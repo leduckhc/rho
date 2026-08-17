@@ -122,16 +122,19 @@ Most changes need no new crate. A new built-in tool goes in `rho-tools` and impl
 
 ### 7. Prove the test catches the bug
 
+- [ ] Copy the file first, for example to `/tmp`. **Never restore it with git**, because
+      `git checkout` throws away every uncommitted change in that file.
 - [ ] Break the implementation on purpose.
 - [ ] Run the test. **Watch it fail.**
-- [ ] Restore the implementation. Watch it pass.
+- [ ] Copy the good file back. Watch it pass.
 - [ ] Record the before-and-after in your report.
 
 > This step is not optional, and it is the one most often skipped. A memory-cap test
 > here passed against the very bug it was written for, because it asserted the size of
 > the kept output while the read buffer still grew without limit. **A test that passes
 > against broken code is worse than no test**, because it buys false confidence. See
-> decision D-016.
+> decision D-016. The controller once used `git checkout` to undo a deliberate break and
+> destroyed the change it had just written. See decision D-029.
 
 ### 8. Check the whole surface, not the diff
 

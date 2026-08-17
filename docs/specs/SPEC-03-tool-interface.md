@@ -313,6 +313,43 @@ the call.
 it changed something. Reporting success would be a silent failure and would waste a
 turn.
 
+### What else we took from jcode's `bash`
+
+Reading `crates/jcode-app-core/src/tool/bash.rs` gave four more changes. See decision
+D-029.
+
+**A disk-backed scratch directory.** The child gets `TMPDIR` and `RHO_SCRATCH_DIR`
+pointing at `~/.rho/scratch`. This matters more here than in jcode. On most Linux systems
+`/tmp` is a tmpfs, so it lives in RAM, and a build or a worktree placed there consumes
+the memory this project exists to save. One careless `--target-dir /tmp/x` can cost more
+than a hundred sessions. `RHO_SCRATCH_DIR` in the parent environment wins, so a caller
+can place scratch space on a chosen volume.
+
+**A timeout message that names the unit.** A model often passes a millisecond timeout
+while meaning seconds, then repeats the mistake, because an error that echoes the number
+back teaches nothing. The message states the seconds too, and warns about the unit when
+the value is 5000 ms or less.
+
+**The unit hint follows the value, not the reason.** A live run showed the first version
+was nearly unreachable. rho adopts a command that outruns its foreground timeout instead
+of killing it, and it backgrounds a command that matches a long-running shape before the
+timeout applies at all. So `ToolError::Timeout` almost never fires in a real session. Any
+background start now carries the hint when the requested timeout looks like a unit
+mistake.
+
+**Wider progress inference.** A byte ratio such as `1.5/3.0 GiB` becomes a percentage,
+never a `done` and `total` pair, because those are item counts and a byte figure there
+reads as one file of three. A phase line such as `Compiling serde v1.0.0` becomes an
+indeterminate progress message, since knowing the phase beats knowing nothing. The prefix
+must anchor at the start of the line, or ordinary prose becomes progress.
+
+**What we did not take.** jcode wraps `cargo` through a repository script, which is
+specific to its own build policy. It also detects when a child waits on standard input,
+using `/proc` on Linux and libproc through unsafe FFI on macOS. That is genuinely useful,
+because rho gives the child a null stdin and an interactive command simply hangs. It is
+also about 180 lines of per-platform unsafe code, so it needs its own spec. Recorded as a
+gap rather than half-built.
+
 ## 7. The `bash` tool
 
 `bash` runs a command in the session root. It streams output and enforces a
