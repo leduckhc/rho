@@ -975,3 +975,195 @@ delegation would be safe. It stays denied because **a tool cannot vary its kind 
 which is the same wall `SPEC-07` hit when it split `task` from `task_cancel`. Under a
 permissive parent, spawning is genuinely mutating, so one tool must declare the stricter
 kind. A separate read-only spawn tool is a future decision, not a tweak.
+
+## D-039 — The session file is append-only JSONL with a per-record parent pointer
+
+**Question (T1 architect):** what shape does the session file take, so a resume and a
+branch both work and a third party can read it?
+
+**Decision:** Append-only JSONL. One record per line. Each record carries an id, a
+parent id, and a timestamp. A branch names an earlier record as its parent. See
+`ADR-004` and `SPEC-14`.
+
+**Reason:** the append path is one write, so a crash never corrupts a written record. A
+branch is a tree walk, not a file copy. A plain reader reads the file, which keeps the
+F-50 promise real.
+
+**Rules out:** a single rewritten JSON document, because it pays an O(n) write per
+message and a crash corrupts the whole file. An embedded database, because it adds a C
+dependency and a file lock that contends across many sessions in one process.
+
+## D-040 — Resume drops a truncated last line and warns, and keeps every whole record
+
+**Question (T1 architect):** what does resume do when a crash cut the last line in half?
+
+**Decision:** The reader decodes every whole line. It drops only a last line that fails
+to decode. It keeps every whole record before it. It sets `truncated_tail`, and the
+resume path logs one warning.
+
+**Reason:** a crash mid-write is normal for a long session. A half-written tail must
+never fail a resume, and must never discard a good record.
+
+**Rules out:** failing a resume on a partial tail. Discarding records before a bad tail.
+
+## D-041 — A write failure degrades a session to ephemeral, and never ends the run
+
+**Question (T1 architect):** what happens when a session write fails mid-run?
+
+**Decision:** `SessionLog::record` degrades the log to ephemeral with a warning, and the
+run continues. It never ends the run.
+
+**Reason:** defect 9 in `.rho-work/progress.md` shipped the opposite. One failure killed
+a whole session, and 222 tests passed while the product was unusable. A lost log is a
+degraded session, not a dead one.
+
+**Rules out:** ending a run because a disk write failed. Silently losing the log with no
+warning.
+
+## D-042 — The session log is an event-stream consumer, not a field in Session
+
+**Question (T1 architect):** where does the session log live, so it needs no change to
+the existing `Session`?
+
+**Decision:** A `SessionRecorder` folds the `AgentEvents` stream into records. It holds
+a `SessionLog`. `Session` and `SessionConfig` do not change. See `SPEC-14` section 5.
+
+**Reason:** every frontend already consumes the event stream, per F-02 and `ADR-003`. A
+`SessionWriter` holds an open file handle, so it cannot live in a `Clone` `SessionConfig`.
+The recorder keeps the format and the runtime separate, so either can change alone.
+
+**Rules out:** embedding a writer in `SessionConfig`. Adding a fourth argument to the
+session constructor, which decision D-013 deleted for a security reason.
+
+## D-043 — A tool argument is redacted on the way into the file
+
+**Question (T1 architect):** how does a credential-shaped tool argument stay out of the
+session file?
+
+**Decision:** The recorder passes every tool argument through a new
+`rho_redact::redact_json_secrets`, which masks a value under a key that
+`looks_like_a_secret` flags. `rho-redact` is the one home for this, per decision D-026.
+
+**Reason:** a session file must hold no credential. A message content block never holds
+a `Secret` type, but a tool argument is free JSON and can carry one. So the writer masks
+it before the record is written.
+
+**Rules out:** a second redaction implementation outside `rho-redact`. Writing a raw
+tool argument to disk and filtering it later.
+
+## D-044 — A large tool result is capped in the record, not stored verbatim
+
+**Question (T1 architect):** what stops a ten-megabyte tool result from bloating the
+session file?
+
+**Decision:** The writer caps one record at `MAX_RECORD_BYTES`. For an oversize tool
+result it stores the head plus a note that states the full byte count. The full payload
+spills to a sidecar file. See `SPEC-14` section 3.
+
+**Reason:** a codec is fast only when a record is small. A verbatim ten-megabyte line
+would slow every read of the file and waste disk.
+
+**Rules out:** storing an unbounded tool result inline. Dropping the tail with no note.
+
+## D-045 — serde_json is the default codec, and sonic-rs is an off-by-default feature
+
+**Question (T1 architect):** which JSON codec does the session file use?
+
+**Decision:** `serde_json` is the default. The `fast-json` cargo feature selects
+`sonic-rs`. `simd-json` is rejected. The codec is one module with a generic `encode` and
+`decode`, so the feature switch changes no caller and no record type. The numbers and
+the command are in `ADR-005`.
+
+**Reason:** `sonic-rs` wins on encode and on a large untyped decode, but it costs a 23
+percent larger binary, a dependency tree of 102 lines against 21, and a slow fallback
+off `x86_64` and `aarch64`. `simd-json` lost on small records. So the fast codec is a
+feature, not the default.
+
+**Rules out:** a codec-specific attribute on a record type, because it would break the
+other codec. Making `sonic-rs` the default and paying its cost for every build.
+
+## D-046 — A credential command inherits an allowlist, stricter than the bash denylist
+
+**Question (T1 architect):** what environment does a `!op read ...` credential command
+inherit?
+
+**Decision:** The child inherits `PATH`, `HOME`, and only the names in an explicit
+`pass_env` allowlist. It inherits no variable that `rho_redact::looks_like_a_secret`
+flags unless `pass_env` names it. It inherits no credential rho itself resolved. See
+`SPEC-13` section 5.
+
+**Reason:** `bash` uses a denylist, because a shell needs a wide and open-ended set of
+variables. A credential helper needs a tiny set, so an allowlist is the safer trade. The
+helper runs closer to the key, so it earns the tighter rule.
+
+**Rules out:** a credential command inheriting the full environment. A credential
+command inheriting another resolved credential.
+
+## D-047 — Config fails closed on a malformed file, an unknown key, or an unreadable file
+
+**Question (T1 architect):** what does `rho-config` do with a bad config file?
+
+**Decision:** A malformed file, an unknown key, and an unreadable file each return a
+typed `ConfigError`. The run stops. It never falls back to a default that grants more
+access than the file asked for. `serde(deny_unknown_fields)` catches an unknown key. A
+missing file is not an error.
+
+**Reason:** decision D-017 shipped a fail-open default once. `ToolKind::Other` read as
+non-mutating and opened a boundary. A broken `approval` key that read as `allow-all`
+would be the same defect in a new place.
+
+**Rules out:** a permissive fallback on a parse error. Treating an unreadable file as an
+empty layer.
+
+## D-048 — The steering queue is bounded, and a cancel keeps it
+
+**Question (T1 architect):** how does rho hold a user message that arrives mid-turn, and
+what does a cancel do to it?
+
+**Decision:** A bounded `MessageQueue` holds it, capacity 32. A full queue returns a
+typed `QueueError::Full` and drops no earlier message. The driver drains the queue at a
+turn boundary, before the next provider request. A cancel keeps the queue. A frontend
+clears it explicitly. See `SPEC-15`.
+
+**Reason:** an unbounded queue is a memory defect, and defect 7 already shipped one: an
+unbounded `bash` reader turned 8 MB into 805 MB. Dropping a user message in silence is
+the worse failure, so a cancel keeps the queue rather than discarding user input.
+
+**Rules out:** an unbounded queue. Injecting a message into the middle of a provider
+request. A cancel silently dropping queued user input.
+
+## D-049 — Cancel reuses the existing CancelToken and keeps the session open
+
+**Question (T1 architect):** does cancel need a new mechanism, and what does it write?
+
+**Decision:** Cancel reuses `CancelToken` in `crates/rho-core/src/cancel.rs`. It stops
+the turn and keeps the session open and usable. It writes the assistant message so far,
+a synthetic error result for any unmatched tool call, and one `Stop` record with
+`Canceled`. So a cancelled turn leaves no half-written tool pairing.
+
+**Reason:** cancel is not close. A second cancellation mechanism would duplicate a type
+the tree already tests. A half-written tool pairing on disk would break a later resume.
+
+**Rules out:** a second cancellation type. A cancel that ends the session. A `ToolCall`
+on disk with no matching `ToolResult`.
+
+## D-050 — A JSONL codec choice is measured, and the fast codec stays optional
+**Question (controller, sprint 2):** which JSON library gives the best result for the
+session log, and what does the faster library cost?
+
+**Decision:** Measure the three candidates, then choose. `serde_json` is the default
+codec. `sonic-rs` sits behind the `fast-json` cargo feature, which is off by default.
+`simd-json` is rejected. The bench lives in `bench/jsonl-codec`, outside the workspace,
+so the workspace carries neither extra crate. `docs/adr/ADR-005-jsonl-codec.md` holds the
+table, the command, and the platform.
+
+**Reason:** The numbers decided it. `simd-json` is 1.9x slower than `serde_json` on the
+small records rho actually writes. `sonic-rs` is only 7 percent faster on a typed
+decode, but it is 2.6x faster on the untyped path that a provider uses for SSE. It costs
+23 percent more binary, 81 more lines of dependency tree, and a slow fallback on a target
+that is neither x86_64 nor aarch64. So the win is real for one path and the cost is real
+for every build. A feature flag gives each user the trade they want.
+
+**Rules out:** A claim that rho is fast because of a JSON crate. A codec-specific
+attribute on a record type. A borrowed parse that ties a record to a read buffer. A
+single measurement as proof, because the bench reports two corpora and both matter.

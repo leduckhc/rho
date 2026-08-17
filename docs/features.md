@@ -27,6 +27,8 @@ and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
 | F-05 | Auto-retry | On a 429 or 5xx response, rho retries with exponential backoff and jitter. It never retries a 4xx client error. | `rho-core` | `sprint-1` | A `RetryPolicy` trait (planned, not sprint-1) will let callers replace the backoff formula. Until then, the built-in policy is fixed. |
 | F-06 | Auto-continue | When a turn ends with open todos, rho sends the model back to work without user input. | `rho-core` | `planned` | A `ContinuePolicy` trait will let callers control the auto-continue trigger condition. |
 | F-07 | Background tasks | Long-running shell commands become named tasks the agent can list, tail, cancel, or wait on. The agent never writes polling loops. | `rho-core`, `rho-tools` | `sprint-2` | Tools register tasks on a shared `TaskRegistry`. Any tool can create or query tasks. |
+| F-08 | Message queue | A user message that arrives during a turn is queued. It is never dropped, and it never lands in the middle of a provider request. The queue is bounded. | `rho-core` | `planned` | Callers push a message from any thread. The queue is part of the session API. See `SPEC-15`. |
+| F-09 | Message steering | A queued message reaches the model after the current tool calls finish. It arrives before the next provider request. Arrival order is kept. | `rho-core` | `planned` | The TUI and `rho-acp` both steer through the same queue. See `SPEC-15` and F-92. |
 
 ---
 
@@ -81,11 +83,16 @@ and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
 
 | ID | Name | Outcome | Owning crate | Status | Extension point |
 |----|------|---------|--------------|--------|-----------------|
-| F-50 | Append-only session log | Every message, tool call, tool result, and event is appended to a JSONL file on disk. The file is never rewritten. | `rho-core` | `planned` | A third party reads the file directly; the format is stable and documented. |
+| F-50 | Append-only session log | Every message, tool call, tool result, and event is appended to a JSONL file on disk. The file is never rewritten. The codec is one seam: `serde_json` by default, and `sonic-rs` behind the `fast-json` feature. | `rho-core` | `planned` | A third party reads the file directly; the format is stable and documented. Compile with `--features fast-json` for the faster codec. See `ADR-005`. |
 | F-51 | Session resume | The user passes a session file path and rho continues the conversation from the last message. | `rho-core` | `planned` | No external extension point. Callers choose the session file path. |
 | F-52 | Session branching | The user navigates to an earlier turn and continues from that point. rho creates a new branch in the same file. The original branch is not deleted. | `rho-core` | `planned` | No external extension point in sprint 1. |
 | F-53 | Ephemeral mode | The user opts out of session persistence. No file is written. | `rho-core` | `planned` | Callers set `session_path = None` at startup. |
 | F-54 | Pi session import | The `rho-session-import-pi` crate converts a pi session file to rho's JSONL format. The conversion is one-way. The original pi file is not changed. | `rho-session-import-pi` | `planned` | No extension point. The converter is a standalone crate. |
+| F-55 | Session close | A close ends a session cleanly and writes the last record. A second close changes nothing, because close is idempotent. | `rho-core` | `planned` | Frontends call close. `rho-acp` maps `session/close` to it. |
+| F-56 | Session cancel without close | A cancel stops the running turn and keeps the session open. The file holds no half-written tool pairing. | `rho-core` | `planned` | Any holder of the `CancelToken` cancels. `rho-acp` maps `session/cancel` to it. |
+| F-57 | Session list | rho lists sessions with a short summary each. A list of 500 sessions reads 500 header records, not 500 whole files. | `rho-core` | `planned` | `rho-acp` maps `session/list` to it. A caller reads the header record directly. |
+| F-58 | Session delete | A delete removes one session file. The command states what happens to a branch inside that file. | `rho-core` | `planned` | `rho-acp` maps `session/delete` to it. |
+| F-59 | Session fork | A fork copies a session to a new id from a chosen record. The original file is not changed. | `rho-core` | `planned` | A caller picks the record to fork from. F-52 branches inside one file instead. |
 
 ---
 

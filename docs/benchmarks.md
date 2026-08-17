@@ -320,3 +320,39 @@ format and different system libraries.
 Resident memory during a live streamed turn is now measured. It is 14.8 MiB,
 recorded in `docs/verification/sprint-1.md`. A live turn costs about 6.5 MiB more
 than the 8.3 MiB idle session on this page.
+
+## JSONL codec, for the session log and the providers
+
+Measured on macOS on Apple Silicon (aarch64), rustc 1.95.0, in sprint 2. Each
+number is the best of 30 rounds. Corpus A is a real 1848-record pi session file,
+5.28 MiB. Corpus B is 50000 short records in the tool-event shape, 7.66 MiB.
+
+```sh
+cd bench/jsonl-codec
+cargo run --release -- ~/.pi/agent/sessions/<project>/<stamp>_<uuid>.jsonl
+```
+
+| Path | Corpus | `serde_json` | `sonic-rs` | `simd-json` |
+| --- | --- | --- | --- | --- |
+| typed decode, line by line | A | 2.01 ms | 1.87 ms | 2.40 ms |
+| typed decode, line by line | B | 8.45 ms | 7.40 ms | 15.80 ms |
+| typed encode, record by record | A | 2.15 ms | 0.76 ms | 1.54 ms |
+| typed encode, record by record | B | 5.05 ms | 4.99 ms | 4.64 ms |
+| untyped value, line by line | A | 2.23 ms | 1.11 ms | not run |
+| untyped value, line by line | B | 16.02 ms | 6.13 ms | not run |
+
+The cost of the extra dependency, on a minimal binary with the rho release
+profile:
+
+| Build | Binary size | Dependency tree | Cold build |
+| --- | --- | --- | --- |
+| `serde_json` only | 352,128 B | 21 lines | 5.0 s |
+| plus `sonic-rs` | 434,784 B | 102 lines | 8.5 s |
+
+The decision is in `docs/adr/ADR-005-jsonl-codec.md`. `serde_json` is the default.
+`sonic-rs` sits behind the `fast-json` feature, which is off by default.
+
+Read one caution with these numbers. A session append is one record of about 200
+bytes, so the encode costs about 100 ns and the write costs microseconds. A faster
+codec does not make `store` faster. The codec matters on resume, and it matters
+more on the provider SSE path.
