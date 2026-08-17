@@ -335,3 +335,162 @@ fn a_task_event_for_an_unknown_id_is_ignored() {
     });
     assert!(state.rows.is_empty(), "no row must be invented");
 }
+
+// --- Subagent rows, from SPEC-11 section 9 ---------------------------------
+
+fn agent_id(n: u64) -> rho_core::AgentId {
+    rho_core::AgentId(n)
+}
+
+fn report(outcome: rho_core::AgentOutcome) -> rho_core::AgentReport {
+    rho_core::AgentReport {
+        agent: "scout".to_string(),
+        outcome,
+        summary: "found it".to_string(),
+        usage: rho_core::Usage {
+            input_tokens: 1400,
+            output_tokens: 42,
+            ..Default::default()
+        },
+        turns: 3,
+        transcript: None,
+    }
+}
+
+#[test]
+fn a_spawned_agent_adds_a_row() {
+    let mut state = TuiState::default();
+    state.apply(&AgentEvent::AgentSpawned {
+        id: agent_id(1),
+        agent: "scout".to_string(),
+        depth: 1,
+    });
+    assert!(
+        state.rows.iter().any(|row| matches!(
+            row,
+            Row::Agent { name, depth, finished, .. } if name == "scout" && *depth == 1 && !finished
+        )),
+        "{:?}",
+        state.rows
+    );
+}
+
+#[test]
+fn agent_progress_updates_the_row_in_place() {
+    let mut state = TuiState::default();
+    state.apply(&AgentEvent::AgentSpawned {
+        id: agent_id(1),
+        agent: "scout".to_string(),
+        depth: 0,
+    });
+    state.apply(&AgentEvent::AgentProgressed {
+        id: agent_id(1),
+        turns: 2,
+        usage: rho_core::Usage {
+            input_tokens: 2500,
+            output_tokens: 100,
+            ..Default::default()
+        },
+    });
+    let count = state
+        .rows
+        .iter()
+        .filter(|row| matches!(row, Row::Agent { .. }))
+        .count();
+    assert_eq!(count, 1, "progress must update the row, not add one");
+    let text = format!("{:?}", state.rows);
+    assert!(text.contains("2.5k"), "a large count is compact: {text}");
+}
+
+#[test]
+fn a_finished_agent_marks_success_and_failure_differently() {
+    for (outcome, want_failed) in [
+        (rho_core::AgentOutcome::Done, false),
+        (rho_core::AgentOutcome::OutOfTurns, true),
+        (rho_core::AgentOutcome::Canceled, true),
+        (
+            rho_core::AgentOutcome::Failed {
+                reason: "the child died".to_string(),
+            },
+            true,
+        ),
+    ] {
+        let mut state = TuiState::default();
+        state.apply(&AgentEvent::AgentSpawned {
+            id: agent_id(1),
+            agent: "scout".to_string(),
+            depth: 0,
+        });
+        state.apply(&AgentEvent::AgentFinished {
+            id: agent_id(1),
+            report: report(outcome.clone()),
+        });
+        let row = state
+            .rows
+            .iter()
+            .find_map(|row| match row {
+                Row::Agent {
+                    finished, failed, ..
+                } => Some((*finished, *failed)),
+                _ => None,
+            })
+            .expect("an agent row");
+        assert!(row.0, "{outcome:?} must mark the row finished");
+        assert_eq!(row.1, want_failed, "{outcome:?} failed flag");
+    }
+}
+
+#[test]
+fn an_agent_summary_never_reaches_the_transcript_rows() {
+    // The core promise of SPEC-11 section 6, checked at the frontend too. The row shows
+    // the cost and the outcome. The child's answer belongs in the parent's tool result,
+    // not as an assistant row that would read as the parent's own words.
+    let mut state = TuiState::default();
+    state.apply(&AgentEvent::AgentSpawned {
+        id: agent_id(1),
+        agent: "scout".to_string(),
+        depth: 0,
+    });
+    state.apply(&AgentEvent::AgentFinished {
+        id: agent_id(1),
+        report: report(rho_core::AgentOutcome::Done),
+    });
+    assert!(
+        !state
+            .rows
+            .iter()
+            .any(|row| matches!(row, Row::Assistant { text } if text.contains("found it"))),
+        "the child summary must not become an assistant row: {:?}",
+        state.rows
+    );
+}
+
+#[test]
+fn a_failure_reason_with_an_escape_sequence_is_sanitised() {
+    // A reason can carry any bytes, because a child's failure may quote a file.
+    let mut state = TuiState::default();
+    state.apply(&AgentEvent::AgentSpawned {
+        id: agent_id(1),
+        agent: "sc\u{1b}[2Jout".to_string(),
+        depth: 0,
+    });
+    state.apply(&AgentEvent::AgentFinished {
+        id: agent_id(1),
+        report: report(rho_core::AgentOutcome::Failed {
+            reason: "boom\u{1b}[31m".to_string(),
+        }),
+    });
+    let text = format!("{:?}", state.rows);
+    assert!(!text.contains('\u{1b}'), "no escape may survive: {text}");
+}
+
+#[test]
+fn an_agent_event_for_an_unknown_id_is_ignored() {
+    let mut state = TuiState::default();
+    state.apply(&AgentEvent::AgentProgressed {
+        id: agent_id(99),
+        turns: 1,
+        usage: rho_core::Usage::default(),
+    });
+    assert!(state.rows.is_empty(), "no row must be invented");
+}

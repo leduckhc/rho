@@ -18,6 +18,22 @@ pub enum Row {
     Assistant { text: String },
     /// A thinking block. Collapsed to one line by default.
     Thinking { text: String },
+    /// A subagent row. It stays after the turn ends, because a child outlives the turn
+    /// that spawned it, and because its cost is worth keeping on screen.
+    Agent {
+        id: u64,
+        /// The agent name from its definition, for example `scout`.
+        name: String,
+        /// How deep in the tree, so a fan-out is legible.
+        depth: u32,
+        turns: u32,
+        /// A short cost summary, for example `1.2k in, 340 out`.
+        cost: String,
+        finished: bool,
+        failed: bool,
+        /// The outcome word, once finished.
+        outcome: String,
+    },
     /// A background task row. It stays after the turn ends, because a task outlives
     /// the turn that started it.
     Task {
@@ -107,6 +123,13 @@ impl TuiState {
             AgentEvent::ToolUpdate { id, output } => self.on_tool_update(id, output),
             AgentEvent::ToolEnd { id, output } => self.on_tool_end(id, output.is_error),
             AgentEvent::TurnEnd { .. } => {}
+            AgentEvent::AgentSpawned { id, agent, depth } => {
+                self.on_agent_spawned(id.0, agent, *depth)
+            }
+            AgentEvent::AgentProgressed { id, turns, usage } => {
+                self.on_agent_progressed(id.0, *turns, usage)
+            }
+            AgentEvent::AgentFinished { id, report } => self.on_agent_finished(id.0, report),
             AgentEvent::TaskStart { id, command, .. } => self.on_task_start(id, command),
             AgentEvent::TaskProgressed { id, progress } => self.on_task_progress(id, progress),
             AgentEvent::TaskEnd { id, state, .. } => self.on_task_end(id, state),
@@ -163,6 +186,61 @@ impl TuiState {
             | StreamEvent::ToolCallDelta { .. }
             | StreamEvent::Usage(_)
             | StreamEvent::Done { .. } => {}
+        }
+    }
+
+    /// Find a subagent row by id.
+    fn agent_row_mut(&mut self, id: u64) -> Option<&mut Row> {
+        self.rows
+            .iter_mut()
+            .find(|row| matches!(row, Row::Agent { id: row_id, .. } if *row_id == id))
+    }
+
+    fn on_agent_spawned(&mut self, id: u64, name: &str, depth: u32) {
+        // A definition name is untrusted text, because it comes from a file on disk.
+        self.rows.push(Row::Agent {
+            id,
+            name: crate::sanitize_line(name),
+            depth,
+            turns: 0,
+            cost: String::new(),
+            finished: false,
+            failed: false,
+            outcome: "running".to_string(),
+        });
+    }
+
+    fn on_agent_progressed(&mut self, id: u64, turns: u32, usage: &rho_core::Usage) {
+        let cost = summarise_usage(usage);
+        if let Some(Row::Agent {
+            turns: row_turns,
+            cost: row_cost,
+            ..
+        }) = self.agent_row_mut(id)
+        {
+            *row_turns = turns;
+            *row_cost = cost;
+        }
+    }
+
+    fn on_agent_finished(&mut self, id: u64, report: &rho_core::AgentReport) {
+        let cost = summarise_usage(&report.usage);
+        let (word, failed) = outcome_label(&report.outcome);
+        let turns = report.turns;
+        if let Some(Row::Agent {
+            turns: row_turns,
+            cost: row_cost,
+            finished,
+            failed: row_failed,
+            outcome,
+            ..
+        }) = self.agent_row_mut(id)
+        {
+            *row_turns = turns;
+            *row_cost = cost;
+            *finished = true;
+            *row_failed = failed;
+            *outcome = word;
         }
     }
 
@@ -383,5 +461,47 @@ fn state_label(state: &TaskState) -> String {
         },
         TaskState::Canceled => "canceled".to_string(),
         TaskState::TimedOut => "timed out".to_string(),
+    }
+}
+
+/// A short cost summary for a status row.
+///
+/// Tokens rather than money, because two of the three providers report no charge. See
+/// decision D-032.
+fn summarise_usage(usage: &rho_core::Usage) -> String {
+    let mut text = format!(
+        "{} in, {} out",
+        thousands(usage.input_tokens),
+        thousands(usage.output_tokens)
+    );
+    if usage.cache_read_tokens > 0 {
+        text.push_str(&format!(", {} cached", thousands(usage.cache_read_tokens)));
+    }
+    if let Some(cost) = usage.cost_usd {
+        text.push_str(&format!(", ${cost:.4}"));
+    }
+    text
+}
+
+/// Render a count compactly, so a wide number does not push a row off screen.
+fn thousands(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
+/// The outcome word for a finished child, and whether it counts as a failure.
+fn outcome_label(outcome: &rho_core::AgentOutcome) -> (String, bool) {
+    match outcome {
+        rho_core::AgentOutcome::Done => ("done".to_string(), false),
+        rho_core::AgentOutcome::OutOfTurns => ("out of turns".to_string(), true),
+        rho_core::AgentOutcome::Canceled => ("canceled".to_string(), true),
+        rho_core::AgentOutcome::Failed { reason } => {
+            (format!("failed: {}", crate::sanitize_line(reason)), true)
+        }
     }
 }

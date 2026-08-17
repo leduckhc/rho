@@ -69,6 +69,47 @@ fn row_line(row: &Row, width: usize) -> Line<'static> {
                 Style::default().add_modifier(Modifier::DIM),
             )
         }
+        Row::Agent {
+            name,
+            depth,
+            turns,
+            cost,
+            finished,
+            failed,
+            outcome,
+            ..
+        } => {
+            // Indent by depth, so a fan-out is legible at a glance. A tree of children is
+            // the point of the feature, and a flat list would hide it.
+            let indent = "  ".repeat((*depth as usize).min(6));
+            let glyph = if !*finished {
+                "~"
+            } else if *failed {
+                "x"
+            } else {
+                "+"
+            };
+            let name = sanitize_line(name);
+            let cost = sanitize_line(cost);
+            let outcome = sanitize_line(outcome);
+            let detail = if cost.is_empty() {
+                format!("{outcome}, {turns} turn(s)")
+            } else {
+                format!("{outcome}, {turns} turn(s), {cost}")
+            };
+            let style = if *finished && *failed {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else if !*finished {
+                Style::default().add_modifier(Modifier::DIM)
+            } else {
+                Style::default()
+            };
+            plain_line(
+                format!("{indent}{glyph} agent {name}  {detail}"),
+                width,
+                style,
+            )
+        }
         Row::Task {
             command,
             state,

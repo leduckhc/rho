@@ -117,11 +117,33 @@ pub enum Command {
 
 /// Build a `SessionConfig` from the parsed arguments. State every choice.
 fn build_config(cli: &Cli) -> anyhow::Result<SessionConfig> {
-    let model = cli.model.clone().ok_or_else(|| {
-        anyhow::anyhow!(
-            "no model was chosen. Set --model or the {MODEL_ENV} variable to a model id."
-        )
-    })?;
+    // A model comes from the flag, then the environment, then the provider's default.
+    //
+    // The default is a convenience, not a security choice. Decision D-013 removed hidden
+    // defaults for the session root and the approval policy, because a wrong value there is
+    // a breach. A wrong model id is a bad answer and a small bill.
+    //
+    // The choice is still reported, so it is never silent.
+    let provider_name = provider::resolve_provider_name(cli.provider.as_deref(), None)?;
+    let model = match cli.model.clone() {
+        Some(model) => model,
+        None => match provider::default_model(&provider_name) {
+            Some(model) => {
+                eprintln!(
+                    "rho: no model given, so using the default for {provider_name}: {model}. \
+                     Set --model or {MODEL_ENV} to choose another."
+                );
+                model.to_string()
+            }
+            None => {
+                return Err(anyhow::anyhow!(
+                    "no model was chosen, and {provider_name} has no default. \
+                     Set --model or the {MODEL_ENV} variable. For azure, the value is your \
+                     deployment name."
+                ));
+            }
+        },
+    };
 
     // The session root confines every tool path. Choose the current directory by
     // default, and state that choice here. A --root flag overrides it.

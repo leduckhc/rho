@@ -79,6 +79,33 @@ pub fn default_provider() -> Option<&'static str> {
 
 /// Resolve the provider name from the flag, then the environment, then the build
 /// default.
+/// The default model for a provider, when the caller names no model.
+///
+/// **Each default is verified through rho, not taken from a table.** The Bedrock entry was
+/// chosen by sweeping the 54 models that a separate harness reported as working, and running
+/// each candidate through `rho run` for a plain answer, a single tool call, and two tool
+/// calls in one turn. `amazon.nova-micro-v1:0` passed a tool call four times out of four and
+/// is the smallest that did. See `docs/verification/models.md`.
+///
+/// **A default model is a convenience, not a security choice.** Decision D-013 removed
+/// hidden defaults for the session root and the approval policy, because a wrong value there
+/// is a breach. A wrong model id is a bad answer and a small bill, so a default is safe here.
+/// It is still reported, so the choice is never silent.
+///
+/// A caller overrides it with `--model`, or with the `RHO_MODEL` variable.
+pub fn default_model(provider: &str) -> Option<&'static str> {
+    match provider {
+        // Smallest Bedrock model that reliably calls tools.
+        "bedrock" => Some("amazon.nova-micro-v1:0"),
+        // A small, cheap, widely available model on OpenRouter.
+        "openrouter" => Some("anthropic/claude-haiku-4.5"),
+        // Azure names a deployment, not a model, and only the account owner knows the
+        // deployment names. So there is no honest default here.
+        "azure" => None,
+        _ => None,
+    }
+}
+
 pub fn resolve_provider_name(
     flag: Option<&str>,
     env: Option<&str>,
