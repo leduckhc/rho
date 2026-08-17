@@ -256,6 +256,56 @@ State this plainly, because a guard that oversells itself is worse than none.
   boundary while a single path walked through it, which decision D-021 forbids. So
   a host with only `unshare` fails closed. This is a deliberate gap, not a bug.
 
+### The Linux path, verified in a container
+
+The `bwrap` path was written on macOS, where `bwrap` does not run, so it was unverified.
+It is verified now, and the chain has two halves.
+
+**Half one: the arguments confine correctly.** The exact sequence that `bwrap_plan` emits
+was run against real `bwrap` 0.11.0 in a Debian container.
+
+```sh
+docker run --rm --privileged -v /tmp/bwtest:/work -w /work debian:stable-slim sh -c '
+  apt-get update -qq && apt-get install -y -qq bubblewrap
+  ROOT=/work/root; mkdir -p "$ROOT"
+  run() { bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
+                --bind "$ROOT" "$ROOT" $EXTRA sh -c "$1" 2>&1 || echo "EXIT=$?"; }
+  run "touch $ROOT/inside.txt && echo OK_INSIDE"
+  run "touch /outside-probe && echo WROTE_OUTSIDE || echo BLOCKED_OUTSIDE"
+  run "head -c 12 /etc/hostname >/dev/null && echo OK_READ"
+  EXTRA="--unshare-net" run "getent hosts example.com >/dev/null && echo NET_OK || echo NET_BLOCKED"'
+```
+
+Output:
+
+```
+bubblewrap 0.11.0
+OK_INSIDE
+touch: cannot touch '/outside-probe': Read-only file system
+BLOCKED_OUTSIDE
+OK_READ
+NET_BLOCKED
+```
+
+So a write inside the root works, a write outside is refused, a system read still works, and
+`--unshare-net` denies the network.
+
+**Half two: rho emits those arguments.** Five unit tests pin the sequence, including the
+ordering rule that the read-only bind of `/` must precede the read-write bind of the session
+root. Reverse that order and the root becomes read-only, which no runtime test on macOS
+would have caught.
+
+- `bwrap_plan_binds_the_system_read_only_then_the_root_read_write`
+- `bwrap_plan_gives_a_private_tmp_and_a_minimal_dev_and_proc`
+- `bwrap_plan_binds_the_scratch_directory_when_there_is_one`
+- `bwrap_plan_unshares_the_network_only_in_strict`
+- `bwrap_plan_passes_the_command_to_a_shell_last`
+
+**What is still not proven on Linux.** rho's own binary has not run there. The container
+tested `bwrap` itself, not rho driving it, and CI does not install bubblewrap, so the
+`sandbox.rs` runtime tests skip on `ubuntu-latest`. Installing bubblewrap in CI would close
+that last gap.
+
 ## 7. Named tests, with the assertion each proves
 
 In `crates/rho-core/src/sandbox.rs`:

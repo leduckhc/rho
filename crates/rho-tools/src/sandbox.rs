@@ -185,8 +185,13 @@ fn sbpl_path(path: &Path) -> String {
 /// bound read-write. `/tmp` is private, and `/dev` and `/proc` are minimal.
 /// `strict` adds `--unshare-net`.
 ///
-/// This path is written and reviewed on macOS, where `bwrap` does not run, so it
-/// is not verified in this environment. See `SPEC-10` section 6.
+/// Verified in two halves, because `bwrap` does not run on macOS. The argument sequence
+/// below was run against real `bwrap` 0.11.0 in a Debian container, and the unit tests in
+/// this module pin that rho emits exactly that sequence. `SPEC-10` records the container
+/// command and its output.
+///
+/// The ordering rule is the one to protect: the read-only bind of `/` must come **before**
+/// the read-write bind of the session root, or the root ends up read-only.
 fn bwrap_plan(
     mode: SandboxMode,
     root: &Path,
@@ -308,6 +313,73 @@ mod tests {
     fn macos_strict_profile_denies_the_network() {
         let profile = macos_profile(SandboxMode::Strict, Path::new("/tmp"), None);
         assert!(profile.contains("(deny network*)"), "{profile}");
+    }
+
+    // --- The Linux plan ---------------------------------------------------
+    //
+    // These tests pin the exact argument sequence that `bwrap_plan` emits. That matters
+    // because the sequence itself was verified against real `bwrap` 0.11.0 in a Debian
+    // container, and the two together are the whole verification chain: the container run
+    // proves the arguments confine correctly, and these tests prove rho emits those
+    // arguments. See `SPEC-10` section 6 for the container command and its output.
+
+    #[test]
+    fn bwrap_plan_binds_the_system_read_only_then_the_root_read_write() {
+        // Order matters. The read-only bind of `/` must come first, and the read-write
+        // bind of the session root must come after it, or the root would be read-only.
+        let plan = bwrap_plan(SandboxMode::Confined, Path::new("/tmp"), None, "echo hello");
+        assert_eq!(plan.program, "bwrap");
+        let joined = plan.args.join(" ");
+        let ro_at = joined
+            .find("--ro-bind / /")
+            .expect("a read-only system bind");
+        let rw_at = joined.find("--bind /").expect("a read-write root bind");
+        assert!(
+            ro_at < rw_at,
+            "the read-only system bind must precede the root bind: {joined}"
+        );
+    }
+
+    #[test]
+    fn bwrap_plan_gives_a_private_tmp_and_a_minimal_dev_and_proc() {
+        let plan = bwrap_plan(SandboxMode::Confined, Path::new("/tmp"), None, "true");
+        let joined = plan.args.join(" ");
+        for needed in ["--tmpfs /tmp", "--dev /dev", "--proc /proc"] {
+            assert!(joined.contains(needed), "missing {needed} in {joined}");
+        }
+    }
+
+    #[test]
+    fn bwrap_plan_binds_the_scratch_directory_when_there_is_one() {
+        let plan = bwrap_plan(
+            SandboxMode::Confined,
+            Path::new("/tmp"),
+            Some(Path::new("/var/tmp")),
+            "true",
+        );
+        let joined = plan.args.join(" ");
+        assert!(joined.contains("/var/tmp"), "{joined}");
+    }
+
+    #[test]
+    fn bwrap_plan_unshares_the_network_only_in_strict() {
+        let confined = bwrap_plan(SandboxMode::Confined, Path::new("/tmp"), None, "true");
+        assert!(
+            !confined.args.iter().any(|a| a == "--unshare-net"),
+            "confined must keep the network"
+        );
+        let strict = bwrap_plan(SandboxMode::Strict, Path::new("/tmp"), None, "true");
+        assert!(
+            strict.args.iter().any(|a| a == "--unshare-net"),
+            "strict must deny the network"
+        );
+    }
+
+    #[test]
+    fn bwrap_plan_passes_the_command_to_a_shell_last() {
+        let plan = bwrap_plan(SandboxMode::Confined, Path::new("/tmp"), None, "echo hi");
+        let tail = &plan.args[plan.args.len() - 3..];
+        assert_eq!(tail, ["sh", "-c", "echo hi"]);
     }
 
     #[test]
