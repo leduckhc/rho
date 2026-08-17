@@ -241,6 +241,7 @@ fn build_command(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     scrub_environment(&mut command);
+    configure_scratch_dir(&mut command);
     if background {
         command.env("RHO_PROGRESS_FD", "1");
     }
@@ -291,7 +292,7 @@ fn start_background(
     spawn_reader(stderr, line_tx);
     let id = handle.id();
     tokio::spawn(supervise(child, line_rx, handle, timeout_ms));
-    Ok(started_output(&id, reason))
+    Ok(started_output(&id, reason, timeout_ms))
 }
 
 /// Adopt a foreground command that outran its timeout. Seed the task with the
@@ -315,7 +316,11 @@ fn adopt_on_timeout(
     }
     let id = handle.id();
     tokio::spawn(supervise(child, line_rx, handle, timeout_ms));
-    Ok(started_output(&id, BackgroundReason::AdoptedOnTimeout))
+    Ok(started_output(
+        &id,
+        BackgroundReason::AdoptedOnTimeout,
+        timeout_ms,
+    ))
 }
 
 /// Supervise one background child to its final state.
@@ -419,11 +424,33 @@ fn map_task_error(error: TaskError) -> ToolError {
 
 /// The message a background start returns to the model. It names the task id and
 /// the reason, so the choice to background is never silent.
-fn started_output(id: &rho_core::TaskId, reason: BackgroundReason) -> ToolOutput {
-    ToolOutput::text(format!(
+fn started_output(id: &rho_core::TaskId, reason: BackgroundReason, timeout_ms: u64) -> ToolOutput {
+    ToolOutput::text(background_message(id, reason, timeout_ms))
+}
+
+/// The message for any background start.
+///
+/// A live run showed why the unit hint belongs here rather than on the adoption path
+/// alone. A `sleep` command matches a long-running shape, so rho backgrounds it before
+/// the timeout ever applies. The model then saw only "matches a long-running shape" and
+/// never learned that its `timeout_ms` of 1000 meant one second.
+///
+/// So the hint follows the **value**, not the reason. Any background start warns when the
+/// requested timeout looks like a seconds-for-milliseconds mistake, and stays quiet
+/// otherwise, because a hint that fires every time is a hint nobody reads.
+fn background_message(id: &rho_core::TaskId, reason: BackgroundReason, timeout_ms: u64) -> String {
+    let mut message = format!(
         "Started background task {id}. Reason: {}. Probe it with the task tool.",
         reason_text(reason)
-    ))
+    );
+    if timeout_ms <= SUSPICIOUS_TIMEOUT_MS {
+        let seconds = timeout_ms as f64 / 1000.0;
+        message.push_str(&format!(
+            " Note the unit: timeout_ms is in milliseconds, so {timeout_ms} is \
+             {seconds:.1} seconds. Pass a larger value if you meant longer."
+        ));
+    }
+    message
 }
 
 /// A short reason phrase for the user.
@@ -550,6 +577,47 @@ fn scrub_environment(command: &mut tokio::process::Command) {
     }
 }
 
+/// Point the child's temporary directory at disk-backed storage.
+///
+/// Adopted from jcode, and it matters more here than there. On most Linux systems `/tmp`
+/// is a tmpfs, so it lives in RAM. A build, a git worktree, or a virtual environment
+/// placed there consumes the memory this project exists to save. One careless `cargo
+/// build --target-dir /tmp/x` can cost more than a hundred sessions.
+///
+/// So the child gets `TMPDIR` pointing at `~/.rho/scratch`, and `RHO_SCRATCH_DIR` naming
+/// the same place for a script that wants it explicitly.
+///
+/// A failure here is not fatal. If the directory cannot be created, the child keeps the
+/// caller's `TMPDIR`, which is the behaviour before this change.
+fn configure_scratch_dir(command: &mut tokio::process::Command) {
+    if let Some(dir) = scratch_dir() {
+        command.env("TMPDIR", &dir).env("RHO_SCRATCH_DIR", &dir);
+    }
+}
+
+/// The scratch directory, created if needed.
+///
+/// `RHO_SCRATCH_DIR` in the parent environment wins, so a caller can place scratch space
+/// on a chosen volume.
+fn scratch_dir() -> Option<std::path::PathBuf> {
+    let dir = std::env::var_os("RHO_SCRATCH_DIR")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+            let home = std::path::PathBuf::from(home);
+            if home.as_os_str().is_empty() {
+                return None;
+            }
+            Some(home.join(".rho").join("scratch"))
+        })?;
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// A foreground timeout at or below this looks like a seconds-for-milliseconds mistake.
+const SUSPICIOUS_TIMEOUT_MS: u64 = 5_000;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,6 +631,23 @@ mod tests {
             out.push(line);
         }
         out
+    }
+
+    #[test]
+    fn background_message_names_the_unit_for_a_tiny_timeout() {
+        let id = rho_core::TaskId("task-1".to_string());
+        let text = background_message(&id, BackgroundReason::AdoptedOnTimeout, 1_000);
+        assert!(text.contains("task-1"));
+        assert!(text.to_lowercase().contains("millisecond"), "{text}");
+        assert!(text.contains("1.0 seconds"), "{text}");
+    }
+
+    #[test]
+    fn background_message_does_not_lecture_on_a_deliberate_timeout() {
+        // A hint that fires every time is a hint nobody reads.
+        let id = rho_core::TaskId("task-1".to_string());
+        let text = background_message(&id, BackgroundReason::KnownLongRunning, 120_000);
+        assert!(!text.to_lowercase().contains("millisecond"), "{text}");
     }
 
     #[tokio::test]

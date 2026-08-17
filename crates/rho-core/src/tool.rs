@@ -76,7 +76,7 @@ pub enum ToolError {
         "the approval policy denied this tool call. Change the policy to allow it, or call a read-only tool."
     )]
     Denied,
-    #[error("timed out after {0:?}")]
+    #[error("{}", timeout_message(*_0))]
     Timeout(Duration),
     #[error("io error: {0}")]
     Io(String),
@@ -310,6 +310,29 @@ impl ApprovalPolicy for AllowAllPolicy {
     ) -> ApprovalDecision {
         ApprovalDecision::Allow
     }
+}
+
+/// Build a timeout message that names the unit.
+///
+/// Adopted from jcode. A model often passes a millisecond timeout while meaning seconds,
+/// then repeats the mistake, because an error that only echoes the number back teaches
+/// nothing. So the message states the seconds too, and it warns about the unit when the
+/// value is small enough to look like a mistake.
+///
+/// The message lives here, next to the error, so there is one definition. See decision
+/// D-026 for why a message that guides a user does not get copied.
+fn timeout_message(elapsed: Duration) -> String {
+    let millis = elapsed.as_millis();
+    let seconds = elapsed.as_secs_f64();
+    let mut message = format!("timed out after {millis} ms ({seconds:.1} s)");
+    if millis <= 5_000 {
+        message.push_str(
+            ". Note the unit: the timeout is in milliseconds, not seconds. \
+             For a longer limit pass a larger value, for example 600000 for ten minutes",
+        );
+    }
+    message.push('.');
+    message
 }
 
 #[cfg(test)]
