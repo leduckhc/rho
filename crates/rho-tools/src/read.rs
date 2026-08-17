@@ -14,6 +14,10 @@ const MAX_READ_BYTES: usize = 100_000;
 #[derive(Debug, Serialize, Deserialize)]
 struct ReadArgs {
     /// The file path, relative to the session root.
+    ///
+    /// Accepts the alias `file_path`, because models trained on other harnesses reach
+    /// for that name. A schema error there costs a whole turn. See `edit.rs`.
+    #[serde(alias = "file_path")]
     path: String,
     /// The first line to return, one-based. The default is line one.
     #[serde(default)]

@@ -273,6 +273,46 @@ All eight ship in `rho-tools`. Each confines its paths to the session root. The
 - `bash` (kind `execute`) — run a shell command. Args: `command`, optional
   `timeout_ms`. Streams output. Mutating. Needs approval. See section 7. F-27.
 
+## 6a. `edit` semantics, and what we took from jcode
+
+`edit` replaces an exact span. Its default is strict: `old_text` must appear exactly
+once, and an ambiguous span is refused, because a silent first-match replacement is a
+data-loss bug.
+
+Four additions came from reading jcode's `edit` tool, which solves problems rho had not.
+
+**`replace_all`.** Strictness alone is a trap. A rename that legitimately touches three
+identical spans forced the model to add surrounding context three times, or to give up.
+`replace_all` makes the intent explicit. The ambiguity error now names both ways out,
+so a model hears the escape hatch rather than guessing.
+
+**Near-miss diagnostics.** A bare "not found" is a dead end, because the model cannot
+tell whether the text is absent or merely differs in whitespace. So a failed match now
+looks for the two common near misses and names the one it finds: a span that matches
+after trimming, or the same lines with different indentation, reported with the line
+number. That turns a wasted turn into a recoverable error.
+
+**Context after the edit.** The result carries a few lines around the change, so a
+consecutive edit does not need another `read`.
+
+**Familiar argument aliases.** The canonical names stay `path`, `old_text`, and
+`new_text`, which match every other tool here. Each also accepts `file_path`,
+`old_string`, and `new_string`, because models are heavily trained on harnesses that use
+those, and a schema error costs a whole turn. `read` and `write` accept `file_path` for
+the same reason. Consistency inside rho and familiarity to the model are both real, and
+an alias buys both instead of choosing.
+
+### Two guards rho adds that jcode does not
+
+**An empty `old_text` is refused.** An empty pattern matches at every character
+boundary, so `replace_all` would rewrite the whole file: `"abc"` becomes `"XaXbXcX"`.
+jcode accepts an empty `old_string`, so this case corrupts the file there. rho refuses
+the call.
+
+**An unchanged edit is refused.** When `old_text` equals `new_text`, the model believes
+it changed something. Reporting success would be a silent failure and would waste a
+turn.
+
 ## 7. The `bash` tool
 
 `bash` runs a command in the session root. It streams output and enforces a
@@ -314,6 +354,17 @@ from disk. Anything that runs shell commands can read files that the user can re
 Sprint 1 adds no container and no namespace sandbox. That is the honest limit.
 
 ## 8. Test cases
+
+`edit` tests, from section 6a:
+- `tool_edit_replace_all_replaces_every_match`
+- `tool_edit_ambiguous_error_offers_replace_all`
+- `tool_edit_rejects_an_empty_old_text` — the case that corrupts a file elsewhere.
+- `tool_edit_rejects_an_unchanged_edit`
+- `tool_edit_explains_a_trailing_whitespace_mismatch`
+- `tool_edit_explains_an_indentation_mismatch_with_a_line_number`
+- `tool_edit_accepts_the_familiar_argument_names`
+- `tool_edit_shows_context_after_the_edit`
+- `tool_read_and_write_accept_the_familiar_path_name`
 
 Security tests for `bash`, each from a real finding:
 - `tool_bash_hides_a_credential_from_the_child` — a variable named like a key never

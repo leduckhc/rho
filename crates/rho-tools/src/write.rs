@@ -10,6 +10,10 @@ use std::path::Path;
 #[derive(Debug, Serialize, Deserialize)]
 struct WriteArgs {
     /// The file path, relative to the session root.
+    ///
+    /// Accepts the alias `file_path`, because models trained on other harnesses reach
+    /// for that name. A schema error there costs a whole turn. See `edit.rs`.
+    #[serde(alias = "file_path")]
     path: String,
     /// The whole file content.
     content: String,
