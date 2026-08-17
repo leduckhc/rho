@@ -175,6 +175,80 @@ Even on that conservative footing, rho's whole process costs less than the
 *marginal* session of every harness in the list. On its own ground, which is many
 sessions inside one host, the marginal session costs 0.024 MiB.
 
+## Live concurrent sessions
+
+**The number this project rests on, measured at last.** Every earlier figure on this page
+is an idle session. An idle session holds a provider client, a tool registry, and a
+context, and it sends nothing. This section measures sessions that are all working at
+once, each sending a real prompt to a real provider and draining a real streamed answer.
+
+Provider OpenRouter, model `anthropic/claude-haiku-4.5`, macOS on Apple Silicon. Each
+figure is the mean of two runs. Every session in every run succeeded.
+
+| Live sessions | Peak RSS | Cost of one more | Slowest first token |
+| --- | --- | --- | --- |
+| 1 | 13.17 MiB | — | 1292 ms |
+| 50 | 24.98 MiB | 247 KB | 1558 ms |
+| 100 | 34.23 MiB | 189 KB | 3564 ms |
+
+```sh
+export OPENROUTER_API_KEY=...
+cargo build --release -p rho-cli --example live_sessions
+RHO_SESSIONS=50 /usr/bin/time -l ./target/release/examples/live_sessions
+```
+
+**A live session costs about ten times an idle one**, at roughly 247 KB against 25 KB.
+That is expected and worth stating: a live session holds a response stream, a decode
+buffer, and a queue of parsed events, and it holds them while the model generates.
+
+**Concurrency barely hurts latency up to 50.** The slowest first token moved from 1292 ms
+to 1558 ms, about 20 percent, for fifty times the work. At 100 it more than doubles, so
+the provider's own rate limiting is the likely bound rather than rho.
+
+### Why no competitor publishes this number
+
+jcode and pi both run one operating-system process per session. So their marginal cost
+carries a whole process: a runtime, a binary, and a TLS stack. rho is a library, and a
+host holds many sessions in one address space.
+
+The conservative comparison, using each project's own published figure:
+
+| Harness | 50 sessions | Basis |
+| --- | --- | --- |
+| rho | **26 MB**, measured live | Total for one process holding 50 live sessions |
+| pi | about 3.7 GB | 76.5 MB incremental per session, times 50 |
+
+That is about 146 times less. The comparison still favours the other side, because pi's
+figure is incremental while rho's is a total.
+
+**What this does not show.** The sessions ran one short turn each. A long session
+accumulates context, and context is the dominant cost over time, so a long-running fleet
+will not hold at 247 KB. Measuring that needs a soak test, and there is not one yet.
+
+## Token accounting and cost
+
+The same example reports the accounting, and two of the three providers used to report
+nothing at all. See decision D-032.
+
+```
+tokens          in 70200 out 306 cache_read 0
+cache hit rate  0.0 %
+cost            $0.000000 as charged by the provider
+```
+
+The input figure is exactly fifty times the single-session figure of 1404, which is the
+check that the accounting is real rather than approximate.
+
+**The cost is the amount the provider charged, never an estimate from a price table.** It
+reads zero here because this key bills upstream directly, so OpenRouter reports no charge
+of its own. A field that a provider does not report stays absent rather than reading as
+free.
+
+**The cache hit rate is zero, and that is an honest zero.** rho now asks for the
+accounting and parses it, and Anthropic caching through this path did not engage. Placing
+a cache breakpoint at the end of the stable prefix is the next step and it is not done.
+See decision D-032.
+
 ## A note on running the script
 
 `bench/footprint.sh` measures the minimal build last, because cargo keys its output

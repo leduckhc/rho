@@ -6,7 +6,8 @@
 mod common;
 
 use common::{
-    sse_midstream_error, sse_parallel_tool_calls, sse_text, sse_tool_call, sse_usage, stream_body,
+    sse_midstream_error, sse_parallel_tool_calls, sse_text, sse_tool_call, sse_usage,
+    sse_usage_after_finish, sse_usage_with_cache_and_cost, stream_body,
 };
 use futures::StreamExt;
 use rho_core::{StopReason, StreamEvent};
@@ -190,5 +191,111 @@ fn openrouter_config_debug_does_not_leak_key() {
     assert!(
         !shown.contains("sk-super-secret"),
         "config Debug leaked the key"
+    );
+}
+
+#[tokio::test]
+async fn provider_openrouter_reports_cache_tokens_and_cost() {
+    // rho used to report zero for both cache fields, so a user could not see the saving
+    // that the append-only context rule works to earn. The shape here is copied from a
+    // live probe of the API. See decision D-032.
+    let (stream, _server) = stream_body(sse_usage_with_cache_and_cost()).await;
+    let events = drain(stream).await;
+    let usage = events
+        .iter()
+        .find_map(|item| match item {
+            Ok(StreamEvent::Usage(usage)) => Some(*usage),
+            _ => None,
+        })
+        .expect("a Usage event");
+
+    assert_eq!(usage.input_tokens, 2409);
+    assert_eq!(usage.cache_read_tokens, 1800, "cached_tokens must be read");
+    assert_eq!(usage.cache_write_tokens, 600);
+    // The charge is measured, never estimated from a price table.
+    assert_eq!(usage.cost_usd, Some(0.002489));
+    let ratio = usage.cache_hit_ratio().expect("a ratio");
+    assert!(
+        (0.42..0.43).contains(&ratio),
+        "1800 of 4209 input tokens is about 43 percent, got {ratio}"
+    );
+}
+
+#[tokio::test]
+async fn provider_openrouter_usage_without_details_reports_no_cost() {
+    // The older shape has no details object. It must parse, and it must leave the cost
+    // absent rather than reporting zero, because zero would read as a free call.
+    let (stream, _server) = stream_body(sse_usage()).await;
+    let events = drain(stream).await;
+    let usage = events
+        .iter()
+        .find_map(|item| match item {
+            Ok(StreamEvent::Usage(usage)) => Some(*usage),
+            _ => None,
+        })
+        .expect("a Usage event");
+    assert_eq!(usage.cache_read_tokens, 0);
+    assert_eq!(usage.cost_usd, None, "absent must not become zero");
+}
+
+#[test]
+fn request_asks_for_usage_accounting() {
+    // OpenRouter omits `usage` from a streamed response unless the request opts in. rho
+    // parsed the cache and cost fields correctly and never received them, so a live run of
+    // fifty sessions reported zero tokens. The parse was right and unreachable.
+    //
+    // This test guards the opt-in, because nothing else would notice its absence: every
+    // fixture supplies a usage chunk regardless of the request.
+    let body = rho_provider_openrouter::build_request_body(&common::sample_request());
+    assert_eq!(
+        body["usage"]["include"],
+        serde_json::json!(true),
+        "the request must opt in to usage accounting: {body}"
+    );
+}
+
+#[tokio::test]
+async fn usage_arriving_after_the_finish_chunk_is_still_reported() {
+    // The order a live probe showed: `finish_reason` in one chunk, then the whole `usage`
+    // object in the next. rho ended the stream at the finish chunk, so it never saw usage
+    // for any OpenRouter call. A fifty-session live run reported zero tokens, which is
+    // what exposed it.
+    //
+    // Every other fixture puts usage in the same chunk as the finish, so nothing else
+    // would catch this.
+    let (stream, _server) = stream_body(sse_usage_after_finish()).await;
+    let events = drain(stream).await;
+
+    let usage = events
+        .iter()
+        .find_map(|item| match item {
+            Ok(StreamEvent::Usage(usage)) => Some(*usage),
+            _ => None,
+        })
+        .expect("a Usage event, even though it arrived after the finish chunk");
+    assert_eq!(usage.input_tokens, 9);
+    assert_eq!(usage.cache_read_tokens, 4);
+    assert_eq!(usage.cost_usd, Some(0.000123));
+
+    // The turn must still end, and exactly once.
+    let dones = events
+        .iter()
+        .filter(|item| matches!(item, Ok(StreamEvent::Done { .. })))
+        .count();
+    assert_eq!(dones, 1, "exactly one Done event");
+
+    // And the order must hold: usage before the turn ends, so a consumer that stops at
+    // `Done` still sees it.
+    let usage_at = events
+        .iter()
+        .position(|item| matches!(item, Ok(StreamEvent::Usage(_))))
+        .expect("a usage event");
+    let done_at = events
+        .iter()
+        .position(|item| matches!(item, Ok(StreamEvent::Done { .. })))
+        .expect("a done event");
+    assert!(
+        usage_at < done_at,
+        "usage must precede Done, or a consumer that stops at Done misses it"
     );
 }

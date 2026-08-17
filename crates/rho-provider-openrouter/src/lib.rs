@@ -161,6 +161,11 @@ impl Provider for OpenRouterProvider {
                     }
                 }
             }
+            // The stream ended. Emit the turn end now, so a usage chunk that arrived
+            // after the finish chunk has already been reported. See decision D-032.
+            if let Some(stop_reason) = state.pending_stop.take() {
+                yield Ok(StreamEvent::Done { stop_reason });
+            }
         };
         Ok(Box::pin(stream))
     }
@@ -298,6 +303,29 @@ struct OpenRouterUsage {
     prompt_tokens: u64,
     #[serde(default)]
     completion_tokens: u64,
+    /// Cache counts, when the service reports them.
+    ///
+    /// The field names come from a live probe of the API, not from memory:
+    /// `usage.prompt_tokens_details.cached_tokens` and `cache_write_tokens`. rho used to
+    /// report zero for both, so a user could not see the cache saving that this project
+    /// works to earn. See decision D-032.
+    #[serde(default)]
+    prompt_tokens_details: Option<OpenRouterPromptDetails>,
+    /// The real cost of the call, in dollars, as the service charged it.
+    ///
+    /// This is measured, not estimated from a price table, so it stays right when a price
+    /// changes or a request falls back to another model.
+    #[serde(default)]
+    cost: Option<f64>,
+}
+
+/// The cache breakdown inside `usage.prompt_tokens_details`.
+#[derive(Debug, Default, Deserialize)]
+struct OpenRouterPromptDetails {
+    #[serde(default)]
+    cached_tokens: u64,
+    #[serde(default)]
+    cache_write_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -318,6 +346,9 @@ struct ToolAccum {
 #[derive(Default)]
 struct SseState {
     message_started: bool,
+    /// The stop reason seen on the finish chunk, held until the stream really ends.
+    /// See the comment in `map_chunk`, and decision D-032.
+    pending_stop: Option<StopReason>,
     text_open: bool,
     thinking_open: bool,
     tool_calls: BTreeMap<u32, ToolAccum>,
@@ -388,11 +419,13 @@ impl SseState {
         }
 
         if let Some(usage) = chunk.usage {
+            let details = usage.prompt_tokens_details.unwrap_or_default();
             events.push(StreamEvent::Usage(Usage {
                 input_tokens: usage.prompt_tokens,
                 output_tokens: usage.completion_tokens,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
+                cache_read_tokens: details.cached_tokens,
+                cache_write_tokens: details.cache_write_tokens,
+                cost_usd: usage.cost,
             }));
         }
 
@@ -404,13 +437,20 @@ impl SseState {
                     done: true,
                 };
             }
-            events.push(StreamEvent::Done {
-                stop_reason: finish_reason_to_stop(&finish),
-            });
+            // Hold the stop reason. Do not end the stream here.
+            //
+            // OpenRouter sends the whole `usage` object in a **later** chunk, after this
+            // one. rho used to return `done: true` at this point, so it never saw usage
+            // for any call: no tokens, no cost, no cache. A fifty-session live run
+            // reporting zero tokens is what exposed it. See decision D-032.
+            //
+            // `Done` is emitted at `[DONE]`, or on the next chunk if the service sends no
+            // `[DONE]`, so usage always precedes it.
+            self.pending_stop = Some(finish_reason_to_stop(&finish));
             return ChunkOutcome {
                 events,
                 error: None,
-                done: true,
+                done: false,
             };
         }
 
@@ -498,7 +538,7 @@ fn finish_reason_to_stop(reason: &str) -> StopReason {
 // --- The request body. ---------------------------------------------------
 
 /// Build the chat-completions request body. See `SPEC-02` section 4.
-fn build_request_body(request: &CompletionRequest) -> Value {
+pub fn build_request_body(request: &CompletionRequest) -> Value {
     let mut messages = Vec::new();
     if let Some(system) = &request.system {
         messages.push(json!({ "role": "system", "content": system }));
@@ -511,6 +551,14 @@ fn build_request_body(request: &CompletionRequest) -> Value {
         "model": request.model,
         "messages": messages,
         "stream": true,
+        // Ask for the accounting, or none arrives.
+        //
+        // OpenRouter omits `usage` from a streamed response unless the request opts in.
+        // So rho parsed the cache and cost fields correctly and never received them. A
+        // live run of fifty sessions reported zero tokens and no cost, which is what
+        // exposed it. This is the same shape as the timeout guidance that never fired:
+        // the code was right and unreachable. See decision D-032.
+        "usage": { "include": true },
     });
     let map = body.as_object_mut().expect("the body is an object");
     if !request.tools.is_empty() {

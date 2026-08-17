@@ -282,3 +282,31 @@ fn build_request_body_keeps_plain_text_messages_as_messages() {
     assert_eq!(items[0]["role"], serde_json::json!("user"));
     assert_eq!(items[0]["content"], serde_json::json!("hello"));
 }
+
+#[tokio::test]
+async fn provider_azure_reports_cache_tokens() {
+    // The shape is copied from a live probe of the Responses endpoint, not from memory:
+    // `usage.input_tokens_details.cached_tokens`. rho used to report zero. See D-032.
+    let body = concat!(
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":",
+        "{\"input_tokens\":1200,\"input_tokens_details\":{\"cached_tokens\":900,",
+        "\"cache_write_tokens\":300},\"output_tokens\":42,",
+        "\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":1242},",
+        "\"output\":[]}}\n\n",
+    );
+    let (stream, _server) = stream_body(body.to_string()).await;
+    let events = drain(stream).await;
+    let usage = events
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Usage(usage) => Some(*usage),
+            _ => None,
+        })
+        .expect("a Usage event");
+    assert_eq!(usage.input_tokens, 1200);
+    assert_eq!(usage.cache_read_tokens, 900, "cached_tokens must be read");
+    assert_eq!(usage.cache_write_tokens, 300);
+    // Azure reports no charge, so the field stays absent rather than reading as free.
+    assert_eq!(usage.cost_usd, None);
+}

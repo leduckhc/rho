@@ -307,6 +307,22 @@ struct AzureUsage {
     input_tokens: u64,
     #[serde(default)]
     output_tokens: u64,
+    /// Cache counts, when the service reports them.
+    ///
+    /// The field names come from a live probe of the endpoint, not from memory:
+    /// `usage.input_tokens_details.cached_tokens` and `cache_write_tokens`. rho used to
+    /// report zero for both. See decision D-032.
+    #[serde(default)]
+    input_tokens_details: Option<AzureInputTokenDetails>,
+}
+
+/// The cache breakdown inside `usage.input_tokens_details`.
+#[derive(Clone, Debug, Default, Deserialize)]
+struct AzureInputTokenDetails {
+    #[serde(default)]
+    cached_tokens: u64,
+    #[serde(default)]
+    cache_write_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -414,11 +430,15 @@ impl ResponsesState {
                 let mut stop_reason = StopReason::EndTurn;
                 if let Some(response) = &event.response {
                     if let Some(usage) = &response.usage {
+                        let details = usage.input_tokens_details.clone().unwrap_or_default();
                         events.push(StreamEvent::Usage(Usage {
                             input_tokens: usage.input_tokens,
                             output_tokens: usage.output_tokens,
-                            cache_read_tokens: 0,
-                            cache_write_tokens: 0,
+                            cache_read_tokens: details.cached_tokens,
+                            cache_write_tokens: details.cache_write_tokens,
+                            // Azure does not report a charge, so the field stays empty
+                            // rather than guessing from a price table.
+                            cost_usd: None,
                         }));
                     }
                     if response

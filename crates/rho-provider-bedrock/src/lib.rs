@@ -230,6 +230,9 @@ pub fn map_converse_event(
             output_tokens: metadata.usage.output_tokens,
             cache_read_tokens: metadata.usage.cache_read_input_tokens,
             cache_write_tokens: metadata.usage.cache_write_input_tokens,
+            // Bedrock reports no charge on the stream, so the field stays empty rather
+            // than guessing from a price table. See decision D-032.
+            cost_usd: None,
         }));
     }
 

@@ -718,3 +718,82 @@ list now, and a test compares the two sets rather than trusting either.
 
 That is decision D-026 again, in a third place. Duplicated code drifts, and a test that
 reads only one copy proves nothing about the other.
+
+## D-031 — `bash` gets a real OS sandbox, and it fails closed
+
+Decisions D-019 and D-021 stated the honest limit: path confinement does not apply to
+`bash`, so the approval policy was the only real boundary. This decision builds a second,
+real boundary with the operating system, not with string matching.
+
+**Decision.** A `SandboxMode` of `off`, `confined`, or `strict` wraps `bash`. `off` is the
+default, because a sandbox that breaks a build is worse than none. `confined` limits writes
+to the session root and the scratch directory and keeps reads. `strict` adds network denial.
+
+**Why the OS, not a pattern list.** A shell has many routes to one effect: a variable, a
+here-document, `base64 -d`, an alias, a script file, an `$IFS` trick. So a pattern list
+catches the careless case and the obvious injection, not a determined one. macOS uses
+`sandbox-exec` with a generated profile. Linux prefers `bwrap`, which needs no privilege.
+
+**Fail closed.** When a caller asks for confinement and no backend is available, `bash`
+refuses the command and names the mode. It never runs unconfined. That is the whole point.
+
+**A deliberate gap, per D-021.** A host with only `unshare` fails closed. A robust
+unprivileged write confinement with `unshare` needs a mount-namespace helper, and a partial
+check would read as a boundary while a single path walked through it. So `unshare` is not a
+backend, and this is recorded rather than half-built.
+
+**Honesty, per the product rules.** The macOS path is verified with live tests, and the
+per-call overhead is measured at about 4.7 ms. The Linux `bwrap` path is written and
+reviewed on macOS, where `bwrap` does not run, so it is not verified in this environment.
+`SPEC-10` section 6 states what the sandbox does not stop: `confined` still allows a read,
+so exfiltration through a read plus a network call needs `strict`.
+
+The macOS path lives behind one function, `macos_plan`, because `sandbox-exec` is deprecated
+by Apple. A replacement is then a small change.
+
+## D-032 — Report the cache hit rate and the real cost, because a competitor only claims them
+
+*Numbered 032 after a collision. A sibling agent claimed D-031 for the bash sandbox while
+this was being written, and both were appended to this file. See decision D-028: a shared
+tree has no single owner, and an append is not a safe way to claim an identifier.*
+
+jcode's site says its append-only context engineering keeps the provider prompt cache hot,
+and it publishes no cache-hit-rate number. `SPEC-01` section 1 gives rho the same
+discipline. So the opportunity is not to copy the claim. It is to **measure it**.
+
+**What the controller found.** `Usage` already had `cache_read_tokens` and
+`cache_write_tokens`. Bedrock filled them. **OpenRouter and Azure both hard-coded zero.**
+So a user of two of the three providers could not see the saving that the whole
+append-only rule exists to earn.
+
+**The field names came from a live probe, not from memory.** That matters, because the
+last two provider defects were both wrong guesses about a request shape.
+
+| Provider | Path to the cache counts |
+| --- | --- |
+| OpenRouter | `usage.prompt_tokens_details.cached_tokens` and `cache_write_tokens` |
+| Azure Responses | `usage.input_tokens_details.cached_tokens` and `cache_write_tokens` |
+| Bedrock | `metadata.usage.cacheReadInputTokens` and `cacheWriteInputTokens` |
+
+**Decision one.** All three providers report the cache counts, and `Usage::cache_hit_ratio`
+turns them into a share. It returns `None` when there were no input tokens, so "no data"
+cannot read as "no cache hits", and a caller cannot divide by zero.
+
+**Decision two: report the cost the provider charged, never an estimate.** OpenRouter
+returns `usage.cost`. A harness that multiplies tokens by a price table is wrong whenever a
+price changes, a request falls back to another model, or a cached token is billed at a
+discount. So `Usage::cost_usd` is an `Option`, it carries the charged amount where a
+provider reports one, and it stays **absent** where none does. Absent is not zero, and
+`Usage::add` keeps that distinction, because a total that silently reads as free is worse
+than a total that admits it is unknown.
+
+**A consequence worth stating.** `Usage` can no longer derive `Eq`, because a float has no
+total equality. The derive line says so, to stop somebody adding it back.
+
+**What is still unproven.** The controller tried to make Anthropic caching engage through
+OpenRouter, with an explicit `cache_control` breakpoint on a 3609-token system prompt, and
+saw `cached_tokens` stay at zero on both a cold and a warm call. That path is byok, so the
+upstream key may not carry caching. **So rho now reports the number, and rho has not yet
+demonstrated a non-zero hit rate end to end.** Automatically placing a cache breakpoint at
+the end of the stable prefix is the obvious next step, and it is not done. Recorded as a
+gap rather than implied.

@@ -223,3 +223,47 @@ impl ProviderHarness for OpenRouterHarness {
         }
     }
 }
+
+/// A stream whose final chunk carries the cache and cost breakdown.
+///
+/// The shape is copied from a live probe of `POST /api/v1/chat/completions`, not from
+/// memory. That probe is what showed rho was reporting zero for both cache fields. See
+/// decision D-032.
+pub fn sse_usage_with_cache_and_cost() -> String {
+    let mut body = String::new();
+    body.push_str(&frame(
+        r#"{"choices":[{"index":0,"delta":{"role":"assistant"}}]}"#,
+    ));
+    body.push_str(&frame(
+        r#"{"choices":[{"index":0,"delta":{"content":"Hi"}}]}"#,
+    ));
+    body.push_str(&frame(
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2409,"completion_tokens":16,"total_tokens":2425,"cost":0.002489,"prompt_tokens_details":{"cached_tokens":1800,"cache_write_tokens":600,"audio_tokens":0,"video_tokens":0},"cost_details":{"upstream_inference_cost":0.002489}}}"#,
+    ));
+    body.push_str("data: [DONE]\n\n");
+    body
+}
+
+/// A stream whose usage chunk arrives **after** the finish chunk.
+///
+/// This is the real order. A live probe of the API showed `finish_reason` in one chunk and
+/// the whole `usage` object in the next, before `[DONE]`. rho used to end the stream at
+/// the finish chunk, so it never saw usage at all: no tokens, no cost, no cache, for every
+/// OpenRouter call. See decision D-032.
+pub fn sse_usage_after_finish() -> String {
+    let mut body = String::new();
+    body.push_str(&frame(
+        r#"{"choices":[{"index":0,"delta":{"role":"assistant"}}]}"#,
+    ));
+    body.push_str(&frame(
+        r#"{"choices":[{"index":0,"delta":{"content":"Hi"}}]}"#,
+    ));
+    body.push_str(&frame(
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+    ));
+    body.push_str(&frame(
+        r#"{"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":16,"total_tokens":25,"cost":0.000123,"prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":5}}}"#,
+    ));
+    body.push_str("data: [DONE]\n\n");
+    body
+}
