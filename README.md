@@ -6,13 +6,27 @@ rho is small on purpose. The runtime, the providers, the tools, and the
 frontends are separate crates. You pick the parts you need. You can replace
 any part with your own crate.
 
-Status: sprint 1, in development. See [workflow.yaml](workflow.yaml).
+Status: sprint 1 delivered. 224 tests. See [workflow.yaml](workflow.yaml) for the
+stages and [docs/verification/sprint-1.md](docs/verification/sprint-1.md) for what
+was actually run against real services.
+
+`rho` streams answers and runs tools today, against OpenRouter and AWS Bedrock.
+Azure OpenAI is implemented and unit-tested, but nobody has yet run it live.
 
 ## Why
 
-Agent harnesses are heavy. A single session can cost more than 100 MB of
-resident memory. That cost makes many parallel sessions impractical. rho
-treats memory and start time as features.
+Agent harnesses are heavy. A single session can cost more than 100 MB of resident
+memory. That cost makes many parallel sessions impractical. rho treats memory and
+start time as features, so it measures them.
+
+**101 idle sessions fit in 10.7 MiB.** One more session costs about 25 KB. A whole
+process holding one session peaks at 8.3 MiB. Every number, and the command that
+produced it, is in [docs/benchmarks.md](docs/benchmarks.md). Reproduce them with
+`bash bench/footprint.sh`.
+
+Those figures are not the same measurement as the published per-session numbers for
+process-per-session harnesses. `docs/benchmarks.md` says so plainly, and shows the
+comparison that favours the others.
 
 ## Layout
 
@@ -27,6 +41,7 @@ treats memory and start time as features.
 | `rho-provider-azure` | Azure OpenAI Responses. |
 | `rho-tui` | Minimal terminal interface. |
 | `rho-acp` | Agent Client Protocol server frontend. |
+| `rho-provider-testkit` | A reusable conformance suite. Run it against your own `Provider`. |
 | `rho-cli` | The `rho` binary. Frontends and providers are cargo features. |
 
 ## Build
@@ -41,6 +56,21 @@ Smallest useful build:
 ```sh
 cargo build -p rho-cli --no-default-features --features minimal
 ```
+
+## Use
+
+```sh
+export OPENROUTER_API_KEY=...
+rho run "Read note.txt and tell me what it says" \
+  --provider openrouter --model anthropic/claude-haiku-4.5
+
+rho                      # the interactive terminal interface
+rho --read-only ...      # deny every tool that can change state
+```
+
+Tools are confined to the session root. A path outside it is refused, including
+one reached through a symlink. `--read-only` denies every mutating tool, so you can
+point rho at a repository you do not trust.
 
 ## Licence
 

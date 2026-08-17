@@ -49,3 +49,60 @@ The controller re-runs every gate and greps the tree. Two false claims so far.
 Lesson now in force: a green suite proves only what the tests assert. The
 controller greps for `todo!`, `unimplemented!`, and `panic!(` before it accepts
 any green claim.
+
+## Final stage results
+
+| Stage | Attempt | Role | Result | Notes |
+| --- | --- | --- | --- | --- |
+| S2 | 3 | reviewer | pass | Found the ACP `cancelled` spelling bug. Real interop defect. |
+| S4 | 2 | reviewer | fail | Found the fail-open `ToolKind::Other` approval hole. |
+| S4b | 1 | developer | partial | Landed `confine` and `SessionConfig`. Kept an insecure `Session::new`. |
+| S4c | 1 | tester | partial | Four fixes with before-and-after proof. Turn limit before the coverage tests. |
+| S5 | 1 | tester | partial | Testkit plus OpenRouter and Azure. Turn limit before Bedrock. |
+| S5b | 1 | tester | pass | Bedrock red tests. 47 provider tests red for the right reason. |
+| S6 | 1 | developer | pass | All three providers stream and assemble tool calls. Ran `git stash` by mistake. |
+| S7 | 1 | developer | pass | Seven tools, the plugin host, and the end-to-end tool-calling proof. |
+| S8 | 1 | developer | pass | TUI, CLI, and the first real benchmark numbers. |
+| secops | 1 | secops | fail | Found the unbounded `bash` line reader and the plugin kind hole. |
+| S9 | 1 | controller | pass | Live runs against OpenRouter and Bedrock. Found three more defects. |
+| S11 | 1 | devops | pass | Footprint script and three CI guards. Failed once on a real portability bug. |
+
+## Defects found, and what found them
+
+Nine real defects landed in sprint 1. **Not one was found by a failing test that
+already existed.**
+
+| # | Defect | Found by |
+| --- | --- | --- |
+| 1 | ACP spells the stop reason `cancelled`; Rust emitted `canceled` | reviewer, against the on-disk schema |
+| 2 | `CancelToken::cancelled` lost a wake on a multi-thread runtime | tester, by reasoning about the race |
+| 3 | `confine`, the path boundary, was still `todo!()` in a green stage | controller, with a grep |
+| 4 | `Session::new` hid a fake model, an accidental root, and blanket approval | controller, reading the diff |
+| 5 | `ToolKind::Other` counted as non-mutating, so approval failed open | reviewer, reading the enum |
+| 6 | Two TLS stacks, and a panicking `rustls-webpki` | GitHub Dependabot, on the first push |
+| 7 | The `bash` line reader had no cap; 8 MB of output took 805 MB of memory | secops, with a driven reproduction |
+| 8 | A plugin's self-declared `ToolKind` bypassed the read-only policy | secops, reading the proxy |
+| 9 | A tool error killed the whole run, and a tool turn never emitted `TurnEnd` | **a live run against a real model** |
+
+The pattern is consistent. The tests asserted the events they expected to see.
+They did not assert the absence of a bad state, nor the completeness of a pairing,
+nor a bound on memory. So the fixes added invariant tests rather than example tests.
+
+Defect 9 is the strongest argument for stage S9. 222 tests passed while the product
+was unusable, because any missing file ended the session.
+
+## Process lessons
+
+1. **Run every new regression test against the defect first.** One memory test
+   passed against the broken reader, because it asserted the wrong property. A test
+   that passes against the broken code is worse than no test.
+2. **Grep the tree before believing a green suite.** Three `todo!()` bodies and one
+   security boundary survived a stage that reported green. CI now greps.
+3. **Split a stage to fit the turn budget.** Six of sixteen dispatches hit a turn
+   limit. The verification step belongs in its own dispatch.
+4. **A subagent must not run a git command that writes.** One ran `git stash` and
+   displaced a parallel agent's files. See D-015.
+5. **Gate a stage on its own crates while a sibling is mid-flight.** A workspace
+   gate fails for reasons that have nothing to do with the stage.
+6. **Verify a CI guard by breaking the rule on purpose.** Each of the three new
+   guards was confirmed to fail on a real violation, not merely to pass today.

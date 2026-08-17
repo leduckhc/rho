@@ -175,13 +175,40 @@ Even on that conservative footing, rho's whole process costs less than the
 *marginal* session of every harness in the list. On its own ground, which is many
 sessions inside one host, the marginal session costs 0.024 MiB.
 
+## Linux numbers, from CI
+
+Every other figure on this page is macOS on Apple Silicon. CI now runs
+`bench/footprint.sh` on `ubuntu-latest` and uploads the JSON as a build artifact,
+so Linux is measured too. Run 32051431230, 2026-08-17.
+
+| What | Linux x86_64 | macOS aarch64 |
+| --- | --- | --- |
+| Binary, default features | 12,747,104 B (12.2 MiB) | 9,708,160 B (9.3 MiB) |
+| Binary, `minimal` features | 8,335,912 B (8.0 MiB) | 6,274,432 B (6.0 MiB) |
+| Peak RSS, 1 session | 11,739,136 B (11.2 MiB) | 8,732,672 B (8.3 MiB) |
+| Peak RSS, 101 sessions | 14,524,416 B (13.9 MiB) | 11,206,656 B (10.7 MiB) |
+| Cost per extra session | 27,852 B (0.027 MiB) | 24,739 B (0.024 MiB) |
+| Time to first frame, median | 1.48 ms | 3.26 ms |
+
+Three honest notes.
+
+The cost per extra session agrees closely across the two systems, at 27 KB and
+25 KB. That agreement is the useful signal, because it is the slope.
+
+The Linux run reported 51 sessions at 11,718,656 bytes, which is **lower** than its
+own 1-session figure of 11,739,136 bytes. That is measurement noise on a shared CI
+runner, not a real result. So read the 1-to-101 slope, and treat a single point on a
+hosted runner with suspicion. A local run is quieter.
+
+The Linux binary is larger. That is normal, and it follows from a different object
+format and different system libraries.
+
 **What is still not measured here.**
 
 - Time to first frame on a real pseudo-tty, with raw mode and the alternate
   screen. `bench/footprint.sh` does not add a pty harness.
 - Time to first token against each provider. See stage S9.
-- A committed Linux figure. CI runs `bench/footprint.sh` on Linux and publishes
-  the JSON, but this page records no Linux number yet.
+- Any figure on Windows. Neither the script nor CI covers it.
 
 Resident memory during a live streamed turn is now measured. It is 14.8 MiB,
 recorded in `docs/verification/sprint-1.md`. A live turn costs about 6.5 MiB more
