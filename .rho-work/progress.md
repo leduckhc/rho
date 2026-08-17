@@ -91,6 +91,33 @@ nor a bound on memory. So the fixes added invariant tests rather than example te
 Defect 9 is the strongest argument for stage S9. 222 tests passed while the product
 was unusable, because any missing file ended the session.
 
+## Sprint 2 stage results
+
+`workflow-sprint-2.yaml` drives this sprint. The scope is config, the session log,
+and the ACP frontend. ACP is the point of the project, because makit needs a cheap
+ACP backend.
+
+| Stage | Attempt | Role | Result | Notes |
+| --- | --- | --- | --- | --- |
+| T0 | 1 | controller | pass | Doc audit against the code. Nine feature rows were wrong. MCP had no rows at all. |
+
+### T0 findings, in detail
+
+The code shipped past the catalogue. These rows disagreed with the tree.
+
+| Row | Said | Code shows |
+| --- | --- | --- |
+| F-07 background tasks | `planned` | `rho-core/src/tasks.rs` and `rho-tools/src/task.rs` |
+| F-15 custom provider | `planned` | `rho-provider-testkit`, verified from outside the workspace |
+| F-31 bash sandbox | `sprint-1` | shipped after the sprint-1 retrospective |
+| F-45 skills | `planned`, owner `rho-core` | `rho-skills`, six test files |
+| F-101 usage | `planned`, claimed session totals | `rho-core/src/usage.rs`, per turn only |
+| F-103 redaction | `sprint-1`, owner `rho-config` | `rho-redact` owns redaction |
+| MCP, all of it | absent | `rho-mcp`, 1960 lines, four test files |
+
+F-102 stays `planned`. Nothing accumulates a session total today. `Usage::add` exists,
+and no caller uses it. The old F-101 row claimed the total, so the claim was deleted.
+
 ## Process lessons
 
 1. **Run every new regression test against the defect first.** One memory test

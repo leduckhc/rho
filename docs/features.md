@@ -3,9 +3,14 @@
 This document is the contract for all later stages. The architect writes specs against these IDs. Developers implement against those specs. The website copy comes from the outcomes listed here.
 
 **Status values:**
-- `sprint-1` — ships in sprint 1.
-- `planned` — on the roadmap after sprint 1.
+- `sprint-1` — shipped in sprint 1.
+- `sprint-2` — shipped after sprint 1, in sprint 2. The code is in the tree.
+- `planned` — on the roadmap. No code yet.
 - `considered` — not decided; requires a design spike first.
+
+A status states what the code proves, not what a plan intends. `workflow-sprint-2.yaml`
+holds the current sprint. Sprint 2 is at work on config (`rho-config`), the session log,
+and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
 
 **Extension point** describes how a third party replaces or extends the feature without forking rho.
 
@@ -21,7 +26,7 @@ This document is the contract for all later stages. The architect writes specs a
 | F-04 | Cancellation | Pressing Ctrl-C cancels the current turn. In-flight HTTP requests are aborted. No task leaks. | `rho-core` | `sprint-1` | Any holder of the `CancellationToken` can cancel. A frontend cancels by dropping its token. |
 | F-05 | Auto-retry | On a 429 or 5xx response, rho retries with exponential backoff and jitter. It never retries a 4xx client error. | `rho-core` | `sprint-1` | A `RetryPolicy` trait (planned, not sprint-1) will let callers replace the backoff formula. Until then, the built-in policy is fixed. |
 | F-06 | Auto-continue | When a turn ends with open todos, rho sends the model back to work without user input. | `rho-core` | `planned` | A `ContinuePolicy` trait will let callers control the auto-continue trigger condition. |
-| F-07 | Background tasks | Long-running shell commands become named tasks the agent can list, tail, cancel, or wait on. The agent never writes polling loops. | `rho-core` | `planned` | Tools register tasks on a shared `TaskRegistry`. Any tool can create or query tasks. |
+| F-07 | Background tasks | Long-running shell commands become named tasks the agent can list, tail, cancel, or wait on. The agent never writes polling loops. | `rho-core`, `rho-tools` | `sprint-2` | Tools register tasks on a shared `TaskRegistry`. Any tool can create or query tasks. |
 
 ---
 
@@ -34,7 +39,7 @@ This document is the contract for all later stages. The architect writes specs a
 | F-12 | AWS Bedrock provider | rho streams answers and tool calls via Bedrock `ConverseStream`. SigV4 auth comes from the standard AWS credential chain: env vars, profile, SSO cache, IMDS. | `rho-provider-bedrock` | `sprint-1` | Callers supply a custom `CredentialProvider` (planned) to replace the standard chain. Until then, the chain is fixed. |
 | F-13 | Azure OpenAI provider | rho streams answers and tool calls from Azure OpenAI `/responses`. Two auth modes: API key, and Entra token with audience `https://cognitiveservices.azure.com/`. | `rho-provider-azure` | `sprint-1` | Two auth modes are built in: API key and Entra token. Adding a new auth mode requires a change in `rho-provider-azure`. |
 | F-14 | Model registry | rho maintains a list of available models per provider. The caller selects a model by ID. | `rho-config` | `planned` | A third party adds models via the config file. Alternatively, pass a `ModelDescriptor` slice at startup. |
-| F-15 | Custom provider extension | A third party ships a crate that implements `Provider` and lists it as a cargo dependency. rho uses it without modification. | `n/a (caller crate)` | `planned` | The `Provider` trait is the full extension point. No other mechanism is needed. |
+| F-15 | Custom provider extension | A third party ships a crate that implements `Provider` and lists it as a cargo dependency. rho uses it without modification. | `n/a (caller crate)`, `rho-provider-testkit` | `sprint-2` | The `Provider` trait is the full extension point. No other mechanism is needed. |
 
 ---
 
@@ -54,7 +59,7 @@ This document is the contract for all later stages. The architect writes specs a
 | F-29 | Tool approval gate | The caller supplies an `ApprovalGate` closure at startup. The closure runs before each tool call. It returns allow or block. The basic TUI wires a confirmation prompt to it. | `rho-core` | `sprint-1` | Any caller supplies a different closure. No fork required. |
 | F-130 | Approval UI extensions | Richer approval interfaces beyond a simple TUI prompt are supported. These include remote approval, policy rules, and per-tool overrides. | `rho-tui` | `planned` | Implement a custom `ApprovalGate` closure and pass it at startup (requires F-29). |
 | F-30 | Todo tool | A structured todo list the agent uses to record tasks, confidence scores, and completion status. The agent checks confidence before marking done. | `rho-tools` | `planned` | Replace by registering a different `Tool` impl under the name `todo`. |
-| F-31 | Bash OS sandbox | The agent runs `bash` under an OS sandbox. `confined` limits writes to the session root and the scratch directory. `strict` also denies the network. When confinement is asked for and no OS backend exists, `bash` refuses the command. | `rho-tools` | `sprint-1` | Set `SessionConfig::sandbox` or pass `--sandbox <mode>`. The macOS `sandbox-exec` path is behind one function, so a replacement is small. See `SPEC-10`. |
+| F-31 | Bash OS sandbox | The agent runs `bash` under an OS sandbox. `confined` limits writes to the session root and the scratch directory. `strict` also denies the network. When confinement is asked for and no OS backend exists, `bash` refuses the command. | `rho-tools` | `sprint-2` | Set `SessionConfig::sandbox` or pass `--sandbox <mode>`. The macOS `sandbox-exec` path is behind one function, so a replacement is small. See `SPEC-10`. |
 
 ---
 
@@ -67,7 +72,7 @@ This document is the contract for all later stages. The architect writes specs a
 | F-42 | Out-of-process plugin (Tier 2) | A subprocess in any language connects over stdio JSON-RPC. It lists its tools and serves tool calls. A crashed plugin does not take down the session. | `rho-plugin` | `sprint-1` | Write a plugin in any language. The JSON-RPC protocol is the extension point. |
 | F-43 | Plugin schema cache | rho caches the tool schemas advertised by each plugin on disk. At startup, schemas appear in the first provider request without waiting for the plugin process to connect. | `rho-plugin` | `planned` | Third-party plugins do not need to change. The cache is transparent. |
 | F-44 | Slash commands | The user types `/command` in the TUI or ACP client. An in-tree handler or a Tier-1 hook responds. | `rho-core` | `planned` | A `CommandHandler` impl registers a new slash command without forking. |
-| F-45 | Skills (filesystem) | rho discovers `SKILL.md` files in configured directories. Skill descriptions appear in the system prompt. The agent loads the full file on demand. | `rho-core` | `planned` | Add a directory to the `skill_paths` config key. No code change required. |
+| F-45 | Skills (filesystem) | rho discovers `SKILL.md` files in configured directories. Skill descriptions appear in the system prompt. The agent loads the full file on demand. | `rho-skills` | `sprint-2` | Add a directory to the `skill_paths` config key. No code change required. |
 | F-46 | Prompt templates | The user invokes a `.md` file in a configured directory as a template. rho expands it before sending. | `rho-core` | `planned` | Add a directory to the `prompt_paths` config key. No code change required. |
 
 ---
@@ -185,14 +190,29 @@ tiers and for the design notes behind each row here.
 | F-177 | Agent events | The parent stream shows a child through three events: spawned, progressed, and finished. | `rho-core` | `sprint-2` | New `AgentEvent` variants. A frontend renders them. |
 | F-178 | Agent definitions | An agent is a markdown file with frontmatter. A project definition is withheld until the project is trusted. | `rho-skills` | `sprint-2` | Author a definition file. The loader is shared with skills. |
 
+## MCP client
+
+`docs/specs/SPEC-09-mcp.md` owns these rows. An MCP server is a peer, not a trusted part
+of rho. So every row below states its trust boundary.
+
+| ID | Name | Outcome | Owning crate | Status | Extension point |
+|----|------|---------|--------------|--------|-----------------|
+| F-180 | MCP client | rho connects to an MCP server over stdio, lists its tools, and calls one. The server's tools join the tool set. | `rho-mcp` | `sprint-2` | Add a server to the config. No code change is required. |
+| F-181 | Tool name namespacing | A server tool appears under a server prefix. Two servers cannot collide. A server cannot shadow a built-in tool. | `rho-mcp` | `sprint-2` | No extension point. This is a security boundary. |
+| F-182 | Schema cache | rho caches each server's tool schemas on disk. So the first provider request holds the full tool list without a connect. | `rho-mcp` | `sprint-2` | The cache is transparent. A server needs no change. |
+| F-183 | Server trust policy | A server declares nothing about its own risk. rho treats every server tool as mutating. So a peer cannot bypass a read-only policy. | `rho-mcp` | `sprint-2` | No extension point. This is a security boundary. |
+| F-184 | Server limits | A slow or noisy server meets four bounds. They are a connect timeout, a call timeout, a response size cap, and a line length cap. | `rho-mcp` | `sprint-2` | A caller sets the limits. |
+| F-185 | Server output sanitation | rho sanitizes server text before the text reaches the model or the terminal. A control sequence cannot repaint the screen. | `rho-mcp` | `sprint-2` | No extension point. This is a security boundary. |
+| F-186 | HTTP and SSE transports | rho connects to a remote MCP server over HTTP with SSE, not only to a local subprocess. | `rho-mcp` | `planned` | The transport is a trait, so a caller adds one without a fork. |
+
 ## Observability and telemetry
 
 | ID | Name | Outcome | Owning crate | Status | Extension point |
 |----|------|---------|--------------|--------|-----------------|
 | F-100 | Structured tracing | Every agent action emits a `tracing` span with structured fields. A third party attaches any `tracing` subscriber. | `rho-core` | `planned` | Attach a `tracing::Subscriber` at startup. No rho code change required. |
-| F-101 | Token and cost accounting | Every provider response records input tokens, output tokens, cache read tokens, and cost. Session totals accumulate. | `rho-core` | `planned` | A hook (F-40) fires after each response and receives the usage struct. |
+| F-101 | Token and cost accounting | Every provider response reports input tokens, output tokens, cache read tokens, cache write tokens, and the cost the provider charged. The cost is measured, never estimated. Session totals are F-102. | `rho-core` | `sprint-2` | A hook (F-40) fires after each response and receives the usage struct. |
 | F-102 | Session statistics | The caller reads session totals: message count, token totals, cost, context usage percent. | `rho-core` | `planned` | No external extension point. The statistics are read from the session state. |
-| F-103 | No secrets in logs | The credential resolution path redacts key values before passing them to `tracing`. Redaction is done by construction, not by a filter. | `rho-config` | `sprint-1` | No extension point. This is a security constraint. |
+| F-103 | No secrets in logs | The credential resolution path redacts key values before passing them to `tracing`. Redaction is done by construction, not by a filter. One crate owns redaction. | `rho-redact` | `sprint-2` | No extension point. This is a security constraint. |
 
 ---
 
