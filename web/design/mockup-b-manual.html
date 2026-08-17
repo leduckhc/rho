@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rho — a composable coding agent harness in Rust</title>
+<meta name="description" content="rho is a composable coding agent harness in Rust. Small crates. You take the parts you want.">
+<style>
+  :root {
+    --bg:#ffffff; --surface:#f3f4f6; --surface-2:#e8eaee; --rule:#d7dbe0;
+    --text:#1b1f24; --muted:#434c59; --faint:#5d6673;
+    --accent:#a34d0e; --link:#0e5aa3; 
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", "DejaVu Sans Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#101318; --surface:#181c23; --surface-2:#232833; --rule:#2c3340;
+      --text:#e7e9ec; --muted:#a8b1bb; --faint:#8a939e;
+      --accent:#e8a75e; --link:#7fb4e8;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: var(--sans); font-size: 17px; line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  .skip { position:absolute; left:-9999px; }
+  .skip:focus { left:16px; top:16px; background:var(--text); color:var(--bg); padding:8px 16px; z-index:9; }
+  a { color: var(--link); text-underline-offset: 3px; }
+  a:hover { color: var(--accent); }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  code, pre { font-family: var(--mono); }
+
+  .shell { max-width: 880px; margin: 0 auto; padding: 0 24px; }
+  header.top {
+    border-bottom: 1px solid var(--rule);
+  }
+  header.top .shell {
+    display:flex; justify-content:space-between; align-items: baseline; padding-top:16px; padding-bottom:16px;
+  }
+  .brand { font-family: var(--mono); font-weight:700; font-size: 17px; color: var(--text); text-decoration: none; }
+  nav a { margin-left: 24px; font-size: 15px; }
+
+  h1 { font-size: 33px; line-height: 1.2; letter-spacing: -0.02em; margin: 64px 0 16px; max-width: 24ch; }
+  h2 { font-size: 26px; line-height: 1.3; letter-spacing: -0.02em; margin: 64px 0 12px; }
+  h2 .no { color: var(--faint); font-weight: 400; margin-right: 12px; font-variant-numeric: tabular-nums; }
+  p { max-width: 68ch; margin: 0 0 16px; }
+  .lede { font-size: 21px; line-height: 1.5; color: var(--muted); max-width: 58ch; }
+
+  pre.block {
+    background: var(--surface); border: 1px solid var(--rule); border-radius: 10px;
+    padding: 16px; overflow-x: auto; font-size: 15px; line-height: 1.6; margin: 16px 0;
+  }
+  .p { color: var(--accent); user-select: none; }
+  p code, td code { background: var(--surface-2); border-radius: 6px; padding: 1px 6px; font-size: 0.92em; }
+
+  table { border-collapse: collapse; width: 100%; margin: 16px 0 4px; font-size: 15px; }
+  caption { text-align: left; font-size: 13px; color: var(--faint); caption-side: bottom; padding-top: 8px; }
+  th {
+    text-align: left; font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); font-weight: 600; border-bottom: 2px solid var(--rule); padding: 8px 16px 8px 0;
+  }
+  td { border-bottom: 1px solid var(--rule); padding: 10px 16px 10px 0; vertical-align: top; }
+  td.n, th.n { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tr.rho-row td:first-child { border-left: 3px solid var(--accent); padding-left: 13px; }
+  .tbm { color: var(--muted); font-style: italic; font-family: var(--sans); }
+  .tablewrap { overflow-x: auto; }
+  .tablewrap table { min-width: 540px; }
+
+  .toc { border: 1px solid var(--rule); border-radius: 10px; padding: 16px 24px; margin: 32px 0; background: var(--surface); }
+  .toc h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; margin: 0 0 8px; color: var(--muted); }
+  .toc ol { margin: 0; padding-left: 20px; font-size: 15px; columns: 2; column-gap: 32px; }
+  .toc li { margin: 2px 0; }
+  @media (max-width: 640px) { .toc ol { columns: 1; } }
+
+  footer { border-top: 1px solid var(--rule); margin-top: 96px; }
+  footer .shell { padding-top: 24px; padding-bottom: 48px; font-size: 13px; color: var(--faint); display: flex; flex-wrap: wrap; gap: 8px 24px; }
+  footer a { color: var(--muted); }
+  @media (max-width: 480px) {
+    h1 { font-size: 28px; margin-top: 48px; }
+    h2 { font-size: 22px; margin-top: 48px; }
+    .lede { font-size: 18px; }
+    nav a { margin-left: 16px; }
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <div class="shell">
+    <a class="brand" href="/">rho</a>
+    <nav aria-label="Site">
+      <a href="https://github.com/leduckhc/rho/tree/main/docs">Docs</a>
+      <a href="https://github.com/leduckhc/rho">GitHub</a>
+    </nav>
+  </div>
+</header>
+<main id="main" class="shell">
+
+  <h1>rho is the harness, unbundled.</h1>
+  <p class="lede">A composable coding agent harness, written in Rust.
+  The agent loop, the providers, the tools, and the interfaces are separate
+  crates. You take the parts you want.</p>
+
+  <pre class="block"><code><span class="p">$</span> cargo install --git https://github.com/leduckhc/rho rho-cli</code></pre>
+
+  <nav class="toc" aria-label="Contents">
+    <h2>Contents</h2>
+    <ol>
+      <li><a href="#why">Why rho exists</a></li>
+      <li><a href="#parts">The parts</a></li>
+      <li><a href="#cost">What a session costs</a></li>
+      <li><a href="#extend">How you extend it</a></li>
+    </ol>
+  </nav>
+
+  <section id="why" aria-labelledby="why-h">
+    <h2 id="why-h"><span class="no">1</span>Why rho exists</h2>
+    <p>Agent harnesses are heavy. One session can cost more than 100&nbsp;MB
+    of resident memory. That cost makes many parallel sessions impractical.</p>
+    <p>rho treats memory and start time as product features. rho never
+    claims a performance win without a measurement and the command that
+    produced it.</p>
+  </section>
+
+  <section id="parts" aria-labelledby="parts-h">
+    <h2 id="parts-h"><span class="no">2</span>The parts</h2>
+    <p>Ten small crates. No crate depends on a frontend. Providers are
+    cargo features. Replace any part with your own crate.</p>
+    <div class="tablewrap">
+    <table>
+      <caption>The rho workspace, sprint 1.</caption>
+      <thead><tr><th scope="col">Crate</th><th scope="col">Role</th></tr></thead>
+      <tbody>
+        <tr><td><code>rho-core</code></td><td>Session, agent loop, event stream, provider and tool traits, hooks. No HTTP.</td></tr>
+        <tr><td><code>rho-config</code></td><td>Layered configuration and profiles.</td></tr>
+        <tr><td><code>rho-tools</code></td><td>Built-in file and shell tools.</td></tr>
+        <tr><td><code>rho-plugin</code></td><td>Out-of-process plugin host over stdio JSON-RPC.</td></tr>
+        <tr><td><code>rho-provider-openrouter</code></td><td>OpenRouter and OpenAI-compatible endpoints.</td></tr>
+        <tr><td><code>rho-provider-bedrock</code></td><td>AWS Bedrock Converse.</td></tr>
+        <tr><td><code>rho-provider-azure</code></td><td>Azure OpenAI Responses.</td></tr>
+        <tr><td><code>rho-tui</code></td><td>Minimal terminal interface.</td></tr>
+        <tr><td><code>rho-acp</code></td><td>Agent Client Protocol server frontend.</td></tr>
+        <tr><td><code>rho-cli</code></td><td>The <code>rho</code> binary. Frontends and providers are cargo features.</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <pre class="block"><code><span class="p">$</span> cargo build -p rho-cli --no-default-features --features minimal</code></pre>
+  </section>
+
+  <section id="cost" aria-labelledby="cost-h">
+    <h2 id="cost-h"><span class="no">3</span>What a session costs</h2>
+    <p>These numbers are the reason rho exists. The rho row stays empty
+    until our benchmark suite produces real values.</p>
+    <div class="tablewrap">
+    <table>
+      <caption>Other harnesses: <a href="https://jcode.sh">jcode.sh</a> published benchmarks, sampled August 2026.
+      rho values land in <a href="https://github.com/leduckhc/rho/blob/main/docs/benchmarks.md">docs/benchmarks.md</a> with the command that produced them.</caption>
+      <thead><tr>
+        <th scope="col">Harness</th>
+        <th scope="col" class="n">Extra memory / session</th>
+        <th scope="col" class="n">Time to first input</th>
+      </tr></thead>
+      <tbody>
+        <tr class="rho-row"><td>rho</td><td class="n"><span class="tbm">to be measured</span></td><td class="n"><span class="tbm">to be measured</span></td></tr>
+        <tr><td>jcode (Rust)</td><td class="n">~10.4 MB</td><td class="n">~49 ms</td></tr>
+        <tr><td>Codex CLI</td><td class="n">~21.6 MB</td><td class="n">~906 ms</td></tr>
+        <tr><td>pi (TypeScript)</td><td class="n">~76.5 MB</td><td class="n">~596 ms</td></tr>
+        <tr><td>Claude Code</td><td class="n">~213 MB</td><td class="n">~3513 ms</td></tr>
+        <tr><td>OpenCode</td><td class="n">~318 MB</td><td class="n">—</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <section id="extend" aria-labelledby="extend-h">
+    <h2 id="extend-h"><span class="no">4</span>How you extend it</h2>
+    <p>Two tiers. Both work without a fork.</p>
+    <p><strong>Tier 1, compiled.</strong> Implement the <code>Provider</code>,
+    <code>Tool</code>, or <code>Hook</code> trait in your own crate. Link it
+    into your build. Zero overhead.</p>
+    <p><strong>Tier 2, out of process.</strong> Ship a plugin as a subprocess
+    over stdio JSON-RPC. Write it in any language. A crashed plugin does not
+    take down the session.</p>
+  </section>
+
+</main>
+<footer>
+  <div class="shell">
+    <span>MIT licensed.</span>
+    <a href="https://github.com/leduckhc/rho">github.com/leduckhc/rho</a>
+    <a href="https://github.com/leduckhc/rho/tree/main/docs">Docs</a>
+    <span>Every number on this site links to the test that produced it.</span>
+  </div>
+</footer>
+</body>
+</html>
