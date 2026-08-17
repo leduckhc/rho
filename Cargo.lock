@@ -2706,6 +2706,7 @@ dependencies = [
  "async-trait",
  "futures",
  "rho-core",
+ "rho-redact",
  "serde",
  "serde_json",
  "tempfile",
@@ -2798,6 +2799,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rho-redact"
+version = "0.1.0"
+
+[[package]]
 name = "rho-skills"
 version = "0.1.0"
 dependencies = [
@@ -2823,6 +2828,7 @@ dependencies = [
  "libc",
  "regex",
  "rho-core",
+ "rho-redact",
  "serde",
  "serde_json",
  "similar",
@@ -2840,6 +2846,7 @@ dependencies = [
  "futures",
  "ratatui",
  "rho-core",
+ "rho-redact",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",

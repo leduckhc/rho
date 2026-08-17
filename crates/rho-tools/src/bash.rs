@@ -544,46 +544,10 @@ fn kill_group(_pid: Option<u32>) {}
 fn scrub_environment(command: &mut tokio::process::Command) {
     for (name, _) in std::env::vars_os() {
         let text = name.to_string_lossy().to_ascii_uppercase();
-        if looks_like_a_secret(&text) {
+        if rho_redact::looks_like_a_secret(&text) {
             command.env_remove(&name);
         }
     }
-}
-
-/// True when a variable name suggests it holds a credential.
-///
-/// The list is a denylist, and that choice needs a reason. An allowlist would be
-/// safer in principle, but a command legitimately needs a wide and open-ended set of
-/// variables, so an allowlist would break ordinary work and users would switch it
-/// off. A denylist that catches the recognisable shapes is the useful trade here.
-///
-/// Add a pattern when you meet a new one. The cost of a false positive is small: a
-/// command loses one variable. The cost of a false negative is a leaked key.
-fn looks_like_a_secret(name: &str) -> bool {
-    const NEEDLES: &[&str] = &[
-        "SECRET",
-        "PASSWORD",
-        "PASSWD",
-        "CREDENTIAL",
-        "PRIVATE_KEY",
-        "API_KEY",
-        "APIKEY",
-        "ACCESS_KEY",
-        "AUTH_TOKEN",
-        "SESSION_TOKEN",
-        "REFRESH_TOKEN",
-        "BEARER",
-    ];
-    if NEEDLES.iter().any(|needle| name.contains(needle)) {
-        return true;
-    }
-    // A bare `*_TOKEN` or `*_KEY` is usually a credential. Keep a short allowlist for
-    // the common names that are not, so ordinary work does not break.
-    const NOT_SECRETS: &[&str] = &["SSH_AUTH_SOCK", "GPG_TTY", "KEYBOARD", "KEYMAP"];
-    if NOT_SECRETS.contains(&name) {
-        return false;
-    }
-    name.ends_with("_TOKEN") || name.ends_with("_KEY")
 }
 
 #[cfg(test)]

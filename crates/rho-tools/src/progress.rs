@@ -115,16 +115,13 @@ fn infer_progress(line: &str) -> Option<TaskProgress> {
 /// message. A progress message is untrusted, so a control sequence must not reach
 /// the display. This mirrors the tool-output rule in `SPEC-07` section 9.
 pub fn sanitize_message(input: &str) -> String {
-    let without_escapes = ANSI_ESCAPE.replace_all(input, "");
-    without_escapes
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect()
+    // The filter lives in `rho-redact`, so the workspace has one implementation and one
+    // test suite. A fourth copy lived here, built on a regex. See decision D-026.
+    //
+    // A progress message is one line in a status row, so fold a newline and a tab.
+    rho_redact::sanitize_line(input)
 }
 
-/// A terminal escape sequence, including a bare `ESC` followed by one byte.
-static ANSI_ESCAPE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b.").expect("the regex is valid"));
 /// A `[3 of 7]` shape.
 static OF_SHAPE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[\s*(\d+)\s+of\s+(\d+)\s*\]").expect("the regex is valid"));

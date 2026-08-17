@@ -14,6 +14,7 @@ crossterm = { version = "0.29.0", features = ["event-stream"] }
 futures = "0.3.34"
 ratatui = "0.30.2"
 rho-core = { version = "0.1.0", path = "../rho-core" }
+rho-redact = { version = "0.1.0", path = "../rho-redact" }
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt", "macros", "sync", "time"] }
 tracing = "0.1.44"

@@ -1,56 +1,33 @@
-//! Text safety helpers for the transcript.
+//! Terminal-safe text for the interface.
 //!
-//! Tool output is untrusted. A file can hold any byte, so a tool result can hold
-//! a control character or a terminal escape sequence. The renderer must never
-//! send such a byte to the terminal, because it can move the cursor, change the
-//! colour, or clear the screen. These helpers make an untrusted string safe to
-//! draw, and make any line fit the frame width.
+//! The filter lives in `rho-redact`, so there is one implementation and one test suite.
+//! This module once carried its own copy, and the three copies in the workspace had
+//! already drifted. This one replaced each unsafe character, which was safe but left
+//! visible rubbish: `red\x1b[31mtext` rendered as `red\u{fffd}[31mtext`. The shared
+//! filter drops the whole sequence, so it renders as `redtext`. Decision D-026 records
+//! the consolidation.
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// The glyph that replaces a stripped control character.
-const REPLACEMENT: char = '\u{fffd}';
-
-/// The marker that shows a line was cut to fit the width.
-const TRUNCATION_MARKER: char = '…';
-
-/// Make an untrusted string safe to draw on one line.
+/// Sanitise one line of untrusted text.
 ///
-/// The function removes every control character and every escape sequence. It
-/// replaces each control character with the Unicode replacement glyph, so the
-/// reader can see that output was present. It keeps normal printable text, including
-/// wide characters and text from other languages. It also flattens a newline to the
-/// replacement glyph, because one row is one line.
+/// Tool output, a file's contents, and a task's progress message are all untrusted. An
+/// escape sequence in any of them can move the cursor or clear the screen.
 pub fn sanitize_line(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
-        if is_unsafe(ch) {
-            out.push(REPLACEMENT);
-        } else {
-            out.push(ch);
-        }
-    }
-    out
+    rho_redact::sanitize_line(input)
 }
 
-/// True when a character must not reach the terminal.
-///
-/// A control character can drive the terminal. The `\u{7f}` delete character and
-/// the C1 control block are also unsafe. A normal space is safe.
-fn is_unsafe(ch: char) -> bool {
-    if ch == ' ' {
-        return false;
-    }
-    ch.is_control() || ch == '\u{7f}' || ('\u{80}'..='\u{9f}').contains(&ch)
-}
+/// The glyph that marks a cut line.
+const TRUNCATION_MARKER: char = '\u{2026}';
 
-/// Cut a string so its display width is not wider than `max_width`.
+/// Cut text to `max_width` terminal columns, and mark the cut.
 ///
-/// The function measures width with `unicode-width`, so a wide glyph counts as
-/// two columns. When the string is too wide, the function keeps a prefix and adds
-/// a one-column marker, so the result still fits. rho truncates a long line. It
-/// does not wrap it, so one transcript row stays one line. The caller must
-/// sanitise the string first.
+/// A byte or character count is wrong for a terminal, because a wide character such as
+/// a Japanese glyph occupies two columns. Cutting by character would overflow the row
+/// and break the layout.
+///
+/// A cut line ends with an ellipsis, so the reader can tell that text was removed. The
+/// marker takes one column out of the budget.
 pub fn fit_to_width(input: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
@@ -72,4 +49,56 @@ pub fn fit_to_width(input: &str, max_width: usize) -> String {
     }
     out.push(TRUNCATION_MARKER);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_line_drops_an_escape_sequence_whole() {
+        assert_eq!(sanitize_line("red\u{1b}[31mtext"), "redtext");
+    }
+
+    #[test]
+    fn sanitize_line_folds_a_newline_to_a_space() {
+        assert_eq!(sanitize_line("a\nb"), "a b");
+    }
+
+    #[test]
+    fn sanitize_line_never_leaves_an_escape() {
+        assert!(!sanitize_line("\u{1b}]0;title\u{7}x").contains('\u{1b}'));
+    }
+
+    #[test]
+    fn fit_to_width_marks_a_cut_and_keeps_the_budget() {
+        // The marker takes one column, so a cut at width 4 keeps three columns of text.
+        let out = fit_to_width("abcdefgh", 4);
+        assert!(out.ends_with('\u{2026}'), "{out:?}");
+        assert!(
+            unicode_width::UnicodeWidthStr::width(out.as_str()) <= 4,
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn fit_to_width_counts_a_wide_character_as_two() {
+        // Three wide glyphs are six columns. At width 5 only two fit beside the marker.
+        let out = fit_to_width("日本語", 5);
+        assert!(
+            unicode_width::UnicodeWidthStr::width(out.as_str()) <= 5,
+            "{out:?}"
+        );
+        assert!(out.starts_with('日'), "{out:?}");
+    }
+
+    #[test]
+    fn fit_to_width_keeps_short_text_unmarked() {
+        assert_eq!(fit_to_width("ab", 10), "ab");
+    }
+
+    #[test]
+    fn fit_to_width_of_zero_is_empty() {
+        assert_eq!(fit_to_width("abc", 0), "");
+    }
 }
