@@ -2649,6 +2649,7 @@ dependencies = [
  "futures",
  "reqwest",
  "rho-core",
+ "rho-provider-testkit",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -2666,6 +2667,7 @@ dependencies = [
  "aws-sdk-bedrockruntime",
  "futures",
  "rho-core",
+ "rho-provider-testkit",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -2682,12 +2684,25 @@ dependencies = [
  "futures",
  "reqwest",
  "rho-core",
+ "rho-provider-testkit",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
  "wiremock",
+]
+
+[[package]]
+name = "rho-provider-testkit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "rho-core",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

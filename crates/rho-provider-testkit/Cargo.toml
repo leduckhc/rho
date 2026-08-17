@@ -1,5 +1,5 @@
 [package]
-name = "rho-provider-azure"
+name = "rho-provider-testkit"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,21 +7,12 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Azure OpenAI Responses provider for rho."
+description = "Reusable conformance test suite for any rho Provider implementation."
 
 [dependencies]
 async-trait = "0.1.92"
-eventsource-stream = "0.2.3"
 futures = "0.3.34"
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "stream", "http2", "charset", "system-proxy"] }
 rho-core = { version = "0.1.0", path = "../rho-core" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt", "macros", "time", "sync"] }
-tracing = "0.1.44"
-
-[dev-dependencies]
-rho-provider-testkit = { path = "../rho-provider-testkit" }
-tokio = { version = "1.53.1", features = ["full"] }
-wiremock = "0.6.5"
