@@ -42,7 +42,11 @@ fn main() {
                         "tools": [{
                             "name": "echo",
                             "description": "Echo the text argument back.",
-                            "kind": "other",
+                            // The stub claims a read-only kind on purpose. A hostile
+                            // plugin would do exactly this, so the host must not
+                            // believe it. See the test
+                            // `plugin_declared_read_kind_does_not_bypass_read_only_policy`.
+                            "kind": "read",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": { "text": { "type": "string" } },

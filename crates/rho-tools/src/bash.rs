@@ -20,6 +20,20 @@ const MAX_TIMEOUT_MS: u64 = 600_000;
 /// The largest combined output stored, in bytes. Output over this is truncated.
 const MAX_OUTPUT_BYTES: usize = 100_000;
 
+/// The largest single line the reader will hold in memory.
+///
+/// This cap is separate from `MAX_OUTPUT_BYTES`, and it is the one that protects
+/// the host. `MAX_OUTPUT_BYTES` bounds what we *keep*. This bounds what we *read*.
+/// A command can emit hundreds of megabytes with no newline, for example
+/// `head -c 400000000 /dev/zero | tr -d "\\0"`. A line reader with no cap grows
+/// its buffer to hold all of it, so resident memory tracks the command's output.
+/// A hostile or careless command then kills the process. That is fatal for a host
+/// that runs many sessions at once.
+///
+/// A line longer than this cap is split, not dropped. So the output is still
+/// correct, and memory stays bounded. `rho-plugin` guards the same way.
+const MAX_LINE_BYTES: usize = 64 * 1024;
+
 /// Arguments for `bash`.
 #[derive(Debug, Serialize, Deserialize)]
 struct BashArgs {
@@ -158,9 +172,51 @@ where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
-        let mut lines = BufReader::new(reader).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if tx.send(line).await.is_err() {
+        let mut reader = BufReader::with_capacity(8 * 1024, reader);
+        let mut line: Vec<u8> = Vec::with_capacity(1024);
+        loop {
+            // Scan the filled buffer instead of reading one byte at a time. A byte
+            // loop is correct but slow, and start-up and throughput are features.
+            let chunk = match reader.fill_buf().await {
+                Ok([]) => {
+                    // End of stream. Send whatever is left, so a file with no final
+                    // newline still reports its last line.
+                    if !line.is_empty() {
+                        let _ = tx.send(String::from_utf8_lossy(&line).into_owned()).await;
+                    }
+                    break;
+                }
+                Ok(chunk) => chunk,
+                Err(_) => break,
+            };
+
+            // Take up to the newline, and never more than the remaining line budget.
+            let budget = MAX_LINE_BYTES - line.len();
+            let take = match chunk.iter().position(|byte| *byte == b'\n') {
+                Some(index) if index < budget => index + 1,
+                _ => budget.min(chunk.len()),
+            };
+            let ends_line = chunk[take - 1] == b'\n';
+            line.extend_from_slice(&chunk[..take]);
+            reader.consume(take);
+
+            if ends_line {
+                line.pop();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+            } else if line.len() < MAX_LINE_BYTES {
+                // The chunk held no newline and the budget is not spent yet, so wait
+                // for more bytes before emitting anything.
+                continue;
+            }
+
+            // Emit either a complete line, or a segment of an over-long line. An
+            // over-long line is split, never dropped, so the output stays correct
+            // while memory stays bounded.
+            let text = String::from_utf8_lossy(&line).into_owned();
+            line.clear();
+            if tx.send(text).await.is_err() {
                 break;
             }
         }
@@ -197,3 +253,85 @@ fn kill_group(pid: Option<u32>) {
 /// still reaps the direct child.
 #[cfg(not(unix))]
 fn kill_group(_pid: Option<u32>) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Drive `spawn_reader` over an in-memory input and collect what it emits.
+    async fn read_all(input: Vec<u8>) -> Vec<String> {
+        let (tx, mut rx) = mpsc::channel(1024);
+        spawn_reader(std::io::Cursor::new(input), tx);
+        let mut out = Vec::new();
+        while let Some(line) = rx.recv().await {
+            out.push(line);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn reader_splits_a_line_that_never_ends() {
+        // The security regression test for the reader.
+        //
+        // A command can emit a large amount of output with no newline at all. A line
+        // reader with no cap grows its buffer to hold the whole run, so the host's
+        // resident memory tracks the command's output. A security audit drove that
+        // case to 805 MB of resident memory and an out-of-memory kill. That is fatal
+        // for a host built to run many sessions at once.
+        //
+        // The property under test is the fix, stated directly: no emitted piece is
+        // larger than the cap. So memory stays bounded whatever the command does.
+        //
+        // Note what this test does not do. It does not measure resident memory. An
+        // earlier attempt asserted on the size of the kept output, and it passed
+        // against the unbounded reader, because the output cap bounded the kept text
+        // while the read buffer still grew without limit. A test that passes against
+        // the broken code is worse than no test.
+        let size = 8 * MAX_LINE_BYTES + 7;
+        let pieces = read_all(vec![b'A'; size]).await;
+
+        assert!(
+            pieces.len() > 1,
+            "an over-long line must be split, got {} piece(s)",
+            pieces.len()
+        );
+        for piece in &pieces {
+            assert!(
+                piece.len() <= MAX_LINE_BYTES,
+                "a piece of {} bytes passed the {MAX_LINE_BYTES} byte cap",
+                piece.len()
+            );
+        }
+        // Splitting must lose nothing. An over-long line is cut, never dropped.
+        assert_eq!(pieces.iter().map(String::len).sum::<usize>(), size);
+    }
+
+    #[tokio::test]
+    async fn reader_keeps_ordinary_lines_whole() {
+        let pieces = read_all(b"first\nsecond\nthird\n".to_vec()).await;
+        assert_eq!(pieces, vec!["first", "second", "third"]);
+    }
+
+    #[tokio::test]
+    async fn reader_emits_a_final_line_with_no_newline() {
+        let pieces = read_all(b"first\nno trailing newline".to_vec()).await;
+        assert_eq!(pieces, vec!["first", "no trailing newline"]);
+    }
+
+    #[tokio::test]
+    async fn reader_strips_a_carriage_return() {
+        let pieces = read_all(b"windows\r\nunix\n".to_vec()).await;
+        assert_eq!(pieces, vec!["windows", "unix"]);
+    }
+
+    #[tokio::test]
+    async fn reader_handles_an_empty_stream() {
+        assert!(read_all(Vec::new()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reader_handles_consecutive_newlines() {
+        let pieces = read_all(b"a\n\nb\n".to_vec()).await;
+        assert_eq!(pieces, vec!["a", "", "b"]);
+    }
+}

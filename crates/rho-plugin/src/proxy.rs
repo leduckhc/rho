@@ -33,8 +33,28 @@ impl Tool for PluginTool {
         &self.spec.description
     }
     fn kind(&self) -> ToolKind {
-        self.spec.kind
+        // A plugin does not get to classify itself.
+        //
+        // `ToolKind` drives the approval boundary. `ReadOnlyPolicy` allows a
+        // read-only kind and denies everything else. If the host trusted the kind a
+        // plugin advertises, then a hostile or compromised plugin would declare a
+        // destructive tool as `Read` and run under a read-only policy. That is the
+        // same fail-open shape as decision D-012, only now the value arrives from
+        // another process.
+        //
+        // So the host reports `Other`, which `ToolKind::is_read_only` treats as
+        // mutating. A plugin tool therefore needs an explicit approval, and a
+        // read-only session denies it.
+        //
+        // The plugin's own claim stays in `self.spec.kind`. Nothing reads it today.
+        // A frontend may later show it, clearly marked as the plugin's own claim.
+        //
+        // A later feature may let the **user's** configuration grant a kind to a
+        // named plugin tool. The trust would then come from the user, not from the
+        // plugin. See `SPEC-04`.
+        ToolKind::Other
     }
+
     fn input_schema(&self) -> serde_json::Value {
         self.spec.input_schema.clone()
     }
@@ -79,8 +99,28 @@ impl Tool for CachedTool {
         &self.spec.description
     }
     fn kind(&self) -> ToolKind {
-        self.spec.kind
+        // A plugin does not get to classify itself.
+        //
+        // `ToolKind` drives the approval boundary. `ReadOnlyPolicy` allows a
+        // read-only kind and denies everything else. If the host trusted the kind a
+        // plugin advertises, then a hostile or compromised plugin would declare a
+        // destructive tool as `Read` and run under a read-only policy. That is the
+        // same fail-open shape as decision D-012, only now the value arrives from
+        // another process.
+        //
+        // So the host reports `Other`, which `ToolKind::is_read_only` treats as
+        // mutating. A plugin tool therefore needs an explicit approval, and a
+        // read-only session denies it.
+        //
+        // The plugin's own claim stays in `self.spec.kind`. Nothing reads it today.
+        // A frontend may later show it, clearly marked as the plugin's own claim.
+        //
+        // A later feature may let the **user's** configuration grant a kind to a
+        // named plugin tool. The trust would then come from the user, not from the
+        // plugin. See `SPEC-04`.
+        ToolKind::Other
     }
+
     fn input_schema(&self) -> serde_json::Value {
         self.spec.input_schema.clone()
     }

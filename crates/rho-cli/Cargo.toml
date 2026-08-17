@@ -12,6 +12,7 @@ description = "The rho command line binary."
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive", "env"] }
+futures = "0.3.34"
 rho-acp = { version = "0.1.0", path = "../rho-acp", optional = true }
 rho-config = { version = "0.1.0", path = "../rho-config" }
 rho-core = { version = "0.1.0", path = "../rho-core" }
@@ -22,9 +23,10 @@ rho-provider-openrouter = { version = "0.1.0", path = "../rho-provider-openroute
 rho-tools = { version = "0.1.0", path = "../rho-tools" }
 rho-tui = { version = "0.1.0", path = "../rho-tui", optional = true }
 serde_json = "1.0.151"
+thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal"] }
 tracing = "0.1.44"
-tracing-subscriber = "0.3.23"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 
 [features]
 default = ["tui", "openrouter", "bedrock", "azure", "plugins"]

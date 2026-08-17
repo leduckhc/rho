@@ -306,3 +306,53 @@ follow.
 
 **Brief change.** Every future stage brief states the per-crate gate commands, and
 states that a workspace gate is the controller's job.
+
+## D-016 — The `bash` reader caps a single line
+
+**Finding (secops audit, with a reproduction).** `bash` read output with
+`BufReader::lines()`, which grows its buffer to hold one whole line and has no
+cap. `MAX_OUTPUT_BYTES` bounded what we *kept*, not what we *read*. The auditor
+drove an 8 MB newline-free line and watched resident memory reach 805 MB. So a
+hostile or careless command could kill the host.
+
+That is fatal for this project specifically, because the reason rho exists is to
+run many sessions at once on one machine. `rho-plugin` already capped its lines.
+`rho-tools` did not.
+
+**Decision.** The reader caps one line at 64 KB and splits a longer line into
+segments. Nothing is dropped, so output stays correct while memory stays bounded.
+The reader scans a filled buffer rather than reading a byte at a time, because
+throughput is also a feature.
+
+**Test.** `reader_splits_a_line_that_never_ends` asserts the property directly:
+no emitted piece passes the cap, and the pieces still sum to the input length.
+
+**A note on how the first attempt at this test was wrong.** The first version
+asserted on the size of the *kept* output. It passed against the broken reader,
+because the output cap bounded the kept text while the read buffer still grew
+without limit. The controller caught that, because it ran the new test against
+the old code. **A test that passes against the broken implementation is worse
+than no test.** So from now on, every regression test is run against the defect
+first, and the report must show it failing.
+
+## D-017 — A plugin does not classify itself
+
+**Finding (secops audit).** `PluginTool::kind` returned the `ToolKind` that the
+plugin advertised in its handshake. `ReadOnlyPolicy` reads that kind. So a hostile
+or compromised plugin could declare a destructive tool as `Read` and run under a
+read-only policy.
+
+This is the same fail-open shape as decision D-012, except the untrusted value
+now arrives from another process.
+
+**Decision.** The host reports `ToolKind::Other` for every plugin tool, whatever
+the plugin claims. `Other` counts as mutating, so a read-only session denies a
+plugin tool, and any session needs an explicit approval for one.
+
+**Later, and only from the user.** A future feature may let the *user's*
+configuration grant a kind to a named plugin tool. Then the trust comes from the
+user, not from the plugin. A plugin's own claim must never reach the approval path.
+
+**Test.** `plugin_declared_read_kind_does_not_bypass_read_only_policy`. The stub
+plugin now advertises `kind: "read"` on purpose, so the test is real. The
+controller confirmed it fails when the trust is restored.

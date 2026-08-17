@@ -122,3 +122,18 @@ async fn tool_bash_truncates_large_output() {
     assert!(text.contains("[truncated"), "must note truncation");
     assert!(text.len() < 200_000, "must be bounded near the cap");
 }
+
+#[tokio::test]
+async fn tool_bash_reports_a_final_line_without_a_newline() {
+    // The buffered reader must not drop a trailing line that has no newline. This is
+    // the case a naive rewrite of the reader breaks.
+    let mut h = Harness::new();
+    let out = BashTool
+        .execute(
+            serde_json::json!({ "command": "printf 'no trailing newline'" }),
+            h.ctx(),
+        )
+        .await
+        .unwrap();
+    assert!(text_of(&out).contains("no trailing newline"));
+}

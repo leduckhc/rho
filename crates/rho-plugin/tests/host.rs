@@ -253,3 +253,41 @@ async fn plugin_host_clean_shutdown_leaves_no_orphan() {
     // After shutdown the process is marked unavailable and reaped.
     assert!(!process.is_available(), "the plugin is shut down");
 }
+
+#[tokio::test]
+async fn plugin_declared_read_kind_does_not_bypass_read_only_policy() {
+    // A security regression test, from a security audit finding.
+    //
+    // `ToolKind` drives the approval boundary. `ReadOnlyPolicy` allows a read-only
+    // kind and denies everything else. If the host trusted the kind a plugin
+    // advertises, a hostile or compromised plugin would declare a destructive tool as
+    // `Read` and then run under a read-only policy.
+    //
+    // So the host reports `Other` for every plugin tool, whatever the plugin claims.
+    // `Other` counts as mutating, so a read-only session denies it. The plugin's own
+    // claim survives for display only.
+    use rho_core::{ApprovalDecision, ApprovalPolicy, ReadOnlyPolicy, ToolKind};
+
+    let mut host = PluginHost::new();
+    host.launch(STUB, &["normal".to_string()]).await.unwrap();
+    let tools = host.tools();
+    assert!(!tools.is_empty(), "the stub plugin must advertise a tool");
+
+    for tool in &tools {
+        assert_eq!(
+            tool.kind(),
+            ToolKind::Other,
+            "the host must not repeat a plugin's own kind claim for tool {}",
+            tool.name()
+        );
+        let decision = ReadOnlyPolicy
+            .approve(tool.name(), tool.kind(), &serde_json::json!({}))
+            .await;
+        assert_eq!(
+            decision,
+            ApprovalDecision::Deny,
+            "a read-only policy must deny the plugin tool {}",
+            tool.name()
+        );
+    }
+}
