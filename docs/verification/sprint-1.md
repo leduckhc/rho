@@ -312,9 +312,57 @@ user to ignore stderr. Warnings are now grouped by text, so eleven lines became 
 A test whose result changes per machine is not a test. `load_skills` now takes the user
 directories, so a test can pass an empty list.
 
+## The interactive TUI, verified on a real pseudo-terminal
+
+Previously unverified. Every TUI test renders into a `ratatui` test backend, so raw mode and
+the alternate screen had never run.
+
+`bench/tui_smoke.py` forks a real pty, sets a 30 by 100 window, and drives the binary. It
+renders the byte stream through the `pyte` terminal emulator, because a flattened stream
+cannot show whether a screen is correct: a terminal user interface overwrites cells, so the
+bytes contain overwritten text that a user never sees.
+
+The screen, as the emulator reports it:
+
+```
+[idle] anthropic/claude-haiku-4.5  type a prompt, then press Enter
+> say the word banana
+banana
+[idle] anthropic/claude-haiku-4.5  done: end turn
+```
+
+So the first frame renders, input reaches the model, a real answer streams back, and the
+status line moves from idle to done.
+
+**Ctrl-C behaves as `SPEC-05` requires.** The first press while idle arms the exit and shows
+`press Ctrl-C again to exit`. The second press exits, and the harness observes the process
+reaped and the pty closed.
+
+**One false alarm worth recording, because it shows why the emulator matters.** A first pass
+read the raw bytes and stripped escape sequences with a regular expression. That output
+showed `runnig` and `tye a prompt`, which looked like dropped characters and a real rendering
+defect. Rendering the same stream through `pyte` showed the text is correct. The missing
+letters were an artifact of flattening a two-dimensional screen into one string. **A
+measurement tool can manufacture a bug.**
+
 ## What is still unverified
-- The interactive TUI against a real terminal. Only the headless `run` path was
-  driven live. Rendering is covered by tests on a test backend.
+
 - The ACP frontend. `rho-acp` is a stub, and `SPEC-06` defines the mapping.
-- Any behaviour on Linux or Windows.
-- Long sessions, context compaction, and prompt-cache hit rates.
+- rho's own binary on Linux or Windows. `SPEC-10` records that the Linux `bwrap`
+  arguments were verified in a container, but rho itself has not run there.
+- Long sessions, and context compaction.
+- A non-zero prompt-cache hit rate. rho reports the number now, and the number is zero
+  so far. See decision D-032.
+
+### Running the harnesses
+
+`bench/tui_smoke.py` and `bench/tui_first_frame.py` need one package that is not a rho
+dependency:
+
+```sh
+python3 -m pip install pyte
+```
+
+`pyte` is a terminal emulator. The smoke harness needs it because a flattened byte stream
+cannot show whether a screen is correct. `tui_first_frame.py` needs no emulator, so it runs
+without `pyte`.

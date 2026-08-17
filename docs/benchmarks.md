@@ -82,11 +82,33 @@ print('min=%.2f median=%.2f max=%.2f ms' % (ts[0], ts[len(ts)//2], ts[-1]))
 PY
 ```
 
-Caveat: this uses a test backend, not a real terminal. It does not include the
-cost of raw-mode setup and the alternate-screen switch, which happen once at
-start-up and touch the real terminal. A real-terminal number needs a pseudo-tty
-harness. `bench/footprint.sh` does not add one yet. So this number stays
-unmeasured.
+Caveat: this uses a test backend, not a real terminal. It skips process start, dynamic
+linking, raw-mode setup, and the alternate-screen switch. The next section measures all four
+on a real pseudo-terminal.
+
+### Time to first frame on a real terminal
+
+| Measure | Value |
+| --- | --- |
+| Minimum | 5.4 ms |
+| **Median** | **6.5 ms** |
+| Maximum | 8.0 ms |
+
+Twelve runs. Each forks a real pty, sets a 30 by 100 window, launches the binary, and stops
+the clock when the status line reaches the screen.
+
+```sh
+cargo build --release -p rho-cli
+python3 bench/tui_first_frame.py
+```
+
+The figure includes building the provider client, because a user cannot start a session
+without one.
+
+**For comparison, using each project's own published figure.** jcode reports 14.0 ms to
+first frame and 48.7 ms to first input. pi reports 590.7 ms to first frame. Those come from
+a different harness on different hardware, so read the comparison as an order of magnitude
+and not a ranking.
 
 ## Idle resident memory
 
