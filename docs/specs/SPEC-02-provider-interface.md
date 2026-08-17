@@ -277,6 +277,11 @@ Responses API stream events and their mapping (the `type` field names the event)
   transport emits `MessageStart` as its first event.
 - `provider_contract_emits_done_last` — every provider ends a good turn with
   `Done`.
+- `provider_contract_yields_first_event_before_stream_end` — the stream yields its
+  first event while the fake transport still holds later bytes back. This proves
+  the provider streams and does not buffer the whole response. The fake transport
+  sends one chunk, then blocks until the test observes an event, then sends the
+  rest. A provider that buffers deadlocks the test and fails it.
 - `provider_contract_text_deltas_in_order` — text deltas arrive in index order.
 - `provider_contract_tool_call_end_has_parsed_arguments` — `ToolCallEnd` carries
   a parsed JSON object, not a string.

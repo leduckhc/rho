@@ -27,6 +27,20 @@ agent-level stop reason in section 9 mirrors the ACP `StopReason` set exactly.
   client errors are separate variants.
 - Cancellation drops in-flight work. A cancelled turn leaks no task.
 
+### How to read the code blocks in this spec
+
+Every `rust` block states the public surface verbatim. Copy the signatures
+exactly. Do not rename a type, a method, or a field.
+
+A function shown without a body is a signature, not a compile error. Give it a
+`todo!()` body when you first paste it. The S3 stage leaves the bodies as
+`todo!()` on purpose, so the tests fail for the right reason. The S4 stage fills
+them in.
+
+This rule covers `Session::prompt`, `RetryPolicy::backoff`, `confine`, every
+`PluginHost` method, `TuiState::apply`, `TuiState::submit_input`, `render`, and
+every `App` method.
+
 ## 2. Content block model
 
 A message holds an ordered list of content blocks. One enum covers every block
@@ -347,8 +361,15 @@ turn can call tools. The loop appends every message to the `Context`. It emits a
 `AgentEvent` stream. A frontend renders the stream.
 
 ```rust
-/// Why a full agent run stopped. This mirrors the ACP `StopReason` set exactly,
-/// so `rho-acp` maps it one-to-one onto a `session/prompt` response. See SPEC-06.
+/// Why a full agent run stopped. The wire names match the ACP `StopReason` set,
+/// so `rho-acp` maps the values one-to-one onto a `session/prompt` response.
+/// See SPEC-06.
+///
+/// One name needs an explicit rename. ACP spells the cancelled reason with two
+/// letters `l`, as `cancelled`. Rust names the variant `Canceled` with one `l`,
+/// which `rename_all = "snake_case"` would turn into `canceled`. That value is
+/// not valid in ACP. The `serde(rename)` attribute below corrects it. Do not
+/// remove the attribute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStopReason {
@@ -360,7 +381,8 @@ pub enum AgentStopReason {
     MaxTurnRequests,
     /// The model refused, or a content filter stopped the output.
     Refusal,
-    /// The caller cancelled the run.
+    /// The caller cancelled the run. The wire value is `cancelled`.
+    #[serde(rename = "cancelled")]
     Canceled,
 }
 
@@ -570,7 +592,10 @@ in-memory shape that the format will serialise.
 - `agent_loop_cancel_ends_with_canceled_stop_reason` — cancelling mid-turn yields
   `TurnEnd { stop_reason: Canceled }` then `AgentEnd { stop_reason: Canceled }`.
 - `agent_stop_reason_serialises_snake_case` — each `AgentStopReason` value
-  serialises to its ACP `snake_case` name, for example `max_turn_requests`.
+  serialises to its ACP wire name, for example `max_turn_requests`.
+- `agent_stop_reason_canceled_serialises_as_cancelled` — `Canceled` serialises to
+  `"cancelled"` with two letters `l`, which is the ACP spelling. This test
+  guards the `serde(rename)` attribute in section 9.
 - `agent_events_drop_aborts_driver_task` — dropping `AgentEvents` before the run
   ends aborts the task; a `Drop` flag on the fake provider confirms the in-flight
   stream was dropped.

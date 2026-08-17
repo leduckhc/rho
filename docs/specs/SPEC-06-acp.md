@@ -78,23 +78,30 @@ the resource in sprint 1. Full resource handling is planned.
 | `AgentEnd { stop_reason }` | The `session/prompt` response `stopReason`; see section 5 |
 
 The tool `kind` is the `ToolKind` from `ToolCallEnd` context and the tool spec.
-The values match the ACP `ToolKind` set one-to-one, so no remap is needed.
+The `ToolKind` values match the ACP `ToolKind` set one-to-one, so `rho-acp` needs
+no remap for them. The stop reason does need one remap; see section 5.
 
 The `messageId` on a chunk is one id per assistant turn. `rho-acp` mints it at
 `TurnStart` and reuses it for every chunk in that turn.
 
 ## 5. Stop reason mapping
 
-`AgentStopReason` maps one-to-one to the ACP `StopReason`. The set was chosen to
-match. This is why `SPEC-01` uses these exact names.
+`AgentStopReason` maps one-to-one to the ACP `StopReason`. The variant set was
+chosen to match. This is why `SPEC-01` uses these exact names.
 
-| `AgentStopReason` | ACP `StopReason` |
-| --- | --- |
-| `EndTurn` | `end_turn` |
-| `MaxTokens` | `max_tokens` |
-| `MaxTurnRequests` | `max_turn_requests` |
-| `Refusal` | `refusal` |
-| `Canceled` | `cancelled` |
+One value needs an explicit rename. ACP spells the cancelled reason `cancelled`,
+with two letters `l`. The Rust variant is `Canceled`, with one `l`. So
+`rename_all = "snake_case"` alone would emit `canceled`, which ACP rejects.
+`SPEC-01` section 9 carries a `serde(rename = "cancelled")` attribute for this
+reason. Do not remove it.
+
+| `AgentStopReason` | ACP `StopReason` | Needs a rename |
+| --- | --- | --- |
+| `EndTurn` | `end_turn` | No |
+| `MaxTokens` | `max_tokens` | No |
+| `MaxTurnRequests` | `max_turn_requests` | No |
+| `Refusal` | `refusal` | No |
+| `Canceled` | `cancelled` | **Yes** |
 
 ## 6. Permission mapping
 
@@ -126,7 +133,12 @@ model sees the denial.
 `rho-acp` advertises in the `initialize` response:
 - `protocolVersion: 1`.
 - `agentInfo`: name `rho`, the crate version.
-- `promptCapabilities`: `image: true`, `audio: false`, `embeddedContext: false`
+- `promptCapabilities`: `image: false`, `audio: false`, `embeddedContext: false`
+
+  Sprint 1 advertises `image: false`. The reason is honesty. `SPEC-02` section 8
+  says every provider drops an image content block in sprint 1. A client must not
+  be told that rho accepts an image when rho throws it away. Flip this to `true`
+  in the same change that adds real image support to a provider.
   for sprint 1.
 - `mcpCapabilities`: none in sprint 1.
 - `loadSession: false` in sprint 1.

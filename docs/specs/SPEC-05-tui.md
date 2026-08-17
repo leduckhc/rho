@@ -55,13 +55,6 @@ pub enum ToolRowStatus {
     Failed,
 }
 
-/// Whether the agent is idle or running a turn.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Activity {
-    Idle,
-    Running,
-}
-
 /// The whole TUI state. A pure function of the events applied so far, plus the
 /// local input buffer and one flag for the Ctrl-C exit gate.
 #[derive(Clone, Debug, Default)]
