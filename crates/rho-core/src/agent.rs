@@ -4,13 +4,15 @@
 //! turn can call tools. The loop appends every message to the `Context`. It
 //! emits an `AgentEvent` stream. A frontend renders the stream.
 
-use crate::{CancelToken, ContentBlock};
+use crate::{CancelToken, ContentBlock, Message, Role};
 use crate::{
-    Context, Error, HookChain, Provider, StopReason, StreamEvent, ToolKind, ToolOutput,
-    ToolRegistry,
+    CompletionRequest, Context, Error, HookChain, HookOutcome, Provider, StopReason, StreamEvent,
+    ToolCallView, ToolContext, ToolKind, ToolOutput, ToolRegistry,
 };
 use futures::Stream;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
@@ -98,15 +100,9 @@ impl Drop for AgentEvents {
 }
 
 pub struct Session {
-    // S4 reads `inner` when it fills in `prompt`. The body is `todo!()` now, so
-    // the field is write-only in S3. S4 removes this allow.
-    #[allow(dead_code)]
     inner: Arc<SessionInner>,
 }
 
-// S4 reads these fields when it fills in the agent loop. The loop body is
-// `todo!()` now, so the fields are write-only in S3. S4 removes this allow.
-#[allow(dead_code)]
 struct SessionInner {
     provider: Arc<dyn Provider>,
     tools: Arc<ToolRegistry>,
@@ -133,7 +129,524 @@ impl Session {
 
     /// Start one agent run. Append `input` to the context, then drive the loop.
     /// `cancel` stops the run. Dropping the returned value also stops the run.
-    pub fn prompt(&self, _input: Vec<ContentBlock>, _cancel: CancelToken) -> AgentEvents {
-        todo!()
+    pub fn prompt(&self, input: Vec<ContentBlock>, cancel: CancelToken) -> AgentEvents {
+        // The channel carries events from the driver task to the caller. A
+        // bounded channel applies backpressure. A dropped receiver makes `send`
+        // fail, so the driver task stops on its own.
+        let (tx, rx) = tokio::sync::mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let driver = Driver {
+            inner: Arc::clone(&self.inner),
+            tx,
+            cancel,
+            config: AgentConfig::default(),
+        };
+        let handle = tokio::spawn(driver.run(input));
+        AgentEvents { rx, handle }
+    }
+
+    /// Read the conversation so far. The context is append-only, so this returns
+    /// a read-only snapshot. A lock guards the context, so this clones the
+    /// messages instead of borrowing them.
+    pub async fn messages(&self) -> Vec<Message> {
+        self.inner.context.lock().await.messages().to_vec()
+    }
+}
+
+/// The event channel buffer size. It applies backpressure to the driver task.
+const EVENT_CHANNEL_CAPACITY: usize = 64;
+
+/// The result of one provider turn.
+enum TurnOutcome {
+    /// The run must stop with this reason.
+    Stop(AgentStopReason),
+    /// The model asked to call these tools. Run them, then loop.
+    ToolCalls(Vec<PendingToolCall>),
+    /// The caller cancelled the turn.
+    Canceled,
+    /// The provider or a tool failed. The error is already sent.
+    Failed,
+    /// The caller dropped the event stream.
+    Closed,
+}
+
+/// One tool call the model requested in a turn.
+struct PendingToolCall {
+    id: String,
+    name: String,
+    arguments: serde_json::Value,
+}
+
+/// The task that drives one agent run.
+struct Driver {
+    inner: Arc<SessionInner>,
+    tx: tokio::sync::mpsc::Sender<Result<AgentEvent, Error>>,
+    cancel: CancelToken,
+    config: AgentConfig,
+}
+
+impl Driver {
+    /// Drive the whole run. Append the user input, then run turns until a stop.
+    async fn run(self, input: Vec<ContentBlock>) {
+        {
+            let mut context = self.inner.context.lock().await;
+            context.append(Message {
+                role: Role::User,
+                content: input,
+            });
+        }
+
+        let mut turns = 0u32;
+        let stop_reason = loop {
+            if self.cancel.is_cancelled() {
+                if self
+                    .emit(AgentEvent::TurnEnd {
+                        stop_reason: StopReason::Canceled,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                break AgentStopReason::Canceled;
+            }
+            if turns >= self.config.max_turns {
+                break AgentStopReason::MaxTurnRequests;
+            }
+            turns += 1;
+
+            match self.run_turn().await {
+                TurnOutcome::Stop(reason) => break reason,
+                TurnOutcome::Canceled => break AgentStopReason::Canceled,
+                TurnOutcome::Failed | TurnOutcome::Closed => return,
+                TurnOutcome::ToolCalls(calls) => match self.dispatch(calls).await {
+                    DispatchOutcome::Continue => continue,
+                    DispatchOutcome::Canceled => {
+                        if self
+                            .emit(AgentEvent::TurnEnd {
+                                stop_reason: StopReason::Canceled,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        break AgentStopReason::Canceled;
+                    }
+                    DispatchOutcome::Failed | DispatchOutcome::Closed => return,
+                },
+            }
+        };
+
+        let _ = self.emit(AgentEvent::AgentEnd { stop_reason }).await;
+    }
+
+    /// Run one provider turn. Forward each stream event. Build the assistant
+    /// message. Append it to the context. Return the next step.
+    async fn run_turn(&self) -> TurnOutcome {
+        if self.emit(AgentEvent::TurnStart).await.is_err() {
+            return TurnOutcome::Closed;
+        }
+
+        let request = self.build_request().await;
+        let mut stream = match self
+            .inner
+            .provider
+            .stream(request, self.cancel.clone())
+            .await
+        {
+            Ok(stream) => stream,
+            Err(error) => {
+                let _ = self.tx.send(Err(Error::from(error))).await;
+                return TurnOutcome::Failed;
+            }
+        };
+
+        let mut builder = AssistantBuilder::default();
+        let mut stop_reason = None;
+        loop {
+            if self.cancel.is_cancelled() {
+                if self
+                    .emit(AgentEvent::TurnEnd {
+                        stop_reason: StopReason::Canceled,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return TurnOutcome::Closed;
+                }
+                return TurnOutcome::Canceled;
+            }
+
+            let next = tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => {
+                    if self
+                        .emit(AgentEvent::TurnEnd {
+                            stop_reason: StopReason::Canceled,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return TurnOutcome::Closed;
+                    }
+                    return TurnOutcome::Canceled;
+                }
+                item = stream.next() => item,
+            };
+
+            match next {
+                Some(Ok(event)) => {
+                    if let StreamEvent::Done {
+                        stop_reason: reason,
+                    } = &event
+                    {
+                        stop_reason = Some(*reason);
+                    }
+                    builder.observe(&event);
+                    if self.emit(AgentEvent::Stream(event)).await.is_err() {
+                        return TurnOutcome::Closed;
+                    }
+                    if stop_reason.is_some() {
+                        break;
+                    }
+                }
+                Some(Err(error)) => {
+                    let _ = self.tx.send(Err(Error::from(error))).await;
+                    return TurnOutcome::Failed;
+                }
+                None => break,
+            }
+        }
+
+        let (message, tool_calls) = builder.finish();
+        {
+            let mut context = self.inner.context.lock().await;
+            context.append(message);
+        }
+
+        match stop_reason {
+            Some(StopReason::ToolUse) => TurnOutcome::ToolCalls(tool_calls),
+            Some(reason) => {
+                if self
+                    .emit(AgentEvent::TurnEnd {
+                        stop_reason: reason,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return TurnOutcome::Closed;
+                }
+                TurnOutcome::Stop(map_stop_reason(reason))
+            }
+            None => {
+                if self.cancel.is_cancelled() {
+                    if self
+                        .emit(AgentEvent::TurnEnd {
+                            stop_reason: StopReason::Canceled,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return TurnOutcome::Closed;
+                    }
+                    return TurnOutcome::Canceled;
+                }
+                // The provider ended the stream with no `Done` event. Report a
+                // decode fault so the caller can retry or stop.
+                let _ = self
+                    .tx
+                    .send(Err(Error::from(crate::ProviderError::Decode(
+                        "the provider stream ended without a done event".to_string(),
+                    ))))
+                    .await;
+                TurnOutcome::Failed
+            }
+        }
+    }
+
+    /// Run every requested tool call, one at a time, in call order.
+    async fn dispatch(&self, calls: Vec<PendingToolCall>) -> DispatchOutcome {
+        for call in calls {
+            match self.dispatch_one(call).await {
+                DispatchOutcome::Continue => continue,
+                other => return other,
+            }
+        }
+        DispatchOutcome::Continue
+    }
+
+    /// Run the hooks, the approval step, and one tool. Append the result.
+    async fn dispatch_one(&self, call: PendingToolCall) -> DispatchOutcome {
+        if self.cancel.is_cancelled() {
+            return DispatchOutcome::Canceled;
+        }
+
+        let PendingToolCall {
+            id,
+            name,
+            mut arguments,
+        } = call;
+
+        // Run `before_tool_call` in registration order. The first block wins.
+        let mut blocked: Option<String> = None;
+        for hook in self.inner.hooks.hooks() {
+            let mut view = ToolCallView {
+                name: &name,
+                arguments: &mut arguments,
+            };
+            match hook.before_tool_call(&mut view).await {
+                HookOutcome::Continue => {}
+                HookOutcome::Block { reason } => {
+                    blocked = Some(reason);
+                    break;
+                }
+            }
+        }
+
+        if let Some(reason) = blocked {
+            let output = error_output(reason);
+            return self.finish_tool(&id, output).await;
+        }
+
+        let tool = self.inner.tools.get(&name).cloned();
+        let Some(tool) = tool else {
+            let output = error_output(format!("the tool {name} is not registered"));
+            return self.finish_tool(&id, output).await;
+        };
+
+        if self
+            .emit(AgentEvent::ToolStart {
+                id: id.clone(),
+                name: name.clone(),
+                kind: tool.kind(),
+            })
+            .await
+            .is_err()
+        {
+            return DispatchOutcome::Closed;
+        }
+
+        // A tool streams output lines on this channel. Forward each line as a
+        // `ToolUpdate` while the tool runs.
+        let (updates_tx, mut updates_rx) =
+            tokio::sync::mpsc::channel::<String>(EVENT_CHANNEL_CAPACITY);
+        let context = ToolContext {
+            session_root: session_root(),
+            cancel: self.cancel.clone(),
+            updates: updates_tx,
+        };
+        let execute = tool.execute(arguments, context);
+        tokio::pin!(execute);
+
+        let result = loop {
+            tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => return DispatchOutcome::Canceled,
+                line = updates_rx.recv() => {
+                    if let Some(line) = line
+                        && self
+                            .emit(AgentEvent::ToolUpdate {
+                                id: id.clone(),
+                                output: line,
+                            })
+                            .await
+                            .is_err()
+                    {
+                        return DispatchOutcome::Closed;
+                    }
+                }
+                done = &mut execute => break done,
+            }
+        };
+
+        // Drain any output line the tool sent just before it returned.
+        while let Ok(line) = updates_rx.try_recv() {
+            if self
+                .emit(AgentEvent::ToolUpdate {
+                    id: id.clone(),
+                    output: line,
+                })
+                .await
+                .is_err()
+            {
+                return DispatchOutcome::Closed;
+            }
+        }
+        let mut output = match result {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = self.tx.send(Err(Error::from(error))).await;
+                return DispatchOutcome::Failed;
+            }
+        };
+
+        // Run `after_tool_result` in registration order. A hook may edit output.
+        for hook in self.inner.hooks.hooks() {
+            hook.after_tool_result(&name, &mut output).await;
+        }
+
+        self.finish_tool(&id, output).await
+    }
+
+    /// Emit `ToolEnd` and append the tool-result message to the context.
+    async fn finish_tool(&self, id: &str, output: ToolOutput) -> DispatchOutcome {
+        let message = Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: id.to_string(),
+                content: output.content.clone(),
+                is_error: output.is_error,
+            }],
+        };
+        {
+            let mut context = self.inner.context.lock().await;
+            context.append(message);
+        }
+        if self
+            .emit(AgentEvent::ToolEnd {
+                id: id.to_string(),
+                output,
+            })
+            .await
+            .is_err()
+        {
+            return DispatchOutcome::Closed;
+        }
+        DispatchOutcome::Continue
+    }
+
+    /// Build the next request from the current context. The system prompt and
+    /// the tool list form the stable prefix. The messages grow by appending.
+    async fn build_request(&self) -> CompletionRequest {
+        let context = self.inner.context.lock().await;
+        CompletionRequest {
+            model: String::new(),
+            system: context.system().map(str::to_string),
+            messages: context.messages().to_vec(),
+            tools: self.inner.tools.specs(),
+            max_tokens: None,
+            temperature: None,
+        }
+    }
+
+    /// Send one event. Return `Err` when the caller dropped the receiver.
+    async fn emit(&self, event: AgentEvent) -> Result<(), ()> {
+        self.tx.send(Ok(event)).await.map_err(|_| ())
+    }
+}
+
+/// The result of running one or more tool calls.
+enum DispatchOutcome {
+    /// The loop may run the next turn.
+    Continue,
+    /// The caller cancelled the run.
+    Canceled,
+    /// A tool failed. The error is already sent.
+    Failed,
+    /// The caller dropped the event stream.
+    Closed,
+}
+
+/// Map a provider stop reason onto an agent stop reason. See SPEC-01 section 9.
+fn map_stop_reason(reason: StopReason) -> AgentStopReason {
+    match reason {
+        StopReason::EndTurn | StopReason::StopSequence => AgentStopReason::EndTurn,
+        StopReason::MaxTokens => AgentStopReason::MaxTokens,
+        StopReason::ContentFiltered => AgentStopReason::Refusal,
+        StopReason::Canceled => AgentStopReason::Canceled,
+        // A `ToolUse` stop is not terminal. The loop handles it before this call.
+        StopReason::ToolUse => AgentStopReason::EndTurn,
+    }
+}
+
+/// Build an error tool result that carries a plain-text reason for the model.
+fn error_output(reason: impl Into<String>) -> ToolOutput {
+    ToolOutput {
+        content: vec![ContentBlock::Text {
+            text: reason.into(),
+        }],
+        is_error: true,
+    }
+}
+
+/// The confinement root passed to every tool. The core owns no session root, so
+/// it uses the current directory. A frontend sets a real root in a later stage.
+fn session_root() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Assembles the assistant message from a turn's stream events. It closes each
+/// content block on its `*End` event, in `index` order.
+#[derive(Default)]
+struct AssistantBuilder {
+    content: Vec<ContentBlock>,
+    tool_calls: Vec<PendingToolCall>,
+    text: Option<String>,
+    thinking: Option<String>,
+    tool_call: Option<(String, String)>,
+}
+
+impl AssistantBuilder {
+    /// Fold one stream event into the message under construction.
+    fn observe(&mut self, event: &StreamEvent) {
+        match event {
+            StreamEvent::TextStart { .. } => self.text = Some(String::new()),
+            StreamEvent::TextDelta { delta, .. } => {
+                if let Some(text) = self.text.as_mut() {
+                    text.push_str(delta);
+                }
+            }
+            StreamEvent::TextEnd { .. } => {
+                if let Some(text) = self.text.take() {
+                    self.content.push(ContentBlock::Text { text });
+                }
+            }
+            StreamEvent::ThinkingStart { .. } => self.thinking = Some(String::new()),
+            StreamEvent::ThinkingDelta { delta, .. } => {
+                if let Some(thinking) = self.thinking.as_mut() {
+                    thinking.push_str(delta);
+                }
+            }
+            StreamEvent::ThinkingEnd { signature, .. } => {
+                if let Some(thinking) = self.thinking.take() {
+                    self.content.push(ContentBlock::Thinking {
+                        thinking,
+                        signature: signature.clone(),
+                    });
+                }
+            }
+            StreamEvent::ToolCallStart { id, name, .. } => {
+                self.tool_call = Some((id.clone(), name.clone()));
+            }
+            StreamEvent::ToolCallEnd { arguments, .. } => {
+                if let Some((id, name)) = self.tool_call.take() {
+                    self.content.push(ContentBlock::ToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                    });
+                    self.tool_calls.push(PendingToolCall {
+                        id,
+                        name,
+                        arguments: arguments.clone(),
+                    });
+                }
+            }
+            StreamEvent::MessageStart { .. }
+            | StreamEvent::ToolCallDelta { .. }
+            | StreamEvent::Usage(_)
+            | StreamEvent::Done { .. } => {}
+        }
+    }
+
+    /// Finish the message. Return it with the tool calls it requested.
+    fn finish(self) -> (Message, Vec<PendingToolCall>) {
+        (
+            Message {
+                role: Role::Assistant,
+                content: self.content,
+            },
+            self.tool_calls,
+        )
     }
 }

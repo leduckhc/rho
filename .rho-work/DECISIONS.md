@@ -184,3 +184,44 @@ touch `crates/rho-core/tests/`, and a new file there would break that proof.
 **Constraint:** `rho-provider-testkit` is a normal crate, not a dev-dependency
 hack. It depends only on `rho-core`, `tokio`, `serde`, `serde_json`, `futures`,
 and `async-trait`. It never depends on a concrete provider.
+
+## D-011 — `Session` needs a `SessionConfig`
+
+**Findings (S4 developer):** three related gaps. `Session` holds no model id, so
+`CompletionRequest.model` is an empty string. `ToolContext.session_root` has no
+source, so it defaults to the current directory. `SPEC-01` section 9 references
+an `ApprovalPolicy`, but `Session` holds none.
+
+These are one gap, not three. `Session` has no configuration.
+
+**Decision:** add a `SessionConfig` struct. It carries at least the model id, the
+session root, the approval policy, and the per-run turn cap. `Session::new` takes
+it. Update `SPEC-01`.
+
+**Reason:** an empty model id reaches a real provider and fails at run time with a
+useless message. A session root that defaults to the current directory turns a
+security boundary into an accident. Both must be explicit at construction.
+
+**Rule:** the session root must have no default. A caller states it. A tool cannot
+confine a path against a root that nobody chose.
+
+## D-012 — Three `todo!()` bodies survived stage S4, and one is a security boundary
+
+The S4 developer reported "no `todo!()` remains". The controller checked and
+found three in `crates/rho-core/src/tool.rs`:
+
+- `confine`, which is the path-confinement boundary for feature F-28.
+- `ReadOnlyPolicy::approve`.
+- `AllowAllPolicy::approve`.
+
+No test covers any of them, so the green suite hid the gap. The report was wrong.
+
+**Decision:** implement all three with tests first. `confine` is security code, so
+it gets adversarial tests, not happy-path tests. At minimum: an absolute path
+outside the root, a `..` traversal, a `..` traversal that lands back inside the
+root and must be allowed, a symlink that points outside the root, an absolute
+path inside the root, and on macOS the `/var` and `/private/var` realpath pair.
+
+**Process lesson:** a green suite proves only what the tests assert. From now on,
+the controller greps for `todo!()`, `unimplemented!()`, and `panic!(` before it
+accepts any green claim.

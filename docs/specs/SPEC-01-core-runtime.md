@@ -471,6 +471,11 @@ impl Session {
     /// Start one agent run. Append `input` to the context, then drive the loop.
     /// `cancel` stops the run. Dropping the returned value also stops the run.
     pub fn prompt(&self, input: Vec<ContentBlock>, cancel: CancelToken) -> AgentEvents;
+
+    /// Read the conversation so far. The context is append-only, so this grants
+    /// no mutation. A lock guards the context, so this returns a cheap snapshot
+    /// of the messages, not a borrow. See decision D-008.
+    pub async fn messages(&self) -> Vec<Message>;
 }
 ```
 

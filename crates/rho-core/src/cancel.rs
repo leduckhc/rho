@@ -36,9 +36,36 @@ impl CancelToken {
 
     /// Resolve when the token is cancelled. Resolve at once if already cancelled.
     pub async fn cancelled(&self) {
+        // Register the waiter before the flag check. `Notified` registers on
+        // creation. So a `cancel` that lands after this line still wakes the
+        // waiter. `notify_waiters` stores no permit, so a later registration
+        // would miss the wake. This order removes that race.
+        let notified = self.inner.notify.notified();
         if self.is_cancelled() {
             return;
         }
-        self.inner.notify.notified().await;
+        notified.await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CancelToken;
+    use std::time::Duration;
+
+    // This test guards D-009. It runs on a multi-thread runtime, so `cancel`
+    // can land between the flag check and the waiter registration. The bounded
+    // timeout fails the test on a lost wake, instead of hanging the suite.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_token_cancelled_wakes_on_multi_thread_runtime() {
+        for _ in 0..1000 {
+            let token = CancelToken::new();
+            let waiter = token.clone();
+            let handle = tokio::spawn(async move { waiter.cancelled().await });
+            token.cancel();
+            let woke = tokio::time::timeout(Duration::from_secs(5), handle).await;
+            assert!(woke.is_ok(), "cancelled() must wake after cancel");
+            woke.unwrap().unwrap();
+        }
     }
 }
