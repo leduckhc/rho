@@ -111,3 +111,174 @@ fn azure_config_debug_does_not_leak_secret() {
         "config Debug leaked the secret"
     );
 }
+
+// --- Request shape, from a live defect -------------------------------------
+
+/// A conversation where the assistant made two tool calls and both returned.
+fn two_tool_results_conversation() -> Vec<rho_core::Message> {
+    use rho_core::{ContentBlock, Message, Role};
+    vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "read both files".to_string(),
+            }],
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "I will read them.".to_string(),
+                },
+                ContentBlock::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    arguments: serde_json::json!({ "path": "a.txt" }),
+                },
+                ContentBlock::ToolCall {
+                    id: "call_2".to_string(),
+                    name: "read".to_string(),
+                    arguments: serde_json::json!({ "path": "b.txt" }),
+                },
+            ],
+        },
+        Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: "call_1".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "alpha".to_string(),
+                }],
+                is_error: false,
+            }],
+        },
+        Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: "call_2".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "beta".to_string(),
+                }],
+                is_error: false,
+            }],
+        },
+    ]
+}
+
+fn request_with(messages: Vec<rho_core::Message>) -> rho_core::CompletionRequest {
+    rho_core::CompletionRequest {
+        model: "gpt-x".to_string(),
+        system: None,
+        messages,
+        tools: Vec::new(),
+        max_tokens: None,
+        temperature: None,
+    }
+}
+
+fn input_items(body: &serde_json::Value) -> Vec<serde_json::Value> {
+    body["input"].as_array().expect("input is an array").clone()
+}
+
+#[test]
+fn build_request_body_never_sends_the_tool_role() {
+    // A live run against Azure found this. The Responses API answered 400:
+    //
+    //   Invalid value: 'tool'. Supported values are: 'assistant', 'system',
+    //   'developer', and 'user'.
+    //
+    // Responses has no tool role. A tool result is an item, not a message.
+    let body = rho_provider_azure::build_request_body(
+        &request_with(two_tool_results_conversation()),
+        "gpt-x",
+    );
+    for item in input_items(&body) {
+        if let Some(role) = item.get("role").and_then(|value| value.as_str()) {
+            assert_ne!(
+                role, "tool",
+                "Responses rejects the tool role. Send a function_call_output item"
+            );
+        }
+    }
+}
+
+#[test]
+fn build_request_body_sends_tool_results_as_function_call_output_items() {
+    let body = rho_provider_azure::build_request_body(
+        &request_with(two_tool_results_conversation()),
+        "gpt-x",
+    );
+    let outputs: Vec<&serde_json::Value> = input_items(&body)
+        .iter()
+        .filter(|item| item.get("type").and_then(|v| v.as_str()) == Some("function_call_output"))
+        .cloned()
+        .collect::<Vec<_>>()
+        .leak()
+        .iter()
+        .collect();
+    assert_eq!(outputs.len(), 2, "both tool results must appear");
+    let ids: Vec<&str> = outputs
+        .iter()
+        .map(|item| item["call_id"].as_str().expect("call_id is a string"))
+        .collect();
+    assert_eq!(ids, vec!["call_1", "call_2"]);
+    assert_eq!(outputs[0]["output"], serde_json::json!("alpha"));
+}
+
+#[test]
+fn build_request_body_replays_the_assistant_tool_calls() {
+    // Responses requires that a `function_call` item precedes its output, and that
+    // the `call_id` values match. The provider dropped the assistant's tool calls, so
+    // an output referenced a call the service had never seen in the input.
+    let body = rho_provider_azure::build_request_body(
+        &request_with(two_tool_results_conversation()),
+        "gpt-x",
+    );
+    let items = input_items(&body);
+    let calls: Vec<&serde_json::Value> = items
+        .iter()
+        .filter(|item| item.get("type").and_then(|v| v.as_str()) == Some("function_call"))
+        .collect();
+    assert_eq!(calls.len(), 2, "both tool calls must be replayed");
+    assert_eq!(calls[0]["call_id"], serde_json::json!("call_1"));
+    assert_eq!(calls[0]["name"], serde_json::json!("read"));
+    // Responses carries the arguments as a JSON string, not as an object.
+    let arguments = calls[0]["arguments"]
+        .as_str()
+        .expect("arguments must be a JSON string");
+    let parsed: serde_json::Value =
+        serde_json::from_str(arguments).expect("the arguments string must parse");
+    assert_eq!(parsed, serde_json::json!({ "path": "a.txt" }));
+
+    // Ordering matters: every function_call must precede its own output.
+    let call_position = items
+        .iter()
+        .position(|item| item.get("type").and_then(|v| v.as_str()) == Some("function_call"))
+        .expect("a function_call item");
+    let output_position = items
+        .iter()
+        .position(|item| item.get("type").and_then(|v| v.as_str()) == Some("function_call_output"))
+        .expect("a function_call_output item");
+    assert!(
+        call_position < output_position,
+        "a function_call must precede its output"
+    );
+}
+
+#[test]
+fn build_request_body_keeps_plain_text_messages_as_messages() {
+    use rho_core::{ContentBlock, Message, Role};
+    let body = rho_provider_azure::build_request_body(
+        &request_with(vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "hello".to_string(),
+            }],
+        }]),
+        "gpt-x",
+    );
+    let items = input_items(&body);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["role"], serde_json::json!("user"));
+    assert_eq!(items[0]["content"], serde_json::json!("hello"));
+}

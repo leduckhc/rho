@@ -475,13 +475,13 @@ fn parse_arguments(buffer: &str) -> Result<Value, ProviderError> {
 // --- The request body. ---------------------------------------------------
 
 /// Build the Responses request body. See `SPEC-02` section 6.
-fn build_request_body(request: &CompletionRequest, deployment: &str) -> Value {
+pub fn build_request_body(request: &CompletionRequest, deployment: &str) -> Value {
     let mut input = Vec::new();
     if let Some(system) = &request.system {
         input.push(json!({ "role": "system", "content": system }));
     }
     for message in &request.messages {
-        input.push(message_to_json(message));
+        input.extend(message_to_items(message));
     }
 
     let mut body = json!({
@@ -514,27 +514,89 @@ fn build_request_body(request: &CompletionRequest, deployment: &str) -> Value {
     body
 }
 
-/// Map one normalised message to a Responses input item.
-fn message_to_json(message: &Message) -> Value {
-    let role = match message.role {
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        Role::Tool => "tool",
-    };
+/// Map one normalised message to **one or more** Responses input items.
+///
+/// One message can produce several items, so this returns a list. An assistant turn
+/// with text and two tool calls becomes three items.
+///
+/// A live run against Azure forced this shape. The Responses API answered 400 with
+/// `Invalid value: 'tool'. Supported values are: 'assistant', 'system', 'developer',
+/// and 'user'.` Responses has no tool role. It mixes messages and typed items in one
+/// `input` array:
+///
+/// - a message is `{"role": ..., "content": ...}`;
+/// - a tool call is `{"type": "function_call", "call_id": ..., "name": ..., "arguments": "<json string>"}`;
+/// - a tool result is `{"type": "function_call_output", "call_id": ..., "output": ...}`.
+///
+/// Two rules are easy to miss, and both cost a 400.
+///
+/// First, `arguments` is a JSON **string**, not an object.
+///
+/// Second, a `function_call` item must appear before its own `function_call_output`,
+/// and the `call_id` values must match. The provider used to drop assistant tool
+/// calls entirely, so an output referenced a call the service had never seen.
+fn message_to_items(message: &Message) -> Vec<Value> {
+    let mut items = Vec::new();
     let mut text = String::new();
+
     for block in &message.content {
         match block {
             ContentBlock::Text { text: piece } => text.push_str(piece),
-            ContentBlock::ToolResult { content, .. } => {
+            ContentBlock::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                // Flush any prose that came before the call, so order survives.
+                if !text.is_empty() {
+                    items.push(json!({ "role": role_name(message.role), "content": text }));
+                    text = String::new();
+                }
+                items.push(json!({
+                    "type": "function_call",
+                    "call_id": id,
+                    "name": name,
+                    "arguments": arguments.to_string(),
+                }));
+            }
+            ContentBlock::ToolResult {
+                tool_call_id,
+                content,
+                ..
+            } => {
+                let mut output = String::new();
                 for inner in content {
                     if let ContentBlock::Text { text: piece } = inner {
-                        text.push_str(piece);
+                        output.push_str(piece);
                     }
                 }
+                items.push(json!({
+                    "type": "function_call_output",
+                    "call_id": tool_call_id,
+                    "output": output,
+                }));
             }
-            // Tool-call replay and image input are out of scope for sprint 1.
+            // Thinking replay and image input are out of scope for sprint 1.
             _ => {}
         }
     }
-    json!({ "role": role, "content": text })
+
+    // Emit trailing prose. Skip an empty message, because an empty content string
+    // adds nothing and some models reject it.
+    if !text.is_empty() {
+        items.push(json!({ "role": role_name(message.role), "content": text }));
+    }
+    items
+}
+
+/// The Responses role name for a normalised role.
+///
+/// `Role::Tool` never reaches this function through a normal path, because a tool
+/// result becomes a `function_call_output` item. It maps to `user` as a safe
+/// fallback, since Responses would reject `tool`.
+fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::User | Role::Tool => "user",
+        Role::Assistant => "assistant",
+    }
 }

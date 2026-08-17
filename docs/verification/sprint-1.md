@@ -13,7 +13,11 @@ Date: 2026-08-17. Platform: macOS on Apple Silicon (aarch64). Build:
 | --- | --- | --- |
 | Streamed answer | OpenRouter | **pass** |
 | Streamed answer | AWS Bedrock | **pass** |
-| Streamed answer | Azure OpenAI | **not run**, no credential available |
+| Streamed answer | Azure OpenAI | **pass** |
+| Tool call, end to end | Azure OpenAI | **pass**, after a fix. See below. |
+| Two tool calls in one turn | Azure OpenAI | **pass**, after the same fix |
+| `--read-only` blocks a write | Azure OpenAI | **pass** |
+| Path confinement holds | Azure OpenAI | **pass** |
 | Tool call, end to end | OpenRouter | **pass** |
 | Two tool calls in one turn | OpenRouter | **pass** |
 | Tool call, end to end | AWS Bedrock | **pass** |
@@ -194,9 +198,47 @@ The list.txt file has 3 lines.
 
 OpenRouter was checked for the same case and was already correct.
 
-## What is still unverified
+## The Azure tool-call defect
 
-- Azure OpenAI, live. No credential available.
+**Symptom.** A plain answer worked. Any tool call returned HTTP 400:
+
+```
+Invalid value: 'tool'. Supported values are: 'assistant', 'system', 'developer',
+and 'user'.
+```
+
+**Cause, and it was two bugs.** The Responses API has no `tool` role. It mixes
+messages and typed items in one `input` array. A tool result is a
+`function_call_output` item, not a message. The provider sent a message with
+`role: "tool"`.
+
+The second bug hid behind the first. The provider dropped the assistant's tool calls
+entirely, with a comment saying replay was out of scope. But Responses requires a
+`function_call` item to appear before its own `function_call_output`, with matching
+`call_id` values. So even a corrected output item would have referenced a call the
+service had never seen.
+
+**Fix.** One normalised message now maps to **one or more** input items, because an
+assistant turn with text and two tool calls is three items. Two details are easy to
+miss and each costs a 400: `arguments` is a JSON **string**, not an object, and the
+call must precede its output.
+
+**Why the tests missed it.** Every Azure fixture describes a *response*. Both defects
+were in the *request*. This is the same lesson as Bedrock, met twice.
+
+**Guards added**, all offline:
+
+- `build_request_body_never_sends_the_tool_role`
+- `build_request_body_sends_tool_results_as_function_call_output_items`
+- `build_request_body_replays_the_assistant_tool_calls`, which also asserts the
+  arguments are a JSON string and that a call precedes its output
+- `build_request_body_keeps_plain_text_messages_as_messages`
+
+**Verified live after the fix.** Single and parallel tool calls both work.
+`--read-only` refused a write and the file was not created. A read of `/etc/passwd`
+was refused and the model recovered.
+
+## What is still unverified
 - The interactive TUI against a real terminal. Only the headless `run` path was
   driven live. Rendering is covered by tests on a test backend.
 - The ACP frontend. `rho-acp` is a stub, and `SPEC-06` defines the mapping.
