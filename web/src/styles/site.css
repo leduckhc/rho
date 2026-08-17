@@ -207,6 +207,31 @@ footer .row {
 }
 footer a { color: var(--muted); }
 
+/* The hint is for narrow screens only. A wide screen shows every column. */
+.scrollhint {
+  display: none;
+  color: var(--faint); font-size: var(--fs-caption); margin: 8px 0 0;
+}
+
+@media (max-width: 640px) {
+  /* The crate table has only three columns. Let it wrap instead of scroll.
+     Wrapping keeps the real table semantics, so a screen reader still pairs
+     each cell with its header. A restacked block layout would lose that. */
+  .hero .tablewrap { overflow-x: visible; }
+  .hero .tablewrap table { min-width: 0; }
+  .hero table td:last-child { font-size: var(--fs-caption); color: var(--muted); }
+  .hero table td code { font-size: 12px; }
+
+  /* A long command must stay one logical line, because a reader copies it.
+     `pre-wrap` wraps for the eye only. It inserts no newline, so a copy still
+     yields the original command. That removes the hidden scroll. */
+  pre.block { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible; }
+
+  /* The cost table carries real tabular meaning, so it keeps scrolling.
+     A touch device shows no scrollbar at rest, so say so in words. */
+  .scrollhint { display: block; }
+}
+
 @media (max-width: 480px) {
   .screen { padding: 64px 24px; }
   .hero h1 { font-size: var(--fs-h1); }
