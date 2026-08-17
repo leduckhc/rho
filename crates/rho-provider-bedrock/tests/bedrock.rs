@@ -260,3 +260,121 @@ async fn provider_bedrock_maps_service_faults_to_server_error() {
         assert!(error.is_retryable(), "{name} must be retryable");
     }
 }
+
+// --- Request shape, from a live defect -------------------------------------
+
+/// Build a conversation where the model made two tool calls in one turn.
+///
+/// `rho-core` records one `Role::Tool` message per tool result, which is correct for
+/// its own model. Bedrock has no tool role, so both map to `user`.
+fn two_tool_results_conversation() -> Vec<rho_core::Message> {
+    use rho_core::{ContentBlock, Message, Role};
+    vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "read both files".to_string(),
+            }],
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    arguments: serde_json::json!({ "path": "a.txt" }),
+                },
+                ContentBlock::ToolCall {
+                    id: "call_2".to_string(),
+                    name: "read".to_string(),
+                    arguments: serde_json::json!({ "path": "b.txt" }),
+                },
+            ],
+        },
+        Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: "call_1".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "alpha".to_string(),
+                }],
+                is_error: false,
+            }],
+        },
+        Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: "call_2".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "beta".to_string(),
+                }],
+                is_error: false,
+            }],
+        },
+    ]
+}
+
+#[test]
+fn build_messages_never_emits_two_messages_with_the_same_role_in_a_row() {
+    // A live run against Bedrock found this. The model made two tool calls in one
+    // turn, and Bedrock answered 400.
+    //
+    // Converse requires strictly alternating roles. `rho-core` records one Tool
+    // message per result, and Bedrock has no tool role, so two results became two
+    // consecutive user messages. One tool call worked, which is why the unit tests
+    // and the first live check both passed.
+    //
+    // The recorded fixtures could never catch this, because they describe responses.
+    // This defect is in the request.
+    use aws_sdk_bedrockruntime::types::ConversationRole;
+
+    let built = rho_provider_bedrock::build_messages(&two_tool_results_conversation());
+    let roles: Vec<&ConversationRole> = built.iter().map(|message| message.role()).collect();
+    for pair in roles.windows(2) {
+        assert_ne!(
+            pair[0], pair[1],
+            "Bedrock rejects two messages with the same role in a row, got {roles:?}"
+        );
+    }
+}
+
+#[test]
+fn build_messages_merges_tool_results_into_one_user_message() {
+    // The merge must keep both results, in order, in a single user message. Dropping
+    // one would lose a tool result in silence, which is worse than the 400.
+    use aws_sdk_bedrockruntime::types::{ContentBlock as SdkBlock, ConversationRole};
+
+    let built = rho_provider_bedrock::build_messages(&two_tool_results_conversation());
+    assert_eq!(
+        built.len(),
+        3,
+        "user, assistant, then one merged user message"
+    );
+    assert_eq!(built[2].role(), &ConversationRole::User);
+
+    let ids: Vec<&str> = built[2]
+        .content()
+        .iter()
+        .filter_map(|block| match block {
+            SdkBlock::ToolResult(result) => Some(result.tool_use_id()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["call_1", "call_2"],
+        "both tool results must survive the merge, in order"
+    );
+}
+
+#[test]
+fn build_messages_keeps_a_single_tool_result_working() {
+    // The single-call path already worked live. Do not regress it.
+    use aws_sdk_bedrockruntime::types::ConversationRole;
+
+    let mut conversation = two_tool_results_conversation();
+    conversation.pop();
+    let built = rho_provider_bedrock::build_messages(&conversation);
+    assert_eq!(built.len(), 3);
+    assert_eq!(built[2].role(), &ConversationRole::User);
+}

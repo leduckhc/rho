@@ -540,24 +540,36 @@ fn sdk_event_to_mirror(
 
 /// Build the SDK message list from the normalised messages. Sprint 1 sends text
 /// and tool calls. See `SPEC-02` section 8 for the out-of-scope block kinds.
-fn build_messages(messages: &[Message]) -> Vec<aws_sdk_bedrockruntime::types::Message> {
+pub fn build_messages(messages: &[Message]) -> Vec<aws_sdk_bedrockruntime::types::Message> {
     use aws_sdk_bedrockruntime::types::{
         ContentBlock as SdkBlock, ConversationRole, Message as SdkMessage, ToolResultBlock,
         ToolResultContentBlock, ToolUseBlock,
     };
     use rho_core::ContentBlock;
 
-    let mut out = Vec::new();
+    // Collect the blocks per role, merging a run of messages that share a role.
+    //
+    // Converse requires strictly alternating roles. `rho-core` records one
+    // `Role::Tool` message per tool result, and Bedrock has no tool role, so every
+    // result maps to `user`. Two tool calls in one turn therefore produced two
+    // consecutive user messages, and Bedrock answered 400.
+    //
+    // One tool call worked, which is why the unit tests and the first live check both
+    // passed. A live run with two calls found it.
+    //
+    // Merging is also what Bedrock wants: all tool results for one turn belong in a
+    // single user message.
+    let mut grouped: Vec<(ConversationRole, Vec<SdkBlock>)> = Vec::new();
     for message in messages {
         let role = match message.role {
             Role::User | Role::Tool => ConversationRole::User,
             Role::Assistant => ConversationRole::Assistant,
         };
-        let mut builder = SdkMessage::builder().role(role);
+        let mut blocks: Vec<SdkBlock> = Vec::new();
         for block in &message.content {
             match block {
                 ContentBlock::Text { text } => {
-                    builder = builder.content(SdkBlock::Text(text.clone()));
+                    blocks.push(SdkBlock::Text(text.clone()));
                 }
                 ContentBlock::ToolCall {
                     id,
@@ -570,7 +582,7 @@ fn build_messages(messages: &[Message]) -> Vec<aws_sdk_bedrockruntime::types::Me
                         .input(json_to_document(arguments))
                         .build()
                     {
-                        builder = builder.content(SdkBlock::ToolUse(tool_use));
+                        blocks.push(SdkBlock::ToolUse(tool_use));
                     }
                 }
                 ContentBlock::ToolResult {
@@ -591,12 +603,29 @@ fn build_messages(messages: &[Message]) -> Vec<aws_sdk_bedrockruntime::types::Me
                         }
                     }
                     if let Ok(result) = result.build() {
-                        builder = builder.content(SdkBlock::ToolResult(result));
+                        blocks.push(SdkBlock::ToolResult(result));
                     }
                 }
                 // Thinking replay and image input are out of scope for sprint 1.
                 _ => {}
             }
+        }
+        if blocks.is_empty() {
+            continue;
+        }
+        match grouped.last_mut() {
+            Some((last_role, last_blocks)) if *last_role == role => {
+                last_blocks.extend(blocks);
+            }
+            _ => grouped.push((role, blocks)),
+        }
+    }
+
+    let mut out = Vec::new();
+    for (role, blocks) in grouped {
+        let mut builder = SdkMessage::builder().role(role);
+        for block in blocks {
+            builder = builder.content(block);
         }
         if let Ok(message) = builder.build() {
             out.push(message);

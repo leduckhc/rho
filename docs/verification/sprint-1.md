@@ -15,6 +15,10 @@ Date: 2026-08-17. Platform: macOS on Apple Silicon (aarch64). Build:
 | Streamed answer | AWS Bedrock | **pass** |
 | Streamed answer | Azure OpenAI | **not run**, no credential available |
 | Tool call, end to end | OpenRouter | **pass** |
+| Two tool calls in one turn | OpenRouter | **pass** |
+| Tool call, end to end | AWS Bedrock | **pass** |
+| Two tool calls in one turn | AWS Bedrock | **pass**, after a fix. See below. |
+| `--read-only` blocks a write | AWS Bedrock | **pass** |
 | Path confinement holds against a live model | OpenRouter | **pass** |
 | `--read-only` blocks a write | OpenRouter | **pass** |
 | Actionable error for a missing key | OpenRouter | **pass** |
@@ -150,10 +154,49 @@ expected to see, and never asserted the **absence** of a bad state or the
 **completeness** of a pairing. The two new tests state invariants instead of
 examples.
 
+## The Bedrock parallel tool-call defect
+
+A second live pass closed the gap this document previously recorded as
+"Bedrock with a tool call, only a plain answer was verified". Closing it found a
+real bug.
+
+**Symptom.** One tool call worked. Two tool calls in one turn returned HTTP 400,
+`Bedrock rejected the request as invalid`.
+
+**Cause.** Converse requires strictly alternating roles. `rho-core` records one
+`Role::Tool` message per tool result, which is right for its own model. Bedrock has
+no tool role, so every result mapped to `user`. Two results therefore produced two
+consecutive user messages, and the service refused the request. The built list was
+`[User, Assistant, User, User]`.
+
+**Fix.** `build_messages` now merges a run of messages that share a role into one
+message. That is also what Bedrock wants: every tool result for one turn belongs in
+a single user message.
+
+**Why the tests missed it.** Every Bedrock fixture describes a *response*. This
+defect was in the *request*. So no recorded fixture could have caught it, and the
+single-call live check passed because one result cannot produce a consecutive pair.
+
+**Guards added**, all offline:
+
+- `build_messages_never_emits_two_messages_with_the_same_role_in_a_row`
+- `build_messages_merges_tool_results_into_one_user_message`, which also asserts both
+  results survive the merge in order, because silently dropping one would be worse
+  than the 400
+- `build_messages_keeps_a_single_tool_result_working`
+
+**Verified live after the fix**, reading two files in one turn:
+
+```
+The canary value is: teal-lantern-77
+The list.txt file has 3 lines.
+```
+
+OpenRouter was checked for the same case and was already correct.
+
 ## What is still unverified
 
 - Azure OpenAI, live. No credential available.
-- Bedrock with a tool call. Only a plain answer was verified.
 - The interactive TUI against a real terminal. Only the headless `run` path was
   driven live. Rendering is covered by tests on a test backend.
 - The ACP frontend. `rho-acp` is a stub, and `SPEC-06` defines the mapping.
