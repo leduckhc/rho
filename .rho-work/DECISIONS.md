@@ -485,3 +485,59 @@ rho at a repository you do not trust.
 
 A real sandbox is a design task with its own spec, not a patch. It is recorded in
 `docs/non-goals.md` scope, not left as a silent gap.
+
+## D-022 — A project skill is not loaded until the project is trusted
+
+A skill is instructions the model will follow, and it may carry scripts the model will
+run. So a skill inside the repository under edit is a prompt injection with a filename.
+
+This is the same threat as decision D-020, where the plugin host refuses a plugin under
+the session root. A skill is worse in one way: nobody reads a Markdown file as code.
+
+**Decision.** A project skill is withheld until the user trusts that session root. The
+default is untrusted, and nothing infers trust. A withheld skill is still **listed**,
+because a user who cannot see a skill cannot decide about it.
+
+`--read-only` does not grant skill trust. The two are independent. A read-only session
+still follows instructions, and instructions can exfiltrate through a read.
+
+## D-023 — `allowed-tools` in a skill is parsed, warned about, and ignored
+
+The Agent Skills frontmatter allows a skill to pre-approve tools for itself.
+
+**Decision.** rho reads the field, warns that it has no effect, and ignores it.
+
+**Reason.** A skill granting itself approval inverts the boundary that decisions D-012
+and D-017 worked to make fail closed. The approval policy stays the single authority.
+Honouring the field needs a design that asks the **user**, not one that believes the
+skill.
+
+## D-024 — An MCP server does not classify its own tools
+
+MCP has no equivalent of `ToolKind`, and a server's own opinion would not be
+trustworthy if it had one.
+
+**Decision.** Every MCP tool reports `ToolKind::Other`, which `is_read_only` treats as
+mutating. So a read-only session denies an MCP tool, and any session needs an explicit
+approval for one.
+
+This is decision D-017 applied to a second source. A plugin's self-declared kind was
+refused for the same reason. A later feature may let the user's configuration grant a
+kind to a named MCP tool. Trust then comes from the user.
+
+## D-025 — An MCP server is shared between sessions by default
+
+An MCP server is a whole process, often a Node or Python program costing tens of
+megabytes.
+
+rho's measured cost is about 25 KB per extra session. If each session spawned its own
+copy of every configured server, fifty sessions with three servers each would spawn 150
+processes, and the footprint argument that justifies this project would collapse.
+
+**Decision.** A server is shared by default, keyed by a fingerprint of its config, and
+reference counted. The last session to release it stops it. A server that must not be
+shared sets `shared: false`.
+
+**Consequence to watch.** A shared server means one session's misbehaviour can affect
+another. So every limit in `SPEC-09` section 6 applies per call, not per session, and a
+call timeout protects a session from a server that another session has wedged.

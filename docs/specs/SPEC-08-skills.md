@@ -1,0 +1,238 @@
+# SPEC-08 — Skills
+
+Status: draft for sprint 2.
+Owning crate: `rho-skills`.
+Features: F-45 (filesystem skills).
+
+## 1. What a skill is, and why it is cheap
+
+A skill is a directory with a `SKILL.md` file. The file carries YAML frontmatter with
+a name and a description, then free-form instructions. Everything else in the
+directory is free-form: scripts, references, assets.
+
+The point is **progressive disclosure**. Only the name and the description sit in the
+system prompt. The body loads on demand, when the model decides the skill matches the
+task. So a hundred skills cost a hundred short lines of context, not a hundred
+documents.
+
+rho follows the Agent Skills standard at `https://agentskills.io/specification`, and
+it is lenient in the same place pi is lenient: a skill name need not match its parent
+directory. That rule in the standard is unhelpful for a skills directory shared
+between several agent harnesses, which is the normal case on a developer machine.
+
+## 2. Discovery
+
+rho reads skills from these places, in this order.
+
+| Source | Trust |
+| --- | --- |
+| `~/.rho/skills/` | trusted |
+| `~/.agents/skills/` | trusted |
+| A directory named in settings | trusted |
+| `--skill <path>` on the command line | trusted |
+| `.rho/skills/` in the session root | **untrusted, see section 3** |
+| `.agents/skills/` in the session root and its ancestors, up to the repository root | **untrusted, see section 3** |
+
+Rules:
+
+- A directory containing `SKILL.md` is a skill. Search recursively.
+- In `~/.rho/skills/` and `.rho/skills/`, a bare `.md` file at the root is also a
+  skill. This is a convenience for a one-file skill.
+- In `~/.agents/skills/`, a bare `.md` file at the root is ignored, because that
+  directory is shared with other harnesses that place other files there.
+- A name collision warns and keeps the first skill found, so an earlier source wins.
+- `--no-skills` turns discovery off. An explicit `--skill` still loads.
+
+## 3. Security, and it is the whole reason this spec is careful
+
+**A skill is instructions that the model will follow, and it may carry scripts the
+model will run.** So a skill from the repository under edit is a prompt injection with
+a filename.
+
+This is the same threat as decision D-020, where the plugin host refuses a plugin
+inside the session root, because a repository must not hand executable code to the
+agent that reads it. A skill is the same risk in prose form, and prose is worse in one
+way: nobody thinks of a Markdown file as code.
+
+**Decision.** A project skill is not loaded until the project is trusted.
+
+- Trust is per session root, recorded on disk with the resolved path.
+- The default is untrusted. A caller states trust; nothing infers it.
+- An untrusted project skill is **listed, not loaded**. The user sees that it exists
+  and can choose. Hiding it would be worse, because a user who cannot see a skill
+  cannot decide about it.
+- `--read-only` does not change skill trust. The two are separate: a read-only session
+  still follows instructions, and instructions can exfiltrate through a read.
+
+**`allowed-tools` in frontmatter is read but never honoured in sprint 2.** The field
+lets a skill pre-approve tools for itself. A skill granting itself approval inverts
+the boundary that decisions D-012 and D-017 spent so much effort making fail closed.
+So rho parses the field, warns that it is ignored, and keeps the approval policy the
+single authority. Honouring it needs a design that asks the **user**, not the skill.
+
+**A skill body is untrusted text.** It reaches the model, so it cannot corrupt a
+terminal, but the name and description reach the TUI and are sanitised like tool
+output.
+
+## 4. Frontmatter
+
+```yaml
+---
+name: pdf-tools
+description: Extracts text and tables from PDF files. Use when working with PDFs.
+---
+```
+
+| Field | Required | Rule |
+| --- | --- | --- |
+| `name` | yes | 1 to 64 characters. Lowercase letters, digits, and hyphens. No leading or trailing hyphen. No double hyphen. |
+| `description` | yes | 1 to 1024 characters. |
+| `license` | no | A licence name, or a reference to a bundled file. |
+| `compatibility` | no | Up to 500 characters. Environment needs. |
+| `metadata` | no | Any key-value map. |
+| `allowed-tools` | no | Parsed, warned about, and ignored. See section 3. |
+| `disable-model-invocation` | no | When true, the skill stays out of the system prompt. A user invokes it by name. |
+
+Validation is lenient, with one exception.
+
+- A bad name warns and still loads. A shared skills directory should not break a
+  session.
+- A description over the limit warns and is truncated in the prompt.
+- **A missing description does not load.** The description is the only thing the model
+  sees, so a skill without one can never be chosen. Loading it would waste context and
+  mislead the user.
+- An unknown field is ignored.
+
+## 5. Public API
+
+```rust
+/// Where a skill came from, which decides whether it is trusted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillOrigin {
+    /// A user directory, settings entry, or an explicit path.
+    User,
+    /// The session root or an ancestor. Untrusted until the project is trusted.
+    Project,
+}
+
+/// One discovered skill. The body is not read yet.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    /// The absolute path of the `SKILL.md` file.
+    pub path: PathBuf,
+    /// The directory that holds the skill. A relative link inside the body resolves
+    /// against this.
+    pub root: PathBuf,
+    pub origin: SkillOrigin,
+    /// True when the skill may not enter the system prompt.
+    pub model_invocation_disabled: bool,
+    /// Warnings raised while validating. Shown to the user, never to the model.
+    pub warnings: Vec<String>,
+}
+
+/// What a discovery pass found.
+#[derive(Clone, Debug, Default)]
+pub struct SkillSet {
+    /// Skills that may be used now.
+    pub loaded: Vec<Skill>,
+    /// Project skills found but withheld, because the project is not trusted.
+    pub withheld: Vec<Skill>,
+}
+
+/// Where to look, and what to trust.
+#[derive(Clone, Debug)]
+pub struct SkillConfig {
+    pub user_dirs: Vec<PathBuf>,
+    pub session_root: Option<PathBuf>,
+    /// Explicit paths from the command line. Always trusted, always loaded.
+    pub explicit: Vec<PathBuf>,
+    /// True when the user has trusted this session root.
+    pub project_trusted: bool,
+    /// False turns discovery off. An explicit path still loads.
+    pub discover: bool,
+}
+
+impl SkillConfig {
+    /// The default user directories, `~/.rho/skills` and `~/.agents/skills`.
+    pub fn with_default_user_dirs(session_root: impl Into<PathBuf>) -> Self;
+}
+
+/// Find every skill. Reads only frontmatter, never a whole body.
+pub async fn discover(config: &SkillConfig) -> SkillSet;
+
+/// Read one skill's full body, on demand.
+pub async fn load_body(skill: &Skill) -> Result<String, SkillError>;
+
+/// Render the prompt block for a set of skills, per the Agent Skills standard.
+///
+/// Only a loaded skill with model invocation enabled appears.
+pub fn prompt_block(skills: &[Skill]) -> String;
+```
+
+## 6. How a skill reaches the model
+
+1. At start-up, `discover` reads frontmatter only. It never reads a body, so a
+   thousand skills cost a thousand small reads and no context.
+2. `prompt_block` renders the names and descriptions into the system prompt, in the XML
+   shape the standard describes.
+3. The model reads the body with the ordinary `read` tool, using the path in the prompt
+   block. **No new tool is needed**, and that is deliberate: a `skill` tool would be a
+   second way to read a file, and the model already knows `read`.
+4. A user may force a skill by name, which appends the body to the next prompt.
+
+**Keep the prompt block out of the dynamic part of the prompt.** The set of skills is
+stable for a session, so the block belongs in the stable prefix. Recomputing it
+mid-session would break the provider prompt cache, which `SPEC-01` section 1 forbids.
+
+## 7. Test cases
+
+Discovery:
+- `discovers_a_directory_skill_with_frontmatter`
+- `discovers_a_bare_md_file_in_the_rho_dir`
+- `ignores_a_bare_md_file_in_the_agents_dir`
+- `discovers_recursively`
+- `a_name_collision_keeps_the_first_and_warns`
+- `no_discover_flag_still_loads_an_explicit_path`
+
+Validation:
+- `a_skill_without_a_description_does_not_load`
+- `a_bad_name_warns_and_still_loads`
+- `an_over_long_description_warns_and_truncates`
+- `an_unknown_frontmatter_field_is_ignored`
+- `a_skill_with_no_frontmatter_does_not_load_and_warns`
+- `malformed_yaml_does_not_load_and_warns`
+
+Trust, the security core:
+- `a_project_skill_is_withheld_when_the_project_is_not_trusted`
+- `a_project_skill_loads_when_the_project_is_trusted`
+- `a_withheld_skill_is_still_listed_so_the_user_can_decide`
+- `a_user_skill_loads_without_project_trust`
+- `an_explicit_path_inside_the_session_root_is_trusted_because_the_user_named_it`
+- `a_symlink_from_a_user_dir_into_the_session_root_is_treated_as_project` — the
+  interesting case. A trusted directory must not become a hole into the repository.
+- `allowed_tools_is_ignored_and_warns`
+- `a_skill_name_with_a_control_sequence_is_sanitised`
+
+Prompt block:
+- `prompt_block_lists_only_loaded_skills`
+- `prompt_block_omits_a_skill_with_model_invocation_disabled`
+- `prompt_block_omits_a_withheld_skill`
+- `prompt_block_is_stable_for_the_same_input` — it sits in the cached prefix, so it
+  must be byte-identical across calls. Sort by name.
+
+Body:
+- `load_body_returns_the_text_after_the_frontmatter`
+- `load_body_on_a_deleted_skill_is_an_error`
+
+## 8. Out of scope for sprint 2
+
+- Honouring `allowed-tools`. See section 3.
+- Installing a skill from a registry or a git URL.
+- A `/skill:name` slash command. That needs the command layer, which is F-44.
+- Watching the skill directories for a change during a session. The prompt prefix is
+  stable on purpose.
+- Executing a skill's scripts automatically. The model runs them with `bash`, under the
+  approval policy, like any other command.
