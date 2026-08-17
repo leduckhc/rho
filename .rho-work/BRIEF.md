@@ -123,6 +123,12 @@ your report instead.
 
 ## 5. Non-negotiable rules
 
+- **This tree has more than one writer.** Sibling stage agents work here, and a separate
+  agent keeps the repository private before release. That agent edits `AGENTS.md`,
+  `docs/release-checklist.md`, `docs/index.md`, and `.github/workflows/` without
+  committing. So prefer a small anchored edit over a whole-section rewrite, and never
+  assume a file is as you left it. See decision D-028.
+
 - **TDD.** A failing test lands before production logic. Red, green, refactor.
   If you are a `tester`, you must leave the suite red. If you are a
   `developer`, you must not edit a test to make it pass. If a test is wrong,

@@ -2,6 +2,11 @@
 
 Rules for any agent or human who changes this repository.
 
+> **This tree has more than one writer.** A separate agent keeps the repository private
+> before release, and it edits `AGENTS.md`, `docs/release-checklist.md`, `docs/index.md`,
+> and `.github/workflows/` without committing. So prefer a small anchored edit over a
+> section rewrite, and read the diff before you stage. See decision D-028.
+
 ## If you read nothing else
 
 1. Spec before code. Test before logic.
