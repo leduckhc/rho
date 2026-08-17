@@ -46,7 +46,7 @@ This document lists what rho will not do and the reason for each decision. Read 
 
 ## N-06 — No self-modifying source mode
 
-**What rho will not do:** rho will not allow the agent to modify its own source code or configuration without explicit user review.
+**What rho will not do:** rho will not let the agent change its own source code or configuration. The user must review every such change first.
 
 **Reason:** Self-modification without a trust boundary is a security risk. The owner's use case (multi-session coding assistant) does not require it. If a future sprint adds this, a full security audit is required first.
 
@@ -80,4 +80,4 @@ This document lists what rho will not do and the reason for each decision. Read 
 
 **What rho will not do:** `rho-core` will not start an HTTP server.
 
-**Reason:** HTTP adds a dependency on an async HTTP server crate and is not necessary for the use cases in sprint 1. `rho-acp` uses stdio JSON-RPC, which works over any byte-stream transport. Callers who need HTTP can proxy stdio to HTTP outside rho.
+**Reason:** HTTP needs an async HTTP server crate. Sprint 1 has no use case for it. `rho-acp` uses stdio JSON-RPC, which works over any byte-stream transport. Callers who need HTTP can proxy stdio to HTTP outside rho.

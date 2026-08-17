@@ -174,5 +174,5 @@ process start
 1. What is the exact shape of the `Provider` trait? In particular, does it return `impl Stream<Item = Event>` or take a callback? The choice affects cancellation and backpressure.
 2. What is the exact shape of the `Tool` trait? Does `execute` take an `AbortSignal` equivalent, and how does streaming output flow back?
 3. How does the event channel type the sender and receiver? `tokio::sync::mpsc`, `flume`, or `async-channel`?
-4. Does the session JSONL format match the pi format exactly, or is it rho-specific? A shared format would allow session portability between tools.
-5. The `rho-acp` protocol is described in features F-90–F-95 but not fully specified. The architect should spike the pi RPC wire format before writing the spec.
+4. Settled by decision D-001. The session JSONL format is rho's own. The first record carries a version field. rho does not copy the pi format. A one-way converter is feature F-54, and it is `planned`.
+5. Settled by decision D-002. `rho-acp` speaks the real Agent Client Protocol. The authoritative JSON schema is on disk at `~/Work/Vibe/acp-docs/schema/`. The architect reads that schema. The architect does not spike a private wire format. See `docs/specs/SPEC-06-acp.md`.

@@ -13,9 +13,9 @@ pi is a TypeScript coding agent. Source: `/opt/homebrew/lib/node_modules/@earend
 | Extension model: tools, hooks, slash commands, themes from user-space packages | Yes, adapted | F-40, F-41, F-44, F-83, F-84 | This is the best idea in pi. rho implements it with compiled Rust traits (Tier 1) and out-of-process JSON-RPC plugins (Tier 2) instead of TypeScript modules. |
 | Skills: `SKILL.md` files discovered from directories, loaded on demand | Yes | F-45 | Skills are language-neutral files. rho discovers them the same way. No Node runtime required. |
 | Prompt templates: user-authored `.md` files in a config directory | Yes | F-46 | Plain files, no runtime dependency. Direct port. |
-| Append-only session JSONL log | Yes | F-50, F-51 | Stable, inspectable, easy to tail. rho uses the same append-only model. |
-| Session branching and tree navigation | Yes | F-52 | Valuable for exploration. Port the concept. The JSONL format may differ from pi's. |
-| RPC / headless mode over stdio JSON-RPC | Yes | F-90–F-95 | The owner's app (`makit`) drives agents headlessly. This is the primary use case. rho calls it ACP. |
+| Append-only session JSONL log | Yes | F-50, F-51 | Stable, inspectable, easy to tail. rho uses the same append-only model. The format itself is rho's own; see decision D-001. |
+| Session branching and tree navigation | Yes | F-52 | Valuable for exploration. Port the concept. The record format is rho-specific, not pi's. |
+| Headless mode over stdio JSON-RPC | Yes | F-90–F-95 | The owner's app (`makit`) drives agents headlessly. This is the primary use case. rho names this frontend ACP, and it speaks the real Agent Client Protocol. |
 | Layered config (global + project) | Yes | F-70, F-71 | Simple and familiar. rho uses TOML instead of JSON. |
 | Credential resolution: env var, file, shell command, interpolation | Yes | F-72 | Shell command resolution (`!op read ...`) is a real user need. Direct port of the idea, not the code. |
 | Context compaction: summarize old messages when context is near full | Yes | F-62 | Context windows are finite. The trigger and summary format are directly inspired by pi. |
