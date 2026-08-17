@@ -6,6 +6,7 @@
 //! itself by construction. See `SPEC-01` section 12a.
 
 mod cli;
+mod extensions;
 mod provider;
 
 use clap::Parser;

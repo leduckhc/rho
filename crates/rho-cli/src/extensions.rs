@@ -1,0 +1,367 @@
+//! Wiring for skills and MCP servers.
+//!
+//! Both are optional. A session works with neither. So every failure here degrades one
+//! capability and never stops the session.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use rho_core::Tool;
+use rho_mcp::{McpLimits, McpPool, McpSchemaCache, McpServerConfig};
+use rho_skills::{SkillConfig, SkillSet};
+
+/// The file that lists MCP servers, under the home directory.
+const MCP_CONFIG_NAME: &str = "mcp.json";
+
+/// What the extension layer produced for one session.
+pub struct Extensions {
+    /// The skills prompt block, ready for the stable prefix. Empty when there are none.
+    pub skills_prompt: String,
+    /// Tools from every configured MCP server, advertised from the schema cache.
+    pub mcp_tools: Vec<Arc<dyn Tool>>,
+    /// The pool. A caller holds it for the session, because dropping it stops every
+    /// server.
+    pub mcp_pool: Option<Arc<McpPool>>,
+    /// Lines to show the user. Warnings, and withheld skills.
+    pub notices: Vec<String>,
+}
+
+/// Discover skills for a session root.
+///
+/// `trust_project` states whether the user trusts this root. Decision D-022 requires a
+/// caller to state it, because a `SKILL.md` in the repository under edit is a prompt
+/// injection with a filename. Nothing infers trust.
+pub async fn load_skills(
+    session_root: &Path,
+    trust_project: bool,
+    explicit: &[PathBuf],
+    discover: bool,
+    user_dirs: Option<Vec<PathBuf>>,
+) -> (String, Vec<String>) {
+    let mut config = SkillConfig::with_default_user_dirs(session_root);
+    // A caller may replace the user directories. A test must, because the defaults read
+    // the real home directory, and a test that reads a developer's own skills is not a
+    // test: its result changes per machine.
+    if let Some(dirs) = user_dirs {
+        config.user_dirs = dirs;
+    }
+    config.project_trusted = trust_project;
+    config.explicit = explicit.to_vec();
+    config.discover = discover;
+
+    let set: SkillSet = rho_skills::discover(&config).await;
+    let mut notices = Vec::new();
+
+    // Group the warnings by their text, then report each group once.
+    //
+    // One line per skill floods the terminal. A machine with forty installed skills
+    // produced ten identical `allowed-tools` lines before every answer, which trains a
+    // user to ignore stderr. A warning nobody reads is worse than no warning.
+    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for skill in set.loaded.iter().chain(set.withheld.iter()) {
+        for warning in &skill.warnings {
+            grouped
+                .entry(warning.clone())
+                .or_default()
+                .push(skill.name.clone());
+        }
+    }
+    for (warning, mut names) in grouped {
+        names.sort();
+        if names.len() == 1 {
+            notices.push(format!("skill {}: {warning}", names[0]));
+        } else {
+            notices.push(format!(
+                "{} skills: {warning} Affected: {}.",
+                names.len(),
+                summarise_names(&names)
+            ));
+        }
+    }
+
+    // A withheld skill is listed on purpose. A user who cannot see a skill cannot
+    // decide about it. See decision D-022.
+    if !set.withheld.is_empty() {
+        let names: Vec<&str> = set.withheld.iter().map(|s| s.name.as_str()).collect();
+        notices.push(format!(
+            "{} project skill(s) were found and not loaded: {}. \
+             A skill can instruct the model and can carry scripts, so a skill from this \
+             repository stays off until you trust it. Pass --trust-project to load them.",
+            set.withheld.len(),
+            names.join(", ")
+        ));
+    }
+
+    (rho_skills::prompt_block(&set.loaded), notices)
+}
+
+/// Name a few items, then count the rest.
+///
+/// A full list of forty names is as unreadable as forty separate lines.
+fn summarise_names(names: &[String]) -> String {
+    const SHOWN: usize = 3;
+    if names.len() <= SHOWN {
+        return names.join(", ");
+    }
+    format!(
+        "{}, and {} more",
+        names[..SHOWN].join(", "),
+        names.len() - SHOWN
+    )
+}
+
+/// Read the MCP server list.
+///
+/// Returns an empty list when the file is absent, because no configuration is the
+/// normal case and it is not an error.
+pub fn read_mcp_config(explicit: Option<&Path>) -> (Vec<McpServerConfig>, Vec<String>) {
+    let path = match explicit {
+        Some(path) => path.to_path_buf(),
+        None => match home_dir() {
+            Some(home) => home.join(".rho").join(MCP_CONFIG_NAME),
+            None => return (Vec::new(), Vec::new()),
+        },
+    };
+    if !path.exists() {
+        // An explicit path that does not exist is a mistake worth reporting. A missing
+        // default file is not.
+        if explicit.is_some() {
+            return (
+                Vec::new(),
+                vec![format!("no MCP config at {}.", path.display())],
+            );
+        }
+        return (Vec::new(), Vec::new());
+    }
+
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            return (
+                Vec::new(),
+                vec![format!("cannot read {}: {error}.", path.display())],
+            );
+        }
+    };
+    match serde_json::from_str::<McpConfigFile>(&text) {
+        Ok(file) => (file.servers, Vec::new()),
+        Err(error) => (
+            Vec::new(),
+            vec![format!(
+                "cannot parse {}: {error}. Expected {{\"servers\": [...]}}.",
+                path.display()
+            )],
+        ),
+    }
+}
+
+/// The shape of the MCP config file.
+#[derive(Debug, serde::Deserialize)]
+struct McpConfigFile {
+    #[serde(default)]
+    servers: Vec<McpServerConfig>,
+}
+
+/// Build the whole extension layer for one session.
+///
+/// This never fails the session. A broken MCP server, or an unreadable config, becomes
+/// a notice and the session continues without those tools.
+pub async fn load(
+    session_root: &Path,
+    trust_project: bool,
+    explicit_skills: &[PathBuf],
+    discover_skills: bool,
+    mcp_config: Option<&Path>,
+) -> Extensions {
+    let (skills_prompt, mut notices) = load_skills(
+        session_root,
+        trust_project,
+        explicit_skills,
+        discover_skills,
+        None,
+    )
+    .await;
+
+    let (servers, mut mcp_notices) = read_mcp_config(mcp_config);
+    notices.append(&mut mcp_notices);
+
+    if servers.is_empty() {
+        return Extensions {
+            skills_prompt,
+            mcp_tools: Vec::new(),
+            mcp_pool: None,
+            notices,
+        };
+    }
+
+    let pool = McpPool::new(McpLimits::default());
+    // The cache is a hint. A missing or unreadable file simply means no tool is
+    // advertised yet, so the session still starts.
+    let cache_path = home_dir()
+        .map(|home| home.join(".rho").join("mcp-schema-cache.json"))
+        .unwrap_or_else(|| PathBuf::from("mcp-schema-cache.json"));
+    let cache = McpSchemaCache::load(&cache_path).unwrap_or_else(|_| McpSchemaCache::new());
+    // `tools_for` returns at once. It advertises from the cache and connects on a
+    // background task, so the first provider request already carries these tools and a
+    // late handshake never rewrites the stable prefix. See SPEC-09 section 4.
+    match rho_mcp::tools_for(&pool, &servers, &cache).await {
+        Ok(mcp_tools) => {
+            if mcp_tools.is_empty() {
+                notices.push(format!(
+                    "{} MCP server(s) are configured, and no tool schema is cached yet. \
+                     Their tools appear in the next session.",
+                    servers.len()
+                ));
+            }
+            Extensions {
+                skills_prompt,
+                mcp_tools,
+                mcp_pool: Some(pool),
+                notices,
+            }
+        }
+        Err(error) => {
+            notices.push(format!("MCP setup failed: {error}. The session continues."));
+            Extensions {
+                skills_prompt,
+                mcp_tools: Vec::new(),
+                mcp_pool: Some(pool),
+                notices,
+            }
+        }
+    }
+}
+
+/// The home directory, from the environment.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_default_mcp_config_is_not_an_error() {
+        // No configuration is the normal case.
+        let (servers, notices) = read_mcp_config(Some(Path::new("/definitely/not/here.json")));
+        assert!(servers.is_empty());
+        assert_eq!(notices.len(), 1, "an explicit missing path is reported");
+        assert!(notices[0].contains("no MCP config"));
+    }
+
+    #[test]
+    fn a_malformed_mcp_config_reports_and_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        let (servers, notices) = read_mcp_config(Some(&path));
+        assert!(servers.is_empty());
+        assert!(notices[0].contains("cannot parse"), "{notices:?}");
+    }
+
+    #[test]
+    fn a_valid_mcp_config_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        std::fs::write(
+            &path,
+            r#"{ "servers": [
+                 { "name": "files",
+                   "transport": { "type": "stdio", "command": "echo", "args": ["hi"] } }
+               ] }"#,
+        )
+        .unwrap();
+        let (servers, notices) = read_mcp_config(Some(&path));
+        assert!(notices.is_empty(), "{notices:?}");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "files");
+    }
+
+    #[tokio::test]
+    async fn a_project_skill_is_withheld_and_the_notice_says_how_to_trust_it() {
+        // The user-visible half of decision D-022. A withheld skill must be listed, and
+        // the notice must say what to do about it.
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".rho").join("skills").join("repo-skill");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: repo-skill\ndescription: A skill that came with the repository.\n---\nbody\n",
+        )
+        .unwrap();
+
+        let (prompt, notices) = load_skills(root.path(), false, &[], true, Some(Vec::new())).await;
+        assert!(
+            !prompt.contains("repo-skill"),
+            "an untrusted project skill must not reach the prompt: {prompt}"
+        );
+        let joined = notices.join(" ");
+        assert!(joined.contains("repo-skill"), "it must be listed: {joined}");
+        assert!(
+            joined.contains("--trust-project"),
+            "the notice must say how to trust it: {joined}"
+        );
+    }
+
+    #[test]
+    fn summarise_names_lists_a_few_then_counts() {
+        let few: Vec<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(summarise_names(&few), "a, b");
+        let many: Vec<String> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(summarise_names(&many), "a, b, c, and 2 more");
+    }
+
+    #[tokio::test]
+    async fn a_repeated_warning_is_reported_once() {
+        // A machine with forty skills produced ten identical lines before every answer.
+        // One grouped line replaces them.
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join(".rho").join("skills");
+        for name in ["one", "two", "three"] {
+            let dir = base.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!(
+                    "---\nname: {name}\ndescription: A skill.\nallowed-tools: read write\n---\nbody\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        let (_, notices) = load_skills(root.path(), true, &[], true, Some(Vec::new())).await;
+        let allowed: Vec<&String> = notices
+            .iter()
+            .filter(|line| line.contains("allowed-tools"))
+            .collect();
+        assert_eq!(
+            allowed.len(),
+            1,
+            "three skills with the same warning must produce one line: {notices:?}"
+        );
+        assert!(allowed[0].starts_with('3'), "{}", allowed[0]);
+    }
+
+    #[tokio::test]
+    async fn a_trusted_project_skill_reaches_the_prompt() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".rho").join("skills").join("repo-skill");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: repo-skill\ndescription: A skill that came with the repository.\n---\nbody\n",
+        )
+        .unwrap();
+
+        let (prompt, _) = load_skills(root.path(), true, &[], true, Some(Vec::new())).await;
+        assert!(prompt.contains("repo-skill"), "{prompt}");
+    }
+}

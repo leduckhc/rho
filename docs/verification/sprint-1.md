@@ -270,6 +270,48 @@ A false positive here would cost a probe on every trivial call.
 **The approval boundary holds.** Under `--read-only`, a background `bash` was refused,
 because `bash` is `ToolKind::Execute` whether it runs in the foreground or not.
 
+## Skills and MCP, verified live
+
+Both are wired into `rho run` and checked against a real model.
+
+**An untrusted project skill is not used.** A repository skill named `canary-lookup`
+held a value. Asked for it, the model answered `NOT AVAILABLE`.
+
+**The notice says what to do.**
+
+```
+rho: 1 project skill(s) were found and not loaded: canary-lookup. A skill can
+instruct the model and can carry scripts, so a skill from this repository stays off
+until you trust it. Pass --trust-project to load them.
+```
+
+**With `--trust-project` the skill works.**
+
+```
+The project canary value is amber-falcon-58. I read this from the canary-lookup skill.
+```
+
+**`--no-skills` silences discovery.** No notice, and no skill in the prompt.
+
+**A broken MCP server does not stop the session.** A config naming a command that does
+not exist produced one notice, and the run finished normally.
+
+**One honest limit on skill trust.** Withholding keeps a skill out of the prompt. It
+does not make the file unreachable: the model can still `read` it, because it sits in
+the session root like any other file. The property is "never injected automatically",
+not "hidden". That is the right boundary, because the same is true of every file in the
+repository, and the approval policy is what governs action.
+
+**A defect this testing found.** The first wiring printed one warning per skill. On a
+machine with forty installed skills that meant ten identical `allowed-tools` lines
+before every answer. A warning nobody reads is worse than none, because it teaches the
+user to ignore stderr. Warnings are now grouped by text, so eleven lines became two.
+
+**A second defect, in my own test.** The aggregation test read the real
+`~/.agents/skills` directory, so it saw thirteen skills instead of the three it created.
+A test whose result changes per machine is not a test. `load_skills` now takes the user
+directories, so a test can pass an empty list.
+
 ## What is still unverified
 - The interactive TUI against a real terminal. Only the headless `run` path was
   driven live. Rendering is covered by tests on a test backend.

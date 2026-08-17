@@ -20,6 +20,7 @@ use rho_core::{
     Session, SessionConfig, StreamEvent,
 };
 
+use crate::extensions;
 use crate::provider::{self, MODEL_ENV, PROVIDER_ENV};
 
 /// The exit code for a run that failed.
@@ -46,6 +47,25 @@ pub struct Cli {
     /// thinks, but it does not write, edit, or run a command.
     #[arg(long, global = true)]
     pub read_only: bool,
+
+    /// Load skills that live in this repository.
+    ///
+    /// A skill can instruct the model and can carry scripts, so a skill from the
+    /// repository under edit is off by default. See decision D-022.
+    #[arg(long, global = true)]
+    pub trust_project: bool,
+
+    /// Load a skill from this path. Repeatable. It loads even with --no-skills.
+    #[arg(long = "skill", global = true, value_name = "PATH")]
+    pub skills: Vec<PathBuf>,
+
+    /// Do not search the skill directories. An explicit --skill still loads.
+    #[arg(long, global = true)]
+    pub no_skills: bool,
+
+    /// Read MCP servers from this file instead of ~/.rho/mcp.json.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub mcp_config: Option<PathBuf>,
 
     /// The log filter, for example "info" or "rho_core=debug". Overrides RHO_LOG.
     #[arg(long, global = true, env = "RHO_LOG")]
@@ -105,20 +125,59 @@ fn build_config(cli: &Cli) -> anyhow::Result<SessionConfig> {
 ///
 /// Returns the session and its task registry. A caller keeps the registry alive for
 /// as long as the session, because dropping it kills every background task.
-fn build_session(
+async fn build_session(
     cli: &Cli,
     config: SessionConfig,
-) -> anyhow::Result<(Session, Arc<rho_core::TaskRegistry>)> {
+) -> anyhow::Result<(Session, Arc<rho_core::TaskRegistry>, SessionExtras)> {
     let name = provider::resolve_provider_name(cli.provider.as_deref(), None)?;
     let provider = provider::build_provider(&name)?;
     let tasks = Arc::new(rho_core::TaskRegistry::new(rho_core::TaskLimits::default()));
-    let tools = Arc::new(rho_tools::builtin_registry_with_tasks(Arc::clone(&tasks)));
+
+    // Skills and MCP are optional. A failure in either degrades one capability and
+    // never stops the session, so this call cannot fail.
+    let extensions = extensions::load(
+        &config.session_root,
+        cli.trust_project,
+        &cli.skills,
+        !cli.no_skills,
+        cli.mcp_config.as_deref(),
+    )
+    .await;
+
+    let mut registry = rho_tools::builtin_registry_with_tasks(Arc::clone(&tasks));
+    for tool in &extensions.mcp_tools {
+        registry.register(Arc::clone(tool));
+    }
+    let tools = Arc::new(registry);
     let hooks = Arc::new(rho_core::HookChain::default());
-    let context = Context::new(Some(system_prompt()), tools.specs());
+
+    // The skills block joins the stable prefix, never the dynamic part. The skill set
+    // is fixed for a session, so the prefix stays byte-identical and the provider
+    // prompt cache survives. See SPEC-01 section 1 and SPEC-08 section 6.
+    let mut prompt = system_prompt();
+    if !extensions.skills_prompt.is_empty() {
+        prompt.push_str("\n\n");
+        prompt.push_str(&extensions.skills_prompt);
+    }
+
+    let context = Context::new(Some(prompt), tools.specs());
     Ok((
         Session::with_config(config, provider, tools, hooks, context),
         tasks,
+        SessionExtras {
+            notices: extensions.notices,
+            mcp_pool: extensions.mcp_pool,
+        },
     ))
+}
+
+/// What a caller must hold, and what it should show the user.
+struct SessionExtras {
+    /// Lines to print once, before the session starts.
+    notices: Vec<String>,
+    /// The MCP pool. Holding it keeps the servers alive for the session.
+    #[allow(dead_code)]
+    mcp_pool: Option<std::sync::Arc<rho_mcp::McpPool>>,
 }
 
 /// The short system prompt. A short prompt keeps the prefix small. See F-64.
@@ -150,12 +209,17 @@ async fn run_headless(cli: &Cli, prompt: String) -> i32 {
         Ok(config) => config,
         Err(error) => return fail(error),
     };
-    // Hold `_tasks` for the whole run. Dropping the registry kills every background
-    // task, so an early drop would end a task the model is still waiting on.
-    let (session, _tasks) = match build_session(cli, config) {
-        Ok(pair) => pair,
+    // Hold `_tasks` and `_extras` for the whole run. Dropping the task registry kills
+    // every background task, and dropping the MCP pool stops every server, so an early
+    // drop would end work the model is still waiting on.
+    let (session, _tasks, extras) = match build_session(cli, config).await {
+        Ok(triple) => triple,
         Err(error) => return fail(error),
     };
+    for notice in &extras.notices {
+        eprintln!("rho: {notice}");
+    }
+    let _extras = extras;
 
     let cancel = CancelToken::new();
     let mut events = session.prompt(vec![ContentBlock::Text { text: prompt }], cancel);
@@ -209,12 +273,17 @@ async fn run_interactive(cli: &Cli) -> i32 {
         Err(error) => return fail(error),
     };
     let model = config.model.clone();
-    // Hold `_tasks` for the whole run. Dropping the registry kills every background
-    // task, so an early drop would end a task the model is still waiting on.
-    let (session, _tasks) = match build_session(cli, config) {
-        Ok(pair) => pair,
+    // Hold `_tasks` and `_extras` for the whole run. Dropping the task registry kills
+    // every background task, and dropping the MCP pool stops every server, so an early
+    // drop would end work the model is still waiting on.
+    let (session, _tasks, extras) = match build_session(cli, config).await {
+        Ok(triple) => triple,
         Err(error) => return fail(error),
     };
+    for notice in &extras.notices {
+        eprintln!("rho: {notice}");
+    }
+    let _extras = extras;
 
     let mut app = rho_tui::App::new(session, model);
     match app.run().await {
