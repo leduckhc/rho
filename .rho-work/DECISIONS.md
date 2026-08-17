@@ -254,3 +254,27 @@ around it. The developer did escalate. So the controller decided, and made the
 change itself.
 
 **Result:** 47 tests still pass. Clippy is clean. No `todo!()` remains.
+
+## D-014 — `Secret` and `RetryPolicy` belong in `rho-core`
+
+**Finding (S5 tester):** `SPEC-02` sections 2 and 3 define `Secret` and
+`RetryPolicy`, but neither exists in `rho-core`. The tester could not edit
+`rho-core`, so it defined `Secret` twice, once in the OpenRouter crate and once
+in the Azure crate, and put `RetryPolicy` in the OpenRouter crate.
+
+**Decision:** hoist both into `rho-core`. Every provider imports them. Delete the
+duplicates.
+
+**Reason, and it is a security reason, not a style reason.** `Secret` exists so a
+key cannot reach a log. Three copies mean three redaction behaviours, and one of
+them will eventually be wrong. A leak needs only one weak copy. So the type that
+guards a secret must have exactly one definition, and one test suite.
+
+`RetryPolicy` follows the same argument. A retry policy that retries a 401 burns a
+user's rate limit on a wrong key. That rule must be stated once.
+
+**Sequencing:** `rho-core` is busy with the coverage task. Hoist after that lands,
+then update the three provider crates in the same change.
+
+**Spec fix:** `SPEC-02` must say that both types live in `rho-core`, and
+`SPEC-01` must list them, because `SPEC-01` owns the `rho-core` surface.
