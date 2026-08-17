@@ -11,7 +11,7 @@ use std::sync::Arc;
 use common::{RecordingTool, ScriptedProvider, text_turn, tool_call_turn};
 use futures::StreamExt;
 use rho_core::{
-    AgentEvent, AgentEvents, AgentStopReason, CancelToken, Context, ContentBlock, HookChain,
+    AgentEvent, AgentEvents, AgentStopReason, CancelToken, ContentBlock, Context, HookChain,
     Provider, Role, Session, StopReason, StreamEvent, ToolRegistry,
 };
 

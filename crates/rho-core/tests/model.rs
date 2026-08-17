@@ -1,6 +1,6 @@
 //! Tests for the append-only context and the error taxonomy.
 
-use rho_core::{Context, ContentBlock, Message, ProviderError, Role};
+use rho_core::{ContentBlock, Context, Message, ProviderError, Role};
 
 #[test]
 fn context_append_only_preserves_order() {

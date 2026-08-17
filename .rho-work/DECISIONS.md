@@ -115,3 +115,50 @@ alone emits `canceled`, which no ACP client accepts.
 **Reason:** the Rust name follows Rust convention. The wire name follows the
 protocol. An attribute plus a test is cheaper than a name that reads wrong in
 either place.
+
+## D-008 — `Session` gets a read-only context accessor
+
+**Question (S3 tester):** `SPEC-01` gives `Session` no way to read its `Context`.
+So `agent_loop_appends_assistant_and_tool_messages` cannot assert on the context.
+The tester asserted the equivalent ordering through the event stream instead.
+
+**Decision:** Add a read-only accessor to `Session`. Name it `messages`. It
+returns a borrowed slice, or a cheap snapshot if a lock forces that. Add it to
+`SPEC-01`.
+
+**Reason:** the append-only rule is a core invariant. An invariant that a test
+cannot observe is an invariant that will break in silence. A read-only accessor
+does not weaken encapsulation, because it grants no mutation. Keep the
+event-stream assertion as well. Two views of one invariant are better than one.
+
+**Constraint:** read only. No public API may mutate the context from outside a
+turn.
+
+## D-009 — Fix the `CancelToken::cancelled` wake race
+
+**Finding (S3 tester):** `cancelled()` checks the flag, and only then awaits
+`notify.notified()`. `Notify::notify_waiters` stores no permit. So on a
+multi-thread runtime a `cancel()` between the flag check and the registration is
+lost, and the waiter hangs. The tester's test passes only because it runs on the
+current-thread runtime, where the interleaving cannot happen.
+
+This is a confirmed bug. The rules forbid leaving one unfixed.
+
+**Decision:** S4 fixes it. Create the `Notified` future first. Then check the
+flag. Then await. The `Notified` future registers on creation, so no wake is
+lost.
+
+```rust
+pub async fn cancelled(&self) {
+    let notified = self.inner.notify.notified();
+    if self.is_cancelled() {
+        return;
+    }
+    notified.await;
+}
+```
+
+**Test:** add `cancel_token_cancelled_wakes_on_multi_thread_runtime`, marked
+`#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`, with a bounded
+timeout so a lost wake fails the test instead of hanging the suite. S4 may add
+this test, because it guards a bug the spec did not describe.

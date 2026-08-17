@@ -4,11 +4,11 @@
 //! turn can call tools. The loop appends every message to the `Context`. It
 //! emits an `AgentEvent` stream. A frontend renders the stream.
 
+use crate::{CancelToken, ContentBlock};
 use crate::{
     Context, Error, HookChain, Provider, StopReason, StreamEvent, ToolKind, ToolOutput,
     ToolRegistry,
 };
-use crate::{CancelToken, ContentBlock};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
@@ -47,7 +47,11 @@ pub enum AgentEvent {
     /// A normalised provider event.
     Stream(StreamEvent),
     /// A tool begins execution, after hooks and the approval policy pass.
-    ToolStart { id: String, name: String, kind: ToolKind },
+    ToolStart {
+        id: String,
+        name: String,
+        kind: ToolKind,
+    },
     /// A streamed line of tool output.
     ToolUpdate { id: String, output: String },
     /// A tool finished. The output feeds the next turn.

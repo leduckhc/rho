@@ -70,7 +70,10 @@ fn content_block_tool_result_roundtrips_json() {
     assert_eq!(json["type"], "tool_result");
     assert_eq!(json["tool_call_id"], "call_1");
     assert_eq!(json["is_error"], true);
-    assert_eq!(json["content"][0], serde_json::json!({ "type": "text", "text": "ok" }));
+    assert_eq!(
+        json["content"][0],
+        serde_json::json!({ "type": "text", "text": "ok" })
+    );
     let back: ContentBlock = serde_json::from_value(json).unwrap();
     assert_eq!(back, block);
 }

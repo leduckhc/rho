@@ -10,8 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
 /// A boxed, sendable stream of normalised events.
-pub type ProviderStream =
-    Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>;
+pub type ProviderStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>;
 
 /// One tool, as advertised to the model.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
