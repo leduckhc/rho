@@ -1,7 +1,12 @@
 # rho — shared subagent brief
 
-Read this file first. Then read `workflow.yaml` in the repo root. Then do only
-your assigned stage.
+Read this file first. Then read **`AGENTS.md`**, which holds the development flow as a
+checklist. Then read `workflow.yaml`. Then do only your assigned stage.
+
+`AGENTS.md` is the short version of everything below, and every step in it exists
+because skipping it cost this project a real defect. Steps 5, 7, 11, and 13 are the ones
+agents skip most: write the test first, prove the test catches the bug, drive the
+feature for real, and reconcile the docs with the code.
 
 Repo: `~/Work/Vibe/rho` — GitHub `leduckhc/rho` — site `getrho.dev` — MIT.
 
@@ -180,7 +185,7 @@ can save it as a project skill.
 
 | Skill | Path | Use for |
 | --- | --- | --- |
-| `verify-by-driving` | `/Users/le/.agents/skills/verify-by-driving/SKILL.md` | **Primary skill for rho QA.** rho has no browser surface. Isolate state, drive every command against a live instance, record exit codes, probe failure paths, turn each bug into a bounded regression test. |
+| `verify-by-driving` | `/Users/le/.agents/skills/verify-by-driving/SKILL.md` | **Primary skill for rho QA.** rho has no browser surface. Isolate state, then drive every command against a live instance. Record exit codes. Probe the failure paths. Turn each bug into a bounded regression test. |
 | `acp-session-fixture-recorder` | `/Users/le/.pi/agent/projects-memory/makit/skills/acp-session-fixture-recorder/SKILL.md` | Record a real agent session to a JSON fixture for deterministic replay. Adapt the same idea to record provider SSE streams into test fixtures. |
 | `spike-agent-protocol-raw-jsonrpc` | `/Users/le/.pi/agent/projects-memory/makit/skills/spike-agent-protocol-raw-jsonrpc/SKILL.md` | Capture real wire bytes before you assert on them. |
 | `dart-add-unit-test` | `/Users/le/.worktrees/makit/feat-rho/.agents/skills/dart-add-unit-test/SKILL.md` | Language is wrong, but the **test organisation and naming discipline** transfers. Read only for structure. |

@@ -6,7 +6,10 @@ rho is small on purpose. The runtime, the providers, the tools, and the
 frontends are separate crates. You pick the parts you need. You can replace
 any part with your own crate.
 
-Status: sprint 1 delivered. 224 tests. See [workflow.yaml](workflow.yaml) for the
+Status: sprint 1 delivered. The repository is private until the first release; see
+[docs/release-checklist.md](docs/release-checklist.md).
+
+Sprint 1 delivered. 224 tests. See [workflow.yaml](workflow.yaml) for the
 stages and [docs/verification/sprint-1.md](docs/verification/sprint-1.md) for what
 was actually run against real services.
 
@@ -71,6 +74,12 @@ rho --read-only ...      # deny every tool that can change state
 Tools are confined to the session root. A path outside it is refused, including
 one reached through a symlink. `--read-only` denies every mutating tool, so you can
 point rho at a repository you do not trust.
+
+## Contributing
+
+Read [AGENTS.md](AGENTS.md) first. It holds the development flow as a checklist, from
+brainstorm to spec, then test-first implementation, then live verification, then the doc
+update. Every step in it comes from a defect this project shipped.
 
 ## Licence
 

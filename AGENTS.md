@@ -2,10 +2,229 @@
 
 Rules for any agent or human who changes this repository.
 
+## If you read nothing else
+
+1. Spec before code. Test before logic.
+2. **Break your implementation and watch your new test fail.** A test that passes
+   against the bug it was written for is worse than no test.
+3. Grep for `todo!` before you believe a green suite.
+4. Run the thing for real. Tests here passed while the product was unusable.
+5. Reconcile the docs with the code, last, every time.
+
+The rest of this page is those five rules with their evidence, plus the lanes for a
+change that is not a feature.
+
+## The development flow
+
+Copy this list into your working notes. Tick a box only when its check passes.
+
+Do the steps in order. Every step exists because skipping it cost this project a real
+defect. The note under each one says which, and names the record that proves it.
+
+### 0. Classify the change, and pick your lane
+
+Not every change is a feature. Tick the one that fits, then follow its lane.
+
+- [ ] **Feature or new public API.** Every step applies.
+- [ ] **Bug fix.** Skip step 3. Start at step 5, and write the test that reproduces the
+      bug before you touch the logic. Step 7 is then the whole point.
+- [ ] **Refactor, with no behaviour change.** Skip steps 3 and 5. The existing tests are
+      the specification, so they must pass **unchanged**. If you must change a test, it
+      is not a refactor. Step 13 still applies, because a comment or a spec may name the
+      old shape.
+- [ ] **Dependency bump.** Skip steps 3 to 7. Run the full gate. Then do step 8's
+      fail-open check on any new default, and step 11 against a real service. Confirm
+      `Cargo.lock` holds exactly one `rustls`.
+- [ ] **Revert.** Say in the commit why the change is going out. Keep the test the
+      reverted work added, unless the test is what was wrong. Then step 13.
+- [ ] **Docs only.** Step 13, then step 14.
+
+> A dependency bump is not a small case. Defect six in `.rho-work/progress.md` was a
+> panicking `rustls-webpki`, pulled in by a feature name that looked safer than the
+> modern one. Dependabot found it on the first push.
+
+### 1. Understand and brainstorm
+
+- [ ] State the problem in one sentence, in the user's own terms.
+- [ ] Find where the change goes. `docs/features.md` maps every feature to its owning
+      crate. Read that row before you pick a file.
+- [ ] Read the prior art before you design. `docs/comparison.md` says what we take from
+      pi and jcode, and why. Read the real source, not your memory of it.
+- [ ] Search `.rho-work/DECISIONS.md` for a decision that already settles this.
+- [ ] Ask, when a choice is the user's to make. Ask once, with options and trade-offs.
+
+> Reading jcode's `edit` tool gave rho three features it lacked, and showed one defect to
+> avoid. Decision D-027 records exactly which, and `docs/comparison.md` repeats it.
+> Guessing would have found neither.
+
+### 2. Decide, and write the decision down
+
+- [ ] Add a decision to `.rho-work/DECISIONS.md` for every choice that constrains later
+      work. Give it an ID, the question, the decision, and the reason.
+- [ ] Say what the decision rules **out**, not only what it allows.
+
+> Decisions D-001 to D-027 stopped later stages re-litigating settled questions. A
+> decision with no written reason gets reversed by the next person.
+
+### 3. Spec before any code
+
+- [ ] Write `docs/specs/SPEC-NN-<topic>.md`.
+- [ ] Put the public API in it **verbatim**, as compilable Rust.
+- [ ] Name every test, with the assertion each one proves.
+- [ ] Add an `## Out of scope` section. An unbounded spec never finishes.
+- [ ] Check the signatures compile. Paste them into a scratch crate outside the repo.
+
+> A tester cannot write a test from a vague spec. A named test with its assertion is
+> the handover, and it is what made parallel work possible here.
+
+### 4. Put the code in the right place
+
+Most changes need no new crate. A new built-in tool goes in `rho-tools` and implements
+`rho_core::Tool`. A new provider gets its own crate, because a provider is optional.
+
+- [ ] Decide whether this needs a new crate. It does only when a user should be able to
+      leave it out of the build.
+- [ ] For a new crate, run `cargo new`. Never hand-write a manifest.
+- [ ] Add a dependency with `cargo add`. Never invent a version.
+- [ ] Keep `rho-core` free of HTTP and terminal dependencies.
+
+> A hand-written version pins a release that may not exist. A needless crate is not free
+> either. It adds a manifest, a feature flag, and one more boundary to keep straight.
+
+### 5. Red: write the failing test first
+
+- [ ] Write the test before the logic.
+- [ ] Run it. Watch it fail.
+- [ ] Confirm it fails for the **right reason**, which is an unimplemented body, never a
+      type error or a missing import.
+- [ ] Use no `sleep` in an async test. Synchronise with a channel, `Notify`, or
+      `tokio::time` pause and advance.
+- [ ] Use no network. Use a stub binary, `wiremock`, or a recorded fixture.
+- [ ] Isolate the filesystem with `tempfile`. A test must never read the real
+      `~/.rho` or `~/.agents`, because its result would change per machine.
+
+### 6. Green: make it pass
+
+- [ ] Write only the code the failing test needs. Add no branch, field, or parameter
+      that no test reaches, because step 8 will make you delete it.
+- [ ] Do not edit a test to fit the implementation. If the test is wrong, stop and say
+      so. A test that forces a defect into the public API is grounds to change it, and
+      that decision belongs to the reviewer, not to you.
+
+> A four-argument `Session::new` survived because a test shape demanded it. It hid a
+> fake model id, an accidental session root, and a policy that approved every tool call.
+> See decision D-013.
+
+### 7. Prove the test catches the bug
+
+- [ ] Break the implementation on purpose.
+- [ ] Run the test. **Watch it fail.**
+- [ ] Restore the implementation. Watch it pass.
+- [ ] Record the before-and-after in your report.
+
+> This step is not optional, and it is the one most often skipped. A memory-cap test
+> here passed against the very bug it was written for, because it asserted the size of
+> the kept output while the read buffer still grew without limit. **A test that passes
+> against broken code is worse than no test**, because it buys false confidence. See
+> decision D-016.
+
+### 8. Check the whole surface, not the diff
+
+- [ ] List every public item your change adds. Confirm a test touches each one.
+- [ ] `grep -rn 'todo!\|unimplemented!' crates/*/src` must find nothing.
+- [ ] Look for a fail-open default: an `Other` or `Unknown` enum variant, a trait method
+      with a default body, a value that crosses a process boundary, or a `Default` impl
+      that picks a security-relevant value.
+
+> Three defects here hid in untested public surface, and a green suite proved nothing
+> about any of them. `confine`, the path boundary, was left `todo!()` through a stage
+> that reported green. `ToolKind::Other` counted as non-mutating, so a read-only policy
+> approved any tool whose author forgot to declare a kind. See decisions D-012 and D-017.
+
+### 9. Review
+
+- [ ] Get a second pass that did not write the code. A subagent, another model, or a
+      human all count. Re-reading your own diff does not, because you will read what you
+      meant to write.
+- [ ] Tell the reviewer the defect history, and ask it to assume another defect of the
+      same family exists.
+- [ ] Ask explicitly for **the list of public items with no test**. That list is where
+      the bugs are.
+- [ ] Get a security review for anything that runs a command, reads a path, holds a
+      credential, or trusts another process.
+- [ ] Treat a severity rating as a hypothesis. Test it.
+
+> A security audit rated credential inheritance as minor. A thirty-second live probe
+> showed a prompt-injected model reading `AWS_SECRET_ACCESS_KEY`. See decision D-019.
+
+### 10. Verify it yourself
+
+- [ ] Re-run every gate command. Do not trust a report.
+- [ ] Read the diff.
+- [ ] Grep for stubs again.
+
+> Two reports here claimed work that was not done. One measured prose at the wrong
+> limit. One said no `todo!()` remained while three did. See the false-claims table in
+> `.rho-work/progress.md`.
+
+### 11. Drive it for real
+
+- [ ] Run it for real. Build with `cargo build --release -p rho-cli`, then run
+      `./target/release/rho run "<prompt>" --provider <name> --model <id>`.
+- [ ] Cover the failure path too. At minimum: an absent file, a denied permission, and
+      the same thing happening **twice**. "Twice" has caught two defects here.
+- [ ] Exercise every provider the change touches. One provider is not every provider.
+- [ ] Write the commands and their real output into `docs/verification/`.
+
+> This step found the worst defects in the project. A tool error killed the whole
+> session, and 222 tests passed while the product was unusable. Bedrock worked for one
+> tool call and returned 400 for two. Azure rejected every tool call. **No fixture could
+> catch any of them, because each fixture described a response and each defect was in the
+> request.** See `docs/verification/sprint-1.md`.
+
+### 12. Turn each defect into a guard
+
+- [ ] Add a test that pins the invariant, not the example. Assert that a pairing is
+      complete, or that a bound holds, rather than that one expected event appeared.
+- [ ] Add a CI guard for a defect class that a test cannot see.
+- [ ] Break the rule on purpose and confirm the guard trips.
+
+> The CI guards here each come from a shipped defect: exactly one `rustls` version, no
+> `todo!()` in crate source, and the prose check.
+
+### 13. Update the docs, and make them match reality
+
+Do this last, and do not skip it. A doc that disagrees with the code is worse than no
+doc, because somebody will trust it.
+
+- [ ] Amend the spec when the implementation diverged. The spec is the contract, so it
+      follows the code or the code follows it. Never leave them disagreeing.
+- [ ] Add the new test names to the spec's `## Test cases` section.
+- [ ] Update `docs/features.md`: the status, the owning crate, and the extension point.
+- [ ] Update `docs/benchmarks.md` when a number changed. Include the command.
+- [ ] Update `docs/verification/` with what you actually ran.
+- [ ] Update `README.md` when a user-visible thing changed.
+- [ ] Record any decision you made along the way in `.rho-work/DECISIONS.md`.
+- [ ] Delete a claim you can no longer prove. An unverified claim is a slogan.
+- [ ] Run `python3 bench/check-prose.py $(find docs -name '*.md')`. It must report zero.
+
+> A stale spec re-introduced a constructor that a decision had deleted. A README claimed
+> that a third party could prove a provider conforms, and nobody had tried it; trying it
+> took ten minutes and found three wrong API guesses. See decision D-018.
+
+### 14. Ship
+
+- [ ] Run the full gate. See the `## Gate` section below.
+- [ ] Write a Conventional Commit. Say what changed, and say **why**, not how.
+- [ ] Push, then confirm CI is green. A push is not a ship.
+
 ## Product rules
 
 - rho is the harness, unbundled. The core is a library. Frontends and providers
   are thin, optional crates.
+- The GitHub repository stays private until the first release. Do not publish the
+  website and do not announce the project before that. `docs/release-checklist.md`
+  holds the steps that make the repository public.
 - Speed and memory are features. Never claim a performance win without a
   measurement and the command that produced it.
 - No crate in `crates/` may depend on `rho-tui`, `rho-acp`, or `rho-cli`.
@@ -53,13 +272,4 @@ Commit messages follow Conventional Commits.
 
 ## Where things live
 
-| Path | Contents |
-| --- | --- |
-| `crates/` | All Rust crates. |
-| `docs/` | Internal docs and the feature catalogue. |
-| `docs/specs/` | Numbered specs. A spec defines the public API verbatim. |
-| `docs/adr/` | Architecture decision records. |
-| `web/` | The `getrho.dev` static site. |
-| `bench/` | Footprint and start-up measurement scripts. |
-| `workflow.yaml` | The sprint workflow, stage artifacts, and definition of done. |
-| `.rho-work/` | Controller notes and the progress ledger. Not shipped. |
+See the layout table in [docs/index.md](docs/index.md).

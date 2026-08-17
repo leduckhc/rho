@@ -290,7 +290,7 @@ stages:
       - State is a pure function of events. Render is tested with a test backend, not a real terminal.
       - Input never blocks on model work.
       - Ctrl-C cancels the turn. A second Ctrl-C exits.
-      - `rho --help`, `rho run <prompt>`, and `rho` interactive all work.
+      - "`rho --help`, `rho run <prompt>`, and `rho` interactive all work."
       - Time to first frame is measured and recorded.
     gate:
       - cargo test -p rho-tui -p rho-cli --all-features
@@ -371,8 +371,24 @@ review_gate:
   fail_action: Re-run the owning role with the findings as the brief. Repeat up to three times.
   escalate_after: 3
 
+# ---------------------------------------------------------------------------
+# Release policy. The repository is private until the first release.
+# ---------------------------------------------------------------------------
+release_policy:
+  visibility_now: private
+  visibility_at_release: public
+  checklist: docs/release-checklist.md
+  rules:
+    - Do not publish the website before the repository is public.
+    - Do not announce the project before the repository is public.
+    - Scan the tracked files and the whole history for a secret before you go public.
+  go_public_command: >
+    gh repo edit leduckhc/rho --visibility public
+    --accept-visibility-change-consequences
+
 definition_of_done_sprint:
   - Repository exists at ~/Work/Vibe/rho and on GitHub, MIT licensed.
+  - Repository visibility is private. docs/release-checklist.md states how to go public.
   - Cargo workspace of small crates builds, with frontends and providers as features.
   - docs/features.md lists every intended feature with status and owning crate.
   - Website builds and explains rho.

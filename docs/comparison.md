@@ -69,3 +69,15 @@ agentsdk.build is a retired project. Its design principles are documented in the
 | Separate the harness from the compute. The agent loop must not assume it runs in the same process as the tools. | Yes | F-42, F-43 | `rho-plugin` implements out-of-process tools over stdio JSON-RPC. The loop dispatches by name, not by function pointer. |
 | Typed, replaceable components rather than configuration flags. | Yes | F-10, F-20, F-40 | `Provider`, `Tool`, and `Hook` are traits, not enum variants or config strings. Replacing a component means passing a different impl. |
 | Agent loop as a composable piece, not a framework | Yes | F-01 | `AgentLoop` is a struct the caller constructs. It does not call a global registry. |
+
+## What reading jcode's source changed
+
+The table above compares designs. This section records a concrete outcome, so the claim
+that reading prior art pays is checkable rather than asserted.
+
+Reading jcode's `edit` tool gave rho three features it lacked: `replace_all`, near-miss
+diagnostics on a failed match, and familiar argument aliases. It also showed one defect
+to avoid: an empty `old_string` with `replace_all` rewrites the whole file, because an
+empty pattern matches at every character boundary.
+
+See `docs/specs/SPEC-03-tool-interface.md` section 6a, and decision D-027.
