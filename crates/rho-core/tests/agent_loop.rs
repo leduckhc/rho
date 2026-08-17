@@ -19,7 +19,13 @@ use rho_core::{
 fn session_with(provider: Arc<dyn Provider>, tools: ToolRegistry) -> Session {
     let hooks = HookChain::new();
     let context = Context::new(Some("system".to_string()), Vec::new());
-    Session::new(provider, Arc::new(tools), Arc::new(hooks), context)
+    Session::with_config(
+        common::test_config(),
+        provider,
+        Arc::new(tools),
+        Arc::new(hooks),
+        context,
+    )
 }
 
 /// Drain every event of a run into a vector.

@@ -299,3 +299,16 @@ pub fn tool_call_turn(id: &str, tool_name: &str, arguments: serde_json::Value) -
         },
     ]
 }
+
+/// A session config for tests. It states every permissive choice out loud.
+///
+/// Production code must not copy this. It approves every tool call, and it roots
+/// path confinement at the current directory. `rho-core` ships no such default,
+/// because a permissive default in a constructor becomes a security accident.
+pub fn test_config() -> rho_core::SessionConfig {
+    rho_core::SessionConfig::new(
+        "test-model",
+        std::env::current_dir().expect("a test needs a working directory"),
+        std::sync::Arc::new(rho_core::AllowAllPolicy),
+    )
+}

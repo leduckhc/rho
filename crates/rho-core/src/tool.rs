@@ -7,7 +7,7 @@
 use crate::{CancelToken, ContentBlock, ToolSpec};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,6 +26,21 @@ pub enum ToolKind {
     Fetch,
     SwitchMode,
     Other,
+}
+
+impl ToolKind {
+    /// True when a tool of this kind can change state on disk or run a command.
+    ///
+    /// The approval model reads this. A read-only policy denies a mutating kind.
+    /// This is the single source of truth. It replaces a fragile tool-name list.
+    /// `Edit`, `Delete`, and `Move` change files. `Execute` runs a command, which
+    /// can change anything. Every other kind only reads or reports.
+    pub fn is_mutating(self) -> bool {
+        matches!(
+            self,
+            ToolKind::Edit | ToolKind::Delete | ToolKind::Move | ToolKind::Execute
+        )
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -128,8 +143,84 @@ impl Default for ToolRegistry {
 }
 
 /// Resolve `candidate` under `root`. Return an error when it escapes the root.
-pub fn confine(_root: &Path, _candidate: &Path) -> Result<PathBuf, ToolError> {
-    todo!()
+///
+/// This is the sandbox boundary for feature F-28. Read it as security code.
+///
+/// Rules:
+/// - Join a relative `candidate` onto the root. Keep an absolute `candidate` as
+///   given.
+/// - Resolve the longest existing ancestor with the filesystem, so a symlink
+///   that points outside the root is caught. You cannot resolve a path that does
+///   not exist yet, so the `write` case of a new file still works.
+/// - Compare canonical forms. On macOS `/var` is a symlink to `/private/var`, so
+///   a text prefix check fails. Canonicalise the root once, then compare.
+/// - An empty `candidate` resolves to the root itself.
+/// - A path with a `NUL` byte is rejected. It never reaches the filesystem.
+pub fn confine(root: &Path, candidate: &Path) -> Result<PathBuf, ToolError> {
+    // A `NUL` byte cannot be part of a real path. Reject it before any syscall.
+    if candidate.as_os_str().as_encoded_bytes().contains(&0) {
+        return Err(ToolError::InvalidArguments(
+            "the path holds a NUL byte. Remove the NUL byte.".to_string(),
+        ));
+    }
+
+    // Canonicalise the root once. All comparisons use this canonical form.
+    let canonical_root = root.canonicalize().map_err(|error| {
+        ToolError::Io(format!(
+            "cannot resolve the session root {}: {error}. Create the directory first.",
+            root.display()
+        ))
+    })?;
+
+    let joined = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        canonical_root.join(candidate)
+    };
+
+    let resolved = resolve_existing_ancestor(&joined)?;
+
+    if resolved.starts_with(&canonical_root) {
+        Ok(resolved)
+    } else {
+        Err(ToolError::PathEscape(candidate.to_path_buf()))
+    }
+}
+
+/// Resolve `path` component by component. Canonicalise each existing part, so a
+/// symlink resolves to its real target. Keep a trailing part that does not exist
+/// yet, so a new-file target still resolves. The result holds no symlink and no
+/// `.` or `..` in its existing prefix.
+fn resolve_existing_ancestor(path: &Path) -> Result<PathBuf, ToolError> {
+    let mut real = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => real.push(prefix.as_os_str()),
+            Component::RootDir => real.push(Component::RootDir.as_os_str()),
+            Component::CurDir => {}
+            // `real` holds a canonical path with no symlink, so a lexical pop is
+            // correct. This keeps `sub/../file.txt` inside the root.
+            Component::ParentDir => {
+                real.pop();
+            }
+            Component::Normal(name) => {
+                real.push(name);
+                // Resolve a symlink at once, so a link that points outside the
+                // root is caught by the later prefix check.
+                if let Ok(metadata) = real.symlink_metadata()
+                    && metadata.file_type().is_symlink()
+                {
+                    real = real.canonicalize().map_err(|error| {
+                        ToolError::Io(format!(
+                            "cannot resolve the symlink {}: {error}.",
+                            real.display()
+                        ))
+                    })?;
+                }
+            }
+        }
+    }
+    Ok(real)
 }
 
 /// The outcome of an approval check.
@@ -141,8 +232,14 @@ pub enum ApprovalDecision {
 
 #[async_trait]
 pub trait ApprovalPolicy: Send + Sync {
-    /// Decide whether a tool call may run.
-    async fn approve(&self, tool: &str, args: &serde_json::Value) -> ApprovalDecision;
+    /// Decide whether a tool call may run. `kind` states what the tool does, so a
+    /// policy decides from the typed category, not from the tool name.
+    async fn approve(
+        &self,
+        tool: &str,
+        kind: ToolKind,
+        args: &serde_json::Value,
+    ) -> ApprovalDecision;
 }
 
 /// Allows read-only tools, asks nothing, denies mutating tools.
@@ -153,14 +250,187 @@ pub struct AllowAllPolicy;
 
 #[async_trait]
 impl ApprovalPolicy for ReadOnlyPolicy {
-    async fn approve(&self, _tool: &str, _args: &serde_json::Value) -> ApprovalDecision {
-        todo!()
+    /// Deny a mutating tool. Allow a read-only tool. The decision reads
+    /// `ToolKind::is_mutating`, so it never matches a tool name.
+    async fn approve(
+        &self,
+        _tool: &str,
+        kind: ToolKind,
+        _args: &serde_json::Value,
+    ) -> ApprovalDecision {
+        if kind.is_mutating() {
+            ApprovalDecision::Deny
+        } else {
+            ApprovalDecision::Allow
+        }
     }
 }
 
 #[async_trait]
 impl ApprovalPolicy for AllowAllPolicy {
-    async fn approve(&self, _tool: &str, _args: &serde_json::Value) -> ApprovalDecision {
-        todo!()
+    async fn approve(
+        &self,
+        _tool: &str,
+        _kind: ToolKind,
+        _args: &serde_json::Value,
+    ) -> ApprovalDecision {
+        ApprovalDecision::Allow
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    // --- Path confinement (F-28) ---
+
+    #[test]
+    fn confine_allows_child_path() {
+        let root = tempdir().unwrap();
+        let resolved = confine(root.path(), Path::new("file.txt")).unwrap();
+        assert!(resolved.is_absolute(), "the result must be absolute");
+        assert!(resolved.starts_with(root.path().canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn confine_allows_the_root_itself() {
+        let root = tempdir().unwrap();
+        let resolved = confine(root.path(), Path::new("")).unwrap();
+        assert_eq!(resolved, root.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn confine_allows_new_file_that_does_not_exist_yet() {
+        // This is the real `write` case. The target file has no entry on disk.
+        let root = tempdir().unwrap();
+        let resolved = confine(root.path(), Path::new("nested/dir/new.txt")).unwrap();
+        assert!(resolved.starts_with(root.path().canonicalize().unwrap()));
+        assert!(resolved.ends_with("nested/dir/new.txt"));
+    }
+
+    #[test]
+    fn confine_allows_traversal_that_returns_inside_root() {
+        // `sub/../file.txt` stays inside the root. Rejecting it is a false
+        // positive. `sub` must exist so the walk resolves it.
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("sub")).unwrap();
+        let resolved = confine(root.path(), Path::new("sub/../file.txt")).unwrap();
+        assert_eq!(
+            resolved,
+            root.path().canonicalize().unwrap().join("file.txt")
+        );
+    }
+
+    #[test]
+    fn confine_rejects_parent_escape() {
+        let root = tempdir().unwrap();
+        let error = confine(root.path(), Path::new("../escape.txt")).unwrap_err();
+        assert!(matches!(error, ToolError::PathEscape(_)));
+    }
+
+    #[test]
+    fn confine_rejects_absolute_outside_root() {
+        let root = tempdir().unwrap();
+        let error = confine(root.path(), Path::new("/etc/passwd")).unwrap_err();
+        assert!(matches!(error, ToolError::PathEscape(_)));
+    }
+
+    #[test]
+    fn confine_allows_absolute_inside_root() {
+        let root = tempdir().unwrap();
+        let inside = root.path().canonicalize().unwrap().join("in.txt");
+        let resolved = confine(root.path(), &inside).unwrap();
+        assert_eq!(resolved, inside);
+    }
+
+    #[test]
+    fn confine_rejects_symlink_that_points_outside_root() {
+        // The case a naive lexical check misses. A link inside the root points
+        // at a directory outside the root.
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let error = confine(root.path(), Path::new("link/secret.txt")).unwrap_err();
+        assert!(matches!(error, ToolError::PathEscape(_)));
+    }
+
+    #[test]
+    fn confine_allows_symlink_that_points_inside_root() {
+        let root = tempdir().unwrap();
+        let real_root = root.path().canonicalize().unwrap();
+        fs::create_dir(real_root.join("target")).unwrap();
+        let link = real_root.join("link");
+        std::os::unix::fs::symlink(real_root.join("target"), &link).unwrap();
+        let resolved = confine(root.path(), Path::new("link/file.txt")).unwrap();
+        assert_eq!(resolved, real_root.join("target").join("file.txt"));
+    }
+
+    #[test]
+    fn confine_handles_temp_dir_realpath_pair() {
+        // On macOS `std::env::temp_dir()` lives under `/var/folders`, and `/var`
+        // is a symlink to `/private/var`. A naive prefix check on the uncanonical
+        // root fails here. The canonical comparison must not.
+        let root = tempdir().unwrap();
+        let resolved = confine(root.path(), Path::new("a/b/c.txt")).unwrap();
+        assert!(resolved.starts_with(root.path().canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn confine_rejects_nul_byte_path() {
+        let root = tempdir().unwrap();
+        let error = confine(root.path(), Path::new("bad\0name")).unwrap_err();
+        assert!(matches!(error, ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn confine_errors_when_root_does_not_exist() {
+        let missing = Path::new("/no/such/root/anywhere/xyz");
+        let error = confine(missing, Path::new("file.txt")).unwrap_err();
+        assert!(matches!(error, ToolError::Io(_)));
+    }
+
+    // --- Approval policies (F-29) ---
+
+    #[tokio::test]
+    async fn read_only_policy_allows_a_reading_tool() {
+        let policy = ReadOnlyPolicy;
+        let decision = policy
+            .approve("read", ToolKind::Read, &serde_json::json!({}))
+            .await;
+        assert_eq!(decision, ApprovalDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn read_only_policy_denies_a_mutating_tool() {
+        let policy = ReadOnlyPolicy;
+        for kind in [
+            ToolKind::Edit,
+            ToolKind::Delete,
+            ToolKind::Move,
+            ToolKind::Execute,
+        ] {
+            let decision = policy.approve("write", kind, &serde_json::json!({})).await;
+            assert_eq!(decision, ApprovalDecision::Deny, "{kind:?} must be denied");
+        }
+    }
+
+    #[tokio::test]
+    async fn allow_all_policy_allows_a_mutating_tool() {
+        let policy = AllowAllPolicy;
+        let decision = policy
+            .approve("bash", ToolKind::Execute, &serde_json::json!({}))
+            .await;
+        assert_eq!(decision, ApprovalDecision::Allow);
+    }
+
+    #[test]
+    fn tool_kind_is_mutating_matches_the_spec() {
+        assert!(ToolKind::Edit.is_mutating());
+        assert!(ToolKind::Execute.is_mutating());
+        assert!(!ToolKind::Read.is_mutating());
+        assert!(!ToolKind::Search.is_mutating());
     }
 }

@@ -166,11 +166,18 @@ returns `ToolError::PathEscape`. This is a hard boundary. It is the sandbox.
 Rules:
 - Join a relative path onto the root. Reject an absolute path that is not already
   under the root.
-- Normalise `.` and `..` without touching the filesystem, then check the result
-  starts with the root.
-- Reject a path that resolves outside the root, including through `..`.
-- A symlink that points outside the root is rejected after canonicalisation for a
-  path that exists.
+- Resolve the longest existing ancestor with the filesystem, then keep any
+  trailing part that does not exist yet. A `write` tool targets a file that does
+  not exist, so this case must resolve.
+- A symlink in the existing prefix resolves to its real target. A symlink that
+  points outside the root is rejected after this step.
+- Compare canonical forms. Canonicalise the root once. On macOS `/var` is a
+  symlink to `/private/var`, and the temp directory lives under `/var/folders`,
+  so a text prefix check on an uncanonical root fails. The canonical comparison
+  must not.
+- An empty candidate resolves to the root itself.
+- A candidate with a `NUL` byte is rejected with `InvalidArguments`. It never
+  reaches the filesystem.
 
 ```rust
 use std::path::{Path, PathBuf};
@@ -193,6 +200,7 @@ Default policy for sprint 1:
 
 ```rust
 use async_trait::async_trait;
+use crate::ToolKind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApprovalDecision {
@@ -202,8 +210,14 @@ pub enum ApprovalDecision {
 
 #[async_trait]
 pub trait ApprovalPolicy: Send + Sync {
-    /// Decide whether a tool call may run.
-    async fn approve(&self, tool: &str, args: &serde_json::Value) -> ApprovalDecision;
+    /// Decide whether a tool call may run. `kind` states what the tool does, so
+    /// a policy decides from the typed category, not from the tool name.
+    async fn approve(
+        &self,
+        tool: &str,
+        kind: ToolKind,
+        args: &serde_json::Value,
+    ) -> ApprovalDecision;
 }
 
 /// Allows read-only tools, asks nothing, denies mutating tools.
@@ -212,6 +226,10 @@ pub struct ReadOnlyPolicy;
 /// Allows every call. For a trusted, non-interactive run.
 pub struct AllowAllPolicy;
 ```
+
+`ReadOnlyPolicy` decides from `ToolKind::is_mutating`. A kind of `Edit`,
+`Delete`, `Move`, or `Execute` mutates state. Every other kind is read-only.
+This is the single source of truth. It replaces a fragile tool-name list.
 
 The agent loop consults the policy before it runs a mutating tool. A hook may
 also block a call; see `SPEC-04`. The policy runs after the hooks.
@@ -264,6 +282,44 @@ Rules:
   the only boundaries for `bash`.
 
 ## 8. Test cases
+
+In `crates/rho-core/src/tool.rs` unit tests, for `confine` (F-28) and the
+policies (F-29):
+- `confine_allows_child_path` — a relative path under the root resolves to an
+  absolute path.
+- `confine_allows_the_root_itself` — an empty candidate resolves to the root.
+- `confine_allows_new_file_that_does_not_exist_yet` — a not-yet-existing target
+  under the root resolves. This is the `write` case.
+- `confine_allows_traversal_that_returns_inside_root` — `sub/../file.txt`
+  resolves and stays inside the root.
+- `confine_rejects_parent_escape` — a `../` path returns `PathEscape`.
+- `confine_rejects_absolute_outside_root` — an absolute path outside the root
+  returns `PathEscape`.
+- `confine_allows_absolute_inside_root` — an absolute path under the root
+  resolves.
+- `confine_rejects_symlink_that_points_outside_root` — a symlink inside the root
+  that points outside is rejected.
+- `confine_allows_symlink_that_points_inside_root` — a symlink that points inside
+  the root resolves.
+- `confine_handles_temp_dir_realpath_pair` — a path under the macOS temp root
+  resolves without a false `PathEscape`.
+- `confine_rejects_nul_byte_path` — a path with a `NUL` byte returns
+  `InvalidArguments`.
+- `confine_errors_when_root_does_not_exist` — a missing root returns `Io`.
+- `read_only_policy_allows_a_reading_tool` — `ReadOnlyPolicy` allows a `Read`
+  kind.
+- `read_only_policy_denies_a_mutating_tool` — `ReadOnlyPolicy` denies `Edit`,
+  `Delete`, `Move`, and `Execute`.
+- `allow_all_policy_allows_a_mutating_tool` — `AllowAllPolicy` allows an
+  `Execute` kind.
+- `tool_kind_is_mutating_matches_the_spec` — `is_mutating` is true for the
+  mutating kinds and false for `Read` and `Search`.
+
+In `crates/rho-core/tests/approval.rs`, for approval wired into dispatch:
+- `approval_denied_mutating_call_never_runs_the_tool` — a `ReadOnlyPolicy`
+  denies a mutating tool, the tool never runs, and the result is an error result.
+- `approval_allowed_reading_call_runs_the_tool` — a `ReadOnlyPolicy` allows a
+  reading tool and the tool runs.
 
 In `crates/rho-tools/tests/`:
 - `tool_read_returns_file_contents` — `read` returns the file text.

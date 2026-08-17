@@ -16,7 +16,7 @@ mod provider;
 mod tool;
 mod usage;
 
-pub use agent::{AgentConfig, AgentEvent, AgentEvents, AgentStopReason, Session};
+pub use agent::{AgentConfig, AgentEvent, AgentEvents, AgentStopReason, Session, SessionConfig};
 pub use cancel::CancelToken;
 pub use content::{ContentBlock, ImageSource, Message, Role};
 pub use context::Context;

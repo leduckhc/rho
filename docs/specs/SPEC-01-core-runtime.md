@@ -408,9 +408,51 @@ pub enum AgentEvent {
 `ToolOutput` and `ToolKind` are defined in `SPEC-03`.
 
 The `Session` owns the provider, the tool registry, the hook chain, and the
-context, all behind an `Arc`. `Session::prompt` starts a run. It spawns one task.
-The task drives the loop and sends events on a channel. The returned `AgentEvents`
-wraps the receiver and the task handle.
+context, all behind an `Arc`. It also owns a `SessionConfig`. `Session::prompt`
+starts a run. It spawns one task. The task drives the loop and sends events on a
+channel. The returned `AgentEvents` wraps the receiver and the task handle.
+
+`SessionConfig` carries the values a session needs before it can run: the model
+id, the confinement root, the approval policy, and the per-run turn cap. It holds
+no default for the session root. A caller states it. A tool cannot confine a path
+against a root that nobody chose. See decision D-011. A caller that wants the
+current directory calls `SessionConfig::for_current_dir`, so that choice is
+visible in the calling code.
+
+```rust
+use std::path::PathBuf;
+
+/// The configuration one `Session` needs before it can run.
+#[derive(Clone)]
+pub struct SessionConfig {
+    /// The model id sent in every `CompletionRequest`.
+    pub model: String,
+    /// The path confinement root. It has no default.
+    pub session_root: PathBuf,
+    /// The approval policy. Tool dispatch consults it before it runs a tool.
+    pub approval: Arc<dyn ApprovalPolicy>,
+    /// The per-run turn cap. The loop stops with `MaxTurnRequests` at the cap.
+    pub max_turns: u32,
+}
+
+impl SessionConfig {
+    /// Build a config with an explicit model, root, and policy.
+    pub fn new(
+        model: impl Into<String>,
+        session_root: impl Into<PathBuf>,
+        approval: Arc<dyn ApprovalPolicy>,
+    ) -> Self;
+    /// Build a config that confines paths to the current directory.
+    pub fn for_current_dir(
+        model: impl Into<String>,
+        approval: Arc<dyn ApprovalPolicy>,
+    ) -> std::io::Result<Self>;
+    /// Override the per-run turn cap.
+    pub fn with_max_turns(self, max_turns: u32) -> Self;
+}
+```
+
+`ApprovalPolicy` is defined in `SPEC-03`.
 
 ```rust
 use futures::Stream;
@@ -449,24 +491,30 @@ struct SessionInner {
     tools: Arc<ToolRegistry>,
     hooks: Arc<HookChain>,
     context: tokio::sync::Mutex<Context>,
+    config: SessionConfig,
 }
 
 impl Session {
+    /// Build a session with an explicit `SessionConfig`. This is the primary
+    /// constructor. See decision D-011.
+    pub fn with_config(
+        config: SessionConfig,
+        provider: Arc<dyn Provider>,
+        tools: Arc<ToolRegistry>,
+        hooks: Arc<HookChain>,
+        context: Context,
+    ) -> Self;
+
+    /// Build a session with a test configuration. The config confines paths to
+    /// the current directory and allows every tool call. A production caller
+    /// uses `with_config`. This constructor keeps the sprint-1 test call sites
+    /// valid without an edit.
     pub fn new(
         provider: Arc<dyn Provider>,
         tools: Arc<ToolRegistry>,
         hooks: Arc<HookChain>,
         context: Context,
-    ) -> Self {
-        Self {
-            inner: Arc::new(SessionInner {
-                provider,
-                tools,
-                hooks,
-                context: tokio::sync::Mutex::new(context),
-            }),
-        }
-    }
+    ) -> Self;
 
     /// Start one agent run. Append `input` to the context, then drive the loop.
     /// `cancel` stops the run. Dropping the returned value also stops the run.
@@ -508,11 +556,14 @@ Tool dispatch, for one tool call:
 1. Run the hook chain `before_tool_call` in registration order. The first
    `Block` stops the call. A blocked call produces a `ToolResult` with
    `is_error: true`.
-2. Consult the `ApprovalPolicy`. A denial produces an error `ToolResult`. See
-   `SPEC-03`. In the ACP frontend the policy issues `session/request_permission`.
+2. Consult the `ApprovalPolicy` from `SessionConfig`. It reads the tool `kind`,
+   so the decision is typed, not a name match. A denial produces an error
+   `ToolResult` and the tool never runs. See `SPEC-03`. In the ACP frontend the
+   policy issues `session/request_permission`.
 3. Emit `ToolStart`.
-4. Look up the tool in the registry. Run `execute`. Forward `ToolUpdate` for each
-   streamed line.
+4. Look up the tool in the registry. Build a `ToolContext` with the
+   `session_root` from `SessionConfig`. Run `execute`. Forward `ToolUpdate` for
+   each streamed line.
 5. Run the hook chain `after_tool_result` in registration order.
 6. Emit `ToolEnd`. Append a `Tool` message with the `ToolResult` block.
 
@@ -606,6 +657,11 @@ in-memory shape that the format will serialise.
   stream was dropped.
 - `hook_block_produces_error_tool_result` — a hook that blocks a call yields a
   `ToolResult` with `is_error: true` and the tool never runs.
+- `approval_denied_mutating_call_never_runs_the_tool` — a `ReadOnlyPolicy` in
+  `SessionConfig` denies a mutating tool, the tool never runs, and the result is
+  an error result. See `crates/rho-core/tests/approval.rs`.
+- `approval_allowed_reading_call_runs_the_tool` — a `ReadOnlyPolicy` allows a
+  reading tool and the tool runs. See `crates/rho-core/tests/approval.rs`.
 
 ## 13. Out of scope for sprint 1
 

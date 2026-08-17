@@ -4,7 +4,7 @@
 //! turn can call tools. The loop appends every message to the `Context`. It
 //! emits an `AgentEvent` stream. A frontend renders the stream.
 
-use crate::{CancelToken, ContentBlock, Message, Role};
+use crate::{ApprovalDecision, ApprovalPolicy, CancelToken, ContentBlock, Message, Role};
 use crate::{
     CompletionRequest, Context, Error, HookChain, HookOutcome, Provider, StopReason, StreamEvent,
     ToolCallView, ToolContext, ToolKind, ToolOutput, ToolRegistry,
@@ -99,6 +99,59 @@ impl Drop for AgentEvents {
     }
 }
 
+/// The configuration one `Session` needs before it can run.
+///
+/// It carries the model id, the confinement root, the approval policy, and the
+/// per-run turn cap. `Session` holds no default for any of these. A caller states
+/// each value, so a security boundary is never set by accident. See decision
+/// D-011.
+#[derive(Clone)]
+pub struct SessionConfig {
+    /// The model id sent in every `CompletionRequest`. An empty id fails at the
+    /// provider with a useless message, so the caller must set a real id.
+    pub model: String,
+    /// The path confinement root. Every tool resolves its paths under this root.
+    /// It has no default. A caller states it.
+    pub session_root: PathBuf,
+    /// The approval policy. Tool dispatch consults it before it runs a tool.
+    pub approval: Arc<dyn ApprovalPolicy>,
+    /// The per-run turn cap. The loop stops with `MaxTurnRequests` at the cap.
+    pub max_turns: u32,
+}
+
+impl SessionConfig {
+    /// Build a config with an explicit model, root, and policy. The turn cap uses
+    /// the `AgentConfig` default.
+    pub fn new(
+        model: impl Into<String>,
+        session_root: impl Into<PathBuf>,
+        approval: Arc<dyn ApprovalPolicy>,
+    ) -> Self {
+        Self {
+            model: model.into(),
+            session_root: session_root.into(),
+            approval,
+            max_turns: AgentConfig::default().max_turns,
+        }
+    }
+
+    /// Build a config that confines paths to the current directory. This states
+    /// the choice in the calling code, so a current-directory root is never an
+    /// accident. It fails when the current directory cannot be read.
+    pub fn for_current_dir(
+        model: impl Into<String>,
+        approval: Arc<dyn ApprovalPolicy>,
+    ) -> std::io::Result<Self> {
+        Ok(Self::new(model, std::env::current_dir()?, approval))
+    }
+
+    /// Override the per-run turn cap.
+    pub fn with_max_turns(mut self, max_turns: u32) -> Self {
+        self.max_turns = max_turns;
+        self
+    }
+}
+
 pub struct Session {
     inner: Arc<SessionInner>,
 }
@@ -108,10 +161,14 @@ struct SessionInner {
     tools: Arc<ToolRegistry>,
     hooks: Arc<HookChain>,
     context: tokio::sync::Mutex<Context>,
+    config: SessionConfig,
 }
 
 impl Session {
-    pub fn new(
+    /// Build a session with an explicit `SessionConfig`. This is the primary
+    /// constructor. See decision D-011.
+    pub fn with_config(
+        config: SessionConfig,
         provider: Arc<dyn Provider>,
         tools: Arc<ToolRegistry>,
         hooks: Arc<HookChain>,
@@ -123,10 +180,15 @@ impl Session {
                 tools,
                 hooks,
                 context: tokio::sync::Mutex::new(context),
+                config,
             }),
         }
     }
 
+    /// Build a session with a test configuration. The config confines paths to
+    /// the current directory and allows every tool call. Use it in a test where
+    /// the model id and the root do not matter. A production caller uses
+    /// `with_config` and states a real config.
     /// Start one agent run. Append `input` to the context, then drive the loop.
     /// `cancel` stops the run. Dropping the returned value also stops the run.
     pub fn prompt(&self, input: Vec<ContentBlock>, cancel: CancelToken) -> AgentEvents {
@@ -135,10 +197,12 @@ impl Session {
         // fail, so the driver task stops on its own.
         let (tx, rx) = tokio::sync::mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let driver = Driver {
+            config: AgentConfig {
+                max_turns: self.inner.config.max_turns,
+            },
             inner: Arc::clone(&self.inner),
             tx,
             cancel,
-            config: AgentConfig::default(),
         };
         let handle = tokio::spawn(driver.run(input));
         AgentEvents { rx, handle }
@@ -414,6 +478,23 @@ impl Driver {
             return self.finish_tool(&id, output).await;
         };
 
+        // Consult the approval policy after the hooks. A denial produces an error
+        // tool result. The tool never runs. See SPEC-01 section 9 and SPEC-03
+        // section 5.
+        if self
+            .inner
+            .config
+            .approval
+            .approve(&name, tool.kind(), &arguments)
+            .await
+            == ApprovalDecision::Deny
+        {
+            let output = error_output(format!(
+                "the approval policy denied the tool {name}. Change the policy to allow it, or call a read-only tool."
+            ));
+            return self.finish_tool(&id, output).await;
+        }
+
         if self
             .emit(AgentEvent::ToolStart {
                 id: id.clone(),
@@ -431,7 +512,7 @@ impl Driver {
         let (updates_tx, mut updates_rx) =
             tokio::sync::mpsc::channel::<String>(EVENT_CHANNEL_CAPACITY);
         let context = ToolContext {
-            session_root: session_root(),
+            session_root: self.inner.config.session_root.clone(),
             cancel: self.cancel.clone(),
             updates: updates_tx,
         };
@@ -520,7 +601,7 @@ impl Driver {
     async fn build_request(&self) -> CompletionRequest {
         let context = self.inner.context.lock().await;
         CompletionRequest {
-            model: String::new(),
+            model: self.inner.config.model.clone(),
             system: context.system().map(str::to_string),
             messages: context.messages().to_vec(),
             tools: self.inner.tools.specs(),
@@ -567,12 +648,6 @@ fn error_output(reason: impl Into<String>) -> ToolOutput {
         }],
         is_error: true,
     }
-}
-
-/// The confinement root passed to every tool. The core owns no session root, so
-/// it uses the current directory. A frontend sets a real root in a later stage.
-fn session_root() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// Assembles the assistant message from a turn's stream events. It closes each

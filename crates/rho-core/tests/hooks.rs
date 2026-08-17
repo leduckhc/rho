@@ -39,7 +39,13 @@ fn session_with_hooks(tool: Arc<RecordingTool>, hooks: Vec<Arc<dyn Hook>>) -> Se
         common::text_turn("done"),
     ]));
     let context = Context::new(Some("system".to_string()), Vec::new());
-    Session::new(provider, Arc::new(registry), Arc::new(chain), context)
+    Session::with_config(
+        common::test_config(),
+        provider,
+        Arc::new(registry),
+        Arc::new(chain),
+        context,
+    )
 }
 
 async fn collect(mut events: AgentEvents) -> Vec<AgentEvent> {
