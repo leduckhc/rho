@@ -21,6 +21,10 @@
     -webkit-font-smoothing: antialiased;
   }
   .skip { position:absolute; left:-9999px; }
+  .sr-only {
+    position:absolute; width:1px; height:1px; padding:0; margin:-1px;
+    overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0;
+  }
   .skip:focus { left:16px; top:16px; background:var(--accent); color:var(--accent-ink); padding:8px 16px; z-index:9; }
   a { color: var(--link); text-underline-offset: 3px; }
   a:hover { color: var(--text); }
@@ -127,19 +131,19 @@
     <p class="lede">A coding agent harness in Rust. Ten small crates.
     Take the parts you want. Replace any part with your own crate.</p>
     <div class="tablewrap">
-    <table>
-      <thead><tr><th scope="col" aria-label="Included"></th><th scope="col">Crate</th><th scope="col">Role</th></tr></thead>
+    <table aria-label="The rho crates, with one example selection">
+      <thead><tr><th scope="col"><span class="sr-only">In this build</span></th><th scope="col">Crate</th><th scope="col">Role</th></tr></thead>
       <tbody>
-        <tr><td class="pick">[x]</td><td><code>rho-core</code></td><td>Session, agent loop, event stream, provider and tool traits, hooks. No HTTP.</td></tr>
-        <tr><td class="pick">[x]</td><td><code>rho-config</code></td><td>Layered configuration and profiles.</td></tr>
-        <tr><td class="pick">[x]</td><td><code>rho-tools</code></td><td>Built-in file and shell tools.</td></tr>
-        <tr><td class="pick">[ ]</td><td><code>rho-plugin</code></td><td>Out-of-process plugin host over stdio JSON-RPC.</td></tr>
-        <tr><td class="pick">[x]</td><td><code>rho-provider-openrouter</code></td><td>OpenRouter and OpenAI-compatible endpoints.</td></tr>
-        <tr><td class="pick">[ ]</td><td><code>rho-provider-bedrock</code></td><td>AWS Bedrock Converse.</td></tr>
-        <tr><td class="pick">[ ]</td><td><code>rho-provider-azure</code></td><td>Azure OpenAI Responses.</td></tr>
-        <tr><td class="pick">[x]</td><td><code>rho-tui</code></td><td>Minimal terminal interface.</td></tr>
-        <tr><td class="pick">[ ]</td><td><code>rho-acp</code></td><td>Agent Client Protocol server frontend.</td></tr>
-        <tr><td class="pick">[x]</td><td><code>rho-cli</code></td><td>The <code>rho</code> binary. Frontends and providers are cargo features.</td></tr>
+        <tr><td class="pick"><span aria-hidden="true">[x]</span><span class="sr-only">included</span></td><td><code>rho-core</code></td><td>Session, agent loop, event stream, provider and tool traits, hooks. No HTTP.</td></tr>
+        <tr><td class="pick"><span aria-hidden="true">[x]</span><span class="sr-only">included</span></td><td><code>rho-config</code></td><td>Layered configuration and profiles.</td></tr>
+        <tr><td class="pick"><span aria-hidden="true">[x]</span><span class="sr-only">included</span></td><td><code>rho-tools</code></td><td>Built-in file and shell tools.</td></tr>
+        <tr><td class="pick"><span aria-hidden="true">[ ]</span><span class="sr-only">not included</span></td><td><code>rho-plugin</code></td><td>Out-of-process plugin host over stdio JSON-RPC.</td></tr>
+        <tr><td class="pick"><span aria-hidden="true">[x]</span><span class="sr-only">included</span></td><td><code>rho-provider-openrouter</code></td><td>OpenRouter and OpenAI-compatible endpoints.</td></tr>
+        <tr><td class="pick"><span aria-hidden="true">[ ]</span><span class="sr-only">not included</span></td><td><code>rho-provider-bedrock</code></td><td>AWS Bedrock Converse.</td></tr>
+        <tr><td class="pick"><span aria-hidden="true">[ ]</span><span class="sr-only">not included</span></td><td><code>rho-provider-azure</code></td><td>Azure OpenAI Responses.</td></tr>
+        <tr><td class="pick"><span aria-hidden="true">[x]</span><span class="sr-only">included</span></td><td><code>rho-tui</code></td><td>Minimal terminal interface.</td></tr>
+        <tr><td class="pick"><span aria-hidden="true">[ ]</span><span class="sr-only">not included</span></td><td><code>rho-acp</code></td><td>Agent Client Protocol server frontend.</td></tr>
+        <tr><td class="pick"><span aria-hidden="true">[x]</span><span class="sr-only">included</span></td><td><code>rho-cli</code></td><td>The <code>rho</code> binary. Frontends and providers are cargo features.</td></tr>
       </tbody>
     </table>
     </div>

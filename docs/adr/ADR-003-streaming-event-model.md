@@ -1,0 +1,77 @@
+# ADR-003 — Streaming event model
+
+Status: accepted. Sprint 1.
+Deciders: the architect.
+
+## Context
+
+rho supports three providers with three very different wire formats:
+- OpenRouter: OpenAI-style SSE chunks, `choices[].delta`, tool-call fragments by
+  `index`, `finish_reason`.
+- AWS Bedrock: `ConverseStream` typed events, `contentBlockStart`,
+  `contentBlockDelta`, `contentBlockStop`, `messageStop`, `metadata`.
+- Azure OpenAI: the `/responses` API, `response.output_text.delta`,
+  `response.function_call_arguments.delta`, `response.completed`, and more.
+
+Every frontend, the TUI and the ACP server, must render the same conversation.
+The agent loop must drive tools the same way regardless of provider. See F-02.
+
+Two designs were possible:
+1. One normalised event enum that every provider emits and every consumer reads.
+2. Per-provider event types, passed through, with each consumer matching on the
+   provider it was given.
+
+## Decision
+
+Use one normalised event enum, `StreamEvent`, defined in `rho-core` (`SPEC-01`).
+Each provider maps its wire format onto this enum. The agent loop, the TUI, and
+the ACP server consume only this enum.
+
+## Why one enum
+
+- One consumer contract. The TUI reducer and the ACP mapper are written once, not
+  three times. A fourth provider needs no change in any consumer.
+- The core stays provider-agnostic. `rho-core` links no provider and no HTTP.
+  This is the library-first rule (F-121) and it protects the footprint budget in
+  `ADR-002`.
+- The event names align with ACP concepts on purpose, so the ACP mapping in
+  `SPEC-06` is close to one-to-one. `AgentStopReason` mirrors the ACP `StopReason`
+  set exactly.
+- A new provider is a self-contained mapping task. Its correctness is proven by
+  the shared contract test suite (`SPEC-02` section 7), not by reading consumer
+  code.
+
+## What it costs
+
+- Each provider carries mapping code. A wire concept with no enum variant must be
+  dropped or folded. For sprint 1 the enum covers text, thinking, tool calls,
+  usage, and a stop reason, which is every concept the three providers need for a
+  coding agent.
+- A provider-specific extra, such as OpenRouter `reasoning` passthrough detail or
+  a Bedrock guardrail trace, does not have a first-class variant. Sprint 1 folds
+  reasoning into `Thinking` and drops guardrail trace detail. A future need can
+  add a variant, but every consumer must then handle it, so a variant is added
+  only when a real consumer needs it.
+- The mapping can hide a provider bug behind a clean event. The shared contract
+  suite and per-provider fixture tests guard against that.
+
+## Alternative rejected: per-provider types
+
+- It pushes the match on provider into every consumer. The TUI and the ACP server
+  would each grow a branch per provider. A fourth provider would touch every
+  frontend.
+- It leaks provider shape into `rho-core` or forces generics through the whole
+  stack. That breaks the clean library boundary and raises compile cost.
+- It offers no real gain for a coding agent, where the five content kinds are the
+  same across providers.
+
+## Consequences
+
+- `StreamEvent` and `AgentEvent` are the stable seam of the whole system. A
+  change to them is a breaking change and needs a spec update.
+- Provider crates own all wire-format knowledge. Consumers own none.
+- The shared contract test suite in `rho-core` is the gate that every provider
+  must pass. See `SPEC-02` section 7.
+- When a provider exposes a concept the enum cannot carry, the choice is explicit:
+  fold it, drop it, or add a variant that every consumer then handles. The default
+  is to fold or drop until a consumer needs more.

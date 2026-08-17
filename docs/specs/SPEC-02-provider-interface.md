@@ -9,10 +9,14 @@ formats normalise onto the one event model from `SPEC-01`. This spec defines the
 trait, the request type, the three mappings, the retry policy, and the secret
 redaction rule.
 
+Features covered: F-10 (provider trait), F-11 (OpenRouter), F-12 (Bedrock),
+F-13 (Azure), F-05 (auto-retry), F-103 (no secrets in logs), F-113 (per-provider
+feature flags).
+
 ## 1. The trait
 
 ```rust
-use crate::{CancelToken, Message, ProviderError, StreamEvent};
+use crate::{CancelToken, Message, ProviderError, StreamEvent, ToolKind};
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -27,6 +31,8 @@ pub type ProviderStream =
 pub struct ToolSpec {
     pub name: String,
     pub description: String,
+    /// The ACP tool category. See `ToolKind` in `SPEC-03`.
+    pub kind: ToolKind,
     /// A JSON Schema object for the tool arguments.
     pub input_schema: serde_json::Value,
 }

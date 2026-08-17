@@ -9,6 +9,11 @@ to the session root, the approval model, and the `bash` timeout and streaming
 rules. Sandbox and approval boundaries are part of the contract, not only the
 signatures.
 
+Features covered: F-20 (tool trait), F-21 to F-27 (the built-in tools), F-28
+(path confinement), F-29 (approval gate). The tool `kind` and the async approval
+policy exist so `rho-acp` can report ACP tool kinds and drive
+`session/request_permission`; see `SPEC-06`.
+
 ## 1. The trait
 
 ```rust
@@ -17,6 +22,23 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
+
+/// The ACP tool category. The values mirror the ACP `ToolKind` set exactly, so
+/// `rho-acp` forwards the value with no remap. See `SPEC-06`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolKind {
+    Read,
+    Edit,
+    Delete,
+    Move,
+    Search,
+    Execute,
+    Think,
+    Fetch,
+    SwitchMode,
+    Other,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
@@ -65,6 +87,10 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     /// A short description sent to the model.
     fn description(&self) -> &str;
+    /// The ACP tool category. Defaults to `Other`.
+    fn kind(&self) -> ToolKind {
+        ToolKind::Other
+    }
     /// A JSON Schema object for the arguments.
     fn input_schema(&self) -> serde_json::Value;
     /// Run the tool. Validate `args` first. Confine every path to the root.
@@ -107,6 +133,7 @@ impl ToolRegistry {
             .map(|t| ToolSpec {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
+                kind: t.kind(),
                 input_schema: t.input_schema(),
             })
             .collect()
@@ -189,24 +216,33 @@ pub struct AllowAllPolicy;
 The agent loop consults the policy before it runs a mutating tool. A hook may
 also block a call; see `SPEC-04`. The policy runs after the hooks.
 
+ACP mapping: `ApprovalPolicy` is async by design so a frontend can ask a human.
+`rho-acp` implements `ApprovalPolicy` by issuing an ACP
+`session/request_permission` request with the four permission options
+(`allow_once`, `allow_always`, `reject_once`, `reject_always`) and mapping the
+selected outcome back to `Allow` or `Deny`. See `SPEC-06`.
+
 ## 6. The built-in tool set
 
-All eight ship in `rho-tools`. Each confines its paths to the session root.
+All eight ship in `rho-tools`. Each confines its paths to the session root. The
+`kind` column is the ACP `ToolKind` the tool reports.
 
-- `read` — read a file. Args: `path`, optional `offset`, optional `limit`.
-  Returns text. Read-only.
-- `write` — write a whole file. Args: `path`, `content`. Creates parent
-  directories. Mutating. Needs approval.
-- `edit` — replace an exact text span in a file. Args: `path`, `old_text`,
-  `new_text`. Fails when `old_text` is absent or not unique. Uses `similar` to
-  build a diff for the result. Mutating. Needs approval.
-- `list` — list a directory. Args: `path`. Returns entries. Read-only.
-- `glob` — match files by a glob pattern under the root. Args: `pattern`. Uses
-  `globset`. Read-only.
-- `grep` — search file contents by a regex. Args: `pattern`, optional `path`,
-  optional `glob`. Uses `ignore` to walk and to honour `.gitignore`. Read-only.
-- `bash` — run a shell command. Args: `command`, optional `timeout_ms`. Streams
-  output. Mutating. Needs approval. See section 7.
+- `read` (kind `read`) — read a file. Args: `path`, optional `offset`, optional
+  `limit`. Returns text. Read-only. F-21.
+- `write` (kind `edit`) — write a whole file. Args: `path`, `content`. Creates
+  parent directories. Mutating. Needs approval. F-22.
+- `edit` (kind `edit`) — replace an exact text span in a file. Args: `path`,
+  `old_text`, `new_text`. Fails when `old_text` is absent or not unique. Uses
+  `similar` to build a diff for the result. Mutating. Needs approval. F-23.
+- `list` (kind `read`) — list a directory. Args: `path`. Returns entries.
+  Read-only. F-24.
+- `glob` (kind `search`) — match files by a glob pattern under the root. Args:
+  `pattern`. Uses `globset`. Read-only. F-25.
+- `grep` (kind `search`) — search file contents by a regex. Args: `pattern`,
+  optional `path`, optional `glob`. Uses `ignore` to walk and to honour
+  `.gitignore`. Read-only. F-26.
+- `bash` (kind `execute`) — run a shell command. Args: `command`, optional
+  `timeout_ms`. Streams output. Mutating. Needs approval. See section 7. F-27.
 
 ## 7. The `bash` tool
 
@@ -259,6 +295,10 @@ In `crates/rho-tools/tests/`:
   is rejected.
 - `tool_schema_roundtrips_arguments` — each tool's `input_schema` accepts a valid
   argument object and the struct parses it back.
+- `tool_kind_matches_acp_category` — each built-in tool reports the expected
+  `ToolKind`, for example `bash` reports `Execute` and `read` reports `Read`.
+- `tool_kind_serialises_snake_case` — each `ToolKind` value serialises to its ACP
+  `snake_case` name, for example `switch_mode`.
 - `approval_read_only_policy_allows_read` — `ReadOnlyPolicy` allows `read`.
 - `approval_read_only_policy_denies_write` — `ReadOnlyPolicy` denies `write`.
 - `approval_denied_call_returns_denied_error` — a denied call returns

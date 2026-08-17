@@ -9,6 +9,15 @@ the message model, the streaming event model, the provider and tool traits, the
 hook chain, the cancellation type, and the agent loop. This spec is the keystone.
 Every other spec builds on the types defined here.
 
+Features covered: F-01 (agent loop), F-02 (event stream), F-03 (turn model),
+F-04 (cancellation), F-60 (stable prefix), F-64 (short system prompt),
+F-121 (library-first API). The event model is also constrained by the ACP
+frontend; see `SPEC-06` and section 12 below.
+
+Decision note (D-002): the event model must express every concept the Agent
+Client Protocol reports back to a client. Section 12 states the alignment. The
+agent-level stop reason in section 9 mirrors the ACP `StopReason` set exactly.
+
 ## 1. Design rules
 
 - The conversation is append-only. A turn adds entries. A turn never edits an
@@ -338,14 +347,31 @@ turn can call tools. The loop appends every message to the `Context`. It emits a
 `AgentEvent` stream. A frontend renders the stream.
 
 ```rust
+/// Why a full agent run stopped. This mirrors the ACP `StopReason` set exactly,
+/// so `rho-acp` maps it one-to-one onto a `session/prompt` response. See SPEC-06.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStopReason {
+    /// The model finished and asked for no more tools.
+    EndTurn,
+    /// A turn hit the token limit.
+    MaxTokens,
+    /// The loop hit its per-run turn cap. See section 9.
+    MaxTurnRequests,
+    /// The model refused, or a content filter stopped the output.
+    Refusal,
+    /// The caller cancelled the run.
+    Canceled,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum AgentEvent {
     /// One provider turn begins.
     TurnStart,
     /// A normalised provider event.
     Stream(StreamEvent),
-    /// A tool begins execution.
-    ToolStart { id: String, name: String },
+    /// A tool begins execution, after hooks and the approval policy pass.
+    ToolStart { id: String, name: String, kind: ToolKind },
     /// A streamed line of tool output.
     ToolUpdate { id: String, output: String },
     /// A tool finished. The output feeds the next turn.
@@ -353,11 +379,11 @@ pub enum AgentEvent {
     /// One provider turn ended.
     TurnEnd { stop_reason: StopReason },
     /// The run is fully settled. No further turn will run.
-    AgentEnd,
+    AgentEnd { stop_reason: AgentStopReason },
 }
 ```
 
-`ToolOutput` is defined in `SPEC-03`.
+`ToolOutput` and `ToolKind` are defined in `SPEC-03`.
 
 The `Session` owns the provider, the tool registry, the hook chain, and the
 context, all behind an `Arc`. `Session::prompt` starts a run. It spawns one task.
@@ -437,25 +463,76 @@ Turn state machine, one turn:
 4. Forward each `StreamEvent` as `AgentEvent::Stream`.
 5. Collect the assistant message from the events. Append it to the context.
 6. On `Done { stop_reason: ToolUse }`: run each tool call, then loop to step 1.
-7. On any other `Done`: emit `TurnEnd`, then `AgentEnd`, then stop.
+7. On any other `Done`: emit `TurnEnd`, map the provider `StopReason` to an
+   `AgentStopReason`, emit `AgentEnd`, then stop.
+
+Provider-to-agent stop reason mapping at step 7:
+- `EndTurn` and `StopSequence` map to `AgentStopReason::EndTurn`.
+- `MaxTokens` maps to `AgentStopReason::MaxTokens`.
+- `ContentFiltered` maps to `AgentStopReason::Refusal`.
+- `Canceled` maps to `AgentStopReason::Canceled`.
+
+Turn cap: the loop runs at most `AgentConfig::max_turns` provider turns per run.
+The default is 32. When the loop hits the cap it stops with
+`AgentEnd { stop_reason: MaxTurnRequests }`. This bounds a tool-call loop and
+maps to the ACP `max_turn_requests` stop reason.
 
 Tool dispatch, for one tool call:
 1. Run the hook chain `before_tool_call` in registration order. The first
    `Block` stops the call. A blocked call produces a `ToolResult` with
    `is_error: true`.
-2. Emit `ToolStart`.
-3. Look up the tool in the registry. Run `execute`. Forward `ToolUpdate` for each
+2. Consult the `ApprovalPolicy`. A denial produces an error `ToolResult`. See
+   `SPEC-03`. In the ACP frontend the policy issues `session/request_permission`.
+3. Emit `ToolStart`.
+4. Look up the tool in the registry. Run `execute`. Forward `ToolUpdate` for each
    streamed line.
-4. Run the hook chain `after_tool_result` in registration order.
-5. Emit `ToolEnd`. Append a `Tool` message with the `ToolResult` block.
+5. Run the hook chain `after_tool_result` in registration order.
+6. Emit `ToolEnd`. Append a `Tool` message with the `ToolResult` block.
 
 Cancellation during a turn:
 - The loop selects the event stream against `cancel.cancelled()`.
 - When the token fires, the loop stops reading, drops the provider stream, and
   aborts any running tool future.
-- The loop emits `TurnEnd { stop_reason: Canceled }`, then `AgentEnd`.
+- The loop emits `TurnEnd { stop_reason: Canceled }`, then
+  `AgentEnd { stop_reason: Canceled }`.
 
-## 10. Test cases
+## 10. ACP alignment
+
+The event model must carry every concept the Agent Client Protocol reports. This
+table states the mapping. `SPEC-06` gives the full detail. Where a concept has no
+core carrier, the row names the gap.
+
+| ACP concept | Core carrier |
+| --- | --- |
+| `agent_message_chunk` | `StreamEvent::Text*` |
+| `agent_thought_chunk` | `StreamEvent::Thinking*` |
+| `tool_call` (pending) | `StreamEvent::ToolCallEnd` plus the tool `kind` |
+| `tool_call_update` in_progress | `AgentEvent::ToolStart` |
+| `tool_call_update` completed or failed | `AgentEvent::ToolEnd` with `is_error` |
+| tool `kind` | `ToolKind` on the tool and the `ToolSpec` (`SPEC-03`) |
+| `session/request_permission` | `ApprovalPolicy` (`SPEC-03`), which is async |
+| `session/prompt` stop reason | `AgentStopReason` on `AgentEnd`, mapped one-to-one |
+| `UsageUpdate` tokens | `StreamEvent::Usage` token counts |
+
+Gaps recorded for sprint 1, handled in `rho-acp`, not in the core:
+- `tool_call.title` is synthesised by `rho-acp` from the tool name and arguments.
+- `tool_call.locations` for follow-along is not tracked. `rho-acp` omits it.
+- A structured `diff` tool-call content is not carried. `rho-acp` reports an
+  `edit` result as a text content block. Structured diff is planned.
+- `plan` updates need a todo or plan feature (F-30, planned). Sprint 1 sends no
+  plan updates.
+- `UsageUpdate.size` and `cost` are not in the core `Usage`. `rho-acp` fills
+  `size` from the model context window and omits `cost` in sprint 1.
+
+## 11. Session format (planned, F-50)
+
+Decision D-001: rho defines its own append-only JSONL session format. It is not
+pi-compatible. The first record is a header with a `version` field. A later
+crate, `rho-session-import-pi`, provides a one-way import from pi. Persistence is
+out of scope for sprint 1. The append-only `Context` in section 7 is the
+in-memory shape that the format will serialise.
+
+## 12. Test cases
 
 - `content_block_text_roundtrips_json` — a `Text` block serialises to
   `{"type":"text","text":...}` and parses back to an equal value.
@@ -486,15 +563,21 @@ Cancellation during a turn:
   `ToolUse` triggers `ToolStart`, `ToolEnd`, then a second `TurnStart`.
 - `agent_loop_appends_assistant_and_tool_messages` — after a tool turn the
   context holds the assistant message and the tool-result message in order.
+- `agent_loop_end_turn_maps_to_agent_stop_reason_end_turn` — a provider
+  `EndTurn` yields `AgentEnd { stop_reason: EndTurn }`.
+- `agent_loop_turn_cap_stops_with_max_turn_requests` — a provider that always
+  asks for a tool stops at `max_turns` with `AgentStopReason::MaxTurnRequests`.
 - `agent_loop_cancel_ends_with_canceled_stop_reason` — cancelling mid-turn yields
-  `TurnEnd { stop_reason: Canceled }` then `AgentEnd`.
+  `TurnEnd { stop_reason: Canceled }` then `AgentEnd { stop_reason: Canceled }`.
+- `agent_stop_reason_serialises_snake_case` — each `AgentStopReason` value
+  serialises to its ACP `snake_case` name, for example `max_turn_requests`.
 - `agent_events_drop_aborts_driver_task` — dropping `AgentEvents` before the run
   ends aborts the task; a `Drop` flag on the fake provider confirms the in-flight
   stream was dropped.
 - `hook_block_produces_error_tool_result` — a hook that blocks a call yields a
   `ToolResult` with `is_error: true` and the tool never runs.
 
-## 11. Out of scope for sprint 1
+## 13. Out of scope for sprint 1
 
 - Compaction and branch summarisation. The context grows without a cut point.
 - Session persistence to disk. The context lives in memory only.
