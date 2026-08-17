@@ -227,8 +227,19 @@ pub struct ReadOnlyPolicy;
 pub struct AllowAllPolicy;
 ```
 
-`ReadOnlyPolicy` decides from `ToolKind::is_mutating`. A kind of `Edit`,
-`Delete`, `Move`, or `Execute` mutates state. Every other kind is read-only.
+`ReadOnlyPolicy` decides from `ToolKind::is_read_only`. That function is an
+**allowlist**, and the direction matters. Only `Read`, `Search`, `Think`, `Fetch`,
+and `SwitchMode` are read-only. Every other kind is mutating, and that includes
+`Other`.
+
+The boundary fails closed on purpose. `Tool::kind` defaults to `Other`, so a tool
+author who forgets to declare a kind gets `Other`. A denylist would then approve
+that tool, even when it deletes files. A denied safe tool is an annoyance. An
+approved destructive tool is a breach.
+
+`is_read_only` matches every variant and carries no wildcard arm. So a new
+`ToolKind` variant fails to compile until somebody classifies it on purpose.
+
 This is the single source of truth. It replaces a fragile tool-name list.
 
 The agent loop consults the policy before it runs a mutating tool. A hook may
@@ -312,8 +323,11 @@ policies (F-29):
   `Delete`, `Move`, and `Execute`.
 - `allow_all_policy_allows_a_mutating_tool` — `AllowAllPolicy` allows an
   `Execute` kind.
-- `tool_kind_is_mutating_matches_the_spec` — `is_mutating` is true for the
-  mutating kinds and false for `Read` and `Search`.
+- `read_only_policy_denies_an_undeclared_kind` — `ReadOnlyPolicy` denies
+  `ToolKind::Other`. This guards the fail-closed direction of the allowlist.
+- `every_tool_kind_is_classified_on_purpose` — every `ToolKind` variant is either
+  read-only or mutating, and the split matches this spec. A silent flip of one
+  variant fails this test.
 
 In `crates/rho-core/tests/approval.rs`, for approval wired into dispatch:
 - `approval_denied_mutating_call_never_runs_the_tool` — a `ReadOnlyPolicy`

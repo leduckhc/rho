@@ -497,19 +497,11 @@ struct SessionInner {
 impl Session {
     /// Build a session with an explicit `SessionConfig`. This is the primary
     /// constructor. See decision D-011.
+    /// The only constructor. Decision D-013 deleted a four-argument `new`, because
+    /// it silently supplied a fake model id, the current directory as the session
+    /// root, and a policy that approved every tool call. A caller states all three.
     pub fn with_config(
         config: SessionConfig,
-        provider: Arc<dyn Provider>,
-        tools: Arc<ToolRegistry>,
-        hooks: Arc<HookChain>,
-        context: Context,
-    ) -> Self;
-
-    /// Build a session with a test configuration. The config confines paths to
-    /// the current directory and allows every tool call. A production caller
-    /// uses `with_config`. This constructor keeps the sprint-1 test call sites
-    /// valid without an edit.
-    pub fn new(
         provider: Arc<dyn Provider>,
         tools: Arc<ToolRegistry>,
         hooks: Arc<HookChain>,

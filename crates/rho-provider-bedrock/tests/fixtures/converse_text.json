@@ -1,0 +1,8 @@
+[
+  { "messageStart": { "role": "assistant" } },
+  { "contentBlockDelta": { "contentBlockIndex": 0, "delta": { "text": "Hel" } } },
+  { "contentBlockDelta": { "contentBlockIndex": 0, "delta": { "text": "lo" } } },
+  { "contentBlockStop": { "contentBlockIndex": 0 } },
+  { "messageStop": { "stopReason": "end_turn" } },
+  { "metadata": { "usage": { "inputTokens": 10, "outputTokens": 5 } } }
+]

@@ -29,17 +29,40 @@ pub enum ToolKind {
 }
 
 impl ToolKind {
-    /// True when a tool of this kind can change state on disk or run a command.
+    /// True when a tool of this kind cannot change state.
     ///
-    /// The approval model reads this. A read-only policy denies a mutating kind.
-    /// This is the single source of truth. It replaces a fragile tool-name list.
-    /// `Edit`, `Delete`, and `Move` change files. `Execute` runs a command, which
-    /// can change anything. Every other kind only reads or reports.
+    /// The approval model reads this. A read-only policy allows only a kind that
+    /// this function names. This is the single source of truth, and it replaces a
+    /// fragile tool-name list.
+    ///
+    /// The list is an allowlist, not a denylist. That choice makes the boundary
+    /// fail closed. `Tool::kind` defaults to `Other`, so a tool author who forgets
+    /// to declare a kind gets `Other`. A denylist would then approve that tool,
+    /// even when it deletes files. An allowlist denies it instead. A denied safe
+    /// tool is an annoyance. An approved destructive tool is a breach.
+    ///
+    /// So a new `ToolKind` variant is denied until somebody adds it here on
+    /// purpose. Do not add a wildcard arm to this match.
+    pub fn is_read_only(self) -> bool {
+        match self {
+            ToolKind::Read
+            | ToolKind::Search
+            | ToolKind::Think
+            | ToolKind::Fetch
+            | ToolKind::SwitchMode => true,
+            ToolKind::Edit
+            | ToolKind::Delete
+            | ToolKind::Move
+            | ToolKind::Execute
+            | ToolKind::Other => false,
+        }
+    }
+
+    /// True when a tool of this kind may change state, or when its kind is not
+    /// declared. See [`ToolKind::is_read_only`] for why an undeclared kind counts
+    /// as mutating.
     pub fn is_mutating(self) -> bool {
-        matches!(
-            self,
-            ToolKind::Edit | ToolKind::Delete | ToolKind::Move | ToolKind::Execute
-        )
+        !self.is_read_only()
     }
 }
 
@@ -94,6 +117,10 @@ pub trait Tool: Send + Sync {
     /// A short description sent to the model.
     fn description(&self) -> &str;
     /// The ACP tool category. Defaults to `Other`.
+    ///
+    /// Declare a real kind. A read-only approval policy denies `Other`, because
+    /// the policy cannot know whether an undeclared tool changes state. So a tool
+    /// that omits this method works only under a permissive policy.
     fn kind(&self) -> ToolKind {
         ToolKind::Other
     }
@@ -415,6 +442,55 @@ mod tests {
             let decision = policy.approve("write", kind, &serde_json::json!({})).await;
             assert_eq!(decision, ApprovalDecision::Deny, "{kind:?} must be denied");
         }
+    }
+
+    #[tokio::test]
+    async fn read_only_policy_denies_an_undeclared_kind() {
+        // The boundary must fail closed. `Tool::kind` defaults to `Other`, so a
+        // tool author who forgets to declare a kind gets `Other`. If the policy
+        // approved `Other`, a tool that deletes files would run under a read-only
+        // policy. That is a breach, not an annoyance. So `Other` is denied.
+        let policy = ReadOnlyPolicy;
+        let decision = policy
+            .approve("mystery", ToolKind::Other, &serde_json::json!({}))
+            .await;
+        assert_eq!(decision, ApprovalDecision::Deny);
+    }
+
+    #[test]
+    fn every_tool_kind_is_classified_on_purpose() {
+        // This test exists so a new `ToolKind` variant cannot slip through as
+        // read-only by accident. `is_read_only` matches every variant with no
+        // wildcard arm, so a new variant fails to compile until somebody classifies
+        // it. This test pins the current classification, so a silent flip of an
+        // existing variant fails here.
+        let read_only = [
+            ToolKind::Read,
+            ToolKind::Search,
+            ToolKind::Think,
+            ToolKind::Fetch,
+            ToolKind::SwitchMode,
+        ];
+        let mutating = [
+            ToolKind::Edit,
+            ToolKind::Delete,
+            ToolKind::Move,
+            ToolKind::Execute,
+            ToolKind::Other,
+        ];
+        for kind in read_only {
+            assert!(kind.is_read_only(), "{kind:?} must stay read only");
+            assert!(!kind.is_mutating(), "{kind:?} must not be mutating");
+        }
+        for kind in mutating {
+            assert!(kind.is_mutating(), "{kind:?} must stay mutating");
+            assert!(!kind.is_read_only(), "{kind:?} must not be read only");
+        }
+        assert_eq!(
+            read_only.len() + mutating.len(),
+            10,
+            "classify every variant"
+        );
     }
 
     #[tokio::test]

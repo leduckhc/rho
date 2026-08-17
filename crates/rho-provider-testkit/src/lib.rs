@@ -23,5 +23,5 @@ pub use contract::{
     provider_contract_yields_first_event_before_stream_end, run_all,
 };
 pub use harness::{HarnessRun, ProviderHarness};
-pub use script::{Script, SCRIPT_TEXT, SCRIPT_TOOL_NAME, script_tool_arguments};
+pub use script::{SCRIPT_TEXT, SCRIPT_TOOL_NAME, Script, script_tool_arguments};
 pub use staged_server::StagedHttpServer;
