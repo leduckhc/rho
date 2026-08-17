@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+*.pdb
+.DS_Store
+/web/node_modules
+/web/dist
+/web/.astro
+.env
+.env.*
+!.env.example
+/.rho-work/*.log

@@ -1,0 +1,25 @@
+[package]
+name = "rho-provider-bedrock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "AWS Bedrock Converse provider for rho."
+
+[dependencies]
+async-trait = "0.1.92"
+aws-config = { version = "1.8.13", default-features = false, features = ["rustls", "behavior-version-latest", "sso"] }
+aws-sdk-bedrockruntime = { version = "1.124.0", default-features = false, features = ["rustls", "behavior-version-latest"] }
+futures = "0.3.34"
+rho-core = { version = "0.1.0", path = "../rho-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt", "macros", "time", "sync"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["full"] }

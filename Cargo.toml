@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/leduckhc/rho"
+homepage = "https://getrho.dev"
+authors = ["rho contributors"]
+
+[workspace.dependencies]
+rho-core = { path = "crates/rho-core", version = "0.1.0" }
+rho-config = { path = "crates/rho-config", version = "0.1.0" }
+rho-tools = { path = "crates/rho-tools", version = "0.1.0" }
+rho-plugin = { path = "crates/rho-plugin", version = "0.1.0" }
+rho-provider-openrouter = { path = "crates/rho-provider-openrouter", version = "0.1.0" }
+rho-provider-bedrock = { path = "crates/rho-provider-bedrock", version = "0.1.0" }
+rho-provider-azure = { path = "crates/rho-provider-azure", version = "0.1.0" }
+rho-tui = { path = "crates/rho-tui", version = "0.1.0" }
+rho-acp = { path = "crates/rho-acp", version = "0.1.0" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+debug = 1

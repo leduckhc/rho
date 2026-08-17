@@ -1,0 +1,22 @@
+[package]
+name = "rho-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Minimal terminal user interface for rho."
+
+[dependencies]
+crossterm = "0.29.0"
+ratatui = "0.30.2"
+rho-core = { version = "0.1.0", path = "../rho-core" }
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt", "macros", "sync", "time"] }
+tracing = "0.1.44"
+unicode-width = "0.2.2"
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["full"] }
