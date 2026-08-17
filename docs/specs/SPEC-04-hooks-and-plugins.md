@@ -260,7 +260,60 @@ Rules:
 - A tool call to a plugin that has not yet connected waits up to the call timeout,
   then returns an error result.
 
+## 5a. Launch policy, from a security audit
+
+A plugin is a program the host executes, so launching one is a trust decision. The
+host states that decision once, at construction.
+
+```rust
+#[derive(Clone, Debug, Default)]
+pub struct PluginPolicy {
+    /// Refuse a plugin that lives under this directory. Set it to the session root.
+    pub untrusted_root: Option<PathBuf>,
+    /// Refuse a plugin that any user can write.
+    pub refuse_world_writable: bool,
+}
+
+impl PluginPolicy {
+    /// Refuse a plugin under `root`, and refuse a world-writable one.
+    pub fn confined_to_outside(root: impl Into<PathBuf>) -> Self;
+    /// Check only that the plugin exists and can run. Name it at the call site.
+    pub fn trust_any_path() -> Self;
+}
+
+impl PluginHost {
+    /// There is no constructor without a policy. See decision D-013.
+    pub fn new(policy: PluginPolicy) -> Self;
+}
+```
+
+**The rule that matters.** A plugin must not live inside the session root. Otherwise a
+repository hands executable code to the agent that reads it: a checked-in script
+becomes a tool as soon as somebody points rho at that repository. The model can also
+write such a script itself, with `write` or `bash`, so a later launch would run code
+the model authored.
+
+The check resolves the path before it compares, so `..` and a symlink cannot dodge the
+root test.
+
+`PluginHost` has no `Default`. A default would have to pick a policy, and the only
+context-free choice is the permissive one. Decision D-013 removed a constructor that
+hid exactly that kind of choice.
+
+**When the CLI gains plugin support, it must pass
+`PluginPolicy::confined_to_outside(session_root)`.** `trust_any_path` exists for a
+caller that already controls the path, and for tests.
+
 ## 6. Test cases
+
+Launch policy, each from the audit finding:
+- `launch_refuses_a_plugin_inside_the_session_root`
+- `launch_refuses_a_path_that_escapes_the_root_with_dot_dot`
+- `launch_refuses_a_missing_plugin_with_a_clear_message`
+- `launch_refuses_a_directory`
+- `launch_refuses_a_non_executable_file`
+- `launch_refuses_a_world_writable_plugin`
+- `launch_allows_a_plugin_outside_the_root` — the policy must not block ordinary use.
 
 Hooks, in `crates/rho-core/tests/`:
 - `hook_chain_runs_in_registration_order` — two hooks record their order; the

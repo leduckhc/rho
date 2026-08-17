@@ -432,3 +432,56 @@ variables, and `PATH` still works.
 `bash` has no path confinement, which is now documented as intended. And
 `PluginHost::launch` does no path validation, so a user who configures a plugin from
 a writable directory trusts that directory. Both need a design decision, not a patch.
+
+## D-020 — The plugin host states a trust policy, and refuses a plugin in the session root
+
+A security audit reported that `PluginHost::launch` did no path validation. The
+controller had recorded it as open. This closes it.
+
+**The risk is concrete.** If a plugin may live inside the session root, then a
+repository hands executable code to the agent that reads it. A checked-in script
+becomes a tool as soon as somebody points rho at that repository. Worse, the model can
+write such a script itself, with `write` or `bash`, so a later launch runs code the
+model authored.
+
+**Decision.** `PluginHost::new` takes a `PluginPolicy`. The policy refuses:
+
+- a path that does not resolve, is not a file, or is not executable;
+- a plugin under `untrusted_root`, which a caller sets to the session root;
+- a world-writable plugin, since another local user could replace the file first.
+
+The check resolves the path before comparing, so `..` and a symlink cannot dodge the
+root test.
+
+**No `Default`, and no policy-free constructor.** A default would have to choose a
+policy, and the only context-free choice is the permissive one. That is the shape
+decision D-013 removed. `PluginPolicy::trust_any_path` exists for a caller that already
+controls the path, and it is named so the call site admits what it does.
+
+**Sequencing note.** The CLI does not wire plugins yet, so no production caller had to
+change. The policy therefore lands before the caller exists, which is the right order.
+`SPEC-04` section 5a records that the CLI must pass
+`PluginPolicy::confined_to_outside(session_root)` when it does wire them.
+
+**Verification.** Six tests cover the refusals and one covers ordinary use. The
+controller disabled the policy check and confirmed all six fail, then restored it.
+
+## D-021 — `bash` path confinement stays out, and the reason is written down
+
+The same audit listed a second open item: `bash` has no path confinement, because `cd`
+and an absolute path both leave the session root.
+
+**Decision. This stays as it is, and it is now documented rather than open.**
+
+Confining a shell command is not a path check. It needs a container, a namespace, or a
+`chroot`, because a shell can reach any path the user can reach, and it can do so
+through a hundred routes. A partial check would be worse than none, since it would read
+as a boundary while a single `cd ..` walked through it.
+
+So `SPEC-03` section 7 now states the truth plainly: the approval policy is the only
+real boundary for `bash`, credential scrubbing is defence in depth, and sprint 1 ships
+no sandbox. `--read-only` denies `bash` outright, and that is the supported way to point
+rho at a repository you do not trust.
+
+A real sandbox is a design task with its own spec, not a patch. It is recorded in
+`docs/non-goals.md` scope, not left as a silent gap.

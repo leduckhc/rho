@@ -12,5 +12,5 @@ mod process;
 mod proxy;
 
 pub use cache::{PluginCache, PluginToolSpec};
-pub use host::{PluginError, PluginHost};
+pub use host::{PluginError, PluginHost, PluginPolicy};
 pub use process::PluginProcess;

@@ -1,6 +1,7 @@
 //! The plugin host. It launches plugins, advertises their tools, and shuts them
 //! down cleanly.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +26,116 @@ pub enum PluginError {
     Protocol(String),
     #[error("the plugin call was canceled.")]
     Canceled,
+    #[error(
+        "refused to launch the plugin at {path}: {reason}. \
+         Move the plugin outside the session root, or set an explicit policy."
+    )]
+    Refused { path: String, reason: String },
+}
+
+/// What the host will agree to launch.
+///
+/// A plugin is a program the host executes, so the decision to run one is a trust
+/// decision. State it once, at construction, rather than at each call. Decision D-011
+/// records why a security-relevant value belongs in a constructor.
+#[derive(Clone, Debug, Default)]
+pub struct PluginPolicy {
+    /// Refuse a plugin that lives under this directory.
+    ///
+    /// Set this to the session root. A repository must not be able to hand executable
+    /// code to the agent that is reading it. Otherwise a checked-in script becomes a
+    /// tool as soon as somebody points rho at the repository, and the model can write
+    /// such a script itself with `write` or `bash`.
+    pub untrusted_root: Option<PathBuf>,
+    /// Refuse a plugin that any user can write.
+    ///
+    /// A world-writable program is a classic escalation path: another local user
+    /// replaces the file, and the host runs their code.
+    pub refuse_world_writable: bool,
+}
+
+impl PluginPolicy {
+    /// A policy that refuses a plugin under `root`, and refuses a world-writable one.
+    pub fn confined_to_outside(root: impl Into<PathBuf>) -> Self {
+        Self {
+            untrusted_root: Some(root.into()),
+            refuse_world_writable: true,
+        }
+    }
+
+    /// A policy that checks only that the plugin exists and can run.
+    ///
+    /// Name it out loud at the call site. It trusts every path, so use it only where
+    /// the caller already controls the path, and in a test.
+    pub fn trust_any_path() -> Self {
+        Self {
+            untrusted_root: None,
+            refuse_world_writable: false,
+        }
+    }
+}
+
+impl PluginPolicy {
+    /// Decide whether the host may launch `command`.
+    ///
+    /// The checks run in order of cost. Existence first, then the trust rules.
+    pub fn check(&self, command: &str) -> Result<(), PluginError> {
+        let path = Path::new(command);
+
+        // Resolve the path, so `..` and a symlink cannot dodge the root check. A path
+        // that does not resolve cannot be launched anyway.
+        let resolved = std::fs::canonicalize(path).map_err(|error| PluginError::Refused {
+            path: command.to_string(),
+            reason: format!("cannot resolve the path: {error}"),
+        })?;
+
+        let metadata = std::fs::metadata(&resolved).map_err(|error| PluginError::Refused {
+            path: command.to_string(),
+            reason: format!("cannot read the file: {error}"),
+        })?;
+        if !metadata.is_file() {
+            return Err(PluginError::Refused {
+                path: command.to_string(),
+                reason: "the path is not a file".to_string(),
+            });
+        }
+
+        if let Some(root) = &self.untrusted_root {
+            // Resolve the root too, or a symlinked root would never match.
+            let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+            if resolved.starts_with(&root) {
+                return Err(PluginError::Refused {
+                    path: command.to_string(),
+                    reason: format!(
+                        "the plugin lives under the session root {}. A repository must \
+                         not supply executable code to an agent that reads it",
+                        root.display()
+                    ),
+                });
+            }
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = metadata.permissions().mode();
+            if mode & 0o111 == 0 {
+                return Err(PluginError::Refused {
+                    path: command.to_string(),
+                    reason: "the file is not executable".to_string(),
+                });
+            }
+            if self.refuse_world_writable && mode & 0o002 != 0 {
+                return Err(PluginError::Refused {
+                    path: command.to_string(),
+                    reason: "any user can write this file, so another user could \
+                             replace it before it runs"
+                        .to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The plugin host. It owns every launched plugin and the cached tool specs.
@@ -32,15 +143,21 @@ pub struct PluginHost {
     plugins: Vec<Arc<PluginProcess>>,
     cached: Vec<PluginCache>,
     call_timeout: Duration,
+    policy: PluginPolicy,
 }
 
 impl PluginHost {
-    /// Build an empty host with the default per-call timeout.
-    pub fn new() -> Self {
+    /// Build a host with an explicit trust policy.
+    ///
+    /// There is no `new()` without a policy on purpose. Decision D-013 deleted a
+    /// convenience constructor that hid a security choice, and this is the same
+    /// shape: a host that will run any program must say so.
+    pub fn new(policy: PluginPolicy) -> Self {
         Self {
             plugins: Vec::new(),
             cached: Vec::new(),
             call_timeout: DEFAULT_CALL_TIMEOUT,
+            policy,
         }
     }
 
@@ -63,6 +180,7 @@ impl PluginHost {
         command: &str,
         args: &[String],
     ) -> Result<Arc<PluginProcess>, PluginError> {
+        self.policy.check(command)?;
         let process = PluginProcess::launch(command, args, self.call_timeout).await?;
         self.plugins.push(Arc::clone(&process));
         Ok(process)
@@ -98,8 +216,8 @@ impl PluginHost {
     }
 }
 
-impl Default for PluginHost {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// There is deliberately no `Default` impl for `PluginHost`.
+//
+// A default would have to pick a trust policy, and the only policy that works without
+// context is the permissive one. Decision D-013 deleted a constructor that hid exactly
+// that kind of choice. A caller states its policy.

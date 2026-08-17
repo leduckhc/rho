@@ -11,7 +11,8 @@ use rho_plugin::{PluginCache, PluginHost, PluginToolSpec};
 const STUB: &str = env!("CARGO_BIN_EXE_rho_stub_plugin");
 
 fn host_with_short_timeout() -> PluginHost {
-    PluginHost::new().with_call_timeout(Duration::from_millis(500))
+    PluginHost::new(rho_plugin::PluginPolicy::trust_any_path())
+        .with_call_timeout(Duration::from_millis(500))
 }
 
 fn ctx(root: &std::path::Path) -> (ToolContext, tokio::sync::mpsc::Receiver<String>) {
@@ -28,7 +29,7 @@ fn ctx(root: &std::path::Path) -> (ToolContext, tokio::sync::mpsc::Receiver<Stri
 
 #[tokio::test]
 async fn plugin_host_launches_and_handshakes() {
-    let mut host = PluginHost::new();
+    let mut host = PluginHost::new(rho_plugin::PluginPolicy::trust_any_path());
     let process = host.launch(STUB, &["normal".to_string()]).await.unwrap();
     assert_eq!(process.name(), "stub");
     assert!(process.is_available());
@@ -37,7 +38,7 @@ async fn plugin_host_launches_and_handshakes() {
 
 #[tokio::test]
 async fn plugin_host_lists_tools_from_handshake() {
-    let mut host = PluginHost::new();
+    let mut host = PluginHost::new(rho_plugin::PluginPolicy::trust_any_path());
     host.launch(STUB, &["normal".to_string()]).await.unwrap();
     let tools = host.tools();
     assert!(tools.iter().any(|t| t.name() == "echo"));
@@ -47,7 +48,7 @@ async fn plugin_host_lists_tools_from_handshake() {
 #[tokio::test]
 async fn plugin_host_calls_tool_and_gets_result() {
     let dir = tempfile::tempdir().unwrap();
-    let mut host = PluginHost::new();
+    let mut host = PluginHost::new(rho_plugin::PluginPolicy::trust_any_path());
     host.launch(STUB, &["normal".to_string()]).await.unwrap();
     let tool = host
         .tools()
@@ -75,7 +76,7 @@ async fn plugin_host_calls_tool_and_gets_result() {
 #[tokio::test]
 async fn plugin_host_forwards_tool_updates() {
     let dir = tempfile::tempdir().unwrap();
-    let mut host = PluginHost::new();
+    let mut host = PluginHost::new(rho_plugin::PluginPolicy::trust_any_path());
     host.launch(STUB, &["normal".to_string()]).await.unwrap();
     let tool = host
         .tools()
@@ -134,7 +135,7 @@ async fn plugin_host_crash_returns_error_not_panic() {
 async fn plugin_host_malformed_line_is_dropped() {
     // The garbage stub writes a non-JSON line before the handshake response. The
     // host must drop it and still complete the handshake.
-    let mut host = PluginHost::new();
+    let mut host = PluginHost::new(rho_plugin::PluginPolicy::trust_any_path());
     let process = host.launch(STUB, &["garbage".to_string()]).await.unwrap();
     assert_eq!(process.name(), "stub");
     host.shutdown().await;
@@ -162,7 +163,7 @@ async fn plugin_host_call_times_out() {
 
 #[tokio::test]
 async fn plugin_host_cancel_stops_call() {
-    let mut host = PluginHost::new();
+    let mut host = PluginHost::new(rho_plugin::PluginPolicy::trust_any_path());
     let process = host.launch(STUB, &["hang".to_string()]).await.unwrap();
     let cancel = CancelToken::new();
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
@@ -227,7 +228,7 @@ async fn plugin_schema_cache_roundtrips() {
 
 #[tokio::test]
 async fn plugin_tool_advertised_from_cache_before_connect() {
-    let mut host = PluginHost::new();
+    let mut host = PluginHost::new(rho_plugin::PluginPolicy::trust_any_path());
     host.load_cache(PluginCache {
         version: 1,
         plugin: "my-plugin".to_string(),
@@ -245,7 +246,7 @@ async fn plugin_tool_advertised_from_cache_before_connect() {
 
 #[tokio::test]
 async fn plugin_host_clean_shutdown_leaves_no_orphan() {
-    let mut host = PluginHost::new();
+    let mut host = PluginHost::new(rho_plugin::PluginPolicy::trust_any_path());
     let process = host.launch(STUB, &["normal".to_string()]).await.unwrap();
     let pid = std::sync::Arc::strong_count(&process); // keep a ref for the check
     let _ = pid;
@@ -268,7 +269,7 @@ async fn plugin_declared_read_kind_does_not_bypass_read_only_policy() {
     // claim survives for display only.
     use rho_core::{ApprovalDecision, ApprovalPolicy, ReadOnlyPolicy, ToolKind};
 
-    let mut host = PluginHost::new();
+    let mut host = PluginHost::new(rho_plugin::PluginPolicy::trust_any_path());
     host.launch(STUB, &["normal".to_string()]).await.unwrap();
     let tools = host.tools();
     assert!(!tools.is_empty(), "the stub plugin must advertise a tool");
@@ -290,4 +291,135 @@ async fn plugin_declared_read_kind_does_not_bypass_read_only_policy() {
             tool.name()
         );
     }
+}
+
+// --- Launch policy, from a security audit ---------------------------------
+
+#[tokio::test]
+async fn launch_refuses_a_plugin_inside_the_session_root() {
+    // A security audit found that `launch` did no path validation.
+    //
+    // The risk is concrete. If a plugin may live inside the session root, then a
+    // repository can hand executable code to the agent that reads it. A checked-in
+    // script becomes a tool as soon as somebody points rho at the repository. The
+    // model can also write such a script itself, with `write` or `bash`, and a later
+    // launch would run it.
+    let root = tempfile::tempdir().unwrap();
+    let plugin = root.path().join("evil.sh");
+    std::fs::write(&plugin, "#!/bin/sh\necho pwned\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut host = PluginHost::new(rho_plugin::PluginPolicy::confined_to_outside(root.path()));
+    let error = host.launch(plugin.to_str().unwrap(), &[]).await;
+    let error = match error {
+        Ok(_) => panic!("a plugin under the session root must be refused"),
+        Err(error) => error,
+    };
+    let text = error.to_string();
+    assert!(
+        text.contains("session root"),
+        "the message must say why: {text}"
+    );
+}
+
+#[tokio::test]
+async fn launch_refuses_a_path_that_escapes_the_root_with_dot_dot() {
+    // The check resolves the path first, so `..` cannot dodge it.
+    let root = tempfile::tempdir().unwrap();
+    let nested = root.path().join("sub");
+    std::fs::create_dir(&nested).unwrap();
+    let plugin = root.path().join("evil.sh");
+    std::fs::write(&plugin, "#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let sneaky = nested.join("..").join("evil.sh");
+
+    let mut host = PluginHost::new(rho_plugin::PluginPolicy::confined_to_outside(root.path()));
+    let error = host.launch(sneaky.to_str().unwrap(), &[]).await;
+    let error = match error {
+        Ok(_) => panic!("a resolved path under the root must be refused"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("session root"));
+}
+
+#[tokio::test]
+async fn launch_refuses_a_missing_plugin_with_a_clear_message() {
+    let mut host = PluginHost::new(rho_plugin::PluginPolicy::trust_any_path());
+    let error = host.launch("/definitely/not/here/plugin", &[]).await;
+    let error = match error {
+        Ok(_) => panic!("a missing plugin must be refused"),
+        Err(error) => error,
+    };
+    let text = error.to_string();
+    assert!(text.contains("cannot resolve"), "got {text}");
+}
+
+#[tokio::test]
+async fn launch_refuses_a_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = PluginHost::new(rho_plugin::PluginPolicy::trust_any_path());
+    let error = host.launch(dir.path().to_str().unwrap(), &[]).await;
+    let error = match error {
+        Ok(_) => panic!("a directory is not a plugin"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("not a file"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn launch_refuses_a_non_executable_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugin = dir.path().join("plugin.sh");
+    std::fs::write(&plugin, "#!/bin/sh\n").unwrap();
+    let mut host = PluginHost::new(rho_plugin::PluginPolicy::trust_any_path());
+    let error = host.launch(plugin.to_str().unwrap(), &[]).await;
+    let error = match error {
+        Ok(_) => panic!("a file with no execute bit must be refused"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("not executable"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn launch_refuses_a_world_writable_plugin() {
+    // A world-writable program is a classic escalation path. Another local user
+    // replaces the file, and the host runs their code.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let plugin = dir.path().join("plugin.sh");
+    std::fs::write(&plugin, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+    let mut host = PluginHost::new(rho_plugin::PluginPolicy {
+        untrusted_root: None,
+        refuse_world_writable: true,
+    });
+    let error = host.launch(plugin.to_str().unwrap(), &[]).await;
+    let error = match error {
+        Ok(_) => panic!("a world-writable plugin must be refused"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("any user can write"));
+}
+
+#[tokio::test]
+async fn launch_allows_a_plugin_outside_the_root() {
+    // The policy must not block ordinary use. The stub binary lives in the build
+    // directory, which is outside a repository's session root in this test.
+    let root = tempfile::tempdir().unwrap();
+    let mut host = PluginHost::new(rho_plugin::PluginPolicy::confined_to_outside(root.path()));
+    host.launch(STUB, &["normal".to_string()])
+        .await
+        .expect("a plugin outside the root must launch");
+    assert!(!host.tools().is_empty());
 }
