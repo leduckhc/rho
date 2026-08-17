@@ -302,7 +302,7 @@ impl Driver {
                         }
                         break AgentStopReason::Canceled;
                     }
-                    DispatchOutcome::Failed | DispatchOutcome::Closed => return,
+                    DispatchOutcome::Closed => return,
                 },
             }
         };
@@ -395,7 +395,25 @@ impl Driver {
         }
 
         match stop_reason {
-            Some(StopReason::ToolUse) => TurnOutcome::ToolCalls(tool_calls),
+            Some(StopReason::ToolUse) => {
+                // Close the turn before the tools run. Every other exit path emits
+                // `TurnEnd`, and this one used to skip it, so a tool-calling turn left
+                // its `TurnStart` unpaired forever.
+                //
+                // A frontend pairs the two events to track state. `rho-tui` decides
+                // whether the agent is running, and `rho-acp` maps the pair onto a
+                // session update. An unpaired start leaks that state.
+                if self
+                    .emit(AgentEvent::TurnEnd {
+                        stop_reason: StopReason::ToolUse,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return TurnOutcome::Closed;
+                }
+                TurnOutcome::ToolCalls(tool_calls)
+            }
             Some(reason) => {
                 if self
                     .emit(AgentEvent::TurnEnd {
@@ -560,8 +578,18 @@ impl Driver {
         let mut output = match result {
             Ok(output) => output,
             Err(error) => {
-                let _ = self.tx.send(Err(Error::from(error))).await;
-                return DispatchOutcome::Failed;
+                // A tool failure is a result, not the end of the run.
+                //
+                // A live smoke test found the opposite behaviour. A missing file
+                // aborted the whole session, and the model never learned why. That
+                // makes the harness unusable, because almost every real session has a
+                // tool error: a file is missing, a grep matches nothing, a command
+                // exits non-zero. The model must see the failure so it can try
+                // something else.
+                //
+                // Only a transport or provider fault ends a run. A tool error becomes
+                // an error tool result, exactly like a blocked call or an unknown tool.
+                error_output(error.to_string())
             }
         };
 
@@ -621,13 +649,15 @@ impl Driver {
 }
 
 /// The result of running one or more tool calls.
+///
+/// There is deliberately no `Failed` variant. A tool failure is a result that goes
+/// back to the model, not an end to the run. Only a transport or provider fault
+/// ends a run. See the tool-error branch in `dispatch_one`.
 enum DispatchOutcome {
     /// The loop may run the next turn.
     Continue,
     /// The caller cancelled the run.
     Canceled,
-    /// A tool failed. The error is already sent.
-    Failed,
     /// The caller dropped the event stream.
     Closed,
 }

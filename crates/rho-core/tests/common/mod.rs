@@ -312,3 +312,42 @@ pub fn test_config() -> rho_core::SessionConfig {
         std::sync::Arc::new(rho_core::AllowAllPolicy),
     )
 }
+
+/// A tool that always returns `Err`. Used to prove that a tool failure returns to
+/// the model as an error result, rather than killing the run.
+pub struct FailingTool {
+    name: String,
+    error_text: String,
+}
+
+impl FailingTool {
+    pub fn new(name: impl Into<String>, error_text: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            error_text: error_text.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for FailingTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        "A tool that always fails."
+    }
+    fn kind(&self) -> ToolKind {
+        ToolKind::Read
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        Err(ToolError::Io(self.error_text.clone()))
+    }
+}

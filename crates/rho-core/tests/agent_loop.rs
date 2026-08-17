@@ -257,3 +257,136 @@ async fn agent_events_drop_aborts_driver_task() {
         "dropping AgentEvents drops the provider stream"
     );
 }
+
+#[tokio::test]
+async fn agent_loop_tool_error_returns_to_the_model_and_the_run_continues() {
+    // A live smoke test found this bug. A tool that returned `Err` aborted the whole
+    // run, and the model never saw the failure.
+    //
+    // That makes the harness unusable in practice. Almost every real session has a
+    // tool error: a file is missing, a grep matches nothing, a command exits non-zero.
+    // A coding agent must report the failure to the model, so the model can try
+    // something else. Only a transport or provider fault ends a run.
+    let tool = common::FailingTool::new("read", "no such file");
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(tool));
+
+    let provider: Arc<dyn Provider> = Arc::new(common::ScriptedProvider::new(vec![
+        common::tool_call_turn(
+            "call_1",
+            "read",
+            serde_json::json!({ "path": "missing.txt" }),
+        ),
+        common::text_turn("the file was missing, so I stopped"),
+    ]));
+    let session = session_with(provider, registry);
+    let events = collect(session.prompt(
+        vec![ContentBlock::Text {
+            text: "read missing.txt".to_string(),
+        }],
+        CancelToken::new(),
+    ))
+    .await;
+
+    // The run must reach a normal end, not an error.
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::AgentEnd {
+                stop_reason: AgentStopReason::EndTurn
+            }
+        )),
+        "the run must end normally, got {events:?}"
+    );
+
+    // The tool result must be marked as an error and must carry the reason, so the
+    // model can act on it.
+    let messages = session.messages().await;
+    let tool_results: Vec<_> = messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => Some((content, is_error)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tool_results.len(), 1, "one tool result must be recorded");
+    let (content, is_error) = tool_results[0];
+    assert!(*is_error, "a failed tool must produce an error result");
+    let text = format!("{content:?}");
+    assert!(
+        text.contains("no such file"),
+        "the result must carry the reason, got {text}"
+    );
+}
+
+#[tokio::test]
+async fn agent_loop_pairs_every_turn_start_with_a_turn_end() {
+    // A live smoke test found this bug. A turn that ended in a tool call returned
+    // without emitting `TurnEnd`, so `TurnStart` events were unpaired.
+    //
+    // Every other exit path emitted `TurnEnd`, which is why the gap survived. The
+    // existing tool test asserted `ToolStart`, `ToolEnd`, and a second `TurnStart`,
+    // and never checked that the first turn closed.
+    //
+    // A frontend pairs these two events to track state. `rho-tui` uses the pair to
+    // decide whether the agent is running, and `rho-acp` maps it onto a session
+    // update. An unpaired start leaks that state forever.
+    //
+    // This test states the invariant for the whole run, so any future exit path is
+    // covered too.
+    let tool = common::RecordingTool::new("probe");
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(tool));
+
+    let provider: Arc<dyn Provider> = Arc::new(common::ScriptedProvider::new(vec![
+        common::tool_call_turn("call_1", "probe", serde_json::json!({})),
+        common::tool_call_turn("call_2", "probe", serde_json::json!({})),
+        common::text_turn("done"),
+    ]));
+    let session = session_with(provider, registry);
+    let events = collect(session.prompt(
+        vec![ContentBlock::Text {
+            text: "use the tool twice".to_string(),
+        }],
+        CancelToken::new(),
+    ))
+    .await;
+
+    let starts = events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::TurnStart))
+        .count();
+    let ends = events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::TurnEnd { .. }))
+        .count();
+    assert_eq!(
+        starts, 3,
+        "three turns must start: two tool turns and the final answer"
+    );
+    assert_eq!(
+        ends, starts,
+        "every TurnStart needs a TurnEnd, got {starts} starts and {ends} ends"
+    );
+
+    // The pairing must also be ordered. A start always precedes its end, and no
+    // second start arrives before the first end.
+    let mut open = 0i32;
+    for event in &events {
+        match event {
+            AgentEvent::TurnStart => {
+                open += 1;
+                assert_eq!(open, 1, "a turn started while another was still open");
+            }
+            AgentEvent::TurnEnd { .. } => {
+                open -= 1;
+                assert_eq!(open, 0, "a turn ended without a matching start");
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(open, 0, "a turn was left open at the end of the run");
+}

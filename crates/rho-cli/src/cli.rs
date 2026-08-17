@@ -144,12 +144,29 @@ async fn run_headless(cli: &Cli, prompt: String) -> i32 {
     let mut events = session.prompt(vec![ContentBlock::Text { text: prompt }], cancel);
     let mut stdout = std::io::stdout();
     let mut failed = false;
+    // A run may span several turns, because a turn can call tools. Each turn is a
+    // separate block of prose, so separate them. Without this, the last word of one
+    // turn runs into the first word of the next.
+    let mut wrote_text = false;
+    let mut turn_pending = false;
 
     while let Some(item) = events.next().await {
         match item {
             Ok(AgentEvent::Stream(StreamEvent::TextDelta { delta, .. })) => {
+                if turn_pending {
+                    let _ = writeln!(stdout);
+                    turn_pending = false;
+                }
                 let _ = write!(stdout, "{delta}");
                 let _ = stdout.flush();
+                wrote_text = true;
+            }
+            Ok(AgentEvent::TurnEnd { .. }) => {
+                // Mark a break, but write it only when more prose actually follows.
+                // So a run never ends with a stray blank line.
+                if wrote_text {
+                    turn_pending = true;
+                }
             }
             Ok(AgentEvent::AgentEnd { stop_reason }) => {
                 tracing::info!(?stop_reason, "run ended");
