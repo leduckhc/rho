@@ -49,3 +49,6 @@ minimal = ["openrouter"]
 [[bin]]
 name = "rho"
 path = "src/main.rs"
+
+[dev-dependencies]
+futures = "0.3.34"

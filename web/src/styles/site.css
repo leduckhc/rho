@@ -168,6 +168,7 @@ td.n, th.n {
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 tr.rho-row td:first-child { border-left: 3px solid var(--accent); padding-left: 13px; }
+.note { color: var(--accent); font-size: 0.8em; vertical-align: super; }
 .tbm { color: var(--muted); font-style: italic; font-family: var(--font-sans); }
 .attribution { color: var(--faint); font-size: var(--fs-caption); margin: 8px 0 0; max-width: 68ch; }
 .cost .tablewrap table { min-width: 540px; max-width: 760px; }

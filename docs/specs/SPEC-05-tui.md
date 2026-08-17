@@ -217,6 +217,45 @@ Input tests:
 - `key_after_first_ctrl_c_disarms_exit` — a normal key after one Ctrl-C clears the
   exit arm.
 
+### Tests added in stage S8
+
+The stage added these tests. Each is in `crates/rho-tui/tests/` unless noted.
+
+Reducer (`reducer.rs`):
+- `reducer_tool_update_sets_preview` — a `ToolUpdate` sets the tool row preview to
+  the latest line.
+
+Render (`render.rs`):
+- `render_sanitises_a_tool_preview_with_an_escape_sequence` — a real escape
+  sequence in tool output never reaches the frame buffer, and the visible letters
+  survive. Tool output is untrusted.
+
+Input (`input.rs`):
+- `input_backspace_removes_last_char` — Backspace removes the last input char.
+- `input_enter_submits_and_clears` — Enter returns `Submit`, pushes a `User` row,
+  and clears the input.
+- `ctrl_c_once_while_idle_does_not_exit` — one Ctrl-C while idle returns `None`.
+
+Sanitiser (`sanitize.rs`), for the untrusted-output rule:
+- `sanitize_strips_a_real_escape_sequence` — an ANSI escape sequence is removed.
+- `sanitize_replaces_control_characters` — the bell and null bytes are removed.
+- `sanitize_keeps_normal_and_wide_text` — normal and wide text survive.
+- `fit_to_width_keeps_a_short_line` — a short line is unchanged.
+- `fit_to_width_truncates_a_long_line_at_the_boundary` — a long line is truncated
+  and marked. rho truncates a long line; it does not wrap it.
+- `fit_to_width_counts_wide_glyphs` — a wide glyph counts as two columns.
+- `fit_to_width_zero_is_empty` — a zero width yields an empty line.
+
+The CLI (`crates/rho-cli/`) tests, in the module unit tests:
+- `unknown_provider_names_the_choices`, `resolve_prefers_the_flag_over_the_env`,
+  `resolve_falls_back_to_the_env`, `resolve_uses_the_build_default_when_nothing_is_set`,
+  `missing_openrouter_key_names_the_variable`,
+  `a_present_openrouter_key_builds_a_provider` — provider selection and the clear
+  missing-key error that names the environment variable.
+- `cli_definition_is_valid`, `build_config_fails_without_a_model`,
+  `build_config_uses_an_explicit_root`, `run_subcommand_parses` — argument parsing
+  and the explicit `SessionConfig` construction. See decision D-013.
+
 ## 8. Out of scope for sprint 1
 
 - Themes (F-83) and keybinding config (F-84).

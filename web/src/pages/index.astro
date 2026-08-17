@@ -132,8 +132,13 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
         <p>
           At 50 parallel sessions, a 100&nbsp;MB harness needs 5&nbsp;GB of
           RAM. <strong>rho treats memory and start time as product
-          features.</strong> The rho row stays empty until our benchmarks
-          produce real values.
+          features.</strong> So we measure them, and we publish the command that
+          produced every number.
+        </p>
+        <p>
+          <strong>101 idle rho sessions fit in 10.75&nbsp;MiB.</strong> One more
+          session costs about 25&nbsp;KB. A host embeds the library and holds many
+          sessions in one process, so it pays for a runtime and a TLS stack once.
         </p>
         <div class="tablewrap">
           <table>
@@ -147,8 +152,8 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
             <tbody>
               <tr class="rho-row">
                 <td>rho</td>
-                <td class="n"><span class="tbm">to be measured</span></td>
-                <td class="n"><span class="tbm">to be measured</span></td>
+                <td class="n">8.3 MiB<span class="note">&#8288;*</span></td>
+                <td class="n">~2.2 ms<span class="note">&#8288;&#8224;</span></td>
               </tr>
               <tr><td>jcode (Rust)</td><td class="n">~10.4 MB</td><td class="n">~49 ms</td></tr>
               <tr><td>Codex CLI</td><td class="n">~21.6 MB</td><td class="n">~906 ms</td></tr>
@@ -160,10 +165,25 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
         </div>
         <p class="scrollhint">Scroll the table sideways to see every column.</p>
         <p class="attribution">
+          <strong>* This is not the same measurement, and we will not pretend it
+          is.</strong> The other rows are extra memory per additional session
+          <em>process</em>, because those harnesses run one process per session.
+          rho&rsquo;s 8.3&nbsp;MiB is the <em>total</em> for a whole process that
+          holds one session. We show the comparison that favours them. On rho&rsquo;s
+          own ground, one more session costs 0.024&nbsp;MiB.
+        </p>
+        <p class="attribution">
+          &#8224; Time to first frame, rendered into a headless test backend, median
+          of ten runs. It excludes raw-mode setup on a real terminal. A real
+          pseudo-tty number is not measured yet, and the table says so rather than
+          guessing.
+        </p>
+        <p class="attribution">
           Other harnesses: <a href="https://jcode.sh">jcode.sh</a> published
-          benchmarks, sampled August 2026. rho values land in
-          <a href="https://github.com/leduckhc/rho/blob/main/docs/benchmarks.md">docs/benchmarks.md</a>
-          with the command that produced them.
+          benchmarks, sampled August 2026. Every rho number, with the exact command
+          that produced it, is in
+          <a href="https://github.com/leduckhc/rho/blob/main/docs/benchmarks.md">docs/benchmarks.md</a>.
+          Measured on macOS with Apple Silicon.
         </p>
       </section>
 

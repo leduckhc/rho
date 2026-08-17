@@ -16,8 +16,8 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use rho_core::{
-    AgentEvent, AllowAllPolicy, CancelToken, ContentBlock, Context, Session, SessionConfig,
-    StreamEvent,
+    AgentEvent, AllowAllPolicy, ApprovalPolicy, CancelToken, ContentBlock, Context, ReadOnlyPolicy,
+    Session, SessionConfig, StreamEvent,
 };
 
 use crate::provider::{self, MODEL_ENV, PROVIDER_ENV};
@@ -41,6 +41,11 @@ pub struct Cli {
     /// current directory.
     #[arg(long, global = true)]
     pub root: Option<PathBuf>,
+
+    /// Deny every tool that can change state. rho then reads, searches, and
+    /// thinks, but it does not write, edit, or run a command.
+    #[arg(long, global = true)]
+    pub read_only: bool,
 
     /// The log filter, for example "info" or "rho_core=debug". Overrides RHO_LOG.
     #[arg(long, global = true, env = "RHO_LOG")]
@@ -76,10 +81,22 @@ fn build_config(cli: &Cli) -> anyhow::Result<SessionConfig> {
             .map_err(|error| anyhow::anyhow!("cannot read the current directory: {error}"))?,
     };
 
-    // State the approval policy out loud. The CLI approves every tool call, so a
-    // headless run does not stop for a prompt. A future release adds an
-    // interactive approval gate. See decision D-013.
-    let approval = Arc::new(AllowAllPolicy);
+    // State the approval policy out loud. See decision D-013, which deleted a
+    // constructor that hid this choice.
+    //
+    // The default approves every tool call, so a headless run never stops for a
+    // prompt. `--read-only` swaps in a policy that denies every mutating tool. That
+    // policy is fail-closed: it allows only a kind it names, so a tool with an
+    // undeclared kind is denied. See decision D-012, and D-017 for plugin tools,
+    // which always count as mutating.
+    //
+    // A future release adds an interactive approval gate for the TUI. Until then
+    // `--read-only` is the way to run rho against a repository you do not trust.
+    let approval: Arc<dyn ApprovalPolicy> = if cli.read_only {
+        Arc::new(ReadOnlyPolicy)
+    } else {
+        Arc::new(AllowAllPolicy)
+    };
 
     Ok(SessionConfig::new(model, root, approval))
 }
@@ -197,13 +214,9 @@ mod tests {
 
     #[test]
     fn build_config_fails_without_a_model() {
-        let cli = Cli {
-            provider: None,
-            model: None,
-            root: None,
-            log: None,
-            command: None,
-        };
+        // Parse real argv instead of building the struct by hand. A hand-built
+        // literal breaks whenever a flag is added, and it skips the parser.
+        let cli = Cli::try_parse_from(["rho"]).unwrap();
         let error = match build_config(&cli) {
             Ok(_) => panic!("expected an error"),
             Err(error) => error,
@@ -216,16 +229,65 @@ mod tests {
 
     #[test]
     fn build_config_uses_an_explicit_root() {
-        let cli = Cli {
-            provider: None,
-            model: Some("openai/gpt-4o".to_string()),
-            root: Some(PathBuf::from("/tmp")),
-            log: None,
-            command: None,
-        };
+        let cli =
+            Cli::try_parse_from(["rho", "--model", "openai/gpt-4o", "--root", "/tmp"]).unwrap();
         let config = build_config(&cli).unwrap();
         assert_eq!(config.session_root, PathBuf::from("/tmp"));
         assert_eq!(config.model, "openai/gpt-4o");
+    }
+
+    #[test]
+    fn build_config_defaults_to_approving_every_tool() {
+        // The default is permissive on purpose, so a headless run never stops for a
+        // prompt. The choice is stated in `build_config`, not hidden in a
+        // constructor. See decision D-013.
+        let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
+        assert!(!cli.read_only);
+        let config = build_config(&cli).unwrap();
+        let decision = futures::executor::block_on(config.approval.approve(
+            "write",
+            rho_core::ToolKind::Edit,
+            &serde_json::json!({}),
+        ));
+        assert_eq!(decision, rho_core::ApprovalDecision::Allow);
+    }
+
+    #[test]
+    fn read_only_flag_denies_a_mutating_tool() {
+        // `--read-only` is the way to run rho against a repository you do not trust.
+        let cli = Cli::try_parse_from(["rho", "--model", "m", "--read-only"]).unwrap();
+        assert!(cli.read_only);
+        let config = build_config(&cli).unwrap();
+        for kind in [
+            rho_core::ToolKind::Edit,
+            rho_core::ToolKind::Delete,
+            rho_core::ToolKind::Execute,
+            // An undeclared kind counts as mutating, so it is denied too. See D-012.
+            rho_core::ToolKind::Other,
+        ] {
+            let decision = futures::executor::block_on(config.approval.approve(
+                "any",
+                kind,
+                &serde_json::json!({}),
+            ));
+            assert_eq!(
+                decision,
+                rho_core::ApprovalDecision::Deny,
+                "{kind:?} must be denied under --read-only"
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_flag_still_allows_reading() {
+        let cli = Cli::try_parse_from(["rho", "--model", "m", "--read-only"]).unwrap();
+        let config = build_config(&cli).unwrap();
+        let decision = futures::executor::block_on(config.approval.approve(
+            "read",
+            rho_core::ToolKind::Read,
+            &serde_json::json!({}),
+        ));
+        assert_eq!(decision, rho_core::ApprovalDecision::Allow);
     }
 
     #[test]
