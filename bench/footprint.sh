@@ -49,7 +49,7 @@ need cargo
 need python3
 need awk
 need sort
-[ -x /usr/bin/time ] || die "required tool not found: /usr/bin/time"
+
 
 # ---------------------------------------------------------------------------
 # Detect the peak-RSS reporter and its unit.
@@ -62,14 +62,26 @@ need sort
 # ---------------------------------------------------------------------------
 RSS_MODE=""
 RSS_SOURCE=""
-if /usr/bin/time -l true 2>&1 | grep -qi "maximum resident set size"; then
+if [ -x /usr/bin/time ] && /usr/bin/time -l true 2>&1 | grep -qi "maximum resident set size"; then
   RSS_MODE="macos"
   RSS_SOURCE="macOS /usr/bin/time -l, value in bytes"
-elif /usr/bin/time -v true 2>&1 | grep -qi "Maximum resident set size"; then
+elif [ -x /usr/bin/time ] && /usr/bin/time -v true 2>&1 | grep -qi "Maximum resident set size"; then
   RSS_MODE="gnu"
   RSS_SOURCE="GNU /usr/bin/time -v, value in kilobytes, converted to bytes"
+elif python3 -c "import resource" 2>/dev/null; then
+  # The fallback that makes this script run anywhere with python3.
+  #
+  # A GitHub Ubuntu runner ships no /usr/bin/time, so the first CI run of this
+  # script failed. python3 is present on every runner and on both developer
+  # systems, so it is the portable reporter.
+  #
+  # `getrusage(RUSAGE_CHILDREN).ru_maxrss` carries the same unit trap as the two
+  # branches above. Linux reports kilobytes. macOS and the BSDs report bytes. The
+  # helper converts by platform, so every branch here yields bytes.
+  RSS_MODE="python"
+  RSS_SOURCE="python3 resource.getrusage(RUSAGE_CHILDREN), converted to bytes"
 else
-  die "no usable /usr/bin/time reporter for peak resident set size"
+  die "no usable reporter for peak resident set size: install GNU time or python3"
 fi
 
 # ---------------------------------------------------------------------------
@@ -79,6 +91,23 @@ fi
 # ---------------------------------------------------------------------------
 measure_rss_bytes() {
   local out
+  if [ "$RSS_MODE" = "python" ]; then
+    python3 - "$@" <<'PYEOF' || die "command failed under the python reporter: $*"
+import resource, subprocess, sys, os
+
+with open(os.devnull, "wb") as devnull:
+    completed = subprocess.run(sys.argv[1:], stdout=devnull, stderr=devnull)
+if completed.returncode != 0:
+    sys.exit(completed.returncode)
+
+peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+# Linux reports kilobytes. macOS and the BSDs report bytes. Convert to bytes.
+if sys.platform.startswith("linux"):
+    peak *= 1024
+print(peak)
+PYEOF
+    return
+  fi
   if [ "$RSS_MODE" = "macos" ]; then
     out=$(/usr/bin/time -l "$@" 2>&1 >/dev/null) || die "command failed under time: $*"
     # A macOS line reads: "  1245184  maximum resident set size". Unit is bytes.
