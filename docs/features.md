@@ -169,6 +169,22 @@ tiers and for the design notes behind each row here.
 | F-162 | Model request and response hooks | A hook sees the request before it is sent and the response as it arrives. So an extension can meter cost or redact a prompt. | `rho-core` | `planned` | New `Hook` trait methods. Must not break the stable prompt prefix. |
 | F-163 | Slash commands | The user types `/name` and an extension answers. | `rho-core` | `planned` | A `CommandHandler` impl. This is F-44 restated for tier 2. |
 
+## Subagents
+
+`docs/specs/SPEC-11-subagents.md` owns these rows. A subagent is another session on the same runtime, so a fan-out is cheap.
+
+| ID | Name | Outcome | Owning crate | Status | Extension point |
+|----|------|---------|--------------|--------|-----------------|
+| F-170 | Subagent spawning | The model delegates work to a child. The child runs in a fresh conversation and returns only a summary. | `rho-tools` | `sprint-2` | Register a different `Tool` under the name `spawn_agent`. |
+| F-171 | Policy composition | A child runs under `BothPolicies`, so it can only be more restrictive than its parent. Escalation is unrepresentable. | `rho-core` | `sprint-2` | No extension point. This is a security boundary. See decision D-036. |
+| F-172 | Tool-set intersection | A child's tool set is the parent's set filtered by the child's list. A name the parent lacks is dropped and reported. | `rho-core` | `sprint-2` | No extension point. This is a security boundary. |
+| F-173 | Inheritance rules | A child inherits the provider and the root, and may narrow the model and the sandbox. The root is never overridable. The sandbox may only narrow. | `rho-core` | `sprint-2` | No extension point. This is a security boundary. |
+| F-174 | Four subagent limits | A depth cap, a per-parent cap, a process-wide cap, and a child timeout bound a fan-out. Each refusal names the limit. | `rho-core` | `sprint-2` | A caller sets `SubagentLimits`. |
+| F-175 | Cycle guard | The spawn walk carries a visited set. A cycle in the parent chain is refused rather than looped. | `rho-core` | `sprint-2` | No extension point. |
+| F-176 | Salvage and retry cap | A child that dies without a report yields a failed result. A re-delegated task stops at the retry cap. | `rho-core` | `sprint-2` | A caller uses `RetryLedger`. |
+| F-177 | Agent events | The parent stream shows a child through three events: spawned, progressed, and finished. | `rho-core` | `sprint-2` | New `AgentEvent` variants. A frontend renders them. |
+| F-178 | Agent definitions | An agent is a markdown file with frontmatter. A project definition is withheld until the project is trusted. | `rho-skills` | `sprint-2` | Author a definition file. The loader is shared with skills. |
+
 ## Observability and telemetry
 
 | ID | Name | Outcome | Owning crate | Status | Extension point |

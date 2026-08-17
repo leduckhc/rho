@@ -23,6 +23,7 @@ use rho_core::{
 
 use crate::extensions;
 use crate::provider::{self, MODEL_ENV, PROVIDER_ENV};
+use crate::subagents;
 
 /// The exit code for a run that failed.
 const EXIT_FAILURE: i32 = 1;
@@ -201,8 +202,31 @@ async fn build_session(
     for tool in &extensions.mcp_tools {
         registry.register(Arc::clone(tool));
     }
-    let tools = Arc::new(registry);
     let hooks = Arc::new(rho_core::HookChain::default());
+
+    // Subagents. The parent's tool set is captured **before** `spawn_agent` joins it, so a
+    // child can never receive `spawn_agent` through the intersection. Depth is enforced too,
+    // and this makes the common case structural rather than a check.
+    let parent_tools: Vec<Arc<dyn rho_core::Tool>> =
+        rho_tools::builtin_tools_with_tasks_and_sandbox(Arc::clone(&tasks), config.sandbox)
+            .into_iter()
+            .chain(extensions.mcp_tools.iter().map(Arc::clone))
+            .collect();
+    let (spawn_tool, subagents) = subagents::load(subagents::LoadRequest {
+        session_root: config.session_root.clone(),
+        trust_project: cli.trust_project,
+        discover: !cli.no_skills,
+        parent_config: config.clone(),
+        provider: Arc::clone(&provider),
+        hooks: Arc::clone(&hooks),
+        parent_tools,
+        limits: rho_core::SubagentLimits::default(),
+    })
+    .await;
+    if let Some(tool) = spawn_tool {
+        registry.register(tool);
+    }
+    let tools = Arc::new(registry);
 
     // The skills block joins the stable prefix, never the dynamic part. The skill set
     // is fixed for a session, so the prefix stays byte-identical and the provider
@@ -218,7 +242,13 @@ async fn build_session(
         Session::with_config(config, provider, tools, hooks, context),
         tasks,
         SessionExtras {
-            notices: extensions.notices,
+            notices: extensions
+                .notices
+                .into_iter()
+                .chain(subagents.notices)
+                .collect(),
+            agents: subagents.registry,
+            agent_definitions: subagents.loaded,
             mcp_pool: extensions.mcp_pool,
         },
     ))
@@ -228,6 +258,14 @@ async fn build_session(
 struct SessionExtras {
     /// Lines to print once, before the session starts.
     notices: Vec<String>,
+    /// The subagent registry. Holding it keeps the process-wide live cap in force for as
+    /// long as the session, and the spawn tree shares this handle.
+    #[allow(dead_code)]
+    agents: rho_core::AgentRegistry,
+    /// How many agent definitions loaded. Zero means `spawn_agent` is not registered, so a
+    /// status line can say why the tool is absent.
+    #[allow(dead_code)]
+    agent_definitions: usize,
     /// The MCP pool. Holding it keeps the servers alive for the session.
     #[allow(dead_code)]
     mcp_pool: Option<std::sync::Arc<rho_mcp::McpPool>>,
@@ -371,17 +409,36 @@ mod tests {
     }
 
     #[test]
-    fn build_config_fails_without_a_model() {
-        // Parse real argv instead of building the struct by hand. A hand-built
-        // literal breaks whenever a flag is added, and it skips the parser.
-        let cli = Cli::try_parse_from(["rho"]).unwrap();
+    fn build_config_uses_the_provider_default_when_no_model_is_given() {
+        // The behaviour changed on purpose. This test used to assert that a missing model
+        // is an error. A provider now supplies a default, which is a convenience and not a
+        // security choice, so the error is gone for a provider that has one.
+        //
+        // The old test is not deleted, it is split: the case below covers the provider
+        // that still has no honest default.
+        let cli = Cli::try_parse_from(["rho", "--provider", "openrouter"]).unwrap();
+        let config = build_config(&cli).expect("a default model");
+        assert_eq!(config.model, "anthropic/claude-haiku-4.5");
+    }
+
+    #[test]
+    fn build_config_fails_for_a_provider_with_no_default() {
+        // Azure names a deployment, not a model, and only the account owner knows the
+        // deployment names. So there is no honest default, and the message must say what
+        // to set. See docs/verification/models.md.
+        let cli = Cli::try_parse_from(["rho", "--provider", "azure"]).unwrap();
         let error = match build_config(&cli) {
-            Ok(_) => panic!("expected an error"),
+            Ok(_) => panic!("azure must not invent a default"),
             Err(error) => error,
         };
+        let text = error.to_string();
         assert!(
-            error.to_string().contains(MODEL_ENV),
-            "message must name the model variable: {error}"
+            text.contains(MODEL_ENV),
+            "the message must name the model variable: {text}"
+        );
+        assert!(
+            text.contains("deployment"),
+            "and it must say the azure value is a deployment name: {text}"
         );
     }
 

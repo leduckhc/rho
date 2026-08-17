@@ -81,6 +81,28 @@ pub enum AgentEvent {
     },
     /// The run is fully settled. No further turn will run.
     AgentEnd { stop_reason: AgentStopReason },
+    /// A subagent was spawned under this session. See SPEC-11 section 9.
+    ///
+    /// These variants are new, not reused `TaskStart` ones. A task is an
+    /// operating-system command with an exit code. An agent has turns, token
+    /// usage, and a summary. Sharing one variant would force a frontend to guess
+    /// which it held.
+    AgentSpawned {
+        id: crate::AgentId,
+        agent: String,
+        depth: u32,
+    },
+    /// A subagent reported progress: its turn count and summed usage so far.
+    AgentProgressed {
+        id: crate::AgentId,
+        turns: u32,
+        usage: crate::Usage,
+    },
+    /// A subagent finished. The report carries the summary, not the transcript.
+    AgentFinished {
+        id: crate::AgentId,
+        report: crate::AgentReport,
+    },
 }
 
 /// Configuration for one agent run.

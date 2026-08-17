@@ -7,12 +7,16 @@
 //!
 //! See `docs/specs/SPEC-08-skills.md` for the contract.
 
+mod agent;
 mod discover;
 mod error;
 mod frontmatter;
 mod prompt;
 mod types;
 
+pub use agent::{
+    AgentConfig, AgentDefinition, AgentSet, discover_agents, load_agent_body, load_definition,
+};
 pub use discover::discover;
 pub use error::SkillError;
 pub use prompt::prompt_block;

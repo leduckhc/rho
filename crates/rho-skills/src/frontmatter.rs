@@ -168,7 +168,7 @@ fn name_warnings(name: &str) -> Vec<String> {
 /// Make an untrusted string safe to draw. Replace every control character with
 /// the replacement glyph. This mirrors the tool-output rule, because a name and
 /// a description reach the terminal.
-fn sanitize(input: &str) -> String {
+pub(crate) fn sanitize(input: &str) -> String {
     input
         .chars()
         .map(|c| if is_unsafe(c) { REPLACEMENT } else { c })
@@ -184,7 +184,7 @@ fn is_unsafe(c: char) -> bool {
 }
 
 /// Read at most `MAX_FRONTMATTER_BYTES` from a file, as lossy UTF-8.
-async fn read_bounded(path: &Path) -> std::io::Result<String> {
+pub(crate) async fn read_bounded(path: &Path) -> std::io::Result<String> {
     let file = tokio::fs::File::open(path).await?;
     let mut reader = file.take(MAX_FRONTMATTER_BYTES);
     let mut buffer = Vec::new();
@@ -196,7 +196,7 @@ async fn read_bounded(path: &Path) -> std::io::Result<String> {
 ///
 /// The file must start with a `---` line. The function returns `None` when there
 /// is no frontmatter, or when the closing fence is not inside the bounded read.
-fn extract_frontmatter(text: &str) -> Option<String> {
+pub(crate) fn extract_frontmatter(text: &str) -> Option<String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut lines = text.lines();
     if lines.next()?.trim_end() != "---" {

@@ -944,3 +944,34 @@ own retry produces two nested loops and a multiplied delay, which is worse than 
 
 **Not yet done.** `rho-core` and the provider crates are held by a sibling agent right now.
 Recorded here so the gap is a task rather than a surprise.
+
+## D-038 — Two weak tests found by breaking the code, and one design consequence recorded
+
+Verifying the subagent implementation produced three findings worth keeping.
+
+**A weak test in the security core.** `a_child_tool_set_is_the_intersection_with_the_parent`
+passed with the intersection removed entirely. Its child list was a **subset** of the
+parent's, so the filter never ran and the test only ever proved the happy path. The
+controller found it by deleting the parent check and watching the test stay green. The test
+now asks for one name the parent lacks and omits one the parent has, so it exercises both
+directions, and it fails when the check is removed.
+
+This is the third vacuous test in this project, after the memory-cap test in D-016 and the
+drop test in the coverage work. The pattern is stable enough to name: **a test built only
+from values that satisfy the rule cannot detect the rule's removal.** Always include a value
+that must be rejected.
+
+**A test I broke myself, and shipped.** Adding a default model made
+`build_config_fails_without_a_model` fail, because a missing model is no longer an error. I
+committed and pushed without running the workspace gate, which `AGENTS.md` step 14 requires.
+The test is now split: one case asserts the provider default is used, and one asserts azure
+still errors and names the deployment. The behaviour change was intended; skipping the gate
+was not.
+
+**A design consequence, now written down.** `spawn_agent` declares `ToolKind::Execute`, so
+`--read-only` denies it, which a live check confirmed. Section 3 guarantees a child is never
+more permissive than its parent, so a read-only parent's child could only read, and
+delegation would be safe. It stays denied because **a tool cannot vary its kind per call**,
+which is the same wall `SPEC-07` hit when it split `task` from `task_cancel`. Under a
+permissive parent, spawning is genuinely mutating, so one tool must declare the stricter
+kind. A separate read-only spawn tool is a future decision, not a tweak.

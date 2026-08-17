@@ -16,6 +16,7 @@ mod provider;
 mod retry;
 mod sandbox;
 mod secret;
+mod subagent;
 mod tasks;
 mod tool;
 mod usage;
@@ -31,6 +32,11 @@ pub use provider::{CompletionRequest, Provider, ProviderStream, ToolSpec};
 pub use retry::RetryPolicy;
 pub use sandbox::SandboxMode;
 pub use secret::Secret;
+pub use subagent::{
+    AgentId, AgentNode, AgentOutcome, AgentRegistry, AgentReport, BothPolicies, ChildSlot,
+    MAX_CHILD_RETRIES, MAX_SUMMARY_CHARS, RetryLedger, SubagentError, SubagentLimits,
+    ToolIntersection, check_no_cycle, collect_report, intersect_tools, narrow_sandbox,
+};
 pub use tasks::{
     BackgroundReason, DEFAULT_FOREGROUND_LIMIT_MS, RunMode, TaskError, TaskHandle, TaskId,
     TaskLimits, TaskProgress, TaskRegistry, TaskSnapshot, TaskState, WaitUntil, decide_run_mode,

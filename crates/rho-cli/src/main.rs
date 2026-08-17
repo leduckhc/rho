@@ -8,6 +8,7 @@
 mod cli;
 mod extensions;
 mod provider;
+mod subagents;
 
 use clap::Parser;
 use cli::Cli;

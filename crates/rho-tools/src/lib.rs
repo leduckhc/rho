@@ -15,6 +15,7 @@ mod list;
 mod progress;
 mod read;
 mod sandbox;
+mod subagent;
 mod task;
 mod write;
 
@@ -26,6 +27,7 @@ pub use list::ListTool;
 pub use progress::{PROGRESS_PREFIX, ProgressScan, scan_line};
 pub use read::ReadTool;
 pub use sandbox::{Backend, CommandPlan, SandboxUnavailable, detect_backend, plan};
+pub use subagent::{ChildToolFactory, SpawnAgentTool, SpawnEnv};
 pub use task::{TaskCancelTool, TaskTool};
 pub use write::WriteTool;
 

@@ -255,6 +255,13 @@ operating-system command with an exit code. An agent has turns, token usage, and
 Sharing one variant would force a frontend to guess which it was holding. `SPEC-07` keeps
 its variants, and this spec adds three.
 
+**Implementation status.** The three variants exist in `rho-core` and are covered by
+tests. The `spawn_agent` tool returns the child summary as its tool result, so the parent
+context stays correct. A tool cannot inject an `AgentEvent` into the parent stream through
+the current `ToolContext`, so the live emission of `AgentSpawned`, `AgentProgressed`, and
+`AgentFinished` needs a driver-level hook. That wiring is a follow-up in `rho-core`, and it
+is reported rather than half-built.
+
 ## 10. Test cases
 
 Composition, the security core:
@@ -263,6 +270,7 @@ Composition, the security core:
 - `both_policies_denies_when_the_child_denies`
 - `both_policies_allows_only_when_both_allow`
 - `a_child_tool_set_is_the_intersection_with_the_parent`
+- `a_child_that_names_no_tools_inherits_the_parent_set`
 - `a_child_asking_for_a_tool_the_parent_lacks_is_dropped_and_reported`
 - `a_child_cannot_widen_the_sandbox_mode`
 - `a_child_cannot_change_the_session_root`
@@ -270,19 +278,23 @@ Composition, the security core:
 Context isolation:
 - `a_child_transcript_never_enters_the_parent_context`
 - `a_parent_receives_a_summary_and_the_usage`
+- `a_parent_receives_only_the_child_summary` — the tool-level check, in `rho-tools`.
 - `a_long_child_summary_is_capped`
 
 Limits:
 - `depth_beyond_the_cap_is_refused_and_the_reason_names_the_limit`
 - `more_children_than_the_per_parent_cap_is_refused`
 - `the_process_wide_cap_is_refused_across_two_parents` — the case a per-parent cap misses.
+- `a_finished_child_frees_its_slot`
 - `a_child_past_its_timeout_is_cancelled_and_reported`
 - `a_depth_of_zero_forbids_spawning`
 
 Failure and cancellation:
 - `a_child_failure_returns_a_result_and_the_parent_continues`
+- `an_unknown_agent_name_is_a_result_not_a_fault` — the tool-level check, in `rho-tools`.
 - `cancelling_the_parent_cancels_every_descendant`
 - `a_child_that_ends_without_reporting_is_reported_as_failed`
+- `a_child_out_of_turns_is_reported`
 - `retrying_a_dying_child_stops_at_the_retry_cap`
 - `a_cycle_in_the_parent_chain_is_refused_rather_than_looping`
 
@@ -291,8 +303,29 @@ Definitions:
 - `a_project_agent_definition_is_withheld_until_the_project_is_trusted`
 - `a_definition_without_a_description_does_not_load`
 - `an_unknown_tool_name_in_a_definition_is_dropped_with_a_warning`
+- `a_dropped_tool_name_is_reported_to_the_caller` — the tool-level check, in `rho-tools`.
 
 Every test uses a scripted fake provider. No network, and no `sleep`.
+
+### A read-only session cannot delegate, and that is deliberate
+
+`spawn_agent` declares `ToolKind::Execute`, so `--read-only` denies it. A live check
+confirmed the refusal.
+
+There is a real argument the other way. Section 3 guarantees a child is never more permissive
+than its parent, so a read-only parent produces a read-only child, and delegating research to
+a scout would be safe. Denying it makes `--read-only` stricter than it needs to be, and it
+blocks the case a read-only session would most want.
+
+**It stays denied, for one reason: a tool cannot vary its `ToolKind` per call.** `SPEC-07`
+met the same wall and split `task` from `task_cancel` for exactly this reason. Under a
+permissive parent, spawning genuinely is mutating, because the child can write. So a single
+tool must declare the stricter kind, and decision D-012 says an uncertain boundary fails
+closed.
+
+A later change could add a second, read-only spawn tool that refuses to grant any mutating
+tool to its child. That is a new tool and a new decision, not a tweak, so it is out of scope
+here and recorded rather than left as a surprise.
 
 ## 11. What this does not give you
 

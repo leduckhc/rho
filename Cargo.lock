@@ -2833,6 +2833,7 @@ dependencies = [
  "regex",
  "rho-core",
  "rho-redact",
+ "rho-skills",
  "serde",
  "serde_json",
  "similar",
