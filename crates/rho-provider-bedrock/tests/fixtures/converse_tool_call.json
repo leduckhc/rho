@@ -1,0 +1,24 @@
+[
+  { "messageStart": { "role": "assistant" } },
+  {
+    "contentBlockStart": {
+      "contentBlockIndex": 0,
+      "start": { "toolUse": { "toolUseId": "tool_1", "name": "get_weather" } }
+    }
+  },
+  { "contentBlockDelta": { "contentBlockIndex": 0, "delta": { "toolUse": { "input": "{\"city\":\"Pa" } } } },
+  { "contentBlockDelta": { "contentBlockIndex": 0, "delta": { "toolUse": { "input": "ris\",\"unit\":" } } } },
+  { "contentBlockDelta": { "contentBlockIndex": 0, "delta": { "toolUse": { "input": "\"celsius\"}" } } } },
+  { "contentBlockStop": { "contentBlockIndex": 0 } },
+  { "messageStop": { "stopReason": "tool_use" } },
+  {
+    "metadata": {
+      "usage": {
+        "inputTokens": 12,
+        "outputTokens": 7,
+        "cacheReadInputTokens": 3,
+        "cacheWriteInputTokens": 4
+      }
+    }
+  }
+]

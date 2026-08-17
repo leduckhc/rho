@@ -114,6 +114,33 @@ async fn approval_denied_mutating_call_never_runs_the_tool() {
 }
 
 #[tokio::test]
+async fn approval_denied_result_carries_the_denied_variant_message() {
+    // The denial must flow through the typed `ToolError::Denied` variant. This
+    // test pins the message to the variant, so the wiring cannot be removed in
+    // silence. See SPEC-03 section 5.
+    let tool = Arc::new(KindedTool::new("write", ToolKind::Edit));
+    let session = session_read_only(tool);
+
+    let got = collect(session.prompt(user_input("go"), CancelToken::new())).await;
+
+    let output = tool_output(&got).expect("a denied call still ends with a tool result");
+    assert!(output.is_error, "a denied call yields an error result");
+    let text = output
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("a text block in the denial result");
+    assert_eq!(
+        text,
+        ToolError::Denied.to_string(),
+        "the denial message comes from the ToolError::Denied variant"
+    );
+}
+
+#[tokio::test]
 async fn approval_allowed_reading_call_runs_the_tool() {
     let tool = Arc::new(KindedTool::new("read", ToolKind::Read));
     let ran = Arc::clone(&tool.ran);

@@ -7,7 +7,7 @@
 use crate::{ApprovalDecision, ApprovalPolicy, CancelToken, ContentBlock, Message, Role};
 use crate::{
     CompletionRequest, Context, Error, HookChain, HookOutcome, Provider, StopReason, StreamEvent,
-    ToolCallView, ToolContext, ToolKind, ToolOutput, ToolRegistry,
+    ToolCallView, ToolContext, ToolError, ToolKind, ToolOutput, ToolRegistry,
 };
 use futures::Stream;
 use futures::StreamExt;
@@ -262,6 +262,12 @@ impl Driver {
         let mut turns = 0u32;
         let stop_reason = loop {
             if self.cancel.is_cancelled() {
+                // The cancel landed before this turn started. Emit a paired
+                // `TurnStart` and `TurnEnd`, so a frontend never sees an
+                // unpaired `TurnEnd`. See the tests in agent_loop.rs.
+                if self.emit(AgentEvent::TurnStart).await.is_err() {
+                    return;
+                }
                 if self
                     .emit(AgentEvent::TurnEnd {
                         stop_reason: StopReason::Canceled,
@@ -479,8 +485,8 @@ impl Driver {
         };
 
         // Consult the approval policy after the hooks. A denial produces an error
-        // tool result. The tool never runs. See SPEC-01 section 9 and SPEC-03
-        // section 5.
+        // tool result from the typed `ToolError::Denied` variant. The tool never
+        // runs. See SPEC-01 section 9 and SPEC-03 section 5.
         if self
             .inner
             .config
@@ -489,9 +495,7 @@ impl Driver {
             .await
             == ApprovalDecision::Deny
         {
-            let output = error_output(format!(
-                "the approval policy denied the tool {name}. Change the policy to allow it, or call a read-only tool."
-            ));
+            let output = error_output(ToolError::Denied.to_string());
             return self.finish_tool(&id, output).await;
         }
 

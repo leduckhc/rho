@@ -72,7 +72,7 @@ pub enum ToolError {
     InvalidArguments(String),
     #[error("path {0} escapes the session root")]
     PathEscape(PathBuf),
-    #[error("permission denied by approval policy")]
+    #[error("the approval policy denied this tool call. Change the policy to allow it, or call a read-only tool.")]
     Denied,
     #[error("timed out after {0:?}")]
     Timeout(Duration),
@@ -406,6 +406,31 @@ mod tests {
     }
 
     #[test]
+    fn confine_allows_a_path_that_differs_only_in_case() {
+        // On a case-insensitive filesystem, the macOS default, a valid path that
+        // differs only in case must resolve. A case-sensitive `starts_with` on
+        // the root prefix falsely rejects it. This is an availability bug, not an
+        // escape. The fix canonicalises the existing prefix, so the on-disk case
+        // replaces the typed case.
+        let parent = tempdir().unwrap();
+        let real_parent = parent.path().canonicalize().unwrap();
+        let root = real_parent.join("RootDir");
+        fs::create_dir(&root).unwrap();
+
+        let lower = real_parent.join("rootdir");
+        if !lower.exists() {
+            // The filesystem is case-sensitive. The lowercase directory is a
+            // different, missing path, so the false-rejection bug cannot occur.
+            return;
+        }
+        // The candidate names the same directory with a different case.
+        let candidate = lower.join("file.txt");
+        let resolved =
+            confine(&root, &candidate).expect("a case variant of the root must resolve");
+        assert!(resolved.starts_with(&root), "the result stays inside the root");
+    }
+
+    #[test]
     fn confine_rejects_nul_byte_path() {
         let root = tempdir().unwrap();
         let error = confine(root.path(), Path::new("bad\0name")).unwrap_err();
@@ -491,6 +516,14 @@ mod tests {
             10,
             "classify every variant"
         );
+    }
+
+    #[test]
+    fn tool_error_denied_matches_and_reads_as_a_denial() {
+        // The denial path constructs this variant. A caller can match on it.
+        let error = ToolError::Denied;
+        assert!(matches!(error, ToolError::Denied));
+        assert!(ToolError::Denied.to_string().contains("denied"));
     }
 
     #[tokio::test]

@@ -203,6 +203,39 @@ async fn agent_loop_cancel_ends_with_canceled_stop_reason() {
 }
 
 #[tokio::test]
+async fn agent_loop_cancel_before_first_turn_pairs_turn_start_and_end() {
+    // A cancel that lands before any turn starts must not emit an unpaired
+    // `TurnEnd`. A frontend pairs `TurnStart` with `TurnEnd`, so an unpaired
+    // `TurnEnd` mis-renders or panics. `rho-tui` and `rho-acp` both rely on this.
+    let provider = Arc::new(ScriptedProvider::new(vec![text_turn("never reached")]));
+    let session = session_with(provider, ToolRegistry::new());
+
+    // The token is already cancelled, so the loop stops before it runs a turn.
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let got = collect(session.prompt(user_input("go"), cancel)).await;
+
+    let turn_end = got
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TurnEnd { .. }))
+        .expect("a TurnEnd event");
+    let turn_start = got
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TurnStart))
+        .expect("a TurnStart event must precede every TurnEnd");
+    assert!(
+        turn_start < turn_end,
+        "a TurnStart must precede the TurnEnd, so the pair is balanced"
+    );
+    assert_eq!(
+        got.last(),
+        Some(&AgentEvent::AgentEnd {
+            stop_reason: AgentStopReason::Canceled
+        })
+    );
+}
+
+#[tokio::test]
 async fn agent_events_drop_aborts_driver_task() {
     // The scripted provider flags a dropped stream. Dropping `AgentEvents` must
     // abort the driver task, which drops the in-flight provider stream.
