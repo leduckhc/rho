@@ -8,33 +8,15 @@
 
 use async_trait::async_trait;
 use rho_core::{CancelToken, CompletionRequest, Provider, ProviderError, ProviderStream};
-use std::fmt;
 
 /// The required Microsoft Entra token audience for Azure OpenAI.
 /// The trailing slash is required. Do not change this string.
 pub const AZURE_ENTRA_AUDIENCE: &str = "https://cognitiveservices.azure.com/";
 
-/// A credential that never prints itself. See `SPEC-02` section 2.
-#[derive(Clone)]
-pub struct Secret(String);
-
-impl Secret {
-    /// Wrap a credential value.
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    /// Read the value. The caller must never log the result.
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for Secret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Secret(***)")
-    }
-}
+// `Secret` lives in `rho-core`. See decision D-014. This crate once defined its
+// own copy with no `Debug` mask at all, while the OpenRouter copy masked itself.
+// That drift is why the type now has one home.
+pub use rho_core::{RetryPolicy, Secret};
 
 /// The two Azure auth modes. See `SPEC-02` section 6.
 #[derive(Clone, Debug)]

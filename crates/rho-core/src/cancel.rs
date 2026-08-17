@@ -36,10 +36,12 @@ impl CancelToken {
 
     /// Resolve when the token is cancelled. Resolve at once if already cancelled.
     pub async fn cancelled(&self) {
-        // Register the waiter before the flag check. `Notified` registers on
-        // creation. So a `cancel` that lands after this line still wakes the
-        // waiter. `notify_waiters` stores no permit, so a later registration
-        // would miss the wake. This order removes that race.
+        // Create the `Notified` future before the flag check. Creating it takes
+        // a snapshot of the notify state. A `notify_waiters` call after this line
+        // updates that state. Registration into the waiter list happens on the
+        // first poll, not on creation. The first poll then observes the snapshot
+        // difference and resolves. So a `cancel` that lands after this line still
+        // wakes the waiter. The creation-time snapshot removes the race.
         let notified = self.inner.notify.notified();
         if self.is_cancelled() {
             return;

@@ -72,6 +72,14 @@ The stream must yield the first event without buffering the whole response body.
 Tool calls must arrive as structured `ToolCallStart`, `ToolCallDelta`, and
 `ToolCallEnd` events, never as raw text.
 
+> **Where these types live.** `Secret` and `RetryPolicy` are defined in
+> `rho-core`, and every provider imports them. See decision D-014. They were
+> briefly defined per provider crate, and the copies drifted at once: one masked
+> its `Debug`, another had no `Debug` at all. A leak needs only one weak copy, so
+> the type that guards a secret has one definition and one test suite. The same
+> argument covers the retry policy, because a policy that retries a 401 burns a
+> user's rate limit on a wrong key.
+
 ## 2. Secret redaction by construction
 
 A secret must never reach a log, including at `trace` level. The design forbids

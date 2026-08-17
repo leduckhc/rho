@@ -72,7 +72,9 @@ pub enum ToolError {
     InvalidArguments(String),
     #[error("path {0} escapes the session root")]
     PathEscape(PathBuf),
-    #[error("the approval policy denied this tool call. Change the policy to allow it, or call a read-only tool.")]
+    #[error(
+        "the approval policy denied this tool call. Change the policy to allow it, or call a read-only tool."
+    )]
     Denied,
     #[error("timed out after {0:?}")]
     Timeout(Duration),
@@ -179,6 +181,9 @@ impl Default for ToolRegistry {
 /// - Resolve the longest existing ancestor with the filesystem, so a symlink
 ///   that points outside the root is caught. You cannot resolve a path that does
 ///   not exist yet, so the `write` case of a new file still works.
+/// - Canonicalise every existing component. This replaces the typed letter case
+///   with the on-disk case. So a case-insensitive filesystem, the macOS default,
+///   does not falsely reject a valid path that differs only in case.
 /// - Compare canonical forms. On macOS `/var` is a symlink to `/private/var`, so
 ///   a text prefix check fails. Canonicalise the root once, then compare.
 /// - An empty `candidate` resolves to the root itself.
@@ -232,14 +237,16 @@ fn resolve_existing_ancestor(path: &Path) -> Result<PathBuf, ToolError> {
             }
             Component::Normal(name) => {
                 real.push(name);
-                // Resolve a symlink at once, so a link that points outside the
-                // root is caught by the later prefix check.
-                if let Ok(metadata) = real.symlink_metadata()
-                    && metadata.file_type().is_symlink()
-                {
+                // Canonicalise an existing component. This resolves a symlink to
+                // its real target, so a link that points outside the root is
+                // caught by the later prefix check. It also replaces the typed
+                // letter case with the on-disk case. So a case-insensitive
+                // filesystem does not cause a false escape. A component that does
+                // not exist yet keeps its typed name, so the new-file case works.
+                if real.symlink_metadata().is_ok() {
                     real = real.canonicalize().map_err(|error| {
                         ToolError::Io(format!(
-                            "cannot resolve the symlink {}: {error}.",
+                            "cannot resolve the path {}: {error}.",
                             real.display()
                         ))
                     })?;
@@ -425,9 +432,11 @@ mod tests {
         }
         // The candidate names the same directory with a different case.
         let candidate = lower.join("file.txt");
-        let resolved =
-            confine(&root, &candidate).expect("a case variant of the root must resolve");
-        assert!(resolved.starts_with(&root), "the result stays inside the root");
+        let resolved = confine(&root, &candidate).expect("a case variant of the root must resolve");
+        assert!(
+            resolved.starts_with(&root),
+            "the result stays inside the root"
+        );
     }
 
     #[test]

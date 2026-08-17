@@ -655,6 +655,74 @@ in-memory shape that the format will serialise.
 - `approval_allowed_reading_call_runs_the_tool` — a `ReadOnlyPolicy` allows a
   reading tool and the tool runs. See `crates/rho-core/tests/approval.rs`.
 
+## 12a. Credentials and retry, from decision D-014
+
+`rho-core` owns two types that `SPEC-02` describes in detail.
+
+```rust
+/// A credential that never prints itself. No `Display`. `Debug` prints a mask.
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(value: impl Into<String>) -> Self;
+    /// Read the value. Never log the result.
+    pub fn expose(&self) -> &str;
+    /// True when the credential is empty. An empty key fails with a message that
+    /// blames the service, so check it early.
+    pub fn is_empty(&self) -> bool;
+}
+
+/// How a provider retries. Retries `Transport`, `Server`, and `RateLimited`.
+/// Never retries `Client`, `Decode`, or `Auth`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetryPolicy {
+    pub max_attempts: u32,
+    pub base_delay_ms: u64,
+    pub max_delay_ms: u64,
+}
+
+impl RetryPolicy {
+    /// A policy that never retries.
+    pub fn none() -> Self;
+    /// True when the error may be retried at `attempt`, which is one-based.
+    pub fn should_retry(&self, error: &ProviderError, attempt: u32) -> bool;
+    /// The delay before `attempt`. Exponential growth with full jitter. A server
+    /// hint wins and skips the jitter, but the ceiling still caps it. `None` means
+    /// do not retry.
+    pub fn backoff(&self, attempt: u32, retry_after_ms: Option<u64>) -> Option<Duration>;
+}
+```
+
+Both live in `rho-core` so there is one definition and one test suite. See
+decision D-014 for the drift that forced the move.
+
+### Test cases
+
+- `secret_debug_prints_a_fixed_mask` — `Debug` prints `Secret(***)`.
+- `secret_debug_never_contains_the_value` — the value never appears.
+- `secret_inside_a_derived_debug_struct_stays_masked` — the real risk. A config
+  struct derives `Debug`, somebody logs it, and the mask must survive that path.
+- `secret_exposes_the_value_on_purpose` — `expose` returns the value.
+- `secret_reports_an_empty_value` — `is_empty` is true for an empty credential.
+- `retry_policy_never_retries_an_unauthorised_request` — a 401 is never retried.
+- `retry_policy_never_retries_any_client_error` — 400, 401, 403, 404, and 422 are
+  never retried.
+- `retry_policy_never_retries_a_decode_or_auth_error` — both are permanent.
+- `retry_policy_retries_a_rate_limit`, `..._a_server_error`, `..._a_transport_error`
+  — each retryable class retries.
+- `retry_policy_stops_at_the_attempt_cap` — the cap holds.
+- `retry_policy_none_never_retries_a_retryable_error` — the no-retry policy holds.
+- `backoff_returns_none_past_the_cap` — past the cap means do not retry.
+- `backoff_stays_inside_the_window_and_grows` — full jitter picks a value in
+  `[0, window)`. The test asserts the bound, never one fixed value, because a
+  fixed assertion on a jittered value would be flaky by design.
+- `backoff_never_passes_the_ceiling` — `max_delay_ms` holds at every attempt.
+- `backoff_uses_a_server_hint_without_jitter` — a hint wins.
+- `backoff_caps_a_hostile_server_hint` — a mistaken `Retry-After` cannot stall a
+  session for an hour.
+- `backoff_spreads_across_calls` — the jitter really spreads. A single value would
+  rebuild the spike that the jitter exists to avoid.
+
 ## 13. Out of scope for sprint 1
 
 - Compaction and branch summarisation. The context grows without a cut point.

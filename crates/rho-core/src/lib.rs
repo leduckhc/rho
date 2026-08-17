@@ -13,6 +13,8 @@ mod error;
 mod event;
 mod hook;
 mod provider;
+mod retry;
+mod secret;
 mod tool;
 mod usage;
 
@@ -24,6 +26,8 @@ pub use error::{Error, ProviderError};
 pub use event::StreamEvent;
 pub use hook::{Hook, HookChain, HookOutcome, ToolCallView};
 pub use provider::{CompletionRequest, Provider, ProviderStream, ToolSpec};
+pub use retry::RetryPolicy;
+pub use secret::Secret;
 pub use tool::{
     AllowAllPolicy, ApprovalDecision, ApprovalPolicy, ReadOnlyPolicy, Tool, ToolContext, ToolError,
     ToolKind, ToolOutput, ToolRegistry, confine,
