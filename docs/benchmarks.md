@@ -13,6 +13,26 @@ and without a real terminal. Stage S9 measures resident memory per live session
 against a real provider. Stage S11 automates every number in `bench/footprint.sh`
 and runs it in CI.
 
+## Reproduce these numbers
+
+Run `bench/footprint.sh` from the repository root. It measures every number on
+this page. It builds the release binary and the examples. Then it reports the
+size, the memory, and the first-frame time. It takes the median of three runs for
+each memory and timing number.
+
+```sh
+bash bench/footprint.sh          # readable table
+bash bench/footprint.sh --json   # one JSON object for CI to diff
+```
+
+The script works on macOS and on Linux. The two systems report peak resident set
+size in different units. macOS `/usr/bin/time -l` uses bytes. GNU `/usr/bin/time
+-v` uses kilobytes. The script detects which reporter is present and converts
+both to bytes.
+
+The numbers on this page are macOS on Apple Silicon. CI runs the script on Linux
+and publishes the JSON as a build artifact.
+
 ## Release binary size
 
 The size of the `rho` binary, stripped, for two feature sets.
@@ -65,7 +85,8 @@ PY
 Caveat: this uses a test backend, not a real terminal. It does not include the
 cost of raw-mode setup and the alternate-screen switch, which happen once at
 start-up and touch the real terminal. A real-terminal number needs a pseudo-tty
-harness. Stage S11 adds that in `bench/footprint.sh`.
+harness. `bench/footprint.sh` does not add one yet. So this number stays
+unmeasured.
 
 ## Idle resident memory
 
@@ -154,10 +175,14 @@ Even on that conservative footing, rho's whole process costs less than the
 *marginal* session of every harness in the list. On its own ground, which is many
 sessions inside one host, the marginal session costs 0.024 MiB.
 
-**What is still not measured.**
+**What is still not measured here.**
 
-- Resident memory during an active streamed turn, with a real provider. Stage S9.
-- Time to first frame on a real pseudo-tty, including raw mode and the alternate
-  screen. Stage S11.
-- Time to first token against each provider. Stage S9.
-- Any number on Linux. Every figure here is macOS on Apple Silicon.
+- Time to first frame on a real pseudo-tty, with raw mode and the alternate
+  screen. `bench/footprint.sh` does not add a pty harness.
+- Time to first token against each provider. See stage S9.
+- A committed Linux figure. CI runs `bench/footprint.sh` on Linux and publishes
+  the JSON, but this page records no Linux number yet.
+
+Resident memory during a live streamed turn is now measured. It is 14.8 MiB,
+recorded in `docs/verification/sprint-1.md`. A live turn costs about 6.5 MiB more
+than the 8.3 MiB idle session on this page.

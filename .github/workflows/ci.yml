@@ -49,3 +49,86 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
+
+  audit:
+    name: dependency advisory audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # A rustls-webpki advisory hit the first push and needed a feature change.
+      # So the build must fail on any advisory. `-D warnings` treats an
+      # unmaintained crate warning as an error too.
+      #
+      # A maintainer triages a false positive like this. First read the RUSTSEC
+      # page named in the failure. Confirm the advisory does not affect rho.
+      # Then add the id to the ignore list below, with a dated comment that says
+      # why it is safe. Never ignore an advisory without that note.
+      #   cargo audit -D warnings --ignore RUSTSEC-YYYY-NNNN
+      - run: cargo audit -D warnings
+
+  tls-single-version:
+    name: exactly one rustls version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Two TLS stacks caused the advisory above, and the second stack is
+      # invisible without a check. ADR-002 records this guard. The lock file
+      # holds one `name = "rustls"` line per distinct rustls version.
+      - run: |
+          count=$(grep -c '^name = "rustls"$' Cargo.lock || true)
+          echo "rustls versions in Cargo.lock: $count"
+          if [ "$count" -ne 1 ]; then
+            echo "expected exactly one rustls version, found $count" >&2
+            exit 1
+          fi
+
+  no-stubs:
+    name: no todo or unimplemented in crate source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Three todo! bodies once survived a green stage, and one was a security
+      # boundary. A green test suite proves only what the tests assert. So the
+      # build greps the source directly.
+      - run: |
+          if grep -rns -e 'todo!(' -e 'unimplemented!(' crates/*/src; then
+            echo "found todo! or unimplemented! in crate source" >&2
+            exit 1
+          fi
+          echo "no todo! or unimplemented! in crate source"
+
+  prose:
+    name: ASD-STE100 prose check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # The checker prints a violation count. It always exits zero, so the build
+      # asserts the count is zero here rather than editing the checker.
+      - run: |
+          python3 bench/check-prose.py $(find docs -name '*.md') | tee prose.txt
+          grep -q '^VIOLATIONS 0$' prose.txt
+
+  footprint:
+    name: footprint benchmark (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      # The cache keeps the release binary and the examples warm. The script
+      # builds all of them, so this cache is the one that helps the most.
+      - uses: Swatinem/rust-cache@v2
+      # The script prints build progress to stderr, so stdout is pure JSON.
+      # Write to a file first, so a script failure fails the job.
+      - run: |
+          bash bench/footprint.sh --json > footprint.json
+          cat footprint.json
+      # A future change adds a baseline and a threshold that fails on a
+      # regression. No baseline is stored in CI yet, so we only publish the
+      # numbers as an artifact for now.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: footprint-linux
+          path: footprint.json

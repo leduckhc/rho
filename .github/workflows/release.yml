@@ -1,0 +1,59 @@
+name: release
+
+# Build a stripped release binary for three targets on a tag, then attach each
+# one to the GitHub release. The release profile already strips symbols, so no
+# extra strip step runs. This workflow adds no code signing and no notarisation.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p rho-cli --target ${{ matrix.target }}
+      # Name the artifact by target, so three uploads do not collide.
+      - name: Package the binary
+        run: |
+          bin="target/${{ matrix.target }}/release/rho"
+          test -x "$bin"
+          out="rho-${{ matrix.target }}"
+          cp "$bin" "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rho-${{ matrix.target }}
+          path: rho-${{ matrix.target }}
+
+  release:
+    name: attach binaries to the release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/rho-*
