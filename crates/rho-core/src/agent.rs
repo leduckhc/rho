@@ -4,7 +4,9 @@
 //! turn can call tools. The loop appends every message to the `Context`. It
 //! emits an `AgentEvent` stream. A frontend renders the stream.
 
-use crate::{ApprovalDecision, ApprovalPolicy, CancelToken, ContentBlock, Message, Role};
+use crate::{
+    ApprovalDecision, ApprovalPolicy, CancelToken, ContentBlock, Message, Role, SandboxMode,
+};
 use crate::{
     CompletionRequest, Context, Error, HookChain, HookOutcome, Provider, StopReason, StreamEvent,
     ToolCallView, ToolContext, ToolError, ToolKind, ToolOutput, ToolRegistry,
@@ -134,6 +136,10 @@ pub struct SessionConfig {
     pub approval: Arc<dyn ApprovalPolicy>,
     /// The per-run turn cap. The loop stops with `MaxTurnRequests` at the cap.
     pub max_turns: u32,
+    /// The `bash` confinement mode. `SessionConfig::new` sets `Off`, so the
+    /// default is stated here, not hidden. Use `with_sandbox` to change it. See
+    /// `SPEC-10` and decision D-031.
+    pub sandbox: SandboxMode,
 }
 
 impl SessionConfig {
@@ -149,6 +155,9 @@ impl SessionConfig {
             session_root: session_root.into(),
             approval,
             max_turns: AgentConfig::default().max_turns,
+            // State the default out loud. `Off` runs `bash` unconfined, which is
+            // today's behaviour. A caller opts in with `with_sandbox`.
+            sandbox: SandboxMode::Off,
         }
     }
 
@@ -165,6 +174,12 @@ impl SessionConfig {
     /// Override the per-run turn cap.
     pub fn with_max_turns(mut self, max_turns: u32) -> Self {
         self.max_turns = max_turns;
+        self
+    }
+
+    /// Set the `bash` confinement mode. `new` leaves it `Off`. See `SPEC-10`.
+    pub fn with_sandbox(mut self, sandbox: SandboxMode) -> Self {
+        self.sandbox = sandbox;
         self
     }
 }

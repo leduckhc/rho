@@ -6,10 +6,11 @@
 
 use crate::args::parse_args;
 use crate::progress::{ProgressScan, scan_line};
+use crate::sandbox;
 use async_trait::async_trait;
 use rho_core::{
-    BackgroundReason, DEFAULT_FOREGROUND_LIMIT_MS, RunMode, TaskError, TaskHandle, TaskRegistry,
-    TaskState, Tool, ToolContext, ToolError, ToolKind, ToolOutput, decide_run_mode,
+    BackgroundReason, DEFAULT_FOREGROUND_LIMIT_MS, RunMode, SandboxMode, TaskError, TaskHandle,
+    TaskRegistry, TaskState, Tool, ToolContext, ToolError, ToolKind, ToolOutput, decide_run_mode,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -64,19 +65,35 @@ struct BashArgs {
 #[derive(Default)]
 pub struct BashTool {
     tasks: Option<Arc<TaskRegistry>>,
+    /// The OS confinement mode for the command. The default is `Off`, which runs
+    /// the command unconfined, as before. See `SPEC-10`.
+    sandbox: SandboxMode,
 }
 
 impl BashTool {
     /// Build a foreground-only `bash` tool. It has no task registry, so it never
     /// backgrounds a command.
     pub fn new() -> Self {
-        Self { tasks: None }
+        Self {
+            tasks: None,
+            sandbox: SandboxMode::Off,
+        }
     }
 
     /// Build a `bash` tool that can run a command in the background. It shares
     /// the session task registry with the `task` and `task_cancel` tools.
     pub fn with_tasks(tasks: Arc<TaskRegistry>) -> Self {
-        Self { tasks: Some(tasks) }
+        Self {
+            tasks: Some(tasks),
+            sandbox: SandboxMode::Off,
+        }
+    }
+
+    /// Set the OS confinement mode. The default is `SandboxMode::Off`. See
+    /// `SPEC-10`.
+    pub fn sandbox(mut self, mode: SandboxMode) -> Self {
+        self.sandbox = mode;
+        self
     }
 }
 
@@ -132,10 +149,11 @@ impl Tool for BashTool {
                 *reason,
                 &ctx.session_root,
                 background_timeout_ms(registry, args.timeout_ms),
+                self.sandbox,
             );
         }
 
-        let mut command = build_command(&args.command, &ctx.session_root, false);
+        let mut command = build_command(&args.command, &ctx.session_root, false, self.sandbox)?;
 
         let mut child = command.spawn().map_err(|error| {
             ToolError::Io(format!(
@@ -222,19 +240,30 @@ impl Tool for BashTool {
     }
 }
 
-/// Build the `sh -c` command with the shared hardening: no stdin, piped output,
-/// kill on drop, a scrubbed environment, and its own process group. A background
-/// command also gets `RHO_PROGRESS_FD=1`, so a script can detect a progress
-/// consumer and opt in with one `echo`.
+/// Build the command with the shared hardening: no stdin, piped output, kill on
+/// drop, a scrubbed environment, and its own process group. A background command
+/// also gets `RHO_PROGRESS_FD=1`, so a script can detect a progress consumer and
+/// opt in with one `echo`.
+///
+/// Under a confinement `sandbox`, the program is the OS sandbox wrapper, not `sh`
+/// directly. When the mode needs confinement and no backend is available, this
+/// fails closed with an error, so the command never runs unconfined. See
+/// `SPEC-10`.
 fn build_command(
     command_str: &str,
     session_root: &Path,
     background: bool,
-) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new("sh");
+    sandbox: SandboxMode,
+) -> Result<tokio::process::Command, ToolError> {
+    // The scratch directory is a write target under confinement, so the child can
+    // still use its temporary space. Build the plan first; it fails closed when a
+    // confinement mode is asked for and no OS backend is available.
+    let scratch = scratch_dir();
+    let run = sandbox::plan(sandbox, session_root, scratch.as_deref(), command_str)
+        .map_err(|error| ToolError::Io(error.to_string()))?;
+    let mut command = tokio::process::Command::new(&run.program);
     command
-        .arg("-c")
-        .arg(command_str)
+        .args(&run.args)
         .current_dir(session_root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -249,7 +278,7 @@ fn build_command(
     // reaches every grandchild, not only the direct child.
     #[cfg(unix)]
     command.process_group(0);
-    command
+    Ok(command)
 }
 
 /// The effective timeout for a background task, in milliseconds. Use the model's
@@ -270,11 +299,20 @@ fn start_background(
     reason: BackgroundReason,
     session_root: &Path,
     timeout_ms: u64,
+    sandbox: SandboxMode,
 ) -> Result<ToolOutput, ToolError> {
     let handle = registry
         .start(command_str, reason)
         .map_err(map_task_error)?;
-    let mut command = build_command(command_str, session_root, true);
+    let mut command = match build_command(command_str, session_root, true, sandbox) {
+        Ok(command) => command,
+        Err(error) => {
+            // The plan failed, for example the sandbox is unavailable. The task
+            // must not linger in the registry as a running task.
+            handle.finish(TaskState::Exited { code: -1 });
+            return Err(error);
+        }
+    };
     let mut child = command.spawn().map_err(|error| {
         // The task never started, so it must not linger in the registry as a
         // running task. Mark it finished with a non-zero code.

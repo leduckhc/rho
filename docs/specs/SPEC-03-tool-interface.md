@@ -378,17 +378,26 @@ false claim about a boundary is worse than no claim.
 **Path confinement does not apply to `bash`.** A command reaches any path with `cd`
 or with an absolute path. The session root only sets the working directory.
 
-**So the approval policy is the only real boundary.** `bash` declares
+**So the approval policy is the only real boundary by default.** `bash` declares
 `ToolKind::Execute`, which `ToolKind::is_read_only` treats as mutating. A read-only
 policy therefore denies `bash` outright. Point rho at a repository you do not trust
 with `--read-only`.
+
+**A second, real boundary is now available: the OS sandbox.** `SPEC-10` adds a
+`--sandbox <off|confined|strict>` mode that confines an approved `bash` call with
+the operating system, not with a string match. `confined` limits writes to the
+session root and the scratch directory. `strict` also denies the network. The
+default is `off`, so the sentence above still holds unless a caller opts in. When
+confinement is asked for and no OS backend is available, `bash` fails closed and
+refuses the command. See `SPEC-10` for what the sandbox does and does not stop.
 
 **Credential scrubbing is defence in depth, not a boundary.** It removes a key from
 the child's environment, so a careless command cannot echo one. It does not stop a
 determined command, because a shell can read `~/.aws/credentials` or a shell profile
 from disk. Anything that runs shell commands can read files that the user can read.
 
-Sprint 1 adds no container and no namespace sandbox. That is the honest limit.
+Sprint 1 adds no container. The macOS `sandbox-exec` and Linux `bwrap` confinement
+in `SPEC-10` is the honest limit: it is off by default, and it does not stop a read.
 
 ## 8. Test cases
 
@@ -525,9 +534,9 @@ In `crates/rho-tools/tests/`:
 
 ## 9. Out of scope for sprint 1
 
-- A container or OS-namespace sandbox for `bash`. The boundary is path
-  confinement and the approval policy.
-- A network allow-list for `bash`.
+- A container sandbox for `bash`. The OS sandbox in `SPEC-10` uses
+  `sandbox-exec` or `bwrap`, not a container.
+- A network allow-list for `bash`. `strict` in `SPEC-10` is all or nothing.
 - A schema derive crate. Schemas are written by hand.
 - Interactive per-call approval UI. Sprint 1 uses a fixed policy. The TUI adds a
   prompt in a later sprint.

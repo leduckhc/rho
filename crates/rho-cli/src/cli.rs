@@ -13,11 +13,12 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use clap::ValueEnum;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use rho_core::{
     AgentEvent, AllowAllPolicy, ApprovalPolicy, CancelToken, ContentBlock, Context, ReadOnlyPolicy,
-    Session, SessionConfig, StreamEvent,
+    SandboxMode, Session, SessionConfig, StreamEvent,
 };
 
 use crate::extensions;
@@ -48,6 +49,13 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub read_only: bool,
 
+    /// The `bash` confinement mode. `off` runs a command unconfined, which is the
+    /// default. `confined` limits writes to the session root and the scratch
+    /// directory. `strict` also denies the network. When confinement is asked for
+    /// and no OS sandbox is available, `bash` refuses the command. See SPEC-10.
+    #[arg(long, global = true, value_enum, default_value_t = SandboxArg::Off)]
+    pub sandbox: SandboxArg,
+
     /// Load skills that live in this repository.
     ///
     /// A skill can instruct the model and can carry scripts, so a skill from the
@@ -73,6 +81,28 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+/// The `--sandbox` value. This mirrors `rho_core::SandboxMode` for clap, because
+/// `rho-core` carries no clap dependency. The default is `Off`, stated here.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum SandboxArg {
+    /// No confinement. The default.
+    Off,
+    /// Writes limited to the session root and the scratch directory.
+    Confined,
+    /// `Confined`, plus no network.
+    Strict,
+}
+
+impl From<SandboxArg> for SandboxMode {
+    fn from(arg: SandboxArg) -> Self {
+        match arg {
+            SandboxArg::Off => SandboxMode::Off,
+            SandboxArg::Confined => SandboxMode::Confined,
+            SandboxArg::Strict => SandboxMode::Strict,
+        }
+    }
 }
 
 /// The subcommands of `rho`.
@@ -118,7 +148,7 @@ fn build_config(cli: &Cli) -> anyhow::Result<SessionConfig> {
         Arc::new(AllowAllPolicy)
     };
 
-    Ok(SessionConfig::new(model, root, approval))
+    Ok(SessionConfig::new(model, root, approval).with_sandbox(cli.sandbox.into()))
 }
 
 /// Build a session from the config and the chosen provider.
@@ -144,7 +174,8 @@ async fn build_session(
     )
     .await;
 
-    let mut registry = rho_tools::builtin_registry_with_tasks(Arc::clone(&tasks));
+    let mut registry =
+        rho_tools::builtin_registry_with_tasks_and_sandbox(Arc::clone(&tasks), config.sandbox);
     for tool in &extensions.mcp_tools {
         registry.register(Arc::clone(tool));
     }
@@ -402,5 +433,34 @@ mod tests {
             Some(Command::Run { prompt }) => assert_eq!(prompt, "hello"),
             other => panic!("expected a run command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sandbox_flag_defaults_to_off() {
+        // The default is stated in the flag definition, not hidden. See D-013.
+        let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
+        assert_eq!(cli.sandbox, SandboxArg::Off);
+        let config = build_config(&cli).unwrap();
+        assert_eq!(config.sandbox, rho_core::SandboxMode::Off);
+    }
+
+    #[test]
+    fn sandbox_flag_sets_confined() {
+        let cli = Cli::try_parse_from(["rho", "--model", "m", "--sandbox", "confined"]).unwrap();
+        let config = build_config(&cli).unwrap();
+        assert_eq!(config.sandbox, rho_core::SandboxMode::Confined);
+    }
+
+    #[test]
+    fn sandbox_flag_sets_strict() {
+        let cli = Cli::try_parse_from(["rho", "--model", "m", "--sandbox", "strict"]).unwrap();
+        let config = build_config(&cli).unwrap();
+        assert_eq!(config.sandbox, rho_core::SandboxMode::Strict);
+    }
+
+    #[test]
+    fn sandbox_flag_rejects_an_unknown_mode() {
+        let result = Cli::try_parse_from(["rho", "--model", "m", "--sandbox", "loose"]);
+        assert!(result.is_err(), "an unknown mode must be rejected");
     }
 }

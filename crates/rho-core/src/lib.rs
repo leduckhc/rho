@@ -14,6 +14,7 @@ mod event;
 mod hook;
 mod provider;
 mod retry;
+mod sandbox;
 mod secret;
 mod tasks;
 mod tool;
@@ -28,6 +29,7 @@ pub use event::StreamEvent;
 pub use hook::{Hook, HookChain, HookOutcome, ToolCallView};
 pub use provider::{CompletionRequest, Provider, ProviderStream, ToolSpec};
 pub use retry::RetryPolicy;
+pub use sandbox::SandboxMode;
 pub use secret::Secret;
 pub use tasks::{
     BackgroundReason, DEFAULT_FOREGROUND_LIMIT_MS, RunMode, TaskError, TaskHandle, TaskId,

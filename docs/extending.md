@@ -182,9 +182,11 @@ own spec before any code, per `AGENTS.md` step 3.
 Hooks that refuse dangerous work. This is the most valuable extension, because it is what
 makes an unattended run safe enough to leave alone.
 
-rho already has two coarse controls: `ToolKind` approval, and `--read-only`. Those are
-per-kind, so `bash` is all or nothing. A guardrail extension adds control at the level of
-the **command**, which is where the danger actually lives.
+rho already has three coarse controls: `ToolKind` approval, `--read-only`, and the
+`--sandbox` OS confinement mode from `SPEC-10`. Approval and `--read-only` are
+per-kind, so `bash` is all or nothing. The sandbox bounds an approved `bash` call
+by write path and by network, but not by command shape. A guardrail extension adds
+control at the level of the **command**, which is where a shape rule lives.
 
 Grounded in what Claude Code exposes, the useful shape is a **scoped pattern** rather
 than a tool name:
@@ -218,6 +220,15 @@ a variable, a here-document, `base64 -d`, an alias, a script file. A pattern cat
 careless case and the obvious injection. It does not stop a determined one. Say so in the
 extension's own documentation, because a guard that oversells itself is worse than none.
 `SPEC-03` section 7 makes the same admission about `bash`.
+
+For a **real** boundary, use the OS sandbox, not a pattern. `SPEC-10` adds a
+`--sandbox <off|confined|strict>` mode that confines an approved `bash` call with
+`sandbox-exec` on macOS or `bwrap` on Linux. It limits writes to the session root
+and the scratch directory, and `strict` also denies the network. So a guardrail
+pattern and the sandbox do different jobs: the pattern refuses a shape the model
+should not try, and the sandbox bounds what any approved command can do. A
+guardrail extension should build on the sandbox for confinement, not try to
+replace it with a string match.
 
 **A refusal must teach.** Name the pattern, and name the safe alternative.
 

@@ -54,6 +54,7 @@ This document is the contract for all later stages. The architect writes specs a
 | F-29 | Tool approval gate | The caller supplies an `ApprovalGate` closure at startup. The closure runs before each tool call. It returns allow or block. The basic TUI wires a confirmation prompt to it. | `rho-core` | `sprint-1` | Any caller supplies a different closure. No fork required. |
 | F-130 | Approval UI extensions | Richer approval interfaces beyond a simple TUI prompt are supported. These include remote approval, policy rules, and per-tool overrides. | `rho-tui` | `planned` | Implement a custom `ApprovalGate` closure and pass it at startup (requires F-29). |
 | F-30 | Todo tool | A structured todo list the agent uses to record tasks, confidence scores, and completion status. The agent checks confidence before marking done. | `rho-tools` | `planned` | Replace by registering a different `Tool` impl under the name `todo`. |
+| F-31 | Bash OS sandbox | The agent runs `bash` under an OS sandbox. `confined` limits writes to the session root and the scratch directory. `strict` also denies the network. When confinement is asked for and no OS backend exists, `bash` refuses the command. | `rho-tools` | `sprint-1` | Set `SessionConfig::sandbox` or pass `--sandbox <mode>`. The macOS `sandbox-exec` path is behind one function, so a replacement is small. See `SPEC-10`. |
 
 ---
 
