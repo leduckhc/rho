@@ -134,6 +134,40 @@ This document is the contract for all later stages. The architect writes specs a
 
 ---
 
+## Extensions — tier 2
+
+An extension adds tools, hooks, or both. It is a normal crate behind a cargo feature, so
+a user who does not want it does not compile it. See `docs/extending.md` for the three
+tiers and for the design notes behind each row here.
+
+| ID | Name | Outcome | Owning crate | Status | Extension point |
+|----|------|---------|--------------|--------|-----------------|
+| F-140 | Scoped command guardrails | The user allows `bash(git log *)` and denies `bash(rm *)`. A denied command never runs. Deny beats allow. | `new: rho-guard` | `planned` | Config states the patterns. A caller can add its own `Hook` for a rule the patterns cannot express. |
+| F-141 | Default destructive-shape deny list | rho refuses a known-destructive command without any configuration. The list covers `rm -rf`, `dd`, `mkfs`, a piped installer, `sudo`, a force push, and a fork bomb. | `new: rho-guard` | `planned` | The list is data, so a caller replaces or extends it. |
+| F-142 | Narrower write confinement | The user confines `write` and `edit` to a glob such as `src/**`, tighter than the session root. | `new: rho-guard` | `planned` | Config states the globs. |
+| F-143 | Budget caps | A session stops at a token, money, or wall-clock limit. So a runaway loop cannot spend without a bound. | `new: rho-guard` | `planned` | A caller sets the caps. A `Hook` enforces them. |
+| F-144 | Web fetch | The agent fetches a URL and reads it as text. The body is capped. A redirect into a private address is refused. | `new: rho-web` | `planned` | Replace by registering a different `Tool` under the name `web_fetch`. |
+| F-145 | Web search | The agent searches the web through a configured provider. The key is a `Secret`. | `new: rho-web` | `planned` | The provider is a trait, so a caller adds a search back end without forking. |
+| F-146 | Browser control | The agent drives a real browser. It declares `ToolKind::Execute`, because it runs a program and can act on a logged-in session. | `new: rho-web` | `planned` | Replace by registering a different `Tool` under the name `browser`. |
+| F-147 | External-content marking | Fetched text is marked as external, so a later rule can treat it as untrusted. Fetched text never widens a permission. | `new: rho-web` | `planned` | No extension point. This is a security boundary. |
+| F-148 | Task list | The model records its goals and their state, and the list survives a turn. | `new: rho-todo` | `planned` | Replace by registering a different `Tool` under the name `todo`. |
+| F-149 | Task confidence scoring | The model rates its confidence when a task is assigned and again when it is done. A large jump triggers a re-check. | `new: rho-todo` | `planned` | The threshold is configuration. |
+| F-150 | Auto-continue on unfinished work | A turn that ends with unfinished tasks sends the model back to work. A transient failure retries, a permanent one stops. | `new: rho-todo` | `planned` | Needs a turn cap and a budget from F-143, so it cannot spend in silence. |
+| F-151 | Durable memory | A note store the agent searches at the start of a turn. | `new: rho-memory` | `considered` | The store is a trait. |
+| F-152 | Language-server tools | Diagnostics, a definition lookup, and a rename, from a language server. | `new: rho-lsp` | `considered` | One server per language, behind a trait. |
+| F-153 | Cost meter | A running token and money count, with a per-session cap. | `new: rho-cost` | `considered` | A `Hook` reads usage and enforces the cap. |
+
+## Hook model gaps
+
+`docs/extending.md` compares rho's hook model with pi's. These rows track the gaps.
+
+| ID | Name | Outcome | Owning crate | Status | Extension point |
+|----|------|---------|--------------|--------|-----------------|
+| F-160 | Terminate on block | A hook stops the whole run, not only one tool call. So a guardrail can end a session that keeps trying a refused action. | `rho-core` | `planned` | `HookOutcome` gains a variant. |
+| F-161 | Lifecycle hook points | A hook observes a session start, a turn start, a turn end, and a run end. | `rho-core` | `planned` | New `Hook` trait methods with default bodies, so an existing hook keeps compiling. |
+| F-162 | Model request and response hooks | A hook sees the request before it is sent and the response as it arrives. So an extension can meter cost or redact a prompt. | `rho-core` | `planned` | New `Hook` trait methods. Must not break the stable prompt prefix. |
+| F-163 | Slash commands | The user types `/name` and an extension answers. | `rho-core` | `planned` | A `CommandHandler` impl. This is F-44 restated for tier 2. |
+
 ## Observability and telemetry
 
 | ID | Name | Outcome | Owning crate | Status | Extension point |

@@ -59,6 +59,42 @@ pub trait Hook: Send + Sync {
 }
 ```
 
+## 1a. The three tiers, and where a hook sits
+
+`docs/extending.md` names rho's three tiers. This spec covers tier 1, the plugin loader,
+and the hook trait that tier 2 builds on.
+
+- **Tier 0, core tools.** A closed set of nine in `rho-tools`. No network, every path
+  confined, every kind declared.
+- **Tier 1, capability loaders.** `rho-skills`, `rho-mcp`, and this crate. A loader adds
+  no capability of its own, and what it loads is untrusted, so each one fails closed.
+- **Tier 2, extensions.** A crate that returns `Arc<dyn Tool>` and `Arc<dyn Hook>` values.
+  There is no plugin format and no registry to join.
+
+**The hook trait is the most valuable extension point in rho.** A hook sees a call before
+it runs, and it may observe it, rewrite its arguments, or refuse it with a reason the
+model reads. That is what makes a guardrail possible, and a guardrail is what makes an
+unattended run safe enough to leave alone.
+
+### Planned additions to the hook model
+
+Recorded here because each one changes this trait, and a default body keeps an existing
+hook compiling.
+
+| Feature | Addition | Reason |
+| --- | --- | --- |
+| F-160 | A `Terminate` outcome | A block ends one call today. A guardrail needs to end a session that keeps retrying a refused action. |
+| F-161 | Lifecycle points: session start, turn start, turn end, run end | A meter and a logger both need them. |
+| F-162 | A model request and response point | Cost metering, and prompt redaction. |
+
+**One constraint binds F-162.** A hook must not change the stable prompt prefix, because
+that throws away the provider's prompt cache. `SPEC-01` section 1 forbids it. So a request
+hook may read the request and may append to the tail, and it may not edit an earlier turn.
+
+**The active tool set stays fixed for a session** for the same reason. pi lets an
+extension change it at run time. rho will not, because the tool list sits in the cached
+prefix.
+
 ## 2. The hook chain and its ordering guarantee
 
 ```rust

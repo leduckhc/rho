@@ -75,6 +75,21 @@ Tools are confined to the session root. A path outside it is refused, including
 one reached through a symlink. `--read-only` denies every mutating tool, so you can
 point rho at a repository you do not trust.
 
+## Extending
+
+rho has three tiers, named for what each contributes.
+
+| Tier | Name | Contributes |
+| --- | --- | --- |
+| 0 | Core tools | The irreducible set: `read`, `write`, `edit`, `list`, `glob`, `grep`, `bash`, `task`, `task_cancel`. No network. |
+| 1 | Capability loaders | Nothing of their own. Skills, MCP servers, and subprocess plugins load somebody else's capability. |
+| 2 | Extensions | New tools and new hooks, in any crate, behind a cargo feature. |
+
+A hook sees a tool call before it runs. It may observe it, rewrite its arguments, or
+refuse it with a reason the model reads. That is how a guardrail works.
+
+See [docs/extending.md](docs/extending.md).
+
 ## Contributing
 
 Read [AGENTS.md](AGENTS.md) first. It holds the development flow as a checklist, from

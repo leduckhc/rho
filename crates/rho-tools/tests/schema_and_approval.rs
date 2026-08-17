@@ -134,3 +134,94 @@ async fn approval_denied_call_returns_denied_error() {
     let error = rho_core::ToolError::Denied;
     assert!(error.to_string().contains("denied"));
 }
+
+#[test]
+fn the_core_tool_set_is_exactly_the_documented_nine() {
+    // `docs/extending.md` calls tier 0 a closed set of nine, and lists each name with its
+    // kind. A doc that disagrees with the code is worse than no doc, so this test pins
+    // both the set and the kinds.
+    //
+    // Adding a core tool should fail here. That is the point: a tenth tool costs context
+    // in every request whether the model uses it or not, so it must be a deliberate
+    // decision, not a quiet addition.
+    let tasks = std::sync::Arc::new(rho_core::TaskRegistry::new(rho_core::TaskLimits::default()));
+    let mut got: Vec<(String, String)> = rho_tools::builtin_tools_with_tasks(tasks)
+        .iter()
+        .map(|tool| (tool.name().to_string(), format!("{:?}", tool.kind())))
+        .collect();
+    got.sort();
+
+    let mut want: Vec<(String, String)> = vec![
+        ("read", rho_core::ToolKind::Read),
+        ("list", rho_core::ToolKind::Read),
+        ("glob", rho_core::ToolKind::Search),
+        ("grep", rho_core::ToolKind::Search),
+        ("write", rho_core::ToolKind::Edit),
+        ("edit", rho_core::ToolKind::Edit),
+        ("bash", rho_core::ToolKind::Execute),
+        ("task", rho_core::ToolKind::Read),
+        ("task_cancel", rho_core::ToolKind::Execute),
+    ]
+    .into_iter()
+    .map(|(name, kind): (&str, rho_core::ToolKind)| (name.to_string(), format!("{kind:?}")))
+    .collect();
+    want.sort();
+
+    assert_eq!(
+        got, want,
+        "the core tool set changed. Update docs/extending.md and this test together"
+    );
+}
+
+#[test]
+fn no_core_tool_declares_an_undeclared_kind() {
+    // `ToolKind::Other` is treated as mutating, so a core tool with an undeclared kind
+    // would be denied under --read-only for no reason. See decision D-012.
+    let tasks = std::sync::Arc::new(rho_core::TaskRegistry::new(rho_core::TaskLimits::default()));
+    for tool in rho_tools::builtin_tools_with_tasks(tasks) {
+        assert_ne!(
+            tool.kind(),
+            rho_core::ToolKind::Other,
+            "core tool {} must declare a real kind",
+            tool.name()
+        );
+    }
+}
+
+#[test]
+fn both_builtin_sets_share_the_same_file_and_search_tools() {
+    // The two sets were written out separately, so adding a core tool to one silently
+    // omitted it from the other. Deleting `grep` from one list left every test green.
+    //
+    // This test compares the sets instead of trusting one. The task-enabled set is the
+    // foreground set plus exactly `task` and `task_cancel`.
+    let tasks = std::sync::Arc::new(rho_core::TaskRegistry::new(rho_core::TaskLimits::default()));
+    let mut foreground: Vec<String> = rho_tools::builtin_tools()
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect();
+    let mut with_tasks: Vec<String> = rho_tools::builtin_tools_with_tasks(tasks)
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect();
+    foreground.sort();
+    with_tasks.sort();
+
+    let extra: Vec<&String> = with_tasks
+        .iter()
+        .filter(|name| !foreground.contains(name))
+        .collect();
+    assert_eq!(
+        extra,
+        vec!["task", "task_cancel"],
+        "the task set must add exactly the two task tools, got {with_tasks:?}"
+    );
+    let missing: Vec<&String> = foreground
+        .iter()
+        .filter(|name| !with_tasks.contains(name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the task set dropped a core tool: {missing:?}"
+    );
+}

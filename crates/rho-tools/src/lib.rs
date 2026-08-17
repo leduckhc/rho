@@ -49,6 +49,18 @@ pub fn builtin_registry() -> ToolRegistry {
 /// tool, because those need a task registry. Use [`builtin_tools_with_tasks`] to
 /// get the full set with background support.
 pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
+    let mut tools = shared_tools();
+    tools.push(Arc::new(BashTool::new()));
+    tools
+}
+
+/// Every core tool that does not need a task registry.
+///
+/// One list, because there were two. The six file and search tools were written out in
+/// both `builtin_tools` and `builtin_tools_with_tasks`, so adding a core tool to one
+/// silently omitted it from the other. A controller found this by deleting `grep` from
+/// one list and watching the set-membership test still pass. See decision D-030.
+fn shared_tools() -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(ReadTool),
         Arc::new(ListTool),
@@ -56,7 +68,6 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(GrepTool),
         Arc::new(WriteTool),
         Arc::new(EditTool),
-        Arc::new(BashTool::new()),
     ]
 }
 
@@ -74,15 +85,9 @@ pub fn builtin_registry_with_tasks(tasks: Arc<TaskRegistry>) -> ToolRegistry {
 
 /// The built-in tools with background-task support, in a stable order.
 pub fn builtin_tools_with_tasks(tasks: Arc<TaskRegistry>) -> Vec<Arc<dyn Tool>> {
-    vec![
-        Arc::new(ReadTool),
-        Arc::new(ListTool),
-        Arc::new(GlobTool),
-        Arc::new(GrepTool),
-        Arc::new(WriteTool),
-        Arc::new(EditTool),
-        Arc::new(BashTool::with_tasks(Arc::clone(&tasks))),
-        Arc::new(TaskTool::new(Arc::clone(&tasks))),
-        Arc::new(TaskCancelTool::new(tasks)),
-    ]
+    let mut tools = shared_tools();
+    tools.push(Arc::new(BashTool::with_tasks(Arc::clone(&tasks))));
+    tools.push(Arc::new(TaskTool::new(Arc::clone(&tasks))));
+    tools.push(Arc::new(TaskCancelTool::new(tasks)));
+    tools
 }
