@@ -21,6 +21,22 @@ So a pattern list is not a boundary.
 The operating system already has the mechanism. This spec adds a real confinement
 mode for `bash`, built on the operating system, not on string matching.
 
+### This is a correctness win, not a structural lead
+
+An architect review pushed back on how this was framed, and the correction is worth
+keeping in the spec rather than losing in a conversation.
+
+A namespace or a sandbox profile is **available to anybody**. Any harness could add this,
+and some will. So being first is a lead in correctness and in honesty, not in
+architecture. Do not sell it as something a competitor cannot copy.
+
+rho does have one architectural edge here, and it is narrow: because many sessions live in
+one process, a host can amortise one sandbox supervisor across all of them, rather than
+paying per process. That is a real advantage and a small one.
+
+**The structural lead is density, not confinement.** See `docs/benchmarks.md`, which
+records 100 concurrent live sessions in 34 MiB, and `SPEC-11` for what that unlocks.
+
 ## 2. The three modes
 
 | Mode | Behaviour |

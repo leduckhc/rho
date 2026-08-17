@@ -797,3 +797,68 @@ upstream key may not carry caching. **So rho now reports the number, and rho has
 demonstrated a non-zero hit rate end to end.** Automatically placing a cache breakpoint at
 the end of the stable prefix is the obvious next step, and it is not done. Recorded as a
 gap rather than implied.
+
+## D-033 — A fleet-wide budget governor, and it is the safety valve for subagents
+
+An architect review ranked this second by value over cost, and the reasoning holds.
+
+Two competitors meter usage per process, because both run one process per session. So
+neither can cap a fleet without an outside coordinator that watches many processes and
+cannot stop one mid-turn. rho holds many sessions in one address space, so a fleet-wide cap
+is a shared counter checked in the hook chain that already runs around every call.
+
+**The lead is not that rho has a cost meter.** Every harness has one. The lead is that one
+limit can bind fifty sessions and every subagent beneath them, and stop the next call
+rather than report the overspend afterwards.
+
+**It is also a safety requirement, not only a feature.** `SPEC-11` makes a subagent cost
+about 247 KB, so the cheap thing to create is not the cheap thing to run. Density without a
+budget is a way to spend money in silence.
+
+**Decision.** `SPEC-12` specifies it, with three scopes: session, tree, and fleet.
+Implementation waits for `SPEC-11`, because a governor must cap a tree and the tree does not
+exist yet.
+
+**Two honest limits are written into the spec rather than discovered later.** The first
+version reads usage from the event stream, so it is one turn late until the model request
+and response hooks land as F-162. And a money cap binds only where a provider reports a
+charge: Azure and Bedrock report none, so the governor must warn at configuration time
+instead of silently failing to enforce. A cap that quietly does nothing is worse than no cap.
+
+## D-034 — No cross-session shared file cache, because rho has no tenancy model
+
+The same review proposed a content-addressed file and grep cache shared between sessions in
+one process, and then ranked it last itself, with a serious warning. The controller agrees
+and is recording the refusal so nobody builds it as an obvious optimisation.
+
+**The risk.** Sessions can have different confinement roots. `docs/benchmarks.md`
+deliberately gives every session its own provider client, its own tool registry, and its own
+context, "because a real host does not share those between users". A shared file cache would
+hand one session's file contents to another, and path confinement would not catch it,
+because the second session never touched the path.
+
+**Decision.** Not built. It stays out until rho has an explicit tenancy model that says
+which sessions may share what. The same argument applies to a shared grep index.
+
+**What is already shared, and why that is safe.** Decision D-025 shares an MCP server
+process between sessions. That is different in kind: an MCP server is a program the user
+configured, it holds no session's file contents, and the sharing is keyed on a config
+fingerprint. A file cache would hold exactly the data that must not cross.
+
+**The general rule this establishes.** Density is rho's advantage, and density means shared
+state. So every proposal to share something must answer one question first: what stops one
+session reading another's data? If the answer needs a tenancy model, the proposal waits.
+
+## D-035 — The bash sandbox is a correctness win, not a structural lead
+
+The controller shipped the `SPEC-10` sandbox and described it as genuinely beating both
+competitors. The architect review pushed back, and the correction is right.
+
+A namespace or a sandbox profile is **available to anybody**. Any harness could add one, and
+some will. So shipping it is a lead in correctness and in honesty, not in architecture.
+
+rho does have one edge here, and it is narrow: many sessions in one process can amortise a
+single sandbox supervisor rather than paying per process.
+
+**The structural lead is density, not confinement.** `SPEC-10` and `docs/extending.md` now
+say so, so the claim does not drift back.

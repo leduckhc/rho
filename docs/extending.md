@@ -215,6 +215,15 @@ The default deny list, and each entry has a reason:
 
 **Two rules this extension must not break.**
 
+**Prefer the operating system over a pattern.** `SPEC-10` adds a real confinement mode
+for `bash`, using `sandbox-exec` on macOS and `bwrap` on Linux. It fails closed: ask for
+confinement with no backend available and the command is refused. That is the boundary. A
+pattern list is a filter in front of it.
+
+Note what that is and is not. A sandbox profile is available to anybody, so shipping one
+is a win in correctness, not an architectural lead. rho's only edge here is narrow: many
+sessions in one process can share one sandbox supervisor.
+
 **Pattern matching is not a sandbox.** A shell has a hundred routes to the same effect:
 a variable, a here-document, `base64 -d`, an alias, a script file. A pattern catches the
 careless case and the obvious injection. It does not stop a determined one. Say so in the
