@@ -351,3 +351,117 @@ impl Tool for FailingTool {
         Err(ToolError::Io(self.error_text.clone()))
     }
 }
+
+/// A tool that streams output lines before it returns. Used to cover the
+/// `AgentEvent::ToolUpdate` branch of tool dispatch.
+pub struct UpdatingTool {
+    lines: Vec<String>,
+}
+
+impl UpdatingTool {
+    pub fn new(lines: &[&str]) -> Self {
+        Self {
+            lines: lines.iter().map(|line| line.to_string()).collect(),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for UpdatingTool {
+    fn name(&self) -> &str {
+        "streamer"
+    }
+    fn description(&self) -> &str {
+        "A tool that streams lines."
+    }
+    fn kind(&self) -> ToolKind {
+        ToolKind::Execute
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        ctx: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        for line in &self.lines {
+            // A full channel must not lose a line, so await rather than try_send.
+            let _ = ctx.updates.send(line.clone()).await;
+        }
+        Ok(ToolOutput {
+            content: vec![ContentBlock::Text {
+                text: "streamed".to_string(),
+            }],
+            is_error: false,
+        })
+    }
+}
+
+/// A tool that blocks until it is told to finish, and records whether its future
+/// was dropped before completing. Used to prove that dropping `AgentEvents` drops
+/// a tool future in flight.
+pub struct BlockingTool {
+    /// Set to true only if `execute` ran to completion.
+    pub completed: Arc<AtomicBool>,
+    /// Set to true when `execute` starts, so a test can wait without sleeping.
+    pub started: Arc<tokio::sync::Notify>,
+    /// Released to let `execute` finish.
+    pub release: Arc<tokio::sync::Notify>,
+}
+
+impl BlockingTool {
+    pub fn new() -> Self {
+        Self {
+            completed: Arc::new(AtomicBool::new(false)),
+            started: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for BlockingTool {
+    fn name(&self) -> &str {
+        "blocker"
+    }
+    fn description(&self) -> &str {
+        "A tool that waits."
+    }
+    fn kind(&self) -> ToolKind {
+        ToolKind::Execute
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        self.started.notify_waiters();
+        self.release.notified().await;
+        // Reached only if the future was not dropped first.
+        self.completed.store(true, Ordering::SeqCst);
+        Ok(ToolOutput {
+            content: vec![ContentBlock::Text {
+                text: "finished".to_string(),
+            }],
+            is_error: false,
+        })
+    }
+}
+
+/// A scripted turn that ends with an arbitrary stop reason and no text.
+///
+/// Used to drive `map_stop_reason` through the real loop, rather than testing only
+/// its serde form.
+pub fn turn_ending_with(stop_reason: rho_core::StopReason) -> Vec<StreamEvent> {
+    use rho_core::Role;
+    vec![
+        StreamEvent::MessageStart {
+            role: Role::Assistant,
+        },
+        StreamEvent::Done { stop_reason },
+    ]
+}

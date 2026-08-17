@@ -723,6 +723,34 @@ decision D-014 for the drift that forced the move.
 - `backoff_spreads_across_calls` — the jitter really spreads. A single value would
   rebuild the spike that the jitter exists to avoid.
 
+### Coverage tests, in `crates/rho-core/tests/coverage.rs`
+
+A reviewer listed every public item with no test. That list closed the gap that hid
+the three worst defects in this crate. These tests cover it.
+
+- `session_config_for_current_dir_uses_the_working_directory`
+- `session_config_with_max_turns_overrides_the_default`
+- `agent_loop_honours_a_max_turns_override` — the setter reaches the loop. The older
+  cap test relied on the default of 32, so the setter itself was unproven.
+- `context_tools_returns_the_registered_specs`
+- `provider_error_server_is_retryable` — a 5xx retries. Only the other variants were
+  covered.
+- `provider_error_decode_and_auth_are_not_retryable`
+- `agent_loop_maps_content_filtered_to_refusal`, `agent_loop_maps_max_tokens_through_the_loop`,
+  `agent_loop_maps_stop_sequence_to_end_turn` — the mapping runs through the real
+  loop, not only through serde.
+- `agent_loop_reports_an_unregistered_tool_and_continues` — a model may invent a
+  tool name. The run must continue and the model must read why.
+- `agent_loop_forwards_streamed_tool_output_in_order`
+- `dropping_events_drops_a_tool_future_in_flight` — see the note below.
+
+**A note on the drop test, because the first version was worthless.** It dropped the
+event stream and asserted the tool had not completed. But the tool was waiting on a
+signal that never fired, so it could not complete either way. That test passed
+against a deliberately emptied `Drop` impl. The current version releases the tool
+after the drop, so a live future would wake and set its flag, while a dropped future
+has no waiter. The controller confirmed it fails against the emptied `Drop`.
+
 ## 13. Out of scope for sprint 1
 
 - Compaction and branch summarisation. The context grows without a cut point.
