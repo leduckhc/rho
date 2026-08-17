@@ -132,11 +132,35 @@ stages:
       - test -s docs/specs/SPEC-14-sessions.md
       - python3 bench/check-prose.py $(find docs -name '*.md')
 
+  - id: T1b
+    name: Fix the T1 findings, and spec the approval model
+    role: architect
+    reviewer: reviewer
+    depends_on: [T1]
+    artifacts:
+      - docs/specs/SPEC-13-config.md
+      - docs/specs/SPEC-14-sessions.md
+      - docs/specs/SPEC-15-message-queue-and-steering.md
+      - docs/specs/SPEC-16-approval-and-permission.md
+    dod:
+      - Every blocker and every major from the T1 review is fixed, and each fix names its test.
+      - No spec depends on a function that does not exist, unless the spec names the stage that builds it.
+      - The session header records the approval mode and the sandbox mode. A resume refuses to widen either one.
+      - Every reader path has a byte cap. A hostile line cannot exhaust memory.
+      - The pairing rule covers the cancel path, the crash path, and the truncated-tail path.
+      - SPEC-16 states the resolution table, and every row of it resolves to a stated policy.
+      - SPEC-16 fails closed: a timeout, a closed channel, and a client with no permission capability are each a denial.
+      - SPEC-16 respects `BothPolicies` from SPEC-11. A child never becomes more permissive than its parent.
+      - Every public item the reviewer listed as untested now has a named test.
+    gate:
+      - test -s docs/specs/SPEC-16-approval-and-permission.md
+      - python3 bench/check-prose.py $(find docs -name '*.md')
+
   - id: T2
     name: Config layer, red tests
     role: tester
     reviewer: reviewer
-    depends_on: [T1]
+    depends_on: [T1b]
     artifacts:
       - crates/rho-config/tests/*.rs
       - crates/rho-config/src/lib.rs      # types only, bodies may be todo!()
@@ -162,7 +186,7 @@ stages:
       - The public API matches SPEC-13 exactly.
       - A malformed file returns a typed error. It never falls back to a default that grants more access.
       - Credential values use the redaction type from `rho-redact`. There is one redaction home.
-      - `rho-config` keeps no HTTP dependency and no terminal dependency.
+      - "`rho-config` keeps no HTTP dependency and no terminal dependency."
     gate:
       - cargo test -p rho-config --all-features
       - cargo clippy -p rho-config --all-targets -- -D warnings
@@ -172,7 +196,7 @@ stages:
     name: Session log, red tests
     role: tester
     reviewer: reviewer
-    depends_on: [T1]
+    depends_on: [T1b]
     artifacts:
       - crates/rho-core/tests/session_log.rs
     dod:
@@ -202,11 +226,49 @@ stages:
       - cargo test -p rho-core --all-features
       - cargo clippy -p rho-core --all-targets --all-features -- -D warnings
 
+  - id: T12
+    name: Ask approval policy and the message queue, red tests
+    role: tester
+    reviewer: reviewer
+    depends_on: [T1b, T5]
+    artifacts:
+      - crates/rho-core/tests/approval_ask.rs
+      - crates/rho-core/tests/message_queue.rs
+    dod:
+      - Tests cover every row of the SPEC-16 resolution table.
+      - Tests cover each fail-closed rule: a timeout, a closed channel, and a peer that cannot be asked.
+      - One test proves a child policy is never more permissive than its parent.
+      - Tests cover the bounded queue: order, a full queue, delivery at a turn boundary, and a cancel that keeps the queue.
+      - No test uses `sleep`. A test synchronises with a channel, a `Notify`, or `tokio::time` pause.
+    gate:
+      - cargo test -p rho-core --no-run
+
+  - id: T13
+    name: Ask approval policy and the message queue, green
+    role: developer
+    reviewer: [reviewer, secops]
+    depends_on: [T12]
+    artifacts:
+      - crates/rho-core/src/**
+      - crates/rho-tui/src/**
+      - crates/rho-cli/src/**
+    dod:
+      - Every T12 test passes, with no test edited.
+      - The Ask policy implements the existing `ApprovalPolicy` trait, and no existing caller changed.
+      - The TUI prompt never blocks the input editor and never blocks the event stream.
+      - Ctrl-C during a prompt denies the call, and it does not exit.
+      - A denial reaches the model as a tool error. It never ends the run.
+      - "`rho run` with no terminal resolves to read-only, proven by a test."
+      - F-29, F-32, F-33, and F-34 in docs/features.md state what the code now does.
+    gate:
+      - cargo test -p rho-core -p rho-tui -p rho-cli --all-features
+      - cargo clippy --workspace --all-targets --all-features -- -D warnings
+
   - id: T6
     name: ACP frontend, red tests
     role: tester
     reviewer: reviewer
-    depends_on: [T5]
+    depends_on: [T5, T13]
     artifacts:
       - crates/rho-acp/tests/*.rs
     dod:
@@ -232,7 +294,7 @@ stages:
     dod:
       - Every T6 test passes, with no test edited.
       - The mapping matches SPEC-06 for every method that sprint 2 claims.
-      - `rho acp` runs the agent on stdio. The command appears in `rho --help`.
+      - "`rho acp` runs the agent on stdio. The command appears in `rho --help`."
       - One process serves many sessions. A session id keys its own `Session`.
       - A malformed line returns a JSON-RPC parse error. It never panics and never exits.
       - The permission request path reaches the client, and a denial blocks the tool call.
@@ -246,7 +308,7 @@ stages:
     name: Prove the test catches the bug
     role: controller
     reviewer: reviewer
-    depends_on: [T3, T5, T7]
+    depends_on: [T3, T5, T7, T13]
     artifacts:
       - docs/verification/sprint-2-mutations.md
     dod:
@@ -356,7 +418,10 @@ definition_of_done_sprint:
   - Layered config merges the defaults, the files, a profile, the environment, and the flags.
   - A credential resolves from an environment variable, a file, or a shell command, and never reaches a log.
   - A session appends to a JSONL file, resumes from it, and branches from an earlier turn.
-  - `rho acp` serves a conforming ACP client, with many sessions in one process.
+  - A session closes, cancels without closing, lists, deletes, and forks.
+  - A user message that arrives mid-turn is queued, and it reaches the model at the next turn boundary.
+  - rho asks before a mutating tool call, wherever a human or a client can answer.
+  - "`rho acp` serves a conforming ACP client, with many sessions in one process."
   - A live client drove a real model through rho over ACP, with a tool call and a tool result.
   - Memory for one ACP session is measured, and recorded against the Node number that started this project.
   - cargo fmt, cargo clippy -D warnings, cargo test, and the minimal build all pass.

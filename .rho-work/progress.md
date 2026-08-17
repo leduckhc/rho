@@ -100,6 +100,41 @@ ACP backend.
 | Stage | Attempt | Role | Result | Notes |
 | --- | --- | --- | --- | --- |
 | T0 | 1 | controller | pass | Doc audit against the code. Nine feature rows were wrong. MCP had no rows at all. |
+| T1 | 1 | architect | partial | SPEC-13, SPEC-14, SPEC-15, and ADR-004. Session ops and steering added mid-flight by the owner. |
+| T1 | 2 | reviewer | fail | Three blockers and five majors. Every one is a repeat of a sprint-1 defect family. |
+| T1b | 1 | architect | running | Fixes the eight findings, and specs the Ask approval policy the owner chose. |
+
+### The T1 review, and why it failed
+
+The reviewer found eight real problems in specs that read well. Each one repeats a
+family from sprint 1.
+
+| Severity | Problem | Sprint-1 family |
+| --- | --- | --- |
+| blocker | The redaction call `redact_json_secrets` does not exist in `rho-redact` | `confine` was `todo!()` in a green stage |
+| blocker | The `approval` and `sandbox` defaults were unstated, and the tree default is allow-all | `ToolKind::Other` failed open |
+| blocker | A resume could widen a permission, because the header records no policy | `Session::new` hid an insecure default |
+| major | The reader had no line cap, so a hostile line could exhaust memory | the `bash` reader cost 805 MB |
+| major | The pairing rule covered cancel only, not a crash or a truncated tail | a tool turn never emitted `TurnEnd` |
+| major | The record cap covered a tool result only | untested public surface |
+| major | The environment layer was read twice, through clap and through config | two sources of truth |
+| major | A broken `sandbox` key and an unknown file version had no test | untested public surface |
+
+The scratch-crate check is what proved blocker one. A spec that names a function is
+not enough. The reviewer pasted every signature into a crate under `/tmp` and ran
+`cargo check`, and the compiler answered `E0425`.
+
+The owner then chose the approval model. rho gains an Ask policy, and it defaults to
+Ask wherever a human or a client can answer. It defaults to read-only where nobody can
+answer. That is decision D-051, and stages T12 and T13 build it.
+
+One more claim died here. `docs/features.md` F-29 said the TUI wires a confirmation
+prompt to the approval gate. `crates/rho-tui/src/` holds no approval code. The row now
+states the two policies that exist.
+
+The sprint-2 workflow file also failed to parse. Four list items started with a
+backtick, which YAML reserves. A workflow that no parser can read is a defect, so the
+file is now quoted and it loads.
 
 ### T0 findings, in detail
 
