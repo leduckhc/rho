@@ -294,6 +294,17 @@ Rules:
 
 ## 8. Test cases
 
+Decisions this stage pins, with a test each:
+- `read` truncates stored output at 100000 bytes and notes the truncation. It
+  reads UTF-8 text only; a non-UTF-8 file returns `InvalidArguments`.
+- `write` creates parent directories and overwrites an existing file.
+- `edit` fails when `old_text` appears more than once. A first-match replacement
+  of an ambiguous span is a data-loss bug, so the tool refuses it and leaves the
+  file unchanged.
+- `bash` enforces its timeout with a `tokio::time::sleep` branch in a `select`,
+  and on timeout or cancel it kills the whole process group with
+  `kill(-pid, SIGKILL)`, so an orphaned grandchild cannot survive.
+
 In `crates/rho-core/src/tool.rs` unit tests, for `confine` (F-28) and the
 policies (F-29):
 - `confine_allows_child_path` — a relative path under the root resolves to an
@@ -357,6 +368,26 @@ In `crates/rho-tools/tests/`:
   `Canceled`.
 - `tool_bash_truncates_large_output` — output over the cap is truncated and the
   result notes it.
+- `tool_bash_reports_nonzero_exit` — a non-zero exit sets `is_error` and notes
+  the exit code.
+- `tool_read_missing_file_is_io_error` — a missing file returns `Io`.
+- `tool_read_directory_is_invalid_arguments` — a directory path returns
+  `InvalidArguments`.
+- `tool_read_binary_file_is_invalid_arguments` — a non-UTF-8 file returns
+  `InvalidArguments`.
+- `tool_read_offset_and_limit_beyond_end_returns_empty` — an offset past the end
+  returns empty text.
+- `tool_read_truncates_a_very_large_file` — a file over the byte cap is truncated
+  and the result notes it.
+- `tool_write_overwrites_existing_file` — `write` overwrites an existing file.
+- `tool_write_rejects_path_escape` — `write` rejects a `../` path.
+- `tool_glob_does_not_follow_symlink_escape` — `glob` does not return a file
+  reached through a symlink out of the root.
+- `tool_grep_does_not_follow_symlink_escape` — `grep` does not search a file
+  reached through a symlink out of the root.
+- `tool_result_feeds_back_into_a_provider_turn_end_to_end` — a scripted fake
+  provider asks for a real `read` call, the agent loop runs it, and the tool
+  result appears in the next provider request. This is the S7 end-to-end proof.
 - `path_confine_allows_child_path` — a path under the root resolves.
 - `path_confine_rejects_parent_escape` — a `../` path returns `PathEscape`.
 - `path_confine_rejects_absolute_outside_root` — an absolute path outside the

@@ -1,14 +1,16 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! The out-of-process plugin host for rho (Tier 2).
+//!
+//! A plugin is a subprocess in any language. It speaks JSON-RPC 2.0 over stdio,
+//! one JSON object per line, LF framing. This crate launches the subprocess,
+//! runs the handshake, lists the plugin tools, and serves each call. A plugin
+//! runs in its own process, so a crash cannot take down the session. See
+//! `SPEC-04`.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+mod cache;
+mod host;
+mod process;
+mod proxy;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use cache::{PluginCache, PluginToolSpec};
+pub use host::{PluginError, PluginHost};
+pub use process::PluginProcess;

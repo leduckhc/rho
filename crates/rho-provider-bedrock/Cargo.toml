@@ -10,9 +10,11 @@ authors.workspace = true
 description = "AWS Bedrock Converse provider for rho."
 
 [dependencies]
+async-stream = "0.3"
 async-trait = "0.1.92"
 aws-config = { version = "1.8.13", default-features = false, features = ["rustls", "behavior-version-latest", "sso"] }
 aws-sdk-bedrockruntime = { version = "1.124.0", default-features = false, features = ["rustls", "behavior-version-latest"] }
+aws-smithy-types = "1"
 futures = "0.3.34"
 rho-core = { version = "0.1.0", path = "../rho-core" }
 serde = { version = "1.0.229", features = ["derive"] }

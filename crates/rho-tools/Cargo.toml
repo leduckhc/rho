@@ -13,6 +13,8 @@ description = "Built-in filesystem and shell tools for the rho harness."
 async-trait = "0.1.92"
 globset = "0.4.20"
 ignore = "0.4.33"
+libc = "0.2.189"
+regex = "1.13.1"
 rho-core = { version = "0.1.0", path = "../rho-core" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -22,5 +24,6 @@ tokio = { version = "1.53.1", features = ["rt", "macros", "fs", "process", "io-u
 tracing = "0.1.44"
 
 [dev-dependencies]
+futures = "0.3.34"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["full"] }

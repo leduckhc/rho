@@ -289,9 +289,19 @@ Plugin host, in `crates/rho-plugin/tests/`:
   it was written from.
 - `plugin_tool_advertised_from_cache_before_connect` — tools from the cache
   appear in `PluginHost::tools` before the plugin process connects.
+- `plugin_host_call_times_out` — a plugin that never answers a call returns
+  `PluginError::Timeout` after the per-call timeout, so one bad plugin cannot
+  hang the agent.
+- `plugin_host_enormous_line_does_not_panic` — a plugin that writes a 20 MB line
+  before its result does not panic the host; the host caps the line and still
+  reads the result.
+- `plugin_host_clean_shutdown_leaves_no_orphan` — after `shutdown` the plugin is
+  marked unavailable and reaped, so no orphan process is left behind.
 
-The stub plugin is a small binary or script in the test tree. No test reaches the
-network.
+The stub plugin is a second binary in this crate, `rho_stub_plugin`. Its path
+comes from `CARGO_BIN_EXE_rho_stub_plugin`. One binary drives every case; the
+first command-line argument selects the behaviour (`normal`, `crash`, `hang`,
+`garbage`, `bigline`). No test reaches the network.
 
 ## 7. Out of scope for sprint 1
 
