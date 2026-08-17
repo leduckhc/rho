@@ -89,6 +89,7 @@ impl Tool for BashTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        scrub_environment(&mut command);
         // Put the child in its own process group. So a later kill on the negated
         // pid reaches every grandchild, not only the direct child.
         #[cfg(unix)]
@@ -253,6 +254,68 @@ fn kill_group(pid: Option<u32>) {
 /// still reaps the direct child.
 #[cfg(not(unix))]
 fn kill_group(_pid: Option<u32>) {}
+
+/// Remove every variable whose name looks like a secret from the child's environment.
+///
+/// The model's tool arguments are attacker-controlled input, because a prompt
+/// injection can live in any file the agent reads. A security audit demonstrated the
+/// risk: a model asked `bash` to print the environment and saw `OPENROUTER_API_KEY`
+/// and `AWS_SECRET_ACCESS_KEY`. One network call then exfiltrates them.
+///
+/// The filter works on the **name**, not the value, because a value cannot be
+/// recognised reliably. It removes the name as well as the value, so the mere
+/// presence of a credential leaks nothing.
+///
+/// **This is defence in depth, not a boundary. Read this before you trust it.**
+/// A tool that runs a shell command can still read a credential file on disk, for
+/// example `~/.aws/credentials` or a shell profile. `bash` also has no path
+/// confinement, because `cd` and an absolute path both leave the session root. So the
+/// real boundary for `bash` is the approval policy. Run `--read-only` against a
+/// repository you do not trust; that denies `bash` outright.
+fn scrub_environment(command: &mut tokio::process::Command) {
+    for (name, _) in std::env::vars_os() {
+        let text = name.to_string_lossy().to_ascii_uppercase();
+        if looks_like_a_secret(&text) {
+            command.env_remove(&name);
+        }
+    }
+}
+
+/// True when a variable name suggests it holds a credential.
+///
+/// The list is a denylist, and that choice needs a reason. An allowlist would be
+/// safer in principle, but a command legitimately needs a wide and open-ended set of
+/// variables, so an allowlist would break ordinary work and users would switch it
+/// off. A denylist that catches the recognisable shapes is the useful trade here.
+///
+/// Add a pattern when you meet a new one. The cost of a false positive is small: a
+/// command loses one variable. The cost of a false negative is a leaked key.
+fn looks_like_a_secret(name: &str) -> bool {
+    const NEEDLES: &[&str] = &[
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+        "PRIVATE_KEY",
+        "API_KEY",
+        "APIKEY",
+        "ACCESS_KEY",
+        "AUTH_TOKEN",
+        "SESSION_TOKEN",
+        "REFRESH_TOKEN",
+        "BEARER",
+    ];
+    if NEEDLES.iter().any(|needle| name.contains(needle)) {
+        return true;
+    }
+    // A bare `*_TOKEN` or `*_KEY` is usually a credential. Keep a short allowlist for
+    // the common names that are not, so ordinary work does not break.
+    const NOT_SECRETS: &[&str] = &["SSH_AUTH_SOCK", "GPG_TTY", "KEYBOARD", "KEYMAP"];
+    if NOT_SECRETS.contains(&name) {
+        return false;
+    }
+    name.ends_with("_TOKEN") || name.ends_with("_KEY")
+}
 
 #[cfg(test)]
 mod tests {

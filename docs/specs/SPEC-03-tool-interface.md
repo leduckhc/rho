@@ -288,11 +288,41 @@ Rules:
 - Truncate the stored output at 100000 bytes. Note the truncation in the result.
 - Select against `ctx.cancel`. On cancel, kill the process group and return
   `ToolError::Canceled`.
-- The command runs with the caller's environment. Sprint 1 does not add a
-  container or a namespace sandbox. Path confinement and the approval policy are
-  the only boundaries for `bash`.
+- Remove every variable whose name looks like a credential from the child's
+  environment. See `scrub_environment` in `crates/rho-tools/src/bash.rs`. The filter
+  reads the name, not the value, and removes the name too.
+
+### What actually bounds `bash`, stated plainly
+
+An earlier version of this section said that "path confinement and the approval
+policy" bound `bash`. A security audit showed the first half was false, and a
+false claim about a boundary is worse than no claim.
+
+**Path confinement does not apply to `bash`.** A command reaches any path with `cd`
+or with an absolute path. The session root only sets the working directory.
+
+**So the approval policy is the only real boundary.** `bash` declares
+`ToolKind::Execute`, which `ToolKind::is_read_only` treats as mutating. A read-only
+policy therefore denies `bash` outright. Point rho at a repository you do not trust
+with `--read-only`.
+
+**Credential scrubbing is defence in depth, not a boundary.** It removes a key from
+the child's environment, so a careless command cannot echo one. It does not stop a
+determined command, because a shell can read `~/.aws/credentials` or a shell profile
+from disk. Anything that runs shell commands can read files that the user can read.
+
+Sprint 1 adds no container and no namespace sandbox. That is the honest limit.
 
 ## 8. Test cases
+
+Security tests for `bash`, each from a real finding:
+- `tool_bash_hides_a_credential_from_the_child` — a variable named like a key never
+  reaches the child. A live run against a real model demonstrated the leak first.
+- `tool_bash_keeps_the_variables_a_command_needs` — `PATH` and `HOME` survive, so
+  scrubbing does not break ordinary work.
+- `reader_splits_a_line_that_never_ends` — output with no newline cannot grow the
+  host's memory without bound.
+
 
 Decisions this stage pins, with a test each:
 - `read` truncates stored output at 100000 bytes and notes the truncation. It

@@ -137,3 +137,61 @@ async fn tool_bash_reports_a_final_line_without_a_newline() {
         .unwrap();
     assert!(text_of(&out).contains("no trailing newline"));
 }
+
+#[tokio::test]
+async fn tool_bash_hides_a_credential_from_the_child() {
+    // A security audit found this, and a live run against a real model demonstrated
+    // it. A prompt-injected model asked `bash` to print the environment, and the
+    // child showed `OPENROUTER_API_KEY` and `AWS_SECRET_ACCESS_KEY`. One `curl` then
+    // exfiltrates them.
+    //
+    // The model's tool arguments are attacker-controlled input, because a prompt
+    // injection can live in any file the agent reads. So the child must not inherit a
+    // variable that holds a secret.
+    //
+    // Read the honest limit in the doc comment on `scrub_environment`. A tool that
+    // runs shell commands can still read a credential file on disk. This is defence
+    // in depth, not a boundary.
+    let mut h = Harness::new();
+    // Safety: the test is single threaded here, and it sets a variable it owns.
+    unsafe {
+        std::env::set_var("RHO_TEST_FAKE_API_KEY", "super-secret-value");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "aws-secret-value");
+    }
+
+    let out = BashTool
+        .execute(serde_json::json!({ "command": "env | sort" }), h.ctx())
+        .await
+        .unwrap();
+    let text = text_of(&out);
+
+    assert!(
+        !text.contains("super-secret-value"),
+        "a variable named like a key must not reach the child"
+    );
+    assert!(
+        !text.contains("aws-secret-value"),
+        "the AWS secret must not reach the child"
+    );
+    assert!(
+        !text.contains("RHO_TEST_FAKE_API_KEY"),
+        "the name must go too, so its presence leaks nothing"
+    );
+}
+
+#[tokio::test]
+async fn tool_bash_keeps_the_variables_a_command_needs() {
+    // Scrubbing must not break ordinary work. A command needs PATH to find a binary,
+    // and HOME for many tools to behave.
+    let mut h = Harness::new();
+    let out = BashTool
+        .execute(
+            serde_json::json!({ "command": "echo \"path=${PATH:+set} home=${HOME:+set}\"" }),
+            h.ctx(),
+        )
+        .await
+        .unwrap();
+    let text = text_of(&out);
+    assert!(text.contains("path=set"), "PATH must survive: {text}");
+    assert!(text.contains("home=set"), "HOME must survive: {text}");
+}
