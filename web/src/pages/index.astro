@@ -1,0 +1,205 @@
+---
+import '../styles/site.css';
+
+const title = 'rho — take the parts you want';
+const description =
+  'rho is a composable coding agent harness in Rust. Small crates. ' +
+  'You take the parts you want.';
+const canonical = new URL(Astro.url.pathname, Astro.site);
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="theme-color" content="#101318" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="rho" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta name="twitter:card" content="summary" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="top">
+      <div class="row">
+        <a class="brand" href="/">rho</a>
+        <nav aria-label="Site">
+          <a href="#cost">Numbers</a>
+          <a href="https://github.com/leduckhc/rho/tree/main/docs">Docs</a>
+          <a href="https://github.com/leduckhc/rho">GitHub</a>
+        </nav>
+      </div>
+    </header>
+    <main id="main">
+      <section class="screen hero" aria-labelledby="hero-h">
+        <p class="kicker">rho --about</p>
+        <h1 id="hero-h">rho is the harness, unbundled.</h1>
+        <p class="lede">
+          A coding agent harness in Rust. Ten small crates. Take the parts you
+          want. Replace any part with your own crate.
+        </p>
+        <div class="tablewrap">
+          <table aria-label="The rho crates, with one example selection">
+            <thead>
+              <tr>
+                <th scope="col"><span class="sr-only">In this build</span></th>
+                <th scope="col">Crate</th>
+                <th scope="col">Role</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="pick"><span aria-hidden="true">[x]</span><span class="sr-only">included</span></td>
+                <td><code>rho-core</code></td>
+                <td>Session, agent loop, event stream, provider and tool traits, hooks. No HTTP.</td>
+              </tr>
+              <tr>
+                <td class="pick"><span aria-hidden="true">[x]</span><span class="sr-only">included</span></td>
+                <td><code>rho-config</code></td>
+                <td>Layered configuration and profiles.</td>
+              </tr>
+              <tr>
+                <td class="pick"><span aria-hidden="true">[x]</span><span class="sr-only">included</span></td>
+                <td><code>rho-tools</code></td>
+                <td>Built-in file and shell tools.</td>
+              </tr>
+              <tr>
+                <td class="pick"><span aria-hidden="true">[ ]</span><span class="sr-only">not included</span></td>
+                <td><code>rho-plugin</code></td>
+                <td>Out-of-process plugin host over stdio JSON-RPC.</td>
+              </tr>
+              <tr>
+                <td class="pick"><span aria-hidden="true">[x]</span><span class="sr-only">included</span></td>
+                <td><code>rho-provider-openrouter</code></td>
+                <td>OpenRouter and OpenAI-compatible endpoints.</td>
+              </tr>
+              <tr>
+                <td class="pick"><span aria-hidden="true">[ ]</span><span class="sr-only">not included</span></td>
+                <td><code>rho-provider-bedrock</code></td>
+                <td>AWS Bedrock Converse.</td>
+              </tr>
+              <tr>
+                <td class="pick"><span aria-hidden="true">[ ]</span><span class="sr-only">not included</span></td>
+                <td><code>rho-provider-azure</code></td>
+                <td>Azure OpenAI Responses.</td>
+              </tr>
+              <tr>
+                <td class="pick"><span aria-hidden="true">[x]</span><span class="sr-only">included</span></td>
+                <td><code>rho-tui</code></td>
+                <td>Minimal terminal interface.</td>
+              </tr>
+              <tr>
+                <td class="pick"><span aria-hidden="true">[ ]</span><span class="sr-only">not included</span></td>
+                <td><code>rho-acp</code></td>
+                <td>Agent Client Protocol server frontend.</td>
+              </tr>
+              <tr>
+                <td class="pick"><span aria-hidden="true">[x]</span><span class="sr-only">included</span></td>
+                <td><code>rho-cli</code></td>
+                <td>The <code>rho</code> binary. Frontends and providers are cargo features.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="after">
+          One example selection. Every crate is optional except
+          <code>rho-core</code>. No crate depends on a frontend.
+        </p>
+      </section>
+
+      <section class="screen claim" aria-labelledby="claim-h">
+        <p class="kicker">man rho</p>
+        <h2 id="claim-h">You do not fork rho. You compose it.</h2>
+        <p>
+          Most harnesses ship as one bundle. To change one part, you fork the
+          whole. <strong>rho inverts that.</strong> The agent loop knows
+          nothing about HTTP or terminals. Providers, tools, and frontends
+          plug into traits.
+        </p>
+        <pre class="block"><code><span class="p">$</span> cargo build -p rho-cli --no-default-features --features minimal</code></pre>
+      </section>
+
+      <section class="screen cost" id="cost" aria-labelledby="cost-h">
+        <p class="kicker">rho bench --sessions</p>
+        <h2 id="cost-h">A session should cost megabytes, not hundreds.</h2>
+        <p>
+          At 50 parallel sessions, a 100&nbsp;MB harness needs 5&nbsp;GB of
+          RAM. <strong>rho treats memory and start time as product
+          features.</strong> The rho row stays empty until our benchmarks
+          produce real values.
+        </p>
+        <div class="tablewrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Harness</th>
+                <th scope="col" class="n">Extra memory / session</th>
+                <th scope="col" class="n">Time to first input</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="rho-row">
+                <td>rho</td>
+                <td class="n"><span class="tbm">to be measured</span></td>
+                <td class="n"><span class="tbm">to be measured</span></td>
+              </tr>
+              <tr><td>jcode (Rust)</td><td class="n">~10.4 MB</td><td class="n">~49 ms</td></tr>
+              <tr><td>Codex CLI</td><td class="n">~21.6 MB</td><td class="n">~906 ms</td></tr>
+              <tr><td>pi (TypeScript)</td><td class="n">~76.5 MB</td><td class="n">~596 ms</td></tr>
+              <tr><td>Claude Code</td><td class="n">~213 MB</td><td class="n">~3513 ms</td></tr>
+              <tr><td>OpenCode</td><td class="n">~318 MB</td><td class="n">—</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="attribution">
+          Other harnesses: <a href="https://jcode.sh">jcode.sh</a> published
+          benchmarks, sampled August 2026. rho values land in
+          <a href="https://github.com/leduckhc/rho/blob/main/docs/benchmarks.md">docs/benchmarks.md</a>
+          with the command that produced them.
+        </p>
+      </section>
+
+      <section class="screen extend" aria-labelledby="extend-h">
+        <p class="kicker">rho extend --help</p>
+        <h2 id="extend-h">Extend it in Rust, or in any language.</h2>
+        <div class="tiers">
+          <div class="tier">
+            <h3><span>Tier 1</span>Compiled traits</h3>
+            <p>Implement <code>Provider</code>, <code>Tool</code>, or <code>Hook</code> in your own crate.</p>
+            <p>Link it into your build. Zero overhead.</p>
+          </div>
+          <div class="tier">
+            <h3><span>Tier 2</span>Out-of-process plugins</h3>
+            <p>Ship a subprocess that speaks stdio JSON-RPC. Any language.</p>
+            <p>A crashed plugin does not take down the session.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="screen get" aria-labelledby="get-h">
+        <p class="kicker">rho install</p>
+        <h2 id="get-h">Install from source. MIT licensed.</h2>
+        <pre class="block"><code><span class="p">$</span> cargo install --git https://github.com/leduckhc/rho rho-cli</code></pre>
+        <div class="links">
+          <a class="btn" href="https://github.com/leduckhc/rho">GitHub</a>
+          <a class="btn ghost" href="https://github.com/leduckhc/rho/tree/main/docs">Read the docs</a>
+        </div>
+      </section>
+    </main>
+    <footer>
+      <div class="row">
+        <span>MIT licensed.</span>
+        <a href="https://github.com/leduckhc/rho">github.com/leduckhc/rho</a>
+        <a href="https://github.com/leduckhc/rho/tree/main/docs">Docs</a>
+        <span>Every number on this site links to the test that produced it.</span>
+      </div>
+    </footer>
+  </body>
+</html>
