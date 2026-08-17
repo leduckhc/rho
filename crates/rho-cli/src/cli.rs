@@ -102,21 +102,36 @@ fn build_config(cli: &Cli) -> anyhow::Result<SessionConfig> {
 }
 
 /// Build a session from the config and the chosen provider.
-fn build_session(cli: &Cli, config: SessionConfig) -> anyhow::Result<Session> {
+///
+/// Returns the session and its task registry. A caller keeps the registry alive for
+/// as long as the session, because dropping it kills every background task.
+fn build_session(
+    cli: &Cli,
+    config: SessionConfig,
+) -> anyhow::Result<(Session, Arc<rho_core::TaskRegistry>)> {
     let name = provider::resolve_provider_name(cli.provider.as_deref(), None)?;
     let provider = provider::build_provider(&name)?;
-    let tools = Arc::new(rho_tools::builtin_registry());
+    let tasks = Arc::new(rho_core::TaskRegistry::new(rho_core::TaskLimits::default()));
+    let tools = Arc::new(rho_tools::builtin_registry_with_tasks(Arc::clone(&tasks)));
     let hooks = Arc::new(rho_core::HookChain::default());
     let context = Context::new(Some(system_prompt()), tools.specs());
-    Ok(Session::with_config(
-        config, provider, tools, hooks, context,
+    Ok((
+        Session::with_config(config, provider, tools, hooks, context),
+        tasks,
     ))
 }
 
 /// The short system prompt. A short prompt keeps the prefix small. See F-64.
 fn system_prompt() -> String {
+    // The prompt stays short on purpose. See F-64. It says only what the model cannot
+    // work out from the tool schemas, and background behaviour is exactly that: the
+    // model needs to know that a long command returns a task id, and that it should
+    // wait on an event rather than sleep.
     "You are rho, a coding agent. You use the tools to read and change files. \
-     You keep answers short."
+     You keep answers short.\n\
+     A long command runs in the background and returns a task id at once. \
+     Use the task tool with the wait action to be woken when it finishes or \
+     reports progress. Never sleep and poll."
         .to_string()
 }
 
@@ -135,8 +150,10 @@ async fn run_headless(cli: &Cli, prompt: String) -> i32 {
         Ok(config) => config,
         Err(error) => return fail(error),
     };
-    let session = match build_session(cli, config) {
-        Ok(session) => session,
+    // Hold `_tasks` for the whole run. Dropping the registry kills every background
+    // task, so an early drop would end a task the model is still waiting on.
+    let (session, _tasks) = match build_session(cli, config) {
+        Ok(pair) => pair,
         Err(error) => return fail(error),
     };
 
@@ -192,8 +209,10 @@ async fn run_interactive(cli: &Cli) -> i32 {
         Err(error) => return fail(error),
     };
     let model = config.model.clone();
-    let session = match build_session(cli, config) {
-        Ok(session) => session,
+    // Hold `_tasks` for the whole run. Dropping the registry kills every background
+    // task, so an early drop would end a task the model is still waiting on.
+    let (session, _tasks) = match build_session(cli, config) {
+        Ok(pair) => pair,
         Err(error) => return fail(error),
     };
 

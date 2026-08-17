@@ -69,6 +69,42 @@ fn row_line(row: &Row, width: usize) -> Line<'static> {
                 Style::default().add_modifier(Modifier::DIM),
             )
         }
+        Row::Task {
+            command,
+            state,
+            finished,
+            failed,
+            progress,
+            ..
+        } => {
+            // A background task keeps its row after the turn ends, so the user can see
+            // that work is still going. A running task shows a spinner glyph, a failed
+            // one is marked, and progress goes on the same line.
+            let glyph = if !*finished {
+                "~"
+            } else if *failed {
+                "x"
+            } else {
+                "+"
+            };
+            // The command and the progress text are already sanitised in the reducer.
+            // Sanitise again here, because render must never trust its input.
+            let command = sanitize_line(command);
+            let progress = sanitize_line(progress);
+            let detail = if progress.is_empty() {
+                state.clone()
+            } else {
+                format!("{state} {progress}")
+            };
+            let style = if *finished && *failed {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else if !*finished {
+                Style::default().add_modifier(Modifier::DIM)
+            } else {
+                Style::default()
+            };
+            plain_line(format!("{glyph} task {command}  {detail}"), width, style)
+        }
         Row::Tool {
             name,
             status,

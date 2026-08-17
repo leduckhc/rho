@@ -60,6 +60,23 @@ pub enum AgentEvent {
     ToolEnd { id: String, output: ToolOutput },
     /// One provider turn ended.
     TurnEnd { stop_reason: StopReason },
+    /// A background task started.
+    TaskStart {
+        id: crate::TaskId,
+        command: String,
+        reason: crate::BackgroundReason,
+    },
+    /// A task reported progress.
+    TaskProgressed {
+        id: crate::TaskId,
+        progress: crate::TaskProgress,
+    },
+    /// A task reached a final state. Always emitted, success or failure.
+    TaskEnd {
+        id: crate::TaskId,
+        state: crate::TaskState,
+        output_tail: String,
+    },
     /// The run is fully settled. No further turn will run.
     AgentEnd { stop_reason: AgentStopReason },
 }

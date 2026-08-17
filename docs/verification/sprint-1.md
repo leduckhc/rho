@@ -238,6 +238,38 @@ were in the *request*. This is the same lesson as Bedrock, met twice.
 `--read-only` refused a write and the file was not created. A read of `/etc/passwd`
 was refused and the model recovered.
 
+## Background tasks, verified live
+
+`SPEC-07` answers four complaints from real use. Each one was checked against a real
+model, with nothing about backgrounding in the prompt unless the line says so.
+
+**A silent failure now reports.** A script printed only progress lines and exited 3.
+
+```
+- Exit code: 3
+- Last progress: 90% complete with message "step 3" (3 out of 3 steps done)
+```
+
+**The model waits on an event, not a sleep.** The same run used the `task` tool with
+the `wait` action. No `sleep` and no poll loop appeared in the transcript.
+
+**rho decides on its own.** Asked only to run `sleep 3 && echo finished`, with no
+mention of background, the model reported:
+
+```
+The command ran in the background. The bash tool automatically detected it as a
+long-running command (due to the sleep 3) and launched it as a background task
+(task-1) rather than blocking.
+```
+
+So the reason reaches the user, which section 2 requires.
+
+**A quick command still runs in the foreground.** `echo hello` answered `Foreground.`
+A false positive here would cost a probe on every trivial call.
+
+**The approval boundary holds.** Under `--read-only`, a background `bash` was refused,
+because `bash` is `ToolKind::Execute` whether it runs in the foreground or not.
+
 ## What is still unverified
 - The interactive TUI against a real terminal. Only the headless `run` path was
   driven live. Rendering is covered by tests on a test backend.

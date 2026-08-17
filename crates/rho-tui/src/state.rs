@@ -5,7 +5,9 @@
 //! test drives them with no terminal at all. See `SPEC-05` sections 1 to 3.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use rho_core::{AgentEvent, AgentStopReason, StreamEvent, ToolKind};
+use rho_core::{
+    AgentEvent, AgentStopReason, StreamEvent, TaskId, TaskProgress, TaskState, ToolKind,
+};
 
 /// One rendered transcript row.
 #[derive(Clone, Debug, PartialEq)]
@@ -16,6 +18,20 @@ pub enum Row {
     Assistant { text: String },
     /// A thinking block. Collapsed to one line by default.
     Thinking { text: String },
+    /// A background task row. It stays after the turn ends, because a task outlives
+    /// the turn that started it.
+    Task {
+        id: String,
+        command: String,
+        /// The current state, as a short word for the status column.
+        state: String,
+        /// True once the task reached a final state.
+        finished: bool,
+        /// True when the task finished and failed. Drives the colour.
+        failed: bool,
+        /// A short progress summary, for example `42%` or `6/10 compiling`.
+        progress: String,
+    },
     /// A tool row. Shows the tool name, kind, and status.
     Tool {
         id: String,
@@ -91,6 +107,9 @@ impl TuiState {
             AgentEvent::ToolUpdate { id, output } => self.on_tool_update(id, output),
             AgentEvent::ToolEnd { id, output } => self.on_tool_end(id, output.is_error),
             AgentEvent::TurnEnd { .. } => {}
+            AgentEvent::TaskStart { id, command, .. } => self.on_task_start(id, command),
+            AgentEvent::TaskProgressed { id, progress } => self.on_task_progress(id, progress),
+            AgentEvent::TaskEnd { id, state, .. } => self.on_task_end(id, state),
             AgentEvent::AgentEnd { stop_reason } => self.on_agent_end(*stop_reason),
         }
     }
@@ -144,6 +163,53 @@ impl TuiState {
             | StreamEvent::ToolCallDelta { .. }
             | StreamEvent::Usage(_)
             | StreamEvent::Done { .. } => {}
+        }
+    }
+
+    /// Find a task row by id.
+    fn task_row_mut(&mut self, id: &str) -> Option<&mut Row> {
+        self.rows
+            .iter_mut()
+            .find(|row| matches!(row, Row::Task { id: row_id, .. } if row_id == id))
+    }
+
+    fn on_task_start(&mut self, id: &TaskId, command: &str) {
+        // A command is untrusted text, because the model wrote it. Sanitise it before
+        // it reaches the screen.
+        self.rows.push(Row::Task {
+            id: id.0.clone(),
+            command: crate::sanitize_line(command),
+            state: "running".to_string(),
+            finished: false,
+            failed: false,
+            progress: String::new(),
+        });
+    }
+
+    fn on_task_progress(&mut self, id: &TaskId, progress: &TaskProgress) {
+        let summary = summarise_progress(progress);
+        if let Some(Row::Task {
+            progress: row_progress,
+            ..
+        }) = self.task_row_mut(&id.0)
+        {
+            *row_progress = summary;
+        }
+    }
+
+    fn on_task_end(&mut self, id: &TaskId, state: &TaskState) {
+        let label = state_label(state);
+        let failed = !state.is_success();
+        if let Some(Row::Task {
+            state: row_state,
+            finished,
+            failed: row_failed,
+            ..
+        }) = self.task_row_mut(&id.0)
+        {
+            *row_state = label;
+            *finished = true;
+            *row_failed = failed;
         }
     }
 
@@ -281,5 +347,41 @@ fn stop_reason_label(reason: AgentStopReason) -> &'static str {
         AgentStopReason::MaxTurnRequests => "max turns",
         AgentStopReason::Refusal => "refusal",
         AgentStopReason::Canceled => "canceled",
+    }
+}
+
+/// A one-line summary of a progress report, for the status column.
+///
+/// A progress `message` is untrusted, because a child prints whatever it likes. So it
+/// is sanitised here, exactly like tool output. See `SPEC-07` section 9.
+fn summarise_progress(progress: &TaskProgress) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(percent) = progress.percent {
+        parts.push(format!("{percent}%"));
+    }
+    if let (Some(done), Some(total)) = (progress.done, progress.total) {
+        parts.push(format!("{done}/{total}"));
+    }
+    if let Some(message) = &progress.message {
+        let clean = crate::sanitize_line(message);
+        if !clean.is_empty() {
+            parts.push(clean);
+        }
+    }
+    parts.join(" ")
+}
+
+/// A short word for a task state, for the status column.
+fn state_label(state: &TaskState) -> String {
+    match state {
+        TaskState::Running => "running".to_string(),
+        TaskState::Exited { code } if *code == 0 => "done".to_string(),
+        TaskState::Exited { code } => format!("failed ({code})"),
+        TaskState::Signaled { signal } => match signal {
+            Some(name) => format!("killed ({name})"),
+            None => "killed".to_string(),
+        },
+        TaskState::Canceled => "canceled".to_string(),
+        TaskState::TimedOut => "timed out".to_string(),
     }
 }

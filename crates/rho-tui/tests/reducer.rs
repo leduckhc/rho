@@ -179,3 +179,159 @@ fn reducer_is_pure_same_events_same_state() {
 
     assert_eq!(first, second);
 }
+
+// --- Background task rows, from SPEC-07 ------------------------------------
+
+fn task_id(text: &str) -> rho_core::TaskId {
+    rho_core::TaskId(text.to_string())
+}
+
+#[test]
+fn task_start_adds_a_task_row() {
+    let mut state = TuiState::default();
+    state.apply(&AgentEvent::TaskStart {
+        id: task_id("t1"),
+        command: "cargo test".to_string(),
+        reason: rho_core::BackgroundReason::KnownLongRunning,
+    });
+    assert!(
+        state.rows.iter().any(|row| matches!(
+            row,
+            Row::Task { command, finished, .. } if command == "cargo test" && !finished
+        )),
+        "a running task row must appear: {:?}",
+        state.rows
+    );
+}
+
+#[test]
+fn task_progress_updates_the_row_in_place() {
+    let mut state = TuiState::default();
+    state.apply(&AgentEvent::TaskStart {
+        id: task_id("t1"),
+        command: "cargo test".to_string(),
+        reason: rho_core::BackgroundReason::KnownLongRunning,
+    });
+    state.apply(&AgentEvent::TaskProgressed {
+        id: task_id("t1"),
+        progress: rho_core::TaskProgress {
+            percent: Some(42),
+            message: Some("compiling".to_string()),
+            done: Some(6),
+            total: Some(10),
+        },
+    });
+    let count = state
+        .rows
+        .iter()
+        .filter(|row| matches!(row, Row::Task { .. }))
+        .count();
+    assert_eq!(count, 1, "progress must update the row, not add one");
+    let text = format!("{:?}", state.rows);
+    assert!(text.contains("42%"), "percent must show: {text}");
+    assert!(text.contains("6/10"), "counts must show: {text}");
+    assert!(text.contains("compiling"), "message must show: {text}");
+}
+
+#[test]
+fn task_end_marks_success_and_failure_differently() {
+    for (state_value, want_failed) in [
+        (rho_core::TaskState::Exited { code: 0 }, false),
+        (rho_core::TaskState::Exited { code: 1 }, true),
+        (rho_core::TaskState::TimedOut, true),
+        (rho_core::TaskState::Canceled, true),
+    ] {
+        let mut state = TuiState::default();
+        state.apply(&AgentEvent::TaskStart {
+            id: task_id("t1"),
+            command: "x".to_string(),
+            reason: rho_core::BackgroundReason::ModelRequested,
+        });
+        state.apply(&AgentEvent::TaskEnd {
+            id: task_id("t1"),
+            state: state_value.clone(),
+            output_tail: String::new(),
+        });
+        let row = state
+            .rows
+            .iter()
+            .find_map(|row| match row {
+                Row::Task {
+                    finished, failed, ..
+                } => Some((*finished, *failed)),
+                _ => None,
+            })
+            .expect("a task row");
+        assert!(row.0, "{state_value:?} must mark the row finished");
+        assert_eq!(row.1, want_failed, "{state_value:?} failed flag");
+    }
+}
+
+#[test]
+fn a_task_row_survives_the_turn_ending() {
+    // The point of a background task. It outlives the turn that started it, so its row
+    // must not be cleared when the turn ends or when the run settles.
+    let mut state = TuiState::default();
+    state.apply(&AgentEvent::TaskStart {
+        id: task_id("t1"),
+        command: "cargo test".to_string(),
+        reason: rho_core::BackgroundReason::KnownLongRunning,
+    });
+    state.apply(&AgentEvent::TurnEnd {
+        stop_reason: rho_core::StopReason::EndTurn,
+    });
+    state.apply(&AgentEvent::AgentEnd {
+        stop_reason: rho_core::AgentStopReason::EndTurn,
+    });
+    assert!(
+        state.rows.iter().any(|row| matches!(
+            row,
+            Row::Task {
+                finished: false,
+                ..
+            }
+        )),
+        "the running task row must survive the run ending"
+    );
+}
+
+#[test]
+fn a_task_progress_message_cannot_corrupt_the_display() {
+    // A child prints whatever it likes, so a progress message is untrusted input.
+    let mut state = TuiState::default();
+    state.apply(&AgentEvent::TaskStart {
+        id: task_id("t1"),
+        command: "evil\u{1b}[2Jcommand".to_string(),
+        reason: rho_core::BackgroundReason::ModelRequested,
+    });
+    state.apply(&AgentEvent::TaskProgressed {
+        id: task_id("t1"),
+        progress: rho_core::TaskProgress {
+            percent: None,
+            message: Some("step\u{1b}[31m one\r\n".to_string()),
+            done: None,
+            total: None,
+        },
+    });
+    let text = format!("{:?}", state.rows);
+    assert!(
+        !text.contains('\u{1b}'),
+        "no escape character may survive: {text}"
+    );
+}
+
+#[test]
+fn a_task_event_for_an_unknown_id_is_ignored() {
+    // A late event must not panic and must not invent a row.
+    let mut state = TuiState::default();
+    state.apply(&AgentEvent::TaskProgressed {
+        id: task_id("ghost"),
+        progress: rho_core::TaskProgress::default(),
+    });
+    state.apply(&AgentEvent::TaskEnd {
+        id: task_id("ghost"),
+        state: rho_core::TaskState::Exited { code: 0 },
+        output_tail: String::new(),
+    });
+    assert!(state.rows.is_empty(), "no row must be invented");
+}

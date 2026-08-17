@@ -27,7 +27,7 @@ fn text_of(output: &rho_core::ToolOutput) -> String {
 async fn tool_bash_streams_output_lines() {
     let mut h = Harness::new();
     let ctx = h.ctx();
-    let out = BashTool
+    let out = BashTool::new()
         .execute(serde_json::json!({ "command": "echo one; echo two" }), ctx)
         .await
         .unwrap();
@@ -52,7 +52,7 @@ async fn tool_bash_streams_output_lines() {
 #[tokio::test]
 async fn tool_bash_reports_nonzero_exit() {
     let mut h = Harness::new();
-    let out = BashTool
+    let out = BashTool::new()
         .execute(serde_json::json!({ "command": "exit 3" }), h.ctx())
         .await
         .unwrap();
@@ -65,7 +65,7 @@ async fn tool_bash_enforces_timeout() {
     let mut h = Harness::new();
     // A tiny timeout against a long command. The command never nears its sleep,
     // so the test finishes in about the timeout, not in the sleep.
-    let error = BashTool
+    let error = BashTool::new()
         .execute(
             serde_json::json!({ "command": "sleep 30", "timeout_ms": 50 }),
             h.ctx(),
@@ -82,7 +82,7 @@ async fn tool_bash_cancel_kills_process() {
     let ctx = h.ctx();
     // The command prints a marker, then sleeps. Cancel after the marker arrives.
     let run = tokio::spawn(async move {
-        BashTool
+        BashTool::new()
             .execute(
                 serde_json::json!({ "command": "echo started; sleep 30" }),
                 ctx,
@@ -111,7 +111,7 @@ async fn tool_bash_cancel_kills_process() {
 async fn tool_bash_truncates_large_output() {
     let mut h = Harness::new();
     // `yes` streams forever. `head` bounds it. The output crosses the cap.
-    let out = BashTool
+    let out = BashTool::new()
         .execute(
             serde_json::json!({ "command": "for i in $(seq 1 20000); do echo AAAAAAAAAAAAAAAAAAAA; done" }),
             h.ctx(),
@@ -128,7 +128,7 @@ async fn tool_bash_reports_a_final_line_without_a_newline() {
     // The buffered reader must not drop a trailing line that has no newline. This is
     // the case a naive rewrite of the reader breaks.
     let mut h = Harness::new();
-    let out = BashTool
+    let out = BashTool::new()
         .execute(
             serde_json::json!({ "command": "printf 'no trailing newline'" }),
             h.ctx(),
@@ -159,7 +159,7 @@ async fn tool_bash_hides_a_credential_from_the_child() {
         std::env::set_var("AWS_SECRET_ACCESS_KEY", "aws-secret-value");
     }
 
-    let out = BashTool
+    let out = BashTool::new()
         .execute(serde_json::json!({ "command": "env | sort" }), h.ctx())
         .await
         .unwrap();
@@ -184,7 +184,7 @@ async fn tool_bash_keeps_the_variables_a_command_needs() {
     // Scrubbing must not break ordinary work. A command needs PATH to find a binary,
     // and HOME for many tools to behave.
     let mut h = Harness::new();
-    let out = BashTool
+    let out = BashTool::new()
         .execute(
             serde_json::json!({ "command": "echo \"path=${PATH:+set} home=${HOME:+set}\"" }),
             h.ctx(),

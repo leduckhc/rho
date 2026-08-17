@@ -30,7 +30,7 @@ fn tool_and_valid_args() -> Vec<(Box<dyn Tool>, serde_json::Value)> {
             serde_json::json!({ "pattern": "x", "path": "sub", "glob": "*.rs" }),
         ),
         (
-            Box::new(BashTool),
+            Box::new(BashTool::new()),
             serde_json::json!({ "command": "echo hi", "timeout_ms": 1000 }),
         ),
     ]
@@ -128,7 +128,7 @@ async fn approval_read_only_policy_denies_write() {
 async fn approval_denied_call_returns_denied_error() {
     // A read-only policy denies bash. The caller turns a denial into this error.
     let decision = ReadOnlyPolicy
-        .approve("bash", BashTool.kind(), &serde_json::json!({}))
+        .approve("bash", BashTool::new().kind(), &serde_json::json!({}))
         .await;
     assert_eq!(decision, ApprovalDecision::Deny);
     let error = rho_core::ToolError::Denied;

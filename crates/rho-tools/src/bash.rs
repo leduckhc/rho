@@ -5,10 +5,16 @@
 //! orphaned grandchild cannot keep running.
 
 use crate::args::parse_args;
+use crate::progress::{ProgressScan, scan_line};
 use async_trait::async_trait;
-use rho_core::{Tool, ToolContext, ToolError, ToolKind, ToolOutput};
+use rho_core::{
+    BackgroundReason, DEFAULT_FOREGROUND_LIMIT_MS, RunMode, TaskError, TaskHandle, TaskRegistry,
+    TaskState, Tool, ToolContext, ToolError, ToolKind, ToolOutput, decide_run_mode,
+};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -42,10 +48,37 @@ struct BashArgs {
     /// The timeout in milliseconds. The default is 120000. The maximum is 600000.
     #[serde(default)]
     timeout_ms: Option<u64>,
+    /// Run the command in the background. When omitted, rho decides with a
+    /// heuristic. An explicit value overrides the heuristic either way.
+    #[serde(default)]
+    run_in_background: Option<bool>,
 }
 
 /// Runs a shell command. Mutating, so it needs approval.
-pub struct BashTool;
+///
+/// The tool may run a command in the background. A background command returns at
+/// once with a task id, so the conversation is not blocked. rho decides between
+/// foreground and background with a heuristic, and the model may override it. A
+/// background run needs a task registry, so a `BashTool` built with `new` runs
+/// only in the foreground.
+#[derive(Default)]
+pub struct BashTool {
+    tasks: Option<Arc<TaskRegistry>>,
+}
+
+impl BashTool {
+    /// Build a foreground-only `bash` tool. It has no task registry, so it never
+    /// backgrounds a command.
+    pub fn new() -> Self {
+        Self { tasks: None }
+    }
+
+    /// Build a `bash` tool that can run a command in the background. It shares
+    /// the session task registry with the `task` and `task_cancel` tools.
+    pub fn with_tasks(tasks: Arc<TaskRegistry>) -> Self {
+        Self { tasks: Some(tasks) }
+    }
+}
 
 #[async_trait]
 impl Tool for BashTool {
@@ -64,7 +97,8 @@ impl Tool for BashTool {
             "type": "object",
             "properties": {
                 "command": { "type": "string", "description": "Shell command to run." },
-                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_MS, "description": "Timeout in milliseconds. Default 120000, maximum 600000." }
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_MS, "description": "Timeout in milliseconds. Default 120000, maximum 600000." },
+                "run_in_background": { "type": "boolean", "description": "Run in the background and return at once with a task id. When omitted, rho decides." }
             },
             "required": ["command"]
         })
@@ -80,20 +114,28 @@ impl Tool for BashTool {
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .min(MAX_TIMEOUT_MS);
 
-        let mut command = tokio::process::Command::new("sh");
-        command
-            .arg("-c")
-            .arg(&args.command)
-            .current_dir(&ctx.session_root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        scrub_environment(&mut command);
-        // Put the child in its own process group. So a later kill on the negated
-        // pid reaches every grandchild, not only the direct child.
-        #[cfg(unix)]
-        command.process_group(0);
+        // Decide foreground or background. The decision reads the requested
+        // timeout, not the resolved default, so a plain command with no explicit
+        // timeout is never backgrounded by rule 2. A registry must exist to run a
+        // background task; without one, every command runs in the foreground.
+        let requested_timeout = args.timeout_ms.unwrap_or(0);
+        let mode = decide_run_mode(
+            &args.command,
+            args.run_in_background,
+            requested_timeout,
+            DEFAULT_FOREGROUND_LIMIT_MS,
+        );
+        if let (RunMode::Background(reason), Some(registry)) = (&mode, &self.tasks) {
+            return start_background(
+                registry,
+                &args.command,
+                *reason,
+                &ctx.session_root,
+                background_timeout_ms(registry, args.timeout_ms),
+            );
+        }
+
+        let mut command = build_command(&args.command, &ctx.session_root, false);
 
         let mut child = command.spawn().map_err(|error| {
             ToolError::Io(format!(
@@ -123,6 +165,19 @@ impl Tool for BashTool {
                     return Err(ToolError::Canceled);
                 }
                 _ = &mut deadline => {
+                    // The command outran its foreground timeout. Adopt it into the
+                    // background rather than kill it, so its work is not thrown
+                    // away. Adoption needs a registry; without one, kill it.
+                    if let Some(registry) = &self.tasks {
+                        return adopt_on_timeout(
+                            registry,
+                            &args.command,
+                            child,
+                            line_rx,
+                            &combined,
+                            background_timeout_ms(registry, args.timeout_ms),
+                        );
+                    }
                     kill_group(pid);
                     return Err(ToolError::Timeout(Duration::from_millis(timeout_ms)));
                 }
@@ -164,6 +219,220 @@ impl Tool for BashTool {
             content: vec![rho_core::ContentBlock::Text { text: combined }],
             is_error,
         })
+    }
+}
+
+/// Build the `sh -c` command with the shared hardening: no stdin, piped output,
+/// kill on drop, a scrubbed environment, and its own process group. A background
+/// command also gets `RHO_PROGRESS_FD=1`, so a script can detect a progress
+/// consumer and opt in with one `echo`.
+fn build_command(
+    command_str: &str,
+    session_root: &Path,
+    background: bool,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new("sh");
+    command
+        .arg("-c")
+        .arg(command_str)
+        .current_dir(session_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    scrub_environment(&mut command);
+    if background {
+        command.env("RHO_PROGRESS_FD", "1");
+    }
+    // Put the child in its own process group. So a later kill on the negated pid
+    // reaches every grandchild, not only the direct child.
+    #[cfg(unix)]
+    command.process_group(0);
+    command
+}
+
+/// The effective timeout for a background task, in milliseconds. Use the model's
+/// requested timeout when it gave one, else the registry default. Cap it at the
+/// registry maximum, because a background task is unsupervised.
+fn background_timeout_ms(registry: &TaskRegistry, requested: Option<u64>) -> u64 {
+    let limits = registry.limits();
+    requested
+        .unwrap_or(limits.default_timeout_ms)
+        .min(limits.max_timeout_ms)
+}
+
+/// Start a command in the background. Return at once with the task id and the
+/// reason, so the model can carry on.
+fn start_background(
+    registry: &Arc<TaskRegistry>,
+    command_str: &str,
+    reason: BackgroundReason,
+    session_root: &Path,
+    timeout_ms: u64,
+) -> Result<ToolOutput, ToolError> {
+    let handle = registry
+        .start(command_str, reason)
+        .map_err(map_task_error)?;
+    let mut command = build_command(command_str, session_root, true);
+    let mut child = command.spawn().map_err(|error| {
+        // The task never started, so it must not linger in the registry as a
+        // running task. Mark it finished with a non-zero code.
+        handle.finish(TaskState::Exited { code: -1 });
+        ToolError::Io(format!(
+            "cannot start the command: {error}. Check the command."
+        ))
+    })?;
+    let pid = child.id();
+    handle.set_killer(move || kill_group(pid));
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let (line_tx, line_rx) = mpsc::channel::<String>(64);
+    spawn_reader(stdout, line_tx.clone());
+    spawn_reader(stderr, line_tx);
+    let id = handle.id();
+    tokio::spawn(supervise(child, line_rx, handle, timeout_ms));
+    Ok(started_output(&id, reason))
+}
+
+/// Adopt a foreground command that outran its timeout. Seed the task with the
+/// output from before adoption, then supervise it to the end.
+fn adopt_on_timeout(
+    registry: &Arc<TaskRegistry>,
+    command_str: &str,
+    child: tokio::process::Child,
+    line_rx: mpsc::Receiver<String>,
+    output_so_far: &str,
+    timeout_ms: u64,
+) -> Result<ToolOutput, ToolError> {
+    let handle = registry
+        .start(command_str, BackgroundReason::AdoptedOnTimeout)
+        .map_err(map_task_error)?;
+    let pid = child.id();
+    handle.set_killer(move || kill_group(pid));
+    // Keep the output from before adoption, so no work is thrown away.
+    for line in output_so_far.lines() {
+        handle.push_output(line);
+    }
+    let id = handle.id();
+    tokio::spawn(supervise(child, line_rx, handle, timeout_ms));
+    Ok(started_output(&id, BackgroundReason::AdoptedOnTimeout))
+}
+
+/// Supervise one background child to its final state.
+///
+/// This task awaits `child.wait()`, and that await is the completion
+/// notification. The task is already awaiting before the child can exit, so the
+/// exit cannot be missed. It reads the exit code, not a bare signal, and it works
+/// the same on Windows. See `SPEC-07` section 3. So there is no signal handler
+/// and no poll loop.
+async fn supervise(
+    mut child: tokio::process::Child,
+    mut line_rx: mpsc::Receiver<String>,
+    handle: TaskHandle,
+    timeout_ms: u64,
+) {
+    let pid = child.id();
+    let deadline = tokio::time::sleep(Duration::from_millis(timeout_ms));
+    tokio::pin!(deadline);
+    let mut saw_explicit = false;
+    let mut timed_out = false;
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut deadline => {
+                kill_group(pid);
+                timed_out = true;
+                break;
+            }
+            maybe_line = line_rx.recv() => match maybe_line {
+                Some(line) => process_progress_line(&handle, &line, &mut saw_explicit),
+                // The readers reached the end of both streams, so the child
+                // closed its output. Await the exit next.
+                None => break,
+            }
+        }
+    }
+    let status = child.wait().await;
+    let state = if handle.cancel_requested() {
+        TaskState::Canceled
+    } else if timed_out {
+        TaskState::TimedOut
+    } else {
+        state_from_status(status)
+    };
+    // Always report, whatever the task wrote. A finished task is never silent.
+    handle.finish(state);
+}
+
+/// Fold one output line into the task. An explicit progress line is consumed. An
+/// ordinary line is kept, and may carry inferred progress. Inference never
+/// overrides an explicit progress line.
+fn process_progress_line(handle: &TaskHandle, line: &str, saw_explicit: &mut bool) {
+    match scan_line(line) {
+        ProgressScan::Explicit(progress) => {
+            *saw_explicit = true;
+            handle.report_progress(progress);
+        }
+        ProgressScan::Output { inferred } => {
+            handle.push_output(line);
+            if let Some(progress) = inferred
+                && !*saw_explicit
+            {
+                handle.report_progress(progress);
+            }
+        }
+    }
+}
+
+/// Map a process exit status onto a task state.
+fn state_from_status(status: std::io::Result<std::process::ExitStatus>) -> TaskState {
+    match status {
+        Ok(status) => match status.code() {
+            Some(code) => TaskState::Exited { code },
+            None => TaskState::Signaled {
+                signal: signal_name(&status),
+            },
+        },
+        // The wait itself failed. Report a signal with no name, so the task is
+        // still final and never silent.
+        Err(_) => TaskState::Signaled { signal: None },
+    }
+}
+
+/// The signal name, where the platform reports one.
+#[cfg(unix)]
+fn signal_name(status: &std::process::ExitStatus) -> Option<String> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal().map(|signal| signal.to_string())
+}
+
+/// A non-Unix host reports no signal.
+#[cfg(not(unix))]
+fn signal_name(_status: &std::process::ExitStatus) -> Option<String> {
+    None
+}
+
+/// Map a task-registry error onto a tool error. The message keeps the advice.
+fn map_task_error(error: TaskError) -> ToolError {
+    ToolError::Io(error.to_string())
+}
+
+/// The message a background start returns to the model. It names the task id and
+/// the reason, so the choice to background is never silent.
+fn started_output(id: &rho_core::TaskId, reason: BackgroundReason) -> ToolOutput {
+    ToolOutput::text(format!(
+        "Started background task {id}. Reason: {}. Probe it with the task tool.",
+        reason_text(reason)
+    ))
+}
+
+/// A short reason phrase for the user.
+fn reason_text(reason: BackgroundReason) -> &'static str {
+    match reason {
+        BackgroundReason::ModelRequested => "you asked for a background run",
+        BackgroundReason::KnownLongRunning => "the command matches a long-running shape",
+        BackgroundReason::LongTimeoutRequested => "the command asked for a long timeout",
+        BackgroundReason::AdoptedOnTimeout => "the command outran its foreground timeout",
     }
 }
 
@@ -366,6 +635,21 @@ mod tests {
             );
         }
         // Splitting must lose nothing. An over-long line is cut, never dropped.
+        assert_eq!(pieces.iter().map(String::len).sum::<usize>(), size);
+    }
+
+    #[tokio::test]
+    async fn a_line_longer_than_the_cap_is_split() {
+        // The section 8 limit, named as in `SPEC-07`. A line longer than the cap
+        // is split into pieces, and no piece passes the cap. This shares the
+        // property that `reader_splits_a_line_that_never_ends` proves, under the
+        // spec's own name.
+        let size = 3 * MAX_LINE_BYTES + 11;
+        let pieces = read_all(vec![b'Z'; size]).await;
+        assert!(pieces.len() > 1, "an over-long line must be split");
+        for piece in &pieces {
+            assert!(piece.len() <= MAX_LINE_BYTES, "a piece passed the cap");
+        }
         assert_eq!(pieces.iter().map(String::len).sum::<usize>(), size);
     }
 
