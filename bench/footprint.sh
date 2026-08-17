@@ -217,13 +217,30 @@ PY
 [ -n "$FIRST_FRAME_MS" ] || die "first-frame measurement produced no value"
 
 # ---------------------------------------------------------------------------
-# 4. Release binary size, minimal feature set. Built last, since it overwrites
-# the default binary at target/release/rho.
+# 4. Release binary size, minimal feature set.
+#
+# This is measured last, because a minimal build overwrites the default binary at
+# target/release/rho. Cargo keys the output path on the package, not on the feature
+# set, so the two builds cannot coexist there.
+#
+# The script then rebuilds the default binary, so it never leaves a crippled one
+# behind. That trap is real: the controller ran this script, then ran
+# `rho --provider bedrock`, and got "the provider bedrock is not in this build".
+# The message was clear, but the cause was invisible.
+#
+# The rebuild costs one extra link. A correct tree is worth more than those seconds.
 # ---------------------------------------------------------------------------
 if [ "$BUILD" -eq 1 ]; then
   echo "footprint.sh: building the minimal release binary..." >&2
   cargo build --release -p rho-cli --no-default-features --features minimal >&2
   SIZE_MINIMAL=$(wc -c < "$BIN" | tr -d ' ')
+  echo "footprint.sh: restoring the default release binary..." >&2
+  cargo build --release -p rho-cli >&2
+  # Prove the restore worked, rather than assume it. A default build carries every
+  # provider, so the help text names them.
+  if ! "$BIN" --help >/dev/null 2>&1; then
+    die "the restored default binary does not run: $BIN"
+  fi
 else
   # Without a build we cannot hold both binaries at once. Report the default
   # size for both, and warn, rather than print a wrong number.

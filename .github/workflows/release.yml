@@ -3,6 +3,13 @@ name: release
 # Build a stripped release binary for three targets on a tag, then attach each
 # one to the GitHub release. The release profile already strips symbols, so no
 # extra strip step runs. This workflow adds no code signing and no notarisation.
+#
+# The macOS x86_64 target is a cross build on an arm64 runner. That combination
+# often breaks, because a native dependency may need a C toolchain for the other
+# architecture. The controller ran it locally on Apple Silicon before this workflow
+# landed: `cargo build --release --locked -p rho-cli --target x86_64-apple-darwin`
+# finished, and `file` reported a Mach-O x86_64 executable that ran. So the risky
+# leg is checked, not assumed.
 
 on:
   push:
@@ -32,7 +39,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p rho-cli --target ${{ matrix.target }}
+      # `--locked` matters for a release. Without it, cargo may resolve a newer
+      # dependency than Cargo.lock records, so the published binary would not match
+      # the committed lock file and the build would not be reproducible.
+      - run: cargo build --release --locked -p rho-cli --target ${{ matrix.target }}
       # Name the artifact by target, so three uploads do not collide.
       - name: Package the binary
         run: |
@@ -57,3 +67,4 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/rho-*
+          fail_on_unmatched_files: true

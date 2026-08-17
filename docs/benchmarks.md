@@ -175,6 +175,17 @@ Even on that conservative footing, rho's whole process costs less than the
 *marginal* session of every harness in the list. On its own ground, which is many
 sessions inside one host, the marginal session costs 0.024 MiB.
 
+## A note on running the script
+
+`bench/footprint.sh` measures the minimal build last, because cargo keys its output
+path on the package and not on the feature set, so the two binaries cannot coexist at
+`target/release/rho`.
+
+The script then rebuilds the default binary, so it never leaves a crippled one behind.
+That trap was real. The controller ran the script, then ran `rho --provider bedrock`,
+and got `the provider bedrock is not in this build`. The message named the fix, but the
+cause was invisible. The script now restores the default build and checks that it runs.
+
 ## Linux numbers, from CI
 
 Every other figure on this page is macOS on Apple Silicon. CI now runs
