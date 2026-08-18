@@ -643,11 +643,21 @@ The crate exposes one function. It returns records, and it writes no file. So a 
 decides where the records go, and the byte-unchanged rule is easy to prove.
 
 ```rust
+/// What one import produced, and what it dropped.
+///
+/// The dropped counts make a loss visible. An import that returned only the entries
+/// would hide a whole record type behind a shorter list.
+pub struct PiImport {
+    pub entries: Vec<Entry>,
+    /// How many records dropped, by the pi type or the reason.
+    pub dropped: BTreeMap<String, usize>,
+}
+
 /// Read a pi session file and return the rho records it maps to.
 ///
 /// The pi file is opened read-only. The function writes nothing, so the pi file keeps
-/// every byte. A record type with no rho model drops, per the table below.
-pub fn import_pi_session(pi_path: &Path) -> Result<Vec<Entry>, SessionError>;
+/// every byte. A record with no rho model drops, and the drop is counted.
+pub fn import_pi_session(pi_path: &Path) -> Result<PiImport, SessionError>;
 ```
 
 A pi session file is JSONL at `~/.pi/agent/sessions/<project>/<stamp>_<uuid>.jsonl`. The
@@ -677,6 +687,7 @@ The content block mapping, inside a message:
 | `thinking`, `thinkingSignature` | `Thinking { thinking, signature }`. |
 | `toolCall` | `ToolCall { id, name, arguments }`. |
 | a `toolResult` text | `ToolResult { tool_call_id, content, is_error }`. |
+| `image` | `Image { source: ImageSource { data, mime_type } }`. A pi block names the fields `data` and `mimeType`. |
 
 The `id`, the `parentId`, and the `timestamp` carry across, so the tree shape is kept.
 
@@ -685,11 +696,38 @@ only the known droppable set drops, and the tree shape survives. The known dropp
 is `thinking_level_change`, `session_info`, and `custom`. So no unknown record is
 invented, no known record is lost silently, and every kept record keeps its parent link.
 
-**What rho drops.** rho drops the record types it has no model for.
+**What rho drops.** rho drops the records it has no model for, and it counts each drop.
 
 - `thinking_level_change` drops. rho has no thinking-level concept.
 - `session_info` drops. rho has no title record in sprint 2.
-- `custom` drops. It is a pi extension payload.
+- `custom` and `custom_message` drop. Both are pi extension payloads.
+- `compaction` drops. rho has no compaction record in sprint 2.
+- A record type this build does not know drops, and the count names the type. The import
+  does not stop. See decision D-058.
+- A message with a role that rho has no model for drops, and the count names the role.
+  `bashExecution` is one such role today.
+
+**A real file decides this rule, not a fixture.** The first implementation returned an
+error for an unknown record type, an unknown role, and an `image` block. Three fixture
+tests passed. Then the controller ran the importer over 60 real pi files, and **21 of them
+failed**. The causes were `custom_message`, `compaction`, the `bashExecution` role, and the
+`image` block. So an unknown record now drops with a count, and the import finishes.
+
+| Reality found in 60 real pi files | Count | Rule |
+| --- | --- | --- |
+| `message` | 12637 | maps |
+| `custom` | 96 | drops |
+| `model_change` | 66 | maps |
+| `thinking_level_change` | 63 | drops |
+| `session` | 60 | maps to the header |
+| `custom_message` | 45 | drops |
+| `session_info` | 26 | drops |
+| `compaction` | 5 | drops |
+| role `bashExecution` | 1 | drops, counted by role |
+| block `image` | 170 | maps to `ContentBlock::Image` |
+
+A `model_change` record names its model in `modelId` in a real file. A fixture wrote
+`model`. The importer accepts both spellings, and the spec states both.
 - A `thinkingSignature` from another provider may be stale. rho keeps the field but
   does not promise it replays.
 
@@ -786,6 +824,11 @@ Redaction, the security core:
   section 5a.
 
 Pi import:
+- `a_real_pi_shape_imports_without_an_error` — a fixture that holds `custom_message`,
+  `compaction`, an `image` block, and a `bashExecution` role imports with no error, and the
+  dropped counts name each dropped type and the dropped role.
+- `an_image_block_survives_the_import` — a pi `image` block becomes a rho `Image` block,
+  with the data and the mime type kept.
 - `every_pi_record_maps_one_to_one_or_drops_from_the_known_set` — the invariant over any
   pi file: every pi record maps one to one to a rho record, only the known set
   (`thinking_level_change`, `session_info`, `custom`) drops, and the tree shape survives

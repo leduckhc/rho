@@ -139,6 +139,35 @@ The last fault was in a type. `Config::approval` was `ApprovalMode`, and the spe
 default is unset. A type with no unset state forced `Config::load` to invent `read-only`,
 which made the owner's `ask` default unreachable. See decision D-057.
 
+### T5b, the pi importer, and why a fixture is not a proof
+
+| Stage | Attempt | Role | Result | Notes |
+| --- | --- | --- | --- | --- |
+| T5b | 1 | developer | partial | Three fixture tests green. The importer failed on 21 of 60 real pi files. |
+| T5b | 2 | controller | pass | Drop with a count, map an image, accept `modelId`. 60 of 60 files import. |
+
+The developer did everything the brief asked. It made the three tests pass, it broke the
+implementation on purpose, and it ran the importer against one real file. That one file
+held no surprise, so the report was green.
+
+The controller ran the importer over 60 real files. **21 failed.**
+
+| Cause | Records in 60 real files | Old behaviour |
+| --- | --- | --- |
+| `custom_message` | 45 | error, whole import stopped |
+| `compaction` | 5 | error, whole import stopped |
+| role `bashExecution` | 1 | error, whole import stopped |
+| block `image` | 170 | error, whole import stopped |
+
+The fix is decision D-058. An unmappable record drops and the drop is counted, so nothing
+is lost in silence and one auxiliary record cannot fail a whole file. A real
+`model_change` also names its model `modelId`, where the fixture wrote `model`. After the
+fix: 60 of 60 files import, 15646 records map, and every drop is named.
+
+This is the sprint-1 lesson again, in one sentence. **A fixture describes what an author
+expects. A real file holds what exists.** So the sample size matters: one real file proved
+nothing, and 60 real files found four defects.
+
 ### Dispatch statistics for this sprint
 
 Eight subagent dispatches so far. Three hit the turn limit, and all three reported the
