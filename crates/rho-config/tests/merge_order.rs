@@ -1,4 +1,4 @@
-//! The merge order from `SPEC-13` section 2 and section 7.
+//! The merge order from `SPEC-config` section 2 and section 7.
 //!
 //! A later layer wins over an earlier one. The stronger layer replaces only a value
 //! it sets, and it leaves a value it does not set. So the winner for one key is the

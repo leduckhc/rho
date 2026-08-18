@@ -37,7 +37,7 @@ use rho_core::{SandboxMode, TaskRegistry, Tool, ToolRegistry};
 /// Build a registry with every built-in tool, in a stable order.
 ///
 /// The order is the advertised tool order, so it stays stable across sessions to
-/// keep the provider prompt prefix warm. See `SPEC-01` section 7.
+/// keep the provider prompt prefix warm. See `SPEC-core-runtime` section 7.
 pub fn builtin_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     for tool in builtin_tools() {
@@ -62,7 +62,7 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
 /// One list, because there were two. The six file and search tools were written out in
 /// both `builtin_tools` and `builtin_tools_with_tasks`, so adding a core tool to one
 /// silently omitted it from the other. A controller found this by deleting `grep` from
-/// one list and watching the set-membership test still pass. See decision D-030.
+/// one list and watching the set-membership test still pass. See decision D-three-tiers.
 fn shared_tools() -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(ReadTool),
@@ -77,7 +77,7 @@ fn shared_tools() -> Vec<Arc<dyn Tool>> {
 /// Build a registry with every built-in tool plus background-task support.
 ///
 /// The `bash`, `task`, and `task_cancel` tools all share `tasks`, so a background
-/// `bash` call creates a task the `task` tool can probe. See `SPEC-07` section 7.
+/// `bash` call creates a task the `task` tool can probe. See `SPEC-background-tasks` section 7.
 pub fn builtin_registry_with_tasks(tasks: Arc<TaskRegistry>) -> ToolRegistry {
     builtin_registry_with_tasks_and_sandbox(tasks, SandboxMode::Off)
 }
@@ -85,7 +85,7 @@ pub fn builtin_registry_with_tasks(tasks: Arc<TaskRegistry>) -> ToolRegistry {
 /// Build a registry with background-task support and a `bash` confinement mode.
 ///
 /// The `bash` tool runs under `sandbox`. `SandboxMode::Off` is today's behaviour.
-/// See `SPEC-10`.
+/// See `SPEC-bash-sandbox`.
 pub fn builtin_registry_with_tasks_and_sandbox(
     tasks: Arc<TaskRegistry>,
     sandbox: SandboxMode,

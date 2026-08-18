@@ -28,5 +28,5 @@ tracing-subscriber = "0.3.23"
 
 [features]
 default = []
-# The faster JSONL codec. Off by default. See docs/adr/ADR-005-jsonl-codec.md.
+# The faster JSONL codec. Off by default. See docs/adr/20260818-014343-ADR-jsonl-codec.md.
 fast-json = ["dep:sonic-rs"]

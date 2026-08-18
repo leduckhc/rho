@@ -55,7 +55,7 @@ mod tests {
     use super::CancelToken;
     use std::time::Duration;
 
-    // This test guards D-009. It runs on a multi-thread runtime, so `cancel`
+    // This test guards D-cancel-wake-race. It runs on a multi-thread runtime, so `cancel`
     // can land between the flag check and the waiter registration. The bounded
     // timeout fails the test on a lost wake, instead of hanging the suite.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

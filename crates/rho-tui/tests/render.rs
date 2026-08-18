@@ -1,5 +1,5 @@
 //! Render tests. Every test renders into a `ratatui` `TestBackend`. No test
-//! opens a real terminal. See `SPEC-05` section 7.
+//! opens a real terminal. See `SPEC-tui` section 7.
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;

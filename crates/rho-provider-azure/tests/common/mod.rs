@@ -152,7 +152,7 @@ impl ProviderHarness for AzureHarness {
                 .to_vec();
             let tail = sse_text().into_bytes();
             let server =
-                rho_provider_testkit::StagedHttpServer::start(head, tail, Duration::from_secs(30))
+                rho_provider_testkit::StagedHttpServer::start(head, tail, Duration::from_secs(5))
                     .await
                     .expect("staged server started");
             let config = AzureConfig::new(

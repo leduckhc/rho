@@ -2,7 +2,7 @@
 //!
 //! A child is confined by `BothPolicies`, the tool-set intersection, and the
 //! sandbox-narrowing rule. The session root is never overridable. See
-//! `docs/specs/SPEC-11-subagents.md` section 3 and decision D-036.
+//! `docs/specs/20260818-000223-SPEC-subagents.md` section 3 and decision D-child-confined-by-composition.
 
 use std::sync::Arc;
 
@@ -73,7 +73,7 @@ fn a_child_tool_set_is_the_intersection_with_the_parent() {
     // An earlier version used a child list that was a subset of the parent's, so removing
     // the parent check entirely left this test passing: every requested name was in the
     // parent set anyway. The controller found that by deleting the check and watching this
-    // test stay green. See decision D-038.
+    // test stay green. See decision D-two-weak-tests.
     //
     // So the child here asks for one name the parent lacks, and omits one the parent has.
     let parent = vec!["read".to_string(), "glob".to_string(), "grep".to_string()];

@@ -4,7 +4,7 @@
 //! This module once carried its own copy, and the three copies in the workspace had
 //! already drifted. This one replaced each unsafe character, which was safe but left
 //! visible rubbish: `red\x1b[31mtext` rendered as `red\u{fffd}[31mtext`. The shared
-//! filter drops the whole sequence, so it renders as `redtext`. Decision D-026 records
+//! filter drops the whole sequence, so it renders as `redtext`. Decision D-one-redaction-home records
 //! the consolidation.
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};

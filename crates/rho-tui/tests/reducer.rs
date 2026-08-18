@@ -1,5 +1,5 @@
 //! Reducer tests. The reducer is pure, so these tests need no terminal.
-//! See `SPEC-05` section 7.
+//! See `SPEC-tui` section 7.
 
 use rho_core::{AgentEvent, AgentStopReason, StreamEvent, ToolKind, ToolOutput};
 use rho_tui::{ActivityState, Row, ToolRowStatus, TuiState};
@@ -180,7 +180,7 @@ fn reducer_is_pure_same_events_same_state() {
     assert_eq!(first, second);
 }
 
-// --- Background task rows, from SPEC-07 ------------------------------------
+// --- Background task rows, from SPEC-background-tasks ------------------------------------
 
 fn task_id(text: &str) -> rho_core::TaskId {
     rho_core::TaskId(text.to_string())
@@ -336,7 +336,7 @@ fn a_task_event_for_an_unknown_id_is_ignored() {
     assert!(state.rows.is_empty(), "no row must be invented");
 }
 
-// --- Subagent rows, from SPEC-11 section 9 ---------------------------------
+// --- Subagent rows, from SPEC-subagents section 9 ---------------------------------
 
 fn agent_id(n: u64) -> rho_core::AgentId {
     rho_core::AgentId(n)
@@ -442,7 +442,7 @@ fn a_finished_agent_marks_success_and_failure_differently() {
 
 #[test]
 fn an_agent_summary_never_reaches_the_transcript_rows() {
-    // The core promise of SPEC-11 section 6, checked at the frontend too. The row shows
+    // The core promise of SPEC-subagents section 6, checked at the frontend too. The row shows
     // the cost and the outcome. The child's answer belongs in the parent's tool result,
     // not as an assistant row that would read as the parent's own words.
     let mut state = TuiState::default();

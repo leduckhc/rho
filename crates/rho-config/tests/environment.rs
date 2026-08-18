@@ -1,6 +1,6 @@
-//! The environment layer from `SPEC-13` section 2 (layer 5) and F-71.
+//! The environment layer from `SPEC-config` section 2 (layer 5) and F-environment-variable-override.
 //!
-//! F-71 says every config key can be set with an environment variable, in the
+//! F-environment-variable-override says every config key can be set with an environment variable, in the
 //! pattern `RHO_<KEY>`. These tests pin the full mapping, the boolean rule, and the
 //! fail-closed guard for the two security keys. No test mutates the process
 //! environment. `Sources.env` is the injected seam, so every value is in memory.
@@ -86,7 +86,7 @@ fn load_reads_every_scalar_key_from_the_environment() {
 fn env_sandbox_bad_value_fails_closed() {
     // `RHO_SANDBOX=loose` must stop the run with a `ConfigError::Parse` that names the
     // key and the value. An environment value must not be a softer path into the same
-    // security setting than a file value. See D-017 and D-047.
+    // security setting than a file value. See D-plugin-does-not-classify-itself and D-config-fails-closed.
     let sources = Sources {
         env: env_vars(&[("RHO_SANDBOX", "loose")]),
         ..Sources::default()
@@ -174,7 +174,7 @@ fn env_no_skills_unaccepted_value_fails_closed() {
 
 #[test]
 fn from_env_leaves_an_unaccepted_boolean_unset() {
-    // `ConfigLayer::from_env` is infallible per SPEC-13 section 3. It omits an
+    // `ConfigLayer::from_env` is infallible per SPEC-config section 3. It omits an
     // unaccepted boolean, and `Config::load` is the fail-closed authority that rejects
     // it. This pins the split, so neither side drifts into a soft default.
     let layer = ConfigLayer::from_env(&env_vars(&[("RHO_EPHEMERAL", "nonsense")]));

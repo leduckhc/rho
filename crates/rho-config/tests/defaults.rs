@@ -1,4 +1,4 @@
-//! Defaults, layers, and parsing from `SPEC-13` section 4 and section 7.
+//! Defaults, layers, and parsing from `SPEC-config` section 4 and section 7.
 //!
 //! These tests pin the stated defaults, the single environment layer, and the
 //! fail-closed parsers for the two security keys.
@@ -14,7 +14,7 @@ use rho_core::SandboxMode;
 #[test]
 fn config_defaults_sets_the_stated_defaults() {
     // `Config::defaults` leaves `approval` unset, because the resolved default comes
-    // from the SPEC-16 mode resolution. It sets `sandbox` to `off`, per D-031.
+    // from the SPEC-approval mode resolution. It sets `sandbox` to `off`, per D-bash-os-sandbox.
     let defaults = Config::defaults();
     assert!(
         defaults.approval.is_none(),

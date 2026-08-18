@@ -3,7 +3,7 @@
 //! A provider is a cargo feature. A build without a provider must fail with a
 //! clear message, not a panic. A missing API key must name the environment
 //! variable to set. Every function here states its choices, so no credential or
-//! session boundary is set by accident. See `SPEC-01` decisions D-011 and D-013.
+//! session boundary is set by accident. See `SPEC-core-runtime` decisions D-session-config and D-no-four-argument-session-new.
 
 use std::sync::Arc;
 
@@ -87,7 +87,7 @@ pub fn default_provider() -> Option<&'static str> {
 /// calls in one turn. `amazon.nova-micro-v1:0` passed a tool call four times out of four and
 /// is the smallest that did. See `docs/verification/models.md`.
 ///
-/// **A default model is a convenience, not a security choice.** Decision D-013 removed
+/// **A default model is a convenience, not a security choice.** Decision D-no-four-argument-session-new removed
 /// hidden defaults for the session root and the approval policy, because a wrong value there
 /// is a breach. A wrong model id is a bad answer and a small bill, so a default is safe here.
 /// It is still reported, so the choice is never silent.

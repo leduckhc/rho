@@ -173,7 +173,7 @@ impl Default for ToolRegistry {
 
 /// Resolve `candidate` under `root`. Return an error when it escapes the root.
 ///
-/// This is the sandbox boundary for feature F-28. Read it as security code.
+/// This is the sandbox boundary for feature F-path-confinement. Read it as security code.
 ///
 /// Rules:
 /// - Join a relative `candidate` onto the root. Keep an absolute `candidate` as
@@ -320,7 +320,7 @@ impl ApprovalPolicy for AllowAllPolicy {
 /// value is small enough to look like a mistake.
 ///
 /// The message lives here, next to the error, so there is one definition. See decision
-/// D-026 for why a message that guides a user does not get copied.
+/// D-one-redaction-home for why a message that guides a user does not get copied.
 fn timeout_message(elapsed: Duration) -> String {
     let millis = elapsed.as_millis();
     let seconds = elapsed.as_secs_f64();
@@ -341,7 +341,7 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    // --- Path confinement (F-28) ---
+    // --- Path confinement (F-path-confinement) ---
 
     #[test]
     fn confine_allows_child_path() {
@@ -476,7 +476,7 @@ mod tests {
         assert!(matches!(error, ToolError::Io(_)));
     }
 
-    // --- Approval policies (F-29) ---
+    // --- Approval policies (F-tool-approval-gate) ---
 
     #[tokio::test]
     async fn read_only_policy_allows_a_reading_tool() {

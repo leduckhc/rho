@@ -5,7 +5,7 @@
 //! stores every task, bounds its resources, and wakes a waiter on a real event.
 //!
 //! The registry never polls. A waiter wakes on a [`tokio::sync::Notify`] signal,
-//! which fires on a progress change or on a final state. See `SPEC-07` section 3.
+//! which fires on a progress change or on a final state. See `SPEC-background-tasks` section 3.
 //!
 //! This module spawns no process. The caller owns the child. The caller feeds
 //! output, progress, and the final state through a [`TaskHandle`]. So the module
@@ -161,7 +161,7 @@ pub const DEFAULT_FOREGROUND_LIMIT_MS: u64 = 30_000;
 
 /// Decide how to run `command`. `requested` is the model's explicit choice, if any.
 ///
-/// The rules run in priority order. See `SPEC-07` section 5.
+/// The rules run in priority order. See `SPEC-background-tasks` section 5.
 ///
 /// 1. An explicit request from the model wins, either way.
 /// 2. A requested timeout above `foreground_limit_ms` means background.

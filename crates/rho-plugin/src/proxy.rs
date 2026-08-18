@@ -12,7 +12,7 @@ use crate::process::PluginProcess;
 ///
 /// It forwards the call to its plugin process. A plugin failure becomes an error
 /// `ToolOutput`, not an `Err`. So a crashed plugin does not abort the agent run.
-/// The model sees the error result and can change course. See `SPEC-04` 4.6.
+/// The model sees the error result and can change course. See `SPEC-hooks-and-plugins` 4.6.
 pub struct PluginTool {
     process: Arc<PluginProcess>,
     spec: PluginToolSpec,
@@ -39,7 +39,7 @@ impl Tool for PluginTool {
         // read-only kind and denies everything else. If the host trusted the kind a
         // plugin advertises, then a hostile or compromised plugin would declare a
         // destructive tool as `Read` and run under a read-only policy. That is the
-        // same fail-open shape as decision D-012, only now the value arrives from
+        // same fail-open shape as decision D-todo-in-a-green-stage, only now the value arrives from
         // another process.
         //
         // So the host reports `Other`, which `ToolKind::is_read_only` treats as
@@ -51,7 +51,7 @@ impl Tool for PluginTool {
         //
         // A later feature may let the **user's** configuration grant a kind to a
         // named plugin tool. The trust would then come from the user, not from the
-        // plugin. See `SPEC-04`.
+        // plugin. See `SPEC-hooks-and-plugins`.
         ToolKind::Other
     }
 
@@ -79,7 +79,7 @@ impl Tool for PluginTool {
 /// A placeholder tool advertised from the schema cache before the plugin
 /// connects. A call to it returns an error result that says the tool is not
 /// ready yet. The tool list shape does not change when the plugin connects, so
-/// the prompt prefix stays stable. See `SPEC-04` section 5.
+/// the prompt prefix stays stable. See `SPEC-hooks-and-plugins` section 5.
 pub struct CachedTool {
     spec: PluginToolSpec,
 }
@@ -105,7 +105,7 @@ impl Tool for CachedTool {
         // read-only kind and denies everything else. If the host trusted the kind a
         // plugin advertises, then a hostile or compromised plugin would declare a
         // destructive tool as `Read` and run under a read-only policy. That is the
-        // same fail-open shape as decision D-012, only now the value arrives from
+        // same fail-open shape as decision D-todo-in-a-green-stage, only now the value arrives from
         // another process.
         //
         // So the host reports `Other`, which `ToolKind::is_read_only` treats as
@@ -117,7 +117,7 @@ impl Tool for CachedTool {
         //
         // A later feature may let the **user's** configuration grant a kind to a
         // named plugin tool. The trust would then come from the user, not from the
-        // plugin. See `SPEC-04`.
+        // plugin. See `SPEC-hooks-and-plugins`.
         ToolKind::Other
     }
 

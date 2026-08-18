@@ -5,7 +5,7 @@ Rules for any agent or human who changes this repository.
 > **This tree has more than one writer.** A separate agent keeps the repository private
 > before release, and it edits `AGENTS.md`, `docs/release-checklist.md`, `docs/index.md`,
 > and `.github/workflows/` without committing. So prefer a small anchored edit over a
-> section rewrite, and read the diff before you stage. See decision D-028.
+> section rewrite, and read the diff before you stage. See decision D-shared-working-tree.
 
 ## If you read nothing else
 
@@ -59,21 +59,24 @@ Not every change is a feature. Tick the one that fits, then follow its lane.
 - [ ] Ask, when a choice is the user's to make. Ask once, with options and trade-offs.
 
 > Reading jcode's `edit` tool gave rho three features it lacked, and showed one defect to
-> avoid. Decision D-027 records exactly which, and `docs/comparison.md` repeats it.
+> avoid. Decision D-jcode-edit-lessons records exactly which, and `docs/comparison.md` repeats it.
 > Guessing would have found neither.
 
 ### 2. Decide, and write the decision down
 
-- [ ] Add a decision to `.rho-work/DECISIONS.md` for every choice that constrains later
-      work. Give it an ID, the question, the decision, and the reason.
+- [ ] Add a decision file, `.rho-work/decisions/<yyyymmdd-hhmmss>-D-<slug>.md`, for every
+      choice that constrains later work. State the question, the decision, and the reason.
+      One decision is one file, so two worktrees never edit the same file.
 - [ ] Say what the decision rules **out**, not only what it allows.
 
-> Decisions D-001 to D-027 stopped later stages re-litigating settled questions. A
-> decision with no written reason gets reversed by the next person.
+> The decisions in `.rho-work/decisions/` stopped later stages re-litigating settled
+> questions. A decision with no written reason gets reversed by the next person.
 
 ### 3. Spec before any code
 
-- [ ] Write `docs/specs/SPEC-NN-<topic>.md`.
+- [ ] Write `docs/specs/<yyyymmdd-hhmmss>-SPEC-<slug>.md`. Take the stamp from
+      `date -u +%Y%m%d-%H%M%S`. Never number a spec, because a counter clashes between
+      worktrees. See `docs/ids.md`.
 - [ ] Put the public API in it **verbatim**, as compilable Rust.
 - [ ] Name every test, with the assertion each one proves.
 - [ ] Add an `## Out of scope` section. An unbounded spec never finishes.
@@ -118,7 +121,7 @@ Most changes need no new crate. A new built-in tool goes in `rho-tools` and impl
 
 > A four-argument `Session::new` survived because a test shape demanded it. It hid a
 > fake model id, an accidental session root, and a policy that approved every tool call.
-> See decision D-013.
+> See decision D-no-four-argument-session-new.
 
 ### 7. Prove the test catches the bug
 
@@ -133,8 +136,8 @@ Most changes need no new crate. A new built-in tool goes in `rho-tools` and impl
 > here passed against the very bug it was written for, because it asserted the size of
 > the kept output while the read buffer still grew without limit. **A test that passes
 > against broken code is worse than no test**, because it buys false confidence. See
-> decision D-016. The controller once used `git checkout` to undo a deliberate break and
-> destroyed the change it had just written. See decision D-029.
+> decision D-bash-line-cap. The controller once used `git checkout` to undo a deliberate break and
+> destroyed the change it had just written. See decision D-jcode-bash-lessons.
 
 ### 8. Check the whole surface, not the diff
 
@@ -147,7 +150,7 @@ Most changes need no new crate. A new built-in tool goes in `rho-tools` and impl
 > Three defects here hid in untested public surface, and a green suite proved nothing
 > about any of them. `confine`, the path boundary, was left `todo!()` through a stage
 > that reported green. `ToolKind::Other` counted as non-mutating, so a read-only policy
-> approved any tool whose author forgot to declare a kind. See decisions D-012 and D-017.
+> approved any tool whose author forgot to declare a kind. See decisions D-todo-in-a-green-stage and D-plugin-does-not-classify-itself.
 
 ### 9. Review
 
@@ -163,7 +166,7 @@ Most changes need no new crate. A new built-in tool goes in `rho-tools` and impl
 - [ ] Treat a severity rating as a hypothesis. Test it.
 
 > A security audit rated credential inheritance as minor. A thirty-second live probe
-> showed a prompt-injected model reading `AWS_SECRET_ACCESS_KEY`. See decision D-019.
+> showed a prompt-injected model reading `AWS_SECRET_ACCESS_KEY`. See decision D-bash-scrubs-credentials.
 
 ### 10. Verify it yourself
 
@@ -218,7 +221,7 @@ doc, because somebody will trust it.
 
 > A stale spec re-introduced a constructor that a decision had deleted. A README claimed
 > that a third party could prove a provider conforms, and nobody had tried it; trying it
-> took ten minutes and found three wrong API guesses. See decision D-018.
+> took ten minutes and found three wrong API guesses. See decision D-provider-extension-verified-outside.
 
 ### 14. Ship
 
@@ -263,7 +266,11 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo build -p rho-cli --no-default-features --features minimal
+python3 bench/check-ids.py
 ```
+
+`bench/check-ids.py` proves that every spec, ADR, decision, and feature reference resolves,
+and that no numeric id came back. See `docs/ids.md`.
 
 ## Prose rules
 

@@ -250,7 +250,7 @@ will not hold at 247 KB. Measuring that needs a soak test, and there is not one 
 ## Token accounting and cost
 
 The same example reports the accounting, and two of the three providers used to report
-nothing at all. See decision D-032.
+nothing at all. See decision D-measured-cost-and-cache.
 
 ```
 tokens          in 70200 out 306 cache_read 0
@@ -269,7 +269,7 @@ free.
 **The cache hit rate is zero, and that is an honest zero.** rho now asks for the
 accounting and parses it, and Anthropic caching through this path did not engage. Placing
 a cache breakpoint at the end of the stable prefix is the next step and it is not done.
-See decision D-032.
+See decision D-measured-cost-and-cache.
 
 ## A note on running the script
 
@@ -349,7 +349,7 @@ profile:
 | `serde_json` only | 352,128 B | 21 lines | 5.0 s |
 | plus `sonic-rs` | 434,784 B | 102 lines | 8.5 s |
 
-The decision is in `docs/adr/ADR-005-jsonl-codec.md`. `serde_json` is the default.
+The decision is in `docs/adr/20260818-014343-ADR-jsonl-codec.md`. `serde_json` is the default.
 `sonic-rs` sits behind the `fast-json` feature, which is off by default.
 
 Read one caution with these numbers. A session append is one record of about 200
@@ -381,4 +381,4 @@ writes one record as one write.
 Two numbers explain the design, and both are measured. A reopen of the file per record
 costs 17567 ns, which is 17 times the held sink. An `fsync` per record costs 3076785 ns,
 which is about 3000 times the write. So the writer holds its sink and does not `fsync` per
-record. See decision D-059 and `SPEC-14` section 4a.
+record. See decision D-writer-holds-one-sink and `SPEC-sessions` section 4a.

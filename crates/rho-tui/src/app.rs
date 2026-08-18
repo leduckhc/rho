@@ -3,7 +3,7 @@
 //! The loop owns the terminal for its lifetime. It reads two sources: terminal
 //! input and the agent event stream. It never blocks one on the other. It uses
 //! `tokio::select!` over a `crossterm` event stream and the `rho_core`
-//! `AgentEvents` stream. See `SPEC-05` section 5.
+//! `AgentEvents` stream. See `SPEC-tui` section 5.
 
 use std::io::{self, Stdout};
 
@@ -64,7 +64,7 @@ impl App {
 
     async fn event_loop(&mut self, terminal: &mut Term) -> Result<(), TuiError> {
         let mut input = EventStream::new();
-        // Draw the first frame before any token arrives. See F-86.
+        // Draw the first frame before any token arrives. See F-time-to-first-frame.
         draw(terminal, &self.state)?;
 
         let App {

@@ -103,7 +103,7 @@ fn agent_stop_reason_serialises_snake_case() {
     }
 }
 
-/// Guards decision D-007. ACP spells the cancelled stop reason with two letters
+/// Guards decision D-acp-cancelled-spelling. ACP spells the cancelled stop reason with two letters
 /// `l`, as `cancelled`. The Rust variant is `Canceled` with one `l`. The
 /// `serde(rename)` attribute must emit the ACP spelling. No ACP client accepts
 /// `canceled`. Do not remove this test.

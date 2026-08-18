@@ -8,7 +8,7 @@
 //!
 //! A server is shared between sessions by default, keyed by the config
 //! fingerprint and reference counted, because a server is a whole process and
-//! rho runs many sessions at once. See `SPEC-09`.
+//! rho runs many sessions at once. See `SPEC-mcp`.
 
 mod cache;
 mod client;

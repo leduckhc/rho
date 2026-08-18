@@ -1,8 +1,8 @@
-//! Live confinement tests for the `bash` tool. See `SPEC-10`.
+//! Live confinement tests for the `bash` tool. See `SPEC-bash-sandbox`.
 //!
 //! These tests need a real OS sandbox backend. When none is present, each test
 //! prints that it skipped and returns. A test that silently passes when it did
-//! nothing is the failure mode decision D-016 records, so the skip is loud.
+//! nothing is the failure mode decision D-bash-line-cap records, so the skip is loud.
 //!
 //! Every test asserts the effect, not an error message. A write that must fail is
 //! checked by the absence of the file, because an error string is easy to match

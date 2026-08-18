@@ -1,4 +1,4 @@
-//! The plugin schema cache (F-43).
+//! The plugin schema cache (F-plugin-schema-cache).
 //!
 //! A plugin's tool schemas come from an on-disk cache. So the host advertises the
 //! tools in the very first provider request, and a late plugin connection never

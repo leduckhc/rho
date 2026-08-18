@@ -1,4 +1,4 @@
-//! Tests for agent definition loading. See `SPEC-11` section 5.
+//! Tests for agent definition loading. See `SPEC-subagents` section 5.
 
 use rho_skills::{AgentConfig, SkillOrigin, discover_agents, load_definition};
 use std::path::Path;

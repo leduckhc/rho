@@ -100,11 +100,11 @@ ACP backend.
 | Stage | Attempt | Role | Result | Notes |
 | --- | --- | --- | --- | --- |
 | T0 | 1 | controller | pass | Doc audit against the code. Nine feature rows were wrong. MCP had no rows at all. |
-| T1 | 1 | architect | partial | SPEC-13, SPEC-14, SPEC-15, and ADR-004. Session ops and steering added mid-flight by the owner. |
+| T1 | 1 | architect | partial | SPEC-config, SPEC-sessions, SPEC-steering, and ADR-session-format. Session ops and steering added mid-flight by the owner. |
 | T1 | 2 | reviewer | fail | Three blockers and five majors. Every one is a repeat of a sprint-1 defect family. |
-| T1b | 1 | architect | pass | Eight findings fixed. SPEC-16 written. Five decisions, D-051 to D-055. |
+| T1b | 1 | architect | pass | Eight findings fixed. SPEC-approval written. Five decisions added. |
 | T1b | 2 | controller | pass | Controller found one more fail-open: a remembered allow would have covered every `bash` call. |
-| T2 | 1 | tester | pass | 29 config tests, all red on `todo!()`. Every SPEC-13 test name exists. |
+| T2 | 1 | tester | pass | 29 config tests, all red on `todo!()`. Every SPEC-config test name exists. |
 | T4 | 1 | tester | partial | Turn limit. 39 session tests red. The pi import tests were missing. |
 | T4 | 2 | tester | pass | Resumed with a narrow brief. Three pi import tests, in a new crate the spec named. |
 | T4 | 3 | controller | pass | Controller found the widening rule had no API, so no test could reach it. |
@@ -130,14 +130,14 @@ The third one is defect 7 again. An assertion on a returned error cannot observe
 allocation. So `SessionReader` gained `read_from`, a `BufRead` seam, and a test drives it
 with a reader that counts the bytes it hands out.
 
-Two more claims died. `SPEC-14` said CI runs the codec tests with `fast-json` on and off,
+Two more claims died. `SPEC-sessions` said CI runs the codec tests with `fast-json` on and off,
 and `rho-core` had no such feature. The feature now exists, the CI matrix is a T10 item,
 and no document claims it works before then. A golden line now pins the codec bytes, so
 the two modes are comparable at all.
 
 The last fault was in a type. `Config::approval` was `ApprovalMode`, and the spec said the
 default is unset. A type with no unset state forced `Config::load` to invent `read-only`,
-which made the owner's `ask` default unreachable. See decision D-057.
+which made the owner's `ask` default unreachable. See decision D-approval-option-not-enum.
 
 ### T5b, the pi importer, and why a fixture is not a proof
 
@@ -159,7 +159,7 @@ The controller ran the importer over 60 real files. **21 failed.**
 | role `bashExecution` | 1 | error, whole import stopped |
 | block `image` | 170 | error, whole import stopped |
 
-The fix is decision D-058. An unmappable record drops and the drop is counted, so nothing
+The fix is decision D-unmappable-pi-record-drops. An unmappable record drops and the drop is counted, so nothing
 is lost in silence and one auxiliary record cannot fail a whole file. A real
 `model_change` also names its model `modelId`, where the fixture wrote `model`. After the
 fix: 60 of 60 files import, 15646 records map, and every drop is named.
@@ -179,7 +179,7 @@ nothing, and 60 real files found four defects.
 | T5d | 1 | controller | pass | A real drive of the operations found a reopen fault and a nameless io error. |
 
 **T3 reported two gaps rather than hiding them.** `ConfigLayer::from_env` mapped two keys
-while F-71 claimed every key, and the credential command had no timeout although the spec
+while F-environment-variable-override claimed every key, and the credential command had no timeout although the spec
 said it did. So a helper waiting for a biometric prompt would hang rho forever. Both are
 closed, test first. The timeout test returns in 1.00 second against a child that never
 exits, and it hung for ten seconds with the kill removed.
@@ -189,7 +189,7 @@ reopened the file per record, because three degrade tests removed the session di
 an open descriptor on Unix keeps writing to an unlinked inode. Measured: a reopen costs
 17567 ns per record, a held sink costs 1034 ns, and an `fsync` per record costs 3076785 ns.
 So the tests were wrong, not the design. The writer now holds a sink, a test injects a sink
-that fails on demand, and a real append costs 1762 ns per record. See D-059.
+that fails on demand, and a real append costs 1762 ns per record. See D-writer-holds-one-sink.
 
 **Then the controller drove the operations for real.** Create three sessions, close each,
 list, resume, widen, fork, delete, and read a missing file twice. Two faults came out that
@@ -202,7 +202,7 @@ list, resume, widen, fork, delete, and read a missing file twice. Two faults cam
 
 A `Reopened` record now states the reopen, and the invariant is a test: a `Closed` record is
 followed by nothing, or by exactly one `Reopened` record. Every io error names its path. See
-D-061.
+D-reopen-stated-on-disk.
 
 The lesson repeats with a new face. **A test proves a case. A run proves the product.** The
 first version of this lesson came from sprint 1, where 222 tests passed while the product
@@ -221,7 +221,41 @@ The fix installs one global subscriber per test binary, writing into a thread-lo
 The important part is not the flake. `a_resolved_credential_never_reaches_a_log` asserts
 that a secret is **absent** from a log. A broken capture makes it pass against an
 implementation that prints the credential in full. So every capture helper now emits a probe
-line and requires it back, before any absence means anything. See decision D-062.
+line and requires it back, before any absence means anything. See decision D-log-capture-proves-itself.
+
+### The id migration, and the flaky harness it uncovered
+
+The owner asked for one thing: stop the id clashes. Numeric ids need a counter, a counter
+needs one allocator, and two worktrees each take the next number and are both right until
+they merge. So an artifact is now named by a timestamp and a slug, and no counter exists.
+See `D-slug-ids`.
+
+| Change | Count |
+| --- | --- |
+| Files moved to the timestamp scheme | 21 |
+| Decisions split from one file into their own | 62 |
+| References rewritten | 1208 across 139 files |
+| Duplicate feature rows found and merged | 2 |
+
+Two things are worth naming. The migration ran first in a throwaway worktree, and the diff
+was read there before the real tree changed. And the new guard, `bench/check-ids.py`, was
+broken four ways on purpose: a numeric id, a reference to nothing, a duplicate slug, and a
+file named the old way. It caught all four.
+
+The slug rewrite also found a doc defect that a number had hidden. Two rows in the tier-2
+table restated two rows above them, so the catalogue counted 118 features where 116 exist.
+A number can repeat quietly. A slug collides, and the guard refuses it.
+
+**Then the repeated runs found a flaky test that predates this sprint.** The provider
+contract suite failed about three runs in eight, after 33 seconds, at the point where the
+stream starts. The fault was in `rho-provider-testkit`, not in any provider: the staged
+server accepted one connection, served it, and ended, so a retry waited in the backlog for
+the client timeout. With the one-shot accept restored on purpose, 4 of 12 runs failed. With
+the fix, 0 of 10. See `D-staged-server-serves-every-connection`.
+
+That crate is what a third party uses to prove its own provider conforms. A harness that
+fails three runs in eight teaches an author to distrust the suite, and a distrusted suite
+gets skipped.
 
 ### Dispatch statistics for this sprint
 
@@ -235,7 +269,7 @@ hardening pass gets split by crate, and each fix names its file and its test.
 
 The tester reports were accurate. The gaps were in the specs and in two test bodies.
 
-1. **The widening rule had no function.** `SPEC-14` section 8a said a resume refuses to
+1. **The widening rule had no function.** `SPEC-sessions` section 8a said a resume refuses to
    widen a permission. No spec signature expressed the comparison, so the test asserted
    only that the header round-trips. That is the `confine` family again: a rule with no
    API cannot be tested. The spec now states `StoredApproval`, `StoredSandbox`, and
@@ -245,7 +279,7 @@ The tester reports were accurate. The gaps were in the specs and in two test bod
 2. **Two failure tests accepted any error.** `a_broken_approval_key_stops_the_run` and
    `a_broken_sandbox_key_stops_the_run` matched `Err(_)`. A read fault would have passed
    them. Both now name the error variant.
-3. **The import signature was missing.** The tester flagged that `SPEC-14` section 9 named
+3. **The import signature was missing.** The tester flagged that `SPEC-sessions` section 9 named
    a crate and no function. The spec now states `import_pi_session`, and states that it
    returns records and writes no file.
 
@@ -274,9 +308,9 @@ not enough. The reviewer pasted every signature into a crate under `/tmp` and ra
 
 The owner then chose the approval model. rho gains an Ask policy, and it defaults to
 Ask wherever a human or a client can answer. It defaults to read-only where nobody can
-answer. That is decision D-051, and stages T12 and T13 build it.
+answer. That is decision D-approval-default-ask, and stages T12 and T13 build it.
 
-One more claim died here. `docs/features.md` F-29 said the TUI wires a confirmation
+One more claim died here. `docs/features.md` F-tool-approval-gate said the TUI wires a confirmation
 prompt to the approval gate. `crates/rho-tui/src/` holds no approval code. The row now
 states the two policies that exist.
 
@@ -290,16 +324,16 @@ The code shipped past the catalogue. These rows disagreed with the tree.
 
 | Row | Said | Code shows |
 | --- | --- | --- |
-| F-07 background tasks | `planned` | `rho-core/src/tasks.rs` and `rho-tools/src/task.rs` |
-| F-15 custom provider | `planned` | `rho-provider-testkit`, verified from outside the workspace |
-| F-31 bash sandbox | `sprint-1` | shipped after the sprint-1 retrospective |
-| F-45 skills | `planned`, owner `rho-core` | `rho-skills`, six test files |
-| F-101 usage | `planned`, claimed session totals | `rho-core/src/usage.rs`, per turn only |
-| F-103 redaction | `sprint-1`, owner `rho-config` | `rho-redact` owns redaction |
+| F-background-tasks background tasks | `planned` | `rho-core/src/tasks.rs` and `rho-tools/src/task.rs` |
+| F-custom-provider-extension custom provider | `planned` | `rho-provider-testkit`, verified from outside the workspace |
+| F-bash-os-sandbox bash sandbox | `sprint-1` | shipped after the sprint-1 retrospective |
+| F-skills-filesystem skills | `planned`, owner `rho-core` | `rho-skills`, six test files |
+| F-token-and-cost-accounting usage | `planned`, claimed session totals | `rho-core/src/usage.rs`, per turn only |
+| F-no-secrets-in-logs redaction | `sprint-1`, owner `rho-config` | `rho-redact` owns redaction |
 | MCP, all of it | absent | `rho-mcp`, 1960 lines, four test files |
 
-F-102 stays `planned`. Nothing accumulates a session total today. `Usage::add` exists,
-and no caller uses it. The old F-101 row claimed the total, so the claim was deleted.
+F-session-statistics stays `planned`. Nothing accumulates a session total today. `Usage::add` exists,
+and no caller uses it. The old F-token-and-cost-accounting row claimed the total, so the claim was deleted.
 
 ## Process lessons
 
@@ -311,7 +345,7 @@ and no caller uses it. The old F-101 row claimed the total, so the claim was del
 3. **Split a stage to fit the turn budget.** Six of sixteen dispatches hit a turn
    limit. The verification step belongs in its own dispatch.
 4. **A subagent must not run a git command that writes.** One ran `git stash` and
-   displaced a parallel agent's files. See D-015.
+   displaced a parallel agent's files. See D-no-git-writes-by-a-subagent.
 5. **Gate a stage on its own crates while a sibling is mid-flight.** A workspace
    gate fails for reasons that have nothing to do with the stage.
 6. **Verify a CI guard by breaking the rule on purpose.** Each of the three new

@@ -1,4 +1,4 @@
-//! SPEC-14 stage T4 red tests: ephemeral mode, the lifecycle, cancel, and redaction.
+//! SPEC-sessions stage T4 red tests: ephemeral mode, the lifecycle, cancel, and redaction.
 //!
 //! Every test drives the public `session` surface. It must fail on an unimplemented
 //! body, never on a type error. It uses `tempfile`, no `sleep`, and no network.
@@ -117,7 +117,7 @@ fn file_pairing_is_complete(path: &Path) -> bool {
     let mut results = std::collections::HashSet::new();
     for line in text.lines().filter(|l| !l.is_empty()) {
         // A skipped line can hide the missing pairing, so a decode failure must panic,
-        // never `continue`. See F2 and decision D-049.
+        // never `continue`. See F2 and decision D-cancel-keeps-the-session-open.
         let entry: rho_core::Entry = decode(line)
             .unwrap_or_else(|e| panic!("a session line failed to decode: {e:?}: {line}"));
         if let Record::Message { message } = entry.record {
@@ -168,7 +168,7 @@ fn a_write_failure_degrades_to_ephemeral_with_a_warning() {
     // the run. This injects a sink that fails on the second write, rather than removing
     // the session directory: the writer now holds one open handle, and a held handle
     // keeps succeeding after its path is unlinked, so the directory trick could not
-    // force a failure. See the sink-seam note at the top of this file. D-041 forbids a
+    // force a failure. See the sink-seam note at the top of this file. D-write-failure-degrades forbids a
     // silent degrade, so the fallback must emit a warning.
     let writer = SessionWriter::with_sink(
         "degrade.jsonl",
@@ -606,7 +606,7 @@ fn a_redacted_tool_argument_is_masked_on_the_way_in() {
 fn redact_json_secrets_masks_a_secret_keyed_field() {
     // rho_redact::redact_json_secrets masks the value under a key that looks_like_a_secret
     // flags, and keeps every other value, every key name, and the tree shape. This guards
-    // the new function in SPEC-14 section 5a.
+    // the new function in SPEC-sessions section 5a.
     let input = serde_json::json!({
         "api_key": "sk-live-1234567890",
         "region": "eu-west-1",
@@ -656,7 +656,7 @@ fn redact_json_secrets_masks_a_secret_keyed_field() {
 
 #[test]
 fn the_append_path_writes_once_per_record() {
-    // SPEC-14 section 3: a buffered writer, one write per record. A counting sink proves
+    // SPEC-sessions section 3: a buffered writer, one write per record. A counting sink proves
     // exactly one write per append, so a writer that batches two records into one write
     // fails this. The sink counts write calls; the writer builds the line and its
     // newline into one buffer, so one record is one write.
@@ -737,11 +737,11 @@ fn a_session_file_holds_one_timestamp_format() {
 //
 // The controller ran the operations for real, in a scratch binary under /tmp: create
 // three sessions, close each one, list, resume, widen, fork, delete, then read a missing
-// file twice. Two faults came out that no test covered. See SPEC-14 section 8.
+// file twice. Two faults came out that no test covered. See SPEC-sessions section 8.
 
 #[test]
 fn append_to_a_closed_session_reopens_it_and_keeps_closed_last() {
-    // A closed file ends with a `Closed` record, and SPEC-14 calls that the last record.
+    // A closed file ends with a `Closed` record, and SPEC-sessions calls that the last record.
     // A real drive appended two records after it, so the file held `Closed` in the middle
     // and any reader would report a closed session that kept talking. A resume must
     // either refuse, or state that the session reopened. It states it.

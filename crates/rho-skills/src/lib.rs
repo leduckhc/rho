@@ -5,7 +5,7 @@
 //! the name and the description reach the system prompt. The body loads on
 //! demand, with the ordinary `read` tool.
 //!
-//! See `docs/specs/SPEC-08-skills.md` for the contract.
+//! See `docs/specs/20260817-215003-SPEC-skills.md` for the contract.
 
 mod agent;
 mod discover;

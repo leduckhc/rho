@@ -37,12 +37,12 @@ sandbox, and in a test, and `rho-tools` links no HTTP client. Web access is tier
 
 **Every path goes through `rho_core::confine`.** A path outside the session root is
 refused, including one reached through a symlink. The single exception is `bash`, and
-`SPEC-03` section 7 says plainly why: confining a shell needs a sandbox, not a path
+`SPEC-tool-interface` section 7 says plainly why: confining a shell needs a sandbox, not a path
 check.
 
 **Every tool declares a `ToolKind`.** The kind drives approval. `ToolKind::is_read_only`
 is an allowlist with no wildcard arm, so a new kind is mutating until somebody classifies
-it. See decision D-012.
+it. See decision D-todo-in-a-green-stage.
 
 **Why closed.** Every tool costs context in every request, whether the model uses it or
 not. A tenth core tool must earn its place against that permanent cost. Anything
@@ -55,9 +55,9 @@ presents it to the model. All three share one property: **what they load is untr
 
 | Loader | Loads | Trust rule |
 | --- | --- | --- |
-| `rho-skills` | Instructions, as `SKILL.md` files | A project skill is withheld until the user trusts the root. See D-022. |
-| `rho-mcp` | Tools from an MCP server | Every tool reports `ToolKind::Other`, so a server never classifies itself. See D-024. |
-| `rho-plugin` | Tools from a subprocess | Same rule. A plugin never classifies itself. See D-017. |
+| `rho-skills` | Instructions, as `SKILL.md` files | A project skill is withheld until the user trusts the root. See D-project-skill-needs-trust. |
+| `rho-mcp` | Tools from an MCP server | Every tool reports `ToolKind::Other`, so a server never classifies itself. See D-mcp-does-not-classify-itself. |
+| `rho-plugin` | Tools from a subprocess | Same rule. A plugin never classifies itself. See D-plugin-does-not-classify-itself. |
 
 The repeated shape is not a coincidence. **A loader is a boundary, so each one fails
 closed.** A capability arriving from outside is mutating until a human says otherwise.
@@ -93,7 +93,7 @@ impl Tool for WordCountTool {
     }
     fn kind(&self) -> ToolKind {
         // Declare a real kind. `Other` is treated as mutating, so a read-only session
-        // would refuse this tool. See decision D-012.
+        // would refuse this tool. See decision D-todo-in-a-green-stage.
         ToolKind::Read
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -183,7 +183,7 @@ Hooks that refuse dangerous work. This is the most valuable extension, because i
 makes an unattended run safe enough to leave alone.
 
 rho already has three coarse controls: `ToolKind` approval, `--read-only`, and the
-`--sandbox` OS confinement mode from `SPEC-10`. Approval and `--read-only` are
+`--sandbox` OS confinement mode from `SPEC-bash-sandbox`. Approval and `--read-only` are
 per-kind, so `bash` is all or nothing. The sandbox bounds an approved `bash` call
 by write path and by network, but not by command shape. A guardrail extension adds
 control at the level of the **command**, which is where a shape rule lives.
@@ -215,7 +215,7 @@ The default deny list, and each entry has a reason:
 
 **Two rules this extension must not break.**
 
-**Prefer the operating system over a pattern.** `SPEC-10` adds a real confinement mode
+**Prefer the operating system over a pattern.** `SPEC-bash-sandbox` adds a real confinement mode
 for `bash`, using `sandbox-exec` on macOS and `bwrap` on Linux. It fails closed: ask for
 confinement with no backend available and the command is refused. That is the boundary. A
 pattern list is a filter in front of it.
@@ -228,9 +228,9 @@ sessions in one process can share one sandbox supervisor.
 a variable, a here-document, `base64 -d`, an alias, a script file. A pattern catches the
 careless case and the obvious injection. It does not stop a determined one. Say so in the
 extension's own documentation, because a guard that oversells itself is worse than none.
-`SPEC-03` section 7 makes the same admission about `bash`.
+`SPEC-tool-interface` section 7 makes the same admission about `bash`.
 
-For a **real** boundary, use the OS sandbox, not a pattern. `SPEC-10` adds a
+For a **real** boundary, use the OS sandbox, not a pattern. `SPEC-bash-sandbox` adds a
 `--sandbox <off|confined|strict>` mode that confines an approved `bash` call with
 `sandbox-exec` on macOS or `bwrap` on Linux. It limits writes to the session root
 and the scratch directory, and `strict` also denies the network. So a guardrail
@@ -301,9 +301,9 @@ implying parity. rho has the two hook points that matter most, and it lacks the 
 | `terminate`, to stop the whole run on a block | no. A block ends one call. |
 | Session and turn lifecycle events | no |
 | Model request and response events | no |
-| Register a slash command | no. Feature F-44. |
+| Register a slash command | no. Feature F-slash-commands. |
 | Register a keyboard shortcut or a renderer | no |
-| Change the active tool set at run time | no. It would rewrite the prompt prefix, which `SPEC-01` forbids. |
+| Change the active tool set at run time | no. It would rewrite the prompt prefix, which `SPEC-core-runtime` forbids. |
 | Compact the context from an extension | no |
 | Extensions written in a scripting language | no. rho has tier-1 subprocess plugins instead. |
 
@@ -313,4 +313,4 @@ rho gains a smaller binary, no runtime, and no compile-at-load cost. It loses th
 five-minute experiment. Tier-1 plugins recover part of that, since a plugin can be a
 shell script.
 
-`SPEC-04` records which of these gaps are planned.
+`SPEC-hooks-and-plugins` records which of these gaps are planned.

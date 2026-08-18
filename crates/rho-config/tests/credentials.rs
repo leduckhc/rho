@@ -1,8 +1,8 @@
-//! Credential resolution from `SPEC-13` section 5 and section 7.
+//! Credential resolution from `SPEC-config` section 5 and section 7.
 //!
 //! A credential source resolves to a `Secret`. A `Literal` is a `Secret` from the
 //! moment it is parsed. A command source runs a program and inherits only an
-//! allowlist, per decision D-046. Every test uses an in-memory environment.
+//! allowlist, per decision D-credential-command-allowlist. Every test uses an in-memory environment.
 
 mod common;
 
@@ -104,7 +104,7 @@ fn a_command_child_inherits_only_the_allowlist() {
     );
 
     // A variable the real process holds, that the allowlist never names, must not
-    // reach the child. D-046 says the child clears its environment and inherits only
+    // reach the child. D-credential-command-allowlist says the child clears its environment and inherits only
     // PATH, HOME, and the pass_env names. This is the assertion the old test lacked:
     // it looked only for SECRET_TOKEN, which lives in the in-memory map and never in
     // the real process environment, so an implementation that forwarded the whole

@@ -2,7 +2,7 @@
 //!
 //! Every limit is per call, not per session. A server is shared between
 //! sessions, so a limit that was per session would let one session set the bound
-//! for another. See decision D-025.
+//! for another. See decision D-mcp-shared-by-default.
 
 /// The safety and timeout bounds for the MCP client.
 #[derive(Clone, Copy, Debug)]

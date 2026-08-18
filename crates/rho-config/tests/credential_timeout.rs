@@ -1,4 +1,4 @@
-//! The credential command timeout from `SPEC-13` section 5.
+//! The credential command timeout from `SPEC-config` section 5.
 //!
 //! Section 5 says the child has a timeout, and a hung helper fails the resolution.
 //! This test uses a child that never exits on its own (`tail -f /dev/null`), so a

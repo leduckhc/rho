@@ -1,4 +1,4 @@
-//! Bedrock-specific tests, from `SPEC-02` section 5 and section 7.
+//! Bedrock-specific tests, from `SPEC-provider-interface` section 5 and section 7.
 //!
 //! These drive the pure mapping functions `map_converse_event` and
 //! `map_converse_error`. A test builds a `ConverseStream` event from recorded
@@ -34,7 +34,7 @@ fn map_one(json: &str) -> Vec<StreamEvent> {
     map_converse_event(&mut state, event(json))
 }
 
-// --- Event kind coverage, from SPEC-02 section 5. ------------------------
+// --- Event kind coverage, from SPEC-provider-interface section 5. ------------------------
 
 #[tokio::test]
 async fn provider_bedrock_maps_message_start() {
@@ -113,7 +113,7 @@ async fn provider_bedrock_content_block_stop_ends_text_block() {
     );
 }
 
-// --- Tool use assembly, from SPEC-02 section 5. --------------------------
+// --- Tool use assembly, from SPEC-provider-interface section 5. --------------------------
 
 #[tokio::test]
 async fn provider_bedrock_assembles_tool_use_input() {
@@ -148,7 +148,7 @@ async fn provider_bedrock_tool_use_input_is_parsed_object_not_string() {
     assert!(arguments.is_object(), "arguments must be a parsed object");
 }
 
-// --- Stop reason mapping, from SPEC-02 section 5. ------------------------
+// --- Stop reason mapping, from SPEC-provider-interface section 5. ------------------------
 //
 // A wrong stop-reason mapping is silent. The test asserts all six values.
 
@@ -186,7 +186,7 @@ async fn provider_bedrock_maps_all_stop_reasons() {
     );
 }
 
-// --- Usage, from SPEC-02 section 5. --------------------------------------
+// --- Usage, from SPEC-provider-interface section 5. --------------------------------------
 
 #[tokio::test]
 async fn provider_bedrock_reports_usage_with_cache_tokens() {
@@ -209,13 +209,13 @@ async fn provider_bedrock_reports_usage_with_cache_tokens() {
             cache_read_tokens: 3,
             cache_write_tokens: 4,
             // Bedrock reports no charge on the stream. rho leaves it empty rather than
-            // estimating from a price table. See decision D-032.
+            // estimating from a price table. See decision D-measured-cost-and-cache.
             cost_usd: None,
         }
     );
 }
 
-// --- Error mapping, from SPEC-02 section 5. ------------------------------
+// --- Error mapping, from SPEC-provider-interface section 5. ------------------------------
 
 #[tokio::test]
 async fn provider_bedrock_maps_throttling_to_rate_limited() {

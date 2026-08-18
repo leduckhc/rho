@@ -3,7 +3,7 @@
 //! It parses the arguments, sets up logging, and runs the chosen mode. Logging
 //! goes through `tracing-subscriber`, controlled by --log or the RHO_LOG
 //! variable. A secret never reaches a log, because the `Secret` type masks
-//! itself by construction. See `SPEC-01` section 12a.
+//! itself by construction. See `SPEC-core-runtime` section 12a.
 
 mod cli;
 mod extensions;

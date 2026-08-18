@@ -14,7 +14,7 @@
 //! character, and one parsed and dropped whole escape sequences. So the same hostile
 //! output rendered differently depending on which path carried it.
 //!
-//! Decision D-014 made this argument once already, about `Secret`. A leak needs only
+//! Decision D-secret-in-core made this argument once already, about `Secret`. A leak needs only
 //! one weak copy, so a value that guards a secret gets one definition and one test
 //! suite. The same holds for a filter that guards a terminal.
 
@@ -120,7 +120,7 @@ pub fn sanitize_line(input: &str) -> String {
 /// - It keeps every key name, every value under an unflagged key, and the whole tree
 ///   shape.
 ///
-/// See `SPEC-14` section 5a and decision D-054.
+/// See `SPEC-sessions` section 5a and decision D-redact-json-secrets.
 pub fn redact_json_secrets(value: &serde_json::Value) -> serde_json::Value {
     /// The value that replaces a flagged field. One masked shape, everywhere.
     const MASK: &str = "***";

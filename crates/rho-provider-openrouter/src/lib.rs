@@ -1,7 +1,7 @@
 //! The OpenRouter provider.
 //!
 //! It maps the OpenRouter chat-completions SSE stream onto the normalised
-//! `StreamEvent` model. See `SPEC-02` section 4.
+//! `StreamEvent` model. See `SPEC-provider-interface` section 4.
 
 use async_stream::stream;
 use async_trait::async_trait;
@@ -21,7 +21,7 @@ pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai";
 /// The chat-completions path on the base URL.
 const CHAT_PATH: &str = "/api/v1/chat/completions";
 
-// `Secret` and `RetryPolicy` live in `rho-core`. See decision D-014.
+// `Secret` and `RetryPolicy` live in `rho-core`. See decision D-secret-in-core.
 //
 // `Secret` was defined here and also in the Azure crate, and the two copies had
 // already drifted: this one masked its `Debug`, the other had no `Debug` at all.
@@ -162,7 +162,7 @@ impl Provider for OpenRouterProvider {
                 }
             }
             // The stream ended. Emit the turn end now, so a usage chunk that arrived
-            // after the finish chunk has already been reported. See decision D-032.
+            // after the finish chunk has already been reported. See decision D-measured-cost-and-cache.
             if let Some(stop_reason) = state.pending_stop.take() {
                 yield Ok(StreamEvent::Done { stop_reason });
             }
@@ -238,7 +238,7 @@ fn parse_retry_after(response: &reqwest::Response) -> Option<u64> {
         .map(|seconds| seconds * 1_000)
 }
 
-/// Map an HTTP status to a provider error. See `SPEC-02` section 4.
+/// Map an HTTP status to a provider error. See `SPEC-provider-interface` section 4.
 fn status_to_error(status: u16, retry_after_ms: Option<u64>, message: String) -> ProviderError {
     match status {
         429 => ProviderError::RateLimited { retry_after_ms },
@@ -308,7 +308,7 @@ struct OpenRouterUsage {
     /// The field names come from a live probe of the API, not from memory:
     /// `usage.prompt_tokens_details.cached_tokens` and `cache_write_tokens`. rho used to
     /// report zero for both, so a user could not see the cache saving that this project
-    /// works to earn. See decision D-032.
+    /// works to earn. See decision D-measured-cost-and-cache.
     #[serde(default)]
     prompt_tokens_details: Option<OpenRouterPromptDetails>,
     /// The real cost of the call, in dollars, as the service charged it.
@@ -347,7 +347,7 @@ struct ToolAccum {
 struct SseState {
     message_started: bool,
     /// The stop reason seen on the finish chunk, held until the stream really ends.
-    /// See the comment in `map_chunk`, and decision D-032.
+    /// See the comment in `map_chunk`, and decision D-measured-cost-and-cache.
     pending_stop: Option<StopReason>,
     text_open: bool,
     thinking_open: bool,
@@ -442,7 +442,7 @@ impl SseState {
             // OpenRouter sends the whole `usage` object in a **later** chunk, after this
             // one. rho used to return `done: true` at this point, so it never saw usage
             // for any call: no tokens, no cost, no cache. A fifty-session live run
-            // reporting zero tokens is what exposed it. See decision D-032.
+            // reporting zero tokens is what exposed it. See decision D-measured-cost-and-cache.
             //
             // `Done` is emitted at `[DONE]`, or on the next chunk if the service sends no
             // `[DONE]`, so usage always precedes it.
@@ -537,7 +537,7 @@ fn finish_reason_to_stop(reason: &str) -> StopReason {
 
 // --- The request body. ---------------------------------------------------
 
-/// Build the chat-completions request body. See `SPEC-02` section 4.
+/// Build the chat-completions request body. See `SPEC-provider-interface` section 4.
 pub fn build_request_body(request: &CompletionRequest) -> Value {
     let mut messages = Vec::new();
     if let Some(system) = &request.system {
@@ -557,7 +557,7 @@ pub fn build_request_body(request: &CompletionRequest) -> Value {
         // So rho parsed the cache and cost fields correctly and never received them. A
         // live run of fifty sessions reported zero tokens and no cost, which is what
         // exposed it. This is the same shape as the timeout guidance that never fired:
-        // the code was right and unreachable. See decision D-032.
+        // the code was right and unreachable. See decision D-measured-cost-and-cache.
         "usage": { "include": true },
     });
     let map = body.as_object_mut().expect("the body is an object");

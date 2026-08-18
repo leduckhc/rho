@@ -1,6 +1,6 @@
 //! The session log. An append-only JSONL record of one conversation.
 //!
-//! See `SPEC-14`, `ADR-004`, and `ADR-005`. This module holds the record set, the
+//! See `SPEC-sessions`, `ADR-session-format`, and `ADR-jsonl-codec`. This module holds the record set, the
 //! codec seam, the writer, the reader, the store, and the event recorder.
 //!
 //! Stage T4 defined the public surface. Stage T5 made every body real.
@@ -71,7 +71,7 @@ pub enum Record {
     /// A closed file ends with `Closed`. A resume may still append, because a user may
     /// continue a conversation they closed. So the reopen is stated on disk. Without this
     /// record a reader would find `Closed` in the middle of a file, and it could not tell
-    /// a closed session from one that kept talking. See `SPEC-14` section 8.
+    /// a closed session from one that kept talking. See `SPEC-sessions` section 8.
     Reopened,
 }
 
@@ -151,7 +151,7 @@ pub enum SessionError {
 /// The approval modes, ordered from strict to permissive.
 ///
 /// The order is the whole point. It makes a widening resume representable as a
-/// refusal. See `SPEC-14` section 8a.
+/// refusal. See `SPEC-sessions` section 8a.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StoredApproval {
     ReadOnly,
@@ -174,7 +174,7 @@ impl StoredApproval {
             "ask" => StoredApproval::Ask,
             "allow-all" => StoredApproval::AllowAll,
             // `read-only`, and every name this build does not know, is the strictest
-            // mode. An unknown name must never widen a permission. See D-017.
+            // mode. An unknown name must never widen a permission. See D-plugin-does-not-classify-itself.
             _ => StoredApproval::ReadOnly,
         }
     }
@@ -195,7 +195,7 @@ impl StoredSandbox {
         match name {
             "confined" => StoredSandbox::Confined,
             "off" => StoredSandbox::Off,
-            // `strict`, and every unknown name, is the strictest mode. See D-017.
+            // `strict`, and every unknown name, is the strictest mode. See D-plugin-does-not-classify-itself.
             _ => StoredSandbox::Strict,
         }
     }
@@ -249,7 +249,7 @@ pub fn check_resume_permission(
 /// Appends records to one session file. It owns an open sink and mints ids.
 ///
 /// The writer holds one sink for the life of the session, and writes one record as one
-/// write. It never reopens the file and never rewrites an earlier byte. See `SPEC-14`
+/// write. It never reopens the file and never rewrites an earlier byte. See `SPEC-sessions`
 /// section 3. A held handle costs about 1 microsecond per record, against about 17.5
 /// microseconds for a reopen per record, measured on macos arm64 over 20000 records.
 ///
@@ -266,8 +266,8 @@ pub struct SessionWriter {
 
 impl SessionWriter {
     /// Build a writer over any sink. The store passes an open file. A test passes a
-    /// sink that fails on demand, to prove the degrade path. See `SPEC-14` section 3
-    /// and decision D-041.
+    /// sink that fails on demand, to prove the degrade path. See `SPEC-sessions` section 3
+    /// and decision D-write-failure-degrades.
     pub fn with_sink(path: impl Into<PathBuf>, sink: Box<dyn Write + Send>) -> Self {
         Self {
             path: path.into(),
@@ -328,7 +328,7 @@ impl SessionWriter {
         let entry = if line.len() > MAX_RECORD_BYTES {
             // The record is over the cap. Cap the oversize string values, spill the full
             // payload to a sidecar, and rebuild the entry from the capped record. See
-            // SPEC-14 section 3 and D-044.
+            // SPEC-sessions section 3 and D-cap-a-large-tool-result.
             let mut spills = Vec::new();
             let capped = cap_record(entry.record, &mut spills);
             if !spills.is_empty() {
@@ -536,7 +536,7 @@ pub struct SessionReader;
 /// Read one line into `buf`, up to `MAX_LINE_BYTES`. Return `true` when a line was read,
 /// `false` at end of input. A line that reaches the cap is a `SessionError::Decode`,
 /// never an unbounded allocation, and the reader stops before it pulls the whole line.
-/// See section 6a and D-055.
+/// See section 6a and D-reader-line-cap.
 fn read_capped_line<R: BufRead>(source: &mut R, buf: &mut Vec<u8>) -> Result<bool, SessionError> {
     buf.clear();
     loop {
@@ -645,7 +645,7 @@ impl SessionReader {
         }
         if truncated_tail {
             // A crash can cut the last line in half. Drop it, but never silently. See
-            // D-040 and D-041.
+            // D-truncated-tail-warns and D-write-failure-degrades.
             tracing::warn!("the session file had a truncated last line; it was dropped");
         }
         Ok(ReadResult {
@@ -685,7 +685,7 @@ impl SessionStore {
         std::fs::create_dir_all(&self.root).map_err(|e| io_error(self.root.as_path(), e))?;
         let path = self.session_path(session_id);
         // Create or truncate, so a new session starts with a clean file. The writer
-        // holds this handle for the life of the session. See SPEC-14 section 3.
+        // holds this handle for the life of the session. See SPEC-sessions section 3.
         let file = File::create(&path).map_err(|e| io_error(path.as_path(), e))?;
         let mut writer = SessionWriter::with_sink(path, Box::new(file));
         let header = Record::Session {
@@ -931,7 +931,7 @@ impl SessionLog {
                     Ok(id) => Some(id),
                     Err(error) => {
                         // A write failure degrades the session to ephemeral. It never ends
-                        // the run. See D-041 and defect 9.
+                        // the run. See D-write-failure-degrades and defect 9.
                         tracing::warn!(
                             %error,
                             "a session write failed; the session log degrades to ephemeral"
@@ -959,7 +959,7 @@ pub struct SessionRecorder {
 
 /// Redact every credential-shaped tool argument inside one content block. A message
 /// content block never holds a `Secret`, but a `ToolCall.arguments` value is free JSON,
-/// so it can carry a key. See section 5a and D-043.
+/// so it can carry a key. See section 5a and D-redact-tool-arguments.
 fn redact_block(block: &ContentBlock) -> ContentBlock {
     match block {
         ContentBlock::ToolCall {

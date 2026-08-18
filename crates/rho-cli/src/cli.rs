@@ -4,7 +4,7 @@
 //! answer on stdout, and `rho` for the interactive TUI. This module parses the
 //! arguments, builds a `SessionConfig` explicitly, and runs the chosen mode.
 //!
-//! The session config is stated out loud here. Decision D-013 deleted a
+//! The session config is stated out loud here. Decision D-no-four-argument-session-new deleted a
 //! convenience constructor because it hid a fake model id, an accidental session
 //! root, and a policy that approved every tool call. So this module names the
 //! model, the session root, and the approval policy in the calling code.
@@ -53,14 +53,14 @@ pub struct Cli {
     /// The `bash` confinement mode. `off` runs a command unconfined, which is the
     /// default. `confined` limits writes to the session root and the scratch
     /// directory. `strict` also denies the network. When confinement is asked for
-    /// and no OS sandbox is available, `bash` refuses the command. See SPEC-10.
+    /// and no OS sandbox is available, `bash` refuses the command. See SPEC-bash-sandbox.
     #[arg(long, global = true, value_enum, default_value_t = SandboxArg::Off)]
     pub sandbox: SandboxArg,
 
     /// Load skills that live in this repository.
     ///
     /// A skill can instruct the model and can carry scripts, so a skill from the
-    /// repository under edit is off by default. See decision D-022.
+    /// repository under edit is off by default. See decision D-project-skill-needs-trust.
     #[arg(long, global = true)]
     pub trust_project: bool,
 
@@ -120,7 +120,7 @@ pub enum Command {
 fn build_config(cli: &Cli) -> anyhow::Result<SessionConfig> {
     // A model comes from the flag, then the environment, then the provider's default.
     //
-    // The default is a convenience, not a security choice. Decision D-013 removed hidden
+    // The default is a convenience, not a security choice. Decision D-no-four-argument-session-new removed hidden
     // defaults for the session root and the approval policy, because a wrong value there is
     // a breach. A wrong model id is a bad answer and a small bill.
     //
@@ -154,13 +154,13 @@ fn build_config(cli: &Cli) -> anyhow::Result<SessionConfig> {
             .map_err(|error| anyhow::anyhow!("cannot read the current directory: {error}"))?,
     };
 
-    // State the approval policy out loud. See decision D-013, which deleted a
+    // State the approval policy out loud. See decision D-no-four-argument-session-new, which deleted a
     // constructor that hid this choice.
     //
     // The default approves every tool call, so a headless run never stops for a
     // prompt. `--read-only` swaps in a policy that denies every mutating tool. That
     // policy is fail-closed: it allows only a kind it names, so a tool with an
-    // undeclared kind is denied. See decision D-012, and D-017 for plugin tools,
+    // undeclared kind is denied. See decision D-todo-in-a-green-stage, and D-plugin-does-not-classify-itself for plugin tools,
     // which always count as mutating.
     //
     // A future release adds an interactive approval gate for the TUI. Until then
@@ -230,7 +230,7 @@ async fn build_session(
 
     // The skills block joins the stable prefix, never the dynamic part. The skill set
     // is fixed for a session, so the prefix stays byte-identical and the provider
-    // prompt cache survives. See SPEC-01 section 1 and SPEC-08 section 6.
+    // prompt cache survives. See SPEC-core-runtime section 1 and SPEC-skills section 6.
     let mut prompt = system_prompt();
     if !extensions.skills_prompt.is_empty() {
         prompt.push_str("\n\n");
@@ -271,9 +271,9 @@ struct SessionExtras {
     mcp_pool: Option<std::sync::Arc<rho_mcp::McpPool>>,
 }
 
-/// The short system prompt. A short prompt keeps the prefix small. See F-64.
+/// The short system prompt. A short prompt keeps the prefix small. See F-short-system-prompt.
 fn system_prompt() -> String {
-    // The prompt stays short on purpose. See F-64. It says only what the model cannot
+    // The prompt stays short on purpose. See F-short-system-prompt. It says only what the model cannot
     // work out from the tool schemas, and background behaviour is exactly that: the
     // model needs to know that a long command returns a task id, and that it should
     // wait on an event rather than sleep.
@@ -455,7 +455,7 @@ mod tests {
     fn build_config_defaults_to_approving_every_tool() {
         // The default is permissive on purpose, so a headless run never stops for a
         // prompt. The choice is stated in `build_config`, not hidden in a
-        // constructor. See decision D-013.
+        // constructor. See decision D-no-four-argument-session-new.
         let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
         assert!(!cli.read_only);
         let config = build_config(&cli).unwrap();
@@ -477,7 +477,7 @@ mod tests {
             rho_core::ToolKind::Edit,
             rho_core::ToolKind::Delete,
             rho_core::ToolKind::Execute,
-            // An undeclared kind counts as mutating, so it is denied too. See D-012.
+            // An undeclared kind counts as mutating, so it is denied too. See D-todo-in-a-green-stage.
             rho_core::ToolKind::Other,
         ] {
             let decision = futures::executor::block_on(config.approval.approve(
@@ -516,7 +516,7 @@ mod tests {
 
     #[test]
     fn sandbox_flag_defaults_to_off() {
-        // The default is stated in the flag definition, not hidden. See D-013.
+        // The default is stated in the flag definition, not hidden. See D-no-four-argument-session-new.
         let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
         assert_eq!(cli.sandbox, SandboxArg::Off);
         let config = build_config(&cli).unwrap();

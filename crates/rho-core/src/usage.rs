@@ -17,7 +17,7 @@ pub struct Usage {
     /// goes wrong whenever a price changes, a request falls back to another model, or a
     /// cached token is billed at a discount. OpenRouter returns the charged amount, so rho
     /// passes it through and leaves the field empty where a provider does not report one.
-    /// See decision D-032.
+    /// See decision D-measured-cost-and-cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
 }
@@ -28,7 +28,7 @@ impl Usage {
     /// Returns `None` when there were no input tokens, so a caller cannot divide by zero
     /// and cannot mistake "no data" for "no cache hits".
     ///
-    /// This number is the point of the append-only context rule in `SPEC-01` section 1.
+    /// This number is the point of the append-only context rule in `SPEC-core-runtime` section 1.
     /// A competitor claims that discipline keeps the cache warm and publishes no
     /// hit rate. rho reports one.
     pub fn cache_hit_ratio(&self) -> Option<f64> {

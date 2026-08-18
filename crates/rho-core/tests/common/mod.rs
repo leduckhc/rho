@@ -468,7 +468,7 @@ pub fn turn_ending_with(stop_reason: rho_core::StopReason) -> Vec<StreamEvent> {
 
 // ---------------------------------------------------------------------------
 // Tracing capture, so a test can assert a warning was emitted rather than
-// silently degraded. See decisions D-041 and D-016.
+// silently degraded. See decisions D-write-failure-degrades and D-bash-line-cap.
 // ---------------------------------------------------------------------------
 
 /// A `tracing` writer that collects every emitted byte into a shared buffer.

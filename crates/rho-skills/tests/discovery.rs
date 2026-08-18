@@ -1,4 +1,4 @@
-//! Discovery rules from SPEC-08 section 2.
+//! Discovery rules from SPEC-skills section 2.
 
 mod common;
 

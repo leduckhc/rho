@@ -1,7 +1,7 @@
 # bench/jsonl-codec
 
 This crate answers one question: which JSON library should the rho session log
-use? See `docs/adr/ADR-005-jsonl-codec.md` for the decision and the numbers.
+use? See `docs/adr/20260818-014343-ADR-jsonl-codec.md` for the decision and the numbers.
 
 The crate is **not** a workspace member. It depends on `sonic-rs` and on
 `simd-json`, and the workspace must not carry either crate for a benchmark. Its

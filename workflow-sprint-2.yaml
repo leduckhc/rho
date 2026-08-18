@@ -79,8 +79,8 @@ monitoring:
   rules:
     - Split a stage so it fits the turn budget. Verification gets its own dispatch.
     - State in every brief that all needed material is already on disk. No web research.
-    - A subagent must never run a git command that writes. See D-015.
-    - A subagent must never run `git checkout` to undo a deliberate break. See D-029.
+    - A subagent must never run a git command that writes. See D-no-git-writes-by-a-subagent.
+    - A subagent must never run `git checkout` to undo a deliberate break. See D-jcode-bash-lessons.
     - Gate a stage on its own crates while a sibling stage is mid-flight.
   max_reruns_per_task: 3
   ledger: .rho-work/progress.md
@@ -113,23 +113,23 @@ stages:
     reviewer: reviewer
     depends_on: [T0]
     artifacts:
-      - docs/specs/SPEC-13-config.md
-      - docs/specs/SPEC-14-sessions.md
-      - docs/adr/ADR-004-session-file-format.md
+      - docs/specs/20260818-014343-SPEC-config.md
+      - docs/specs/20260818-014343-SPEC-sessions.md
+      - docs/adr/20260818-014343-ADR-session-format.md
     dod:
       - Each spec states the public Rust types and trait signatures verbatim.
       - Each spec names every test that proves it, with the assertion of each test.
-      - SPEC-13 defines the merge order: defaults, global file, project file, profile, environment, flags.
-      - SPEC-13 defines credential resolution, including a shell command source, and states that no source is logged.
-      - SPEC-13 states what a malformed config file does. It must fail closed, never fall back to a permissive default.
-      - SPEC-14 defines the JSONL record set, and the parent pointer that makes branching possible.
-      - SPEC-14 states the resume rule for a truncated last line, because a crash can cut a line in half.
-      - SPEC-14 states that a session file never holds a credential, and how a tool argument gets redacted.
-      - ADR-004 says why JSONL with a parent pointer, and what it rules out.
+      - SPEC-config defines the merge order: defaults, global file, project file, profile, environment, flags.
+      - SPEC-config defines credential resolution, including a shell command source, and states that no source is logged.
+      - SPEC-config states what a malformed config file does. It must fail closed, never fall back to a permissive default.
+      - SPEC-sessions defines the JSONL record set, and the parent pointer that makes branching possible.
+      - SPEC-sessions states the resume rule for a truncated last line, because a crash can cut a line in half.
+      - SPEC-sessions states that a session file never holds a credential, and how a tool argument gets redacted.
+      - ADR-session-format says why JSONL with a parent pointer, and what it rules out.
       - Each spec has an `## Out of scope` section.
     gate:
-      - test -s docs/specs/SPEC-13-config.md
-      - test -s docs/specs/SPEC-14-sessions.md
+      - test -s docs/specs/20260818-014343-SPEC-config.md
+      - test -s docs/specs/20260818-014343-SPEC-sessions.md
       - python3 bench/check-prose.py $(find docs -name '*.md')
 
   - id: T1b
@@ -138,22 +138,22 @@ stages:
     reviewer: reviewer
     depends_on: [T1]
     artifacts:
-      - docs/specs/SPEC-13-config.md
-      - docs/specs/SPEC-14-sessions.md
-      - docs/specs/SPEC-15-message-queue-and-steering.md
-      - docs/specs/SPEC-16-approval-and-permission.md
+      - docs/specs/20260818-014343-SPEC-config.md
+      - docs/specs/20260818-014343-SPEC-sessions.md
+      - docs/specs/20260818-014343-SPEC-steering.md
+      - docs/specs/20260818-020639-SPEC-approval.md
     dod:
       - Every blocker and every major from the T1 review is fixed, and each fix names its test.
       - No spec depends on a function that does not exist, unless the spec names the stage that builds it.
       - The session header records the approval mode and the sandbox mode. A resume refuses to widen either one.
       - Every reader path has a byte cap. A hostile line cannot exhaust memory.
       - The pairing rule covers the cancel path, the crash path, and the truncated-tail path.
-      - SPEC-16 states the resolution table, and every row of it resolves to a stated policy.
-      - SPEC-16 fails closed: a timeout, a closed channel, and a client with no permission capability are each a denial.
-      - SPEC-16 respects `BothPolicies` from SPEC-11. A child never becomes more permissive than its parent.
+      - SPEC-approval states the resolution table, and every row of it resolves to a stated policy.
+      - SPEC-approval fails closed: a timeout, a closed channel, and a client with no permission capability are each a denial.
+      - SPEC-approval respects `BothPolicies` from SPEC-subagents. A child never becomes more permissive than its parent.
       - Every public item the reviewer listed as untested now has a named test.
     gate:
-      - test -s docs/specs/SPEC-16-approval-and-permission.md
+      - test -s docs/specs/20260818-020639-SPEC-approval.md
       - python3 bench/check-prose.py $(find docs -name '*.md')
 
   - id: T2
@@ -183,7 +183,7 @@ stages:
       - crates/rho-config/src/**
     dod:
       - Every T2 test passes, and no test was edited to fit the implementation.
-      - The public API matches SPEC-13 exactly.
+      - The public API matches SPEC-config exactly.
       - A malformed file returns a typed error. It never falls back to a default that grants more access.
       - Credential values use the redaction type from `rho-redact`. There is one redaction home.
       - "`rho-config` keeps no HTTP dependency and no terminal dependency."
@@ -218,7 +218,7 @@ stages:
       - crates/rho-core/src/session/**
     dod:
       - Every T4 test passes, with no test edited.
-      - The record set matches SPEC-14 exactly.
+      - The record set matches SPEC-sessions exactly.
       - A write failure degrades the session to ephemeral mode with a warning. It never ends the run.
       - Resume rebuilds the message list in the order the file records it.
       - The append path costs one write per record. It never rewrites the file.
@@ -235,7 +235,7 @@ stages:
       - crates/rho-core/tests/approval_ask.rs
       - crates/rho-core/tests/message_queue.rs
     dod:
-      - Tests cover every row of the SPEC-16 resolution table.
+      - Tests cover every row of the SPEC-approval resolution table.
       - Tests cover each fail-closed rule: a timeout, a closed channel, and a peer that cannot be asked.
       - One test proves a child policy is never more permissive than its parent.
       - Tests cover the bounded queue: order, a full queue, delivery at a turn boundary, and a cancel that keeps the queue.
@@ -259,7 +259,7 @@ stages:
       - Ctrl-C during a prompt denies the call, and it does not exit.
       - A denial reaches the model as a tool error. It never ends the run.
       - "`rho run` with no terminal resolves to read-only, proven by a test."
-      - F-29, F-32, F-33, and F-34 in docs/features.md state what the code now does.
+      - F-tool-approval-gate, F-ask-approval-policy, F-approval-mode-resolution, and F-permission-over-acp in docs/features.md state what the code now does.
     gate:
       - cargo test -p rho-core -p rho-tui -p rho-cli --all-features
       - cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -293,7 +293,7 @@ stages:
       - crates/rho-cli/src/**
     dod:
       - Every T6 test passes, with no test edited.
-      - The mapping matches SPEC-06 for every method that sprint 2 claims.
+      - The mapping matches SPEC-acp for every method that sprint 2 claims.
       - "`rho acp` runs the agent on stdio. The command appears in `rho --help`."
       - One process serves many sessions. A session id keys its own `Session`.
       - A malformed line returns a JSON-RPC parse error. It never panics and never exits.
@@ -365,9 +365,9 @@ stages:
     depends_on: [T10]
     artifacts:
       - docs/features.md
-      - docs/specs/SPEC-06-acp.md
-      - docs/specs/SPEC-13-config.md
-      - docs/specs/SPEC-14-sessions.md
+      - docs/specs/20260817-170455-SPEC-acp.md
+      - docs/specs/20260818-014343-SPEC-config.md
+      - docs/specs/20260818-014343-SPEC-sessions.md
       - README.md
       - .rho-work/DECISIONS.md
     dod:

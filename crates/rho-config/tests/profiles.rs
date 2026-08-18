@@ -1,4 +1,4 @@
-//! Named profiles from `SPEC-13` section 2 and section 7.
+//! Named profiles from `SPEC-config` section 2 and section 7.
 //!
 //! A profile is a named block inside a file, not a seventh source. The merge applies
 //! the profile after both files. A profile the user names but no file defines is an

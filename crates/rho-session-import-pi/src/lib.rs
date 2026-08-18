@@ -1,6 +1,6 @@
 //! One-way import of a pi session file into rho's record set.
 //!
-//! Feature F-54. See `SPEC-14` section 9. The conversion is one-way: it reads a pi
+//! Feature F-pi-session-import. See `SPEC-sessions` section 9. The conversion is one-way: it reads a pi
 //! JSONL file and returns rho `Entry` records. It never changes the pi file.
 
 use std::collections::BTreeMap;
@@ -9,18 +9,18 @@ use std::path::Path;
 use rho_core::{ContentBlock, Entry, ImageSource, Message, Record, RecordId, Role, SessionError};
 use serde_json::Value;
 
-/// rho writes its own session version, not pi's `3`. See SPEC-14 section 9.
+/// rho writes its own session version, not pi's `3`. See SPEC-sessions section 9.
 const RHO_SESSION_VERSION: u32 = 1;
 
 /// The strictest resolved modes. A pi header names neither, so an import assumes the
-/// safest possible modes rather than the loosest. See SPEC-14 section 8a.
+/// safest possible modes rather than the loosest. See SPEC-sessions section 8a.
 const DEFAULT_APPROVAL: &str = "read-only";
 const DEFAULT_SANDBOX: &str = "strict";
 
-/// The pi record types rho has no model for, and so drops. See SPEC-14 section 9.
+/// The pi record types rho has no model for, and so drops. See SPEC-sessions section 9.
 ///
 /// A real pi file holds every one of these. `custom_message` and `compaction` are here
-/// because a run over 60 real files failed on them. See decision D-058.
+/// because a run over 60 real files failed on them. See decision D-unmappable-pi-record-drops.
 const KNOWN_DROPPABLE: &[&str] = &[
     "thinking_level_change",
     "session_info",
@@ -32,7 +32,7 @@ const KNOWN_DROPPABLE: &[&str] = &[
 /// What one import produced, and what it dropped.
 ///
 /// The dropped counts make a loss visible. An import that returned only the entries
-/// would hide a whole record type behind a shorter list. See SPEC-14 section 9.
+/// would hide a whole record type behind a shorter list. See SPEC-sessions section 9.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PiImport {
     /// The records that mapped, in file order.
@@ -44,12 +44,12 @@ pub struct PiImport {
 /// Convert a pi session file to rho records.
 ///
 /// It reads the JSONL file at `pi_path` and maps each pi record to a rho `Record`,
-/// per the mapping in `SPEC-14` section 9. It keeps every `id`, every `parentId`, and
+/// per the mapping in `SPEC-sessions` section 9. It keeps every `id`, every `parentId`, and
 /// every `timestamp`, so the tree shape survives. It never changes the pi file.
 ///
 /// A record rho cannot map drops, and the drop is counted by the pi type or by the
 /// reason. The import does not stop on a record it does not know, because a real pi file
-/// holds shapes that no fixture predicted. See decision D-058.
+/// holds shapes that no fixture predicted. See decision D-unmappable-pi-record-drops.
 pub fn import_pi_session(pi_path: &Path) -> Result<PiImport, SessionError> {
     let contents = std::fs::read_to_string(pi_path).map_err(|e| SessionError::Io(e.to_string()))?;
 
@@ -114,7 +114,7 @@ fn map_record(value: &Value) -> Result<Option<Entry>, Drop> {
         },
         "model_change" => {
             // The fixture names the field `model`; a real pi file names it `modelId`.
-            // So the importer accepts both spellings. See SPEC-14 section 9.
+            // So the importer accepts both spellings. See SPEC-sessions section 9.
             let provider = string_field(value, "provider").ok_or_else(|| Drop {
                 reason: "model_change with no provider".to_string(),
             })?;
@@ -136,7 +136,7 @@ fn map_record(value: &Value) -> Result<Option<Entry>, Drop> {
         other => {
             // A type this build does not know drops, and the count names it. An error here
             // would stop a whole import for one auxiliary record, and a run over 60 real
-            // pi files proved that 21 of them hold such a record. See D-058.
+            // pi files proved that 21 of them hold such a record. See D-unmappable-pi-record-drops.
             return Err(Drop {
                 reason: other.to_string(),
             });
@@ -227,7 +227,7 @@ fn map_content_block(block: &Value) -> Result<ContentBlock, Drop> {
                 .unwrap_or(false),
         }),
         // A real pi file holds 170 image blocks. A pi block names the fields `data` and
-        // `mimeType`. See SPEC-14 section 9.
+        // `mimeType`. See SPEC-sessions section 9.
         "image" => Ok(ContentBlock::Image {
             source: ImageSource {
                 data: string_field(block, "data").ok_or_else(|| Drop {

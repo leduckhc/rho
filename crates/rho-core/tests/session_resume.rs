@@ -1,4 +1,4 @@
-//! SPEC-14 stage T4 red tests: resume and branch.
+//! SPEC-sessions stage T4 red tests: resume and branch.
 //!
 //! Every test drives the public `session` surface. It must fail on an unimplemented
 //! body, never on a type error. It uses `tempfile`, no `sleep`, and no network.
@@ -167,7 +167,7 @@ fn resume_recovers_after_a_truncated_last_line() {
 
 #[test]
 fn resume_warns_on_a_truncated_last_line() {
-    // The resume path warns when the read reports a truncated tail. D-041 forbids a
+    // The resume path warns when the read reports a truncated tail. D-write-failure-degrades forbids a
     // silent degrade, so a dropped tail must reach a log, not vanish. Capturing the
     // subscriber makes the warning assertable, so this test fails on a silent drop.
     let (dir, _store) = temp_store();
@@ -292,7 +292,7 @@ fn a_giant_line_stops_the_reader_at_the_cap() {
     // blows past the cap and this test fails. A bounded reader stops near the cap.
     //
     // The giant line is four times the cap, so the gap between "stopped at the cap"
-    // and "read the whole line" is unmistakable. This is the D-016 lesson: assert the
+    // and "read the whole line" is unmistakable. This is the D-bash-line-cap lesson: assert the
     // bound on the bytes pulled through, not the size of the kept output.
     let header = header_line(1, "read-only", "off");
     let huge = "z".repeat(4 * MAX_LINE_BYTES);
@@ -330,8 +330,8 @@ fn resume_refuses_an_unknown_version() {
 #[test]
 fn resume_does_not_widen_a_read_only_session() {
     // The header names `read-only`. A run that would use `allow-all` must be refused,
-    // because a resume that widens a permission is the D-013 family: an insecure default
-    // that nobody chose. The check is a comparison of two stored names, per SPEC-14 8a.
+    // because a resume that widens a permission is the D-no-four-argument-session-new family: an insecure default
+    // that nobody chose. The check is a comparison of two stored names, per SPEC-sessions 8a.
     let (_dir, store) = temp_store();
     let mut writer = store
         .create("s", Path::new("/work"), "read-only", "off")
@@ -413,7 +413,7 @@ fn sandbox_widen_is_refused() {
     // the approval field, so an implementation that ignores the sandbox entirely
     // passes every one of them. This test moves only the sandbox: the header names
     // `strict`, the run would use `Off`, and the approval is unchanged. So it fails
-    // against a check that compares only the approval. This is decision D-053, a
+    // against a check that compares only the approval. This is decision D-resume-never-widens, a
     // security boundary.
     let (_dir, store) = temp_store();
     let writer = store
@@ -444,7 +444,7 @@ fn sandbox_widen_is_refused() {
 #[test]
 fn an_unknown_mode_name_parses_to_the_strictest_mode() {
     // A name this build does not know must never widen. This is the opposite of
-    // ToolKind::Other, which counted an unknown kind as safe and failed open. See D-017.
+    // ToolKind::Other, which counted an unknown kind as safe and failed open. See D-plugin-does-not-classify-itself.
     assert_eq!(
         StoredApproval::parse("something-new"),
         StoredApproval::ReadOnly,

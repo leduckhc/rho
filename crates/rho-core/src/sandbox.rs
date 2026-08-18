@@ -2,16 +2,16 @@
 //!
 //! The type lives here, in the core, because `SessionConfig` carries it. The
 //! planner that turns a mode into a real command lives in `rho-tools`, next to
-//! the `bash` tool. See `SPEC-10`.
+//! the `bash` tool. See `SPEC-bash-sandbox`.
 
 use std::fmt;
 use std::str::FromStr;
 
-/// The OS-level confinement mode for the `bash` tool. See `SPEC-10`.
+/// The OS-level confinement mode for the `bash` tool. See `SPEC-bash-sandbox`.
 ///
 /// `Off` is the default, and the `Default` derive makes that explicit. A sandbox
 /// that breaks a build is worse than none, so the default does not change under a
-/// user. See decision D-013 on stated defaults.
+/// user. See decision D-no-four-argument-session-new on stated defaults.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SandboxMode {
     /// No confinement. Today's behaviour, and the default.
@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn sandbox_mode_default_is_off() {
-        // The default must be stated and must not change under a user. See D-013.
+        // The default must be stated and must not change under a user. See D-no-four-argument-session-new.
         assert_eq!(SandboxMode::default(), SandboxMode::Off);
     }
 

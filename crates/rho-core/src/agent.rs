@@ -21,7 +21,7 @@ use std::task::{Context as TaskContext, Poll};
 
 /// Why a full agent run stopped. The wire names match the ACP `StopReason` set,
 /// so `rho-acp` maps the values one-to-one onto a `session/prompt` response.
-/// See SPEC-06.
+/// See SPEC-acp.
 ///
 /// One name needs an explicit rename. ACP spells the cancelled reason with two
 /// letters `l`, as `cancelled`. Rust names the variant `Canceled` with one `l`,
@@ -81,7 +81,7 @@ pub enum AgentEvent {
     },
     /// The run is fully settled. No further turn will run.
     AgentEnd { stop_reason: AgentStopReason },
-    /// A subagent was spawned under this session. See SPEC-11 section 9.
+    /// A subagent was spawned under this session. See SPEC-subagents section 9.
     ///
     /// These variants are new, not reused `TaskStart` ones. A task is an
     /// operating-system command with an exit code. An agent has turns, token
@@ -145,7 +145,7 @@ impl Drop for AgentEvents {
 /// It carries the model id, the confinement root, the approval policy, and the
 /// per-run turn cap. `Session` holds no default for any of these. A caller states
 /// each value, so a security boundary is never set by accident. See decision
-/// D-011.
+/// D-session-config.
 #[derive(Clone)]
 pub struct SessionConfig {
     /// The model id sent in every `CompletionRequest`. An empty id fails at the
@@ -160,7 +160,7 @@ pub struct SessionConfig {
     pub max_turns: u32,
     /// The `bash` confinement mode. `SessionConfig::new` sets `Off`, so the
     /// default is stated here, not hidden. Use `with_sandbox` to change it. See
-    /// `SPEC-10` and decision D-031.
+    /// `SPEC-bash-sandbox` and decision D-bash-os-sandbox.
     pub sandbox: SandboxMode,
 }
 
@@ -199,7 +199,7 @@ impl SessionConfig {
         self
     }
 
-    /// Set the `bash` confinement mode. `new` leaves it `Off`. See `SPEC-10`.
+    /// Set the `bash` confinement mode. `new` leaves it `Off`. See `SPEC-bash-sandbox`.
     pub fn with_sandbox(mut self, sandbox: SandboxMode) -> Self {
         self.sandbox = sandbox;
         self
@@ -220,7 +220,7 @@ struct SessionInner {
 
 impl Session {
     /// Build a session with an explicit `SessionConfig`. This is the primary
-    /// constructor. See decision D-011.
+    /// constructor. See decision D-session-config.
     pub fn with_config(
         config: SessionConfig,
         provider: Arc<dyn Provider>,
@@ -558,7 +558,7 @@ impl Driver {
 
         // Consult the approval policy after the hooks. A denial produces an error
         // tool result from the typed `ToolError::Denied` variant. The tool never
-        // runs. See SPEC-01 section 9 and SPEC-03 section 5.
+        // runs. See SPEC-core-runtime section 9 and SPEC-tool-interface section 5.
         if self
             .inner
             .config
@@ -716,7 +716,7 @@ enum DispatchOutcome {
     Closed,
 }
 
-/// Map a provider stop reason onto an agent stop reason. See SPEC-01 section 9.
+/// Map a provider stop reason onto an agent stop reason. See SPEC-core-runtime section 9.
 fn map_stop_reason(reason: StopReason) -> AgentStopReason {
     match reason {
         StopReason::EndTurn | StopReason::StopSequence => AgentStopReason::EndTurn,

@@ -1,8 +1,8 @@
-//! The redaction invariant from `SPEC-13` section 5 and section 7.
+//! The redaction invariant from `SPEC-config` section 5 and section 7.
 //!
 //! A resolved credential is a `Secret`, and `Secret` redacts by construction. These
 //! tests assert the invariant, not one example field: no formatted output and no log
-//! line holds the credential text. This satisfies F-103 and answers the sprint-1
+//! line holds the credential text. This satisfies F-no-secrets-in-logs and answers the sprint-1
 //! "credential in a log" defect.
 
 mod common;

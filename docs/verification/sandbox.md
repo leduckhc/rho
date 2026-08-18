@@ -1,4 +1,4 @@
-# Verification — bash OS sandbox (SPEC-10 / F-31)
+# Verification — bash OS sandbox (SPEC-bash-sandbox / F-bash-os-sandbox)
 
 Platform tested: macOS 25.5.0, arm64 (Darwin Kernel 25.5.0). Backend:
 `/usr/bin/sandbox-exec`. The Linux `bwrap` path is not verified here, because

@@ -2,7 +2,7 @@
 //!
 //! A line from a server is untrusted input. An uncapped reader grows its buffer
 //! to hold one whole line, so a hostile server can exhaust host memory with one
-//! enormous line. Decision D-016 records a case where an uncapped reader reached
+//! enormous line. Decision D-bash-line-cap records a case where an uncapped reader reached
 //! 805 MB of resident memory. So the reader caps one line and reads in buffered
 //! chunks, not one byte at a time.
 

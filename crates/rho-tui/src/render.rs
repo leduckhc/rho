@@ -2,7 +2,7 @@
 //!
 //! The renderer draws the state into a `ratatui` frame. It is a pure function of
 //! the state and the frame area. It does no IO. A test renders into a
-//! `TestBackend` and asserts on the buffer. See `SPEC-05` section 4.
+//! `TestBackend` and asserts on the buffer. See `SPEC-tui` section 4.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};

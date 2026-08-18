@@ -169,10 +169,10 @@ const PHASE_PREFIXES: &[&str] = &[
 
 /// Remove control characters and terminal escape sequences from a progress
 /// message. A progress message is untrusted, so a control sequence must not reach
-/// the display. This mirrors the tool-output rule in `SPEC-07` section 9.
+/// the display. This mirrors the tool-output rule in `SPEC-background-tasks` section 9.
 pub fn sanitize_message(input: &str) -> String {
     // The filter lives in `rho-redact`, so the workspace has one implementation and one
-    // test suite. A fourth copy lived here, built on a regex. See decision D-026.
+    // test suite. A fourth copy lived here, built on a regex. See decision D-one-redaction-home.
     //
     // A progress message is one line in a status row, so fold a newline and a tab.
     rho_redact::sanitize_line(input)

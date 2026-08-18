@@ -4,7 +4,7 @@
 //! where rho spawns the server. rho-mcp must not link an HTTP client, because
 //! `rho-core` stays HTTP-free and rho-mcp sits beside it. So the HTTP transport
 //! is a trait a caller supplies, and `rho-cli` passes an implementation backed
-//! by the `reqwest` already present in the provider crates. See `SPEC-09`
+//! by the `reqwest` already present in the provider crates. See `SPEC-mcp`
 //! section 3.
 
 use std::sync::Arc;
@@ -38,7 +38,7 @@ pub trait TransportWriter: Send + Sync {
 ///
 /// The connection owns `guard`. When the connection drops, the guard drops. For
 /// a stdio server the guard is the child process with kill on drop, so the last
-/// reference stops the server and leaves no orphan. See `SPEC-09` section 6.
+/// reference stops the server and leaves no orphan. See `SPEC-mcp` section 6.
 pub struct TransportPair {
     pub reader: Box<dyn TransportReader>,
     pub writer: Arc<dyn TransportWriter>,
@@ -188,7 +188,7 @@ impl TransportWriter for StdioWriter {
 /// The filter reads the name, not the value, because a value cannot be
 /// recognised reliably. It removes the name as well, so the presence of a key
 /// leaks nothing. This is defence in depth, not a boundary: a server can still
-/// read a credential file the user can read. See decision D-019.
+/// read a credential file the user can read. See decision D-bash-scrubs-credentials.
 fn scrub_credentials(cmd: &mut tokio::process::Command) {
     for (name, _) in std::env::vars_os() {
         let text = name.to_string_lossy().to_ascii_uppercase();

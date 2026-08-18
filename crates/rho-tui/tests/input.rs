@@ -1,5 +1,5 @@
 //! Input tests. The key handler is pure, so these tests need no terminal.
-//! See `SPEC-05` section 7.
+//! See `SPEC-tui` section 7.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rho_core::AgentEvent;

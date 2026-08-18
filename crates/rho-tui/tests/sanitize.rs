@@ -1,5 +1,5 @@
 //! Sanitiser tests. Tool output is untrusted, so a control character or an
-//! escape sequence must not corrupt the display. See `SPEC-05` Task A.
+//! escape sequence must not corrupt the display. See `SPEC-tui` Task A.
 
 use rho_tui::{fit_to_width, sanitize_line};
 use unicode_width::UnicodeWidthStr;

@@ -1,4 +1,4 @@
-//! Security tests for background tasks. See `SPEC-07` section 9.
+//! Security tests for background tasks. See `SPEC-background-tasks` section 9.
 //!
 //! The approval policy is the real boundary. A read-only policy denies a
 //! background `bash` and denies `task_cancel`, but allows a `task` probe. And the

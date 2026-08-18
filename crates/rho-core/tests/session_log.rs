@@ -1,4 +1,4 @@
-//! SPEC-14 stage T4 red tests: storage and the codec.
+//! SPEC-sessions stage T4 red tests: storage and the codec.
 //!
 //! Every test drives the public `session` surface. It must fail on an unimplemented
 //! body, never on a type error. It uses `tempfile`. It writes no file in the repository.
@@ -79,7 +79,7 @@ fn all_files_under(dir: &Path) -> Vec<std::path::PathBuf> {
 }
 
 /// True when some file under `dir`, other than the session file, holds `needle`.
-/// This is how a test proves the full payload spilled to a sidecar. See D-044.
+/// This is how a test proves the full payload spilled to a sidecar. See D-cap-a-large-tool-result.
 fn a_sidecar_holds(dir: &Path, session_file: &Path, needle: &str) -> bool {
     all_files_under(dir).into_iter().any(|path| {
         path != session_file
@@ -249,7 +249,7 @@ fn no_written_record_of_any_kind_exceeds_the_cap() {
         }
     }
     // The three oversize payloads must have spilled their full bytes to a sidecar,
-    // rather than sit inline. See D-044.
+    // rather than sit inline. See D-cap-a-large-tool-result.
     assert!(
         a_sidecar_holds(dir.path(), writer.path(), &big),
         "the full oversize payload must spill to a sidecar under the session directory"
@@ -297,7 +297,7 @@ fn an_oversize_record_of_every_kind_stays_under_the_cap() {
     assert_eq!(name, "bash", "the ToolCall keeps its name");
     // The full arguments must spill to a sidecar, never sit inline over the cap. The
     // pairing invariant depends on the ToolCall staying a ToolCall, asserted above. See
-    // SPEC-14 section 3 and D-044.
+    // SPEC-sessions section 3 and D-cap-a-large-tool-result.
     assert!(
         a_sidecar_holds(dir.path(), writer.path(), &big),
         "the full ToolCall arguments must spill to a sidecar under the session directory"
@@ -329,8 +329,8 @@ fn a_non_tool_result_record_over_the_cap_is_capped() {
         panic!("the head plus the note is a valid text block");
     };
     // The note must state the full byte count, so a reader knows the tail was dropped.
-    // A byte-truncating writer drops the tail with no note and fails this. See SPEC-14
-    // section 3 and D-044.
+    // A byte-truncating writer drops the tail with no note and fails this. See SPEC-sessions
+    // section 3 and D-cap-a-large-tool-result.
     assert!(
         capped.contains(&big.len().to_string()),
         "the note must state the full byte count {}, note was {:?}",
@@ -351,7 +351,7 @@ fn both_codecs_agree_byte_for_byte() {
     //
     // This test runs under whichever codec the build selects. `fast-json` selects
     // `sonic-rs`, and the default selects `serde_json`. So the cross-codec rule in
-    // SPEC-14 section 3 holds only when the suite runs in both modes. Stage T10 adds
+    // SPEC-sessions section 3 holds only when the suite runs in both modes. Stage T10 adds
     // that CI matrix. Until T10 lands, do not claim that CI proves it. The golden
     // vector below is what makes the two modes comparable at all: it pins the exact
     // bytes, so a codec that drifts fails in either mode.
@@ -376,7 +376,7 @@ fn the_codec_matches_a_golden_line_in_either_mode() {
     // The cross-codec rule needs a fixed point that does not depend on the build. So one
     // record has its bytes pinned here. A codec that spells a field differently, orders a
     // key differently, or escapes a character differently fails this test, whether the
-    // build selects `serde_json` or `sonic-rs`. See SPEC-14 section 3 and ADR-005.
+    // build selects `serde_json` or `sonic-rs`. See SPEC-sessions section 3 and ADR-jsonl-codec.
     let entry = rho_core::Entry {
         id: RecordId("id-1".to_string()),
         parent_id: Some(RecordId("id-0".to_string())),

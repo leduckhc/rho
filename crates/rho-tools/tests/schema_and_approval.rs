@@ -176,7 +176,7 @@ fn the_core_tool_set_is_exactly_the_documented_nine() {
 #[test]
 fn no_core_tool_declares_an_undeclared_kind() {
     // `ToolKind::Other` is treated as mutating, so a core tool with an undeclared kind
-    // would be denied under --read-only for no reason. See decision D-012.
+    // would be denied under --read-only for no reason. See decision D-todo-in-a-green-stage.
     let tasks = std::sync::Arc::new(rho_core::TaskRegistry::new(rho_core::TaskLimits::default()));
     for tool in rho_tools::builtin_tools_with_tasks(tasks) {
         assert_ne!(

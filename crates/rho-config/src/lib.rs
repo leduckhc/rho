@@ -1,6 +1,6 @@
 //! Layered configuration for rho.
 //!
-//! The public API is stated verbatim in `docs/specs/SPEC-13-config.md`. This crate
+//! The public API is stated verbatim in `docs/specs/20260818-014343-SPEC-config.md`. This crate
 //! reads configuration from files, the environment, and the command line. It merges
 //! those sources in one fixed order, and it resolves a credential to a `Secret`.
 //!
@@ -80,7 +80,7 @@ pub enum ApprovalMode {
     /// Deny every mutating tool call. It maps to `rho_core::ReadOnlyPolicy`.
     ReadOnly,
     /// Ask a frontend before a mutating tool call. It maps to the interactive
-    /// `AskPolicy` in `SPEC-16`.
+    /// `AskPolicy` in `SPEC-approval`.
     Ask,
 }
 
@@ -159,7 +159,7 @@ pub struct Config {
     pub ephemeral: bool,
     pub sandbox: SandboxMode,
     /// The approval mode the user stated, or `None` when the user stated none.
-    /// `None` means the frontend resolves the mode, per `SPEC-16` section 4.
+    /// `None` means the frontend resolves the mode, per `SPEC-approval` section 4.
     pub approval: Option<ApprovalMode>,
     pub skill_paths: Vec<PathBuf>,
     pub discover_skills: bool,
@@ -191,7 +191,7 @@ impl ConfigLayer {
     }
 
     /// Build a layer from the `RHO_*` variables. This maps every scalar config key,
-    /// per SPEC-13 section 2 layer 5 and F-71. It is infallible: an unaccepted boolean
+    /// per SPEC-config section 2 layer 5 and F-environment-variable-override. It is infallible: an unaccepted boolean
     /// value is omitted here, and `Config::load` is the fail-closed authority that
     /// rejects it. The two security keys (`sandbox`, `approval`) pass through as
     /// strings, and the merged-layer parser fails closed on a bad value.
@@ -340,7 +340,7 @@ const CREDENTIAL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const ENV_SOURCE_LABEL: &str = "the environment";
 
 /// Run a credential command with a cleared environment. The child inherits only
-/// `PATH`, `HOME`, and the names in `pass_env`, per decision D-046. The child never
+/// `PATH`, `HOME`, and the names in `pass_env`, per decision D-credential-command-allowlist. The child never
 /// inherits the whole process environment, so a variable the allowlist does not name
 /// cannot reach the helper.
 fn resolve_command(
@@ -378,7 +378,7 @@ fn resolve_command(
     })?;
 
     // Wait for the child, but never longer than the timeout. A hung helper is killed
-    // and reaped, so it leaks no process and leaves no zombie. See SPEC-13 section 5.
+    // and reaped, so it leaks no process and leaves no zombie. See SPEC-config section 5.
     let start = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -470,9 +470,9 @@ impl Config {
     /// The built-in defaults. The weakest layer.
     pub fn defaults() -> ConfigLayer {
         ConfigLayer {
-            // The sandbox default is stated, not hidden. See section 4 and D-031.
+            // The sandbox default is stated, not hidden. See section 4 and D-bash-os-sandbox.
             sandbox: Some(SandboxMode::default().as_str().to_string()),
-            // The approval default stays unset, so the frontend resolves it. See D-057.
+            // The approval default stays unset, so the frontend resolves it. See D-approval-option-not-enum.
             ..ConfigLayer::default()
         }
     }

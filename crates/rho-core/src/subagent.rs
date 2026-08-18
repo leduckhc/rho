@@ -2,13 +2,13 @@
 //!
 //! A subagent is another `Session` on the same runtime. The parent asks for a
 //! result, a child does the reading and the trying, and only a summary comes
-//! back. See `docs/specs/SPEC-11-subagents.md`.
+//! back. See `docs/specs/20260818-000223-SPEC-subagents.md`.
 //!
 //! This module owns the security core. A child is confined by composition, not
 //! by comparison: [`BothPolicies`] allows a call only when the parent and the
 //! child both allow it, so a child can only ever be more restrictive. The tool
 //! set follows the same rule with [`intersect_tools`], and the sandbox mode may
-//! only narrow with [`narrow_sandbox`]. See decision D-036.
+//! only narrow with [`narrow_sandbox`]. See decision D-child-confined-by-composition.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -41,22 +41,22 @@ impl std::fmt::Display for AgentId {
 ///
 /// The summary is the only thing the parent's context receives, so it must stay
 /// small. A longer final answer is truncated to this many characters. See
-/// `SPEC-11` section 6.
+/// `SPEC-subagents` section 6.
 pub const MAX_SUMMARY_CHARS: usize = 8_000;
 
 /// The most times a unit of work may die before it is reported failed.
 ///
 /// This is jcode's reclaim cap. Without it a poisoned task loops until the
-/// budget is gone. See `SPEC-11` section 8.
+/// budget is gone. See `SPEC-subagents` section 8.
 pub const MAX_CHILD_RETRIES: u32 = 3;
 
-// --- The security core: composition, not comparison (D-036) ---
+// --- The security core: composition, not comparison (D-child-confined-by-composition) ---
 
 /// Allow a call only when **both** policies allow it.
 ///
 /// This is how a child is confined. The parent's policy is always one of the two
 /// conjuncts, so a child can only ever be more restrictive. Escalation is not
-/// checked, it is unrepresentable. See decision D-036.
+/// checked, it is unrepresentable. See decision D-child-confined-by-composition.
 pub struct BothPolicies {
     parent: Arc<dyn ApprovalPolicy>,
     child: Arc<dyn ApprovalPolicy>,
@@ -99,7 +99,7 @@ pub struct ToolIntersection {
 /// A child that names no tools inherits the parent's set unchanged. A name the
 /// parent does not hold is dropped and reported. This removes a class of
 /// privilege escalation by delegation: a child can never receive a tool its
-/// parent never had. See decision D-036.
+/// parent never had. See decision D-child-confined-by-composition.
 pub fn intersect_tools(parent: &[String], child_request: Option<&[String]>) -> ToolIntersection {
     let Some(requested) = child_request else {
         return ToolIntersection {
@@ -125,7 +125,7 @@ pub fn intersect_tools(parent: &[String], child_request: Option<&[String]>) -> T
 ///
 /// A child that names no mode inherits the parent's mode. A child that asks for
 /// a mode at least as strict as the parent's gets that mode. A child that asks
-/// for a weaker mode is refused, and the refusal names both modes. See `SPEC-11`
+/// for a weaker mode is refused, and the refusal names both modes. See `SPEC-subagents`
 /// section 4.
 pub fn narrow_sandbox(
     parent: SandboxMode,
@@ -150,10 +150,10 @@ fn sandbox_rank(mode: SandboxMode) -> u8 {
     }
 }
 
-// --- Limits (SPEC-11 section 7) ---
+// --- Limits (SPEC-subagents section 7) ---
 
 /// The four subagent limits. A child that spawns a child fans out
-/// geometrically, so one limit is not enough. See `SPEC-11` section 7.
+/// geometrically, so one limit is not enough. See `SPEC-subagents` section 7.
 #[derive(Clone, Copy, Debug)]
 pub struct SubagentLimits {
     /// How deep the tree may go. A depth of 0 forbids spawning.
@@ -168,7 +168,7 @@ pub struct SubagentLimits {
 }
 
 impl SubagentLimits {
-    /// The starting limits, stated here and not hidden. See decision D-013.
+    /// The starting limits, stated here and not hidden. See decision D-no-four-argument-session-new.
     ///
     /// Depth 2, four children per parent, 32 live in total, and a ten minute
     /// child timeout.
@@ -188,7 +188,7 @@ impl Default for SubagentLimits {
     }
 }
 
-// --- The result contract (SPEC-11 section 6) ---
+// --- The result contract (SPEC-subagents section 6) ---
 
 /// What a child returns to its parent.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -221,10 +221,10 @@ pub enum AgentOutcome {
     },
 }
 
-// --- Refusals (SPEC-11 section 7: refusing must teach) ---
+// --- Refusals (SPEC-subagents section 7: refusing must teach) ---
 
 /// A refusal to spawn or run a child. Every variant names the limit, its value,
-/// and what to do. See `SPEC-11` section 7.
+/// and what to do. See `SPEC-subagents` section 7.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum SubagentError {
     #[error(
@@ -268,7 +268,7 @@ pub enum SubagentError {
 ///
 /// It holds the limits, the count of live agents, and the id allocator. A clone
 /// shares the same state, so a child created from any node counts against the
-/// same process-wide cap. See `SPEC-11` section 7.
+/// same process-wide cap. See `SPEC-subagents` section 7.
 #[derive(Clone, Debug)]
 pub struct AgentRegistry {
     inner: Arc<RegistryInner>,
@@ -455,7 +455,7 @@ impl Drop for ChildSlot {
 /// The tree cannot cycle by construction, because the parent link is stored
 /// directly and every id is fresh. So a duplicate id means a bug, not a race.
 /// The visited set costs little and stops an infinite loop inside a lock. See
-/// `SPEC-11` section 7.
+/// `SPEC-subagents` section 7.
 pub fn check_no_cycle(ancestors: &[AgentId]) -> Result<(), SubagentError> {
     let mut seen = HashSet::with_capacity(ancestors.len());
     for id in ancestors {
@@ -470,7 +470,7 @@ pub fn check_no_cycle(ancestors: &[AgentId]) -> Result<(), SubagentError> {
 ///
 /// This is jcode's reclaim cap. When a caller re-delegates the same work and the
 /// child dies again, the count grows. After [`MAX_CHILD_RETRIES`] the work is
-/// reported failed rather than retried. See `SPEC-11` section 8.
+/// reported failed rather than retried. See `SPEC-subagents` section 8.
 pub struct RetryLedger {
     deaths: Mutex<std::collections::HashMap<String, u32>>,
     cap: u32,
@@ -514,18 +514,18 @@ impl Default for RetryLedger {
     }
 }
 
-// --- Running a child to a report (SPEC-11 section 6) ---
+// --- Running a child to a report (SPEC-subagents section 6) ---
 
 /// Drive a child's event stream to an [`AgentReport`].
 ///
 /// It sums usage, counts turns, keeps the child's final answer as the capped
 /// summary, and writes the full transcript to `transcript_path`. The transcript
-/// never reaches the model, only the summary does. See `SPEC-11` section 6.
+/// never reaches the model, only the summary does. See `SPEC-subagents` section 6.
 ///
 /// A child that passes `timeout` is cancelled through the shared token and
 /// reported `Canceled`. A child that ends without a report is reported `Failed`.
 /// A child failure is a result, not the end of the parent's run. See decision
-/// D-032.
+/// D-measured-cost-and-cache.
 pub async fn collect_report(
     agent: impl Into<String>,
     mut events: AgentEvents,

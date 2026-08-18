@@ -54,7 +54,7 @@ See `docs/verification/sprint-1.md`.
 `amazon.nova-micro-v1:0`. It is the smallest model that called a tool four times out of
 four, and it also handled two calls in one turn.
 
-A default model is a convenience, not a security choice. Decision D-013 removed hidden
+A default model is a convenience, not a security choice. Decision D-no-four-argument-session-new removed hidden
 defaults for the session root and the approval policy, because a wrong value there is a
 breach. A wrong model id is a bad answer and a small bill. So a default is safe here, and it
 is still **reported** on use, so the choice is never silent:

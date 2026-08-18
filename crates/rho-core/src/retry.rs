@@ -1,6 +1,6 @@
 //! The retry policy for a provider request.
 //!
-//! See `SPEC-02` section 3 and decision D-014.
+//! See `SPEC-provider-interface` section 3 and decision D-secret-in-core.
 //!
 //! This type lives in `rho-core` on purpose. It once sat in the OpenRouter crate,
 //! so the other two providers had no policy at all. A retry policy that retries a
@@ -57,7 +57,7 @@ impl RetryPolicy {
     ///
     /// The growth is exponential with full jitter. Full jitter picks a delay
     /// anywhere in `[0, window)`. That spreads a thundering herd, which a fixed
-    /// backoff does not. See `SPEC-02` section 3.
+    /// backoff does not. See `SPEC-provider-interface` section 3.
     ///
     /// A server hint wins and skips the jitter, because the server knows better
     /// than we do. The hint is still capped by `max_delay_ms`, so a hostile or

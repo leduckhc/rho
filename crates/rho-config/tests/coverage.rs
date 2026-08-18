@@ -1,6 +1,6 @@
 //! Coverage for public items that no existing test reaches.
 //!
-//! Each test drives a public surface named in `SPEC-13` that had no in-tree caller:
+//! Each test drives a public surface named in `SPEC-config` that had no in-tree caller:
 //! `Config::resolve_credential`, `SubagentLimitsLayer` with the `subagents` field on
 //! `ConfigLayer`, the `no-skills` key inverting into `discover_skills`, and the
 //! resolved default `sandbox` and `approval` after a full `Config::load`. Every test
@@ -104,10 +104,10 @@ fn no_skills_false_enables_discovery() {
 #[test]
 fn load_leaves_the_approval_unset_so_the_frontend_resolves_it() {
     // A bare load states no approval mode, so `approval` is `None`. `None` is not a
-    // permissive default. It hands the choice to the table in SPEC-16 section 4, which
+    // permissive default. It hands the choice to the table in SPEC-approval section 4, which
     // yields `ask` where a human or a client can answer, and `read-only` where nobody
     // can answer. A `Config` that collapsed the unset case into one value would make the
-    // `ask` default unreachable. See decision D-057.
+    // `ask` default unreachable. See decision D-approval-option-not-enum.
     let config = Config::load(&Sources::default()).expect("empty sources resolve");
     assert!(
         config.approval.is_none(),
@@ -134,9 +134,9 @@ fn a_stated_approval_survives_the_load() {
 #[test]
 fn load_resolves_the_default_security_keys() {
     // The resolved `Config` after a full `Config::load`, not merely the `ConfigLayer`
-    // default. The sandbox default is `off` (SPEC-13 section 4, D-031). The approval
+    // default. The sandbox default is `off` (SPEC-config section 4, D-bash-os-sandbox). The approval
     // default must fail closed: nothing in a bare config load can answer a prompt, so
-    // per SPEC-16 section 4 the resolved default is read-only and never allow-all.
+    // per SPEC-approval section 4 the resolved default is read-only and never allow-all.
     let config = Config::load(&Sources::default()).expect("empty sources resolve");
     assert_eq!(
         config.sandbox,

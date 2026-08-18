@@ -1,4 +1,4 @@
-//! Loading a skill body on demand, from SPEC-08 section 6.
+//! Loading a skill body on demand, from SPEC-skills section 6.
 
 mod common;
 

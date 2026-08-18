@@ -240,7 +240,7 @@ was refused and the model recovered.
 
 ## Background tasks, verified live
 
-`SPEC-07` answers four complaints from real use. Each one was checked against a real
+`SPEC-background-tasks` answers four complaints from real use. Each one was checked against a real
 model, with nothing about backgrounding in the prompt unless the line says so.
 
 **A silent failure now reports.** A script printed only progress lines and exited 3.
@@ -334,7 +334,7 @@ banana
 So the first frame renders, input reaches the model, a real answer streams back, and the
 status line moves from idle to done.
 
-**Ctrl-C behaves as `SPEC-05` requires.** The first press while idle arms the exit and shows
+**Ctrl-C behaves as `SPEC-tui` requires.** The first press while idle arms the exit and shows
 `press Ctrl-C again to exit`. The second press exits, and the harness observes the process
 reaped and the pty closed.
 
@@ -347,12 +347,12 @@ measurement tool can manufacture a bug.**
 
 ## What is still unverified
 
-- The ACP frontend. `rho-acp` is a stub, and `SPEC-06` defines the mapping.
-- rho's own binary on Linux or Windows. `SPEC-10` records that the Linux `bwrap`
+- The ACP frontend. `rho-acp` is a stub, and `SPEC-acp` defines the mapping.
+- rho's own binary on Linux or Windows. `SPEC-bash-sandbox` records that the Linux `bwrap`
   arguments were verified in a container, but rho itself has not run there.
 - Long sessions, and context compaction.
 - A non-zero prompt-cache hit rate. rho reports the number now, and the number is zero
-  so far. See decision D-032.
+  so far. See decision D-measured-cost-and-cache.
 
 ### Running the harnesses
 

@@ -1,7 +1,7 @@
 /* getrho.dev — single stylesheet.
    Tokens come from web/design/DESIGN.md. Do not change a value here
    without changing DESIGN.md first. Layout comes from
-   web/design/mockup-c-parts.html (decision D-004). */
+   web/design/mockup-c-parts.html (decision D-website-direction). */
 
 :root {
   /* Color tokens — dark mode (default). DESIGN.md section 2. */
@@ -115,7 +115,7 @@ nav a { margin-left: 24px; font-size: var(--fs-small); }
 }
 .screen:last-of-type { border-bottom: none; }
 
-/* Eyebrow label. D-004: the `$ <command>` form from mockup A. */
+/* Eyebrow label. D-website-direction: the `$ <command>` form from mockup A. */
 .kicker {
   font-family: var(--font-mono); font-size: var(--fs-caption);
   color: var(--accent); margin: 0 0 16px;

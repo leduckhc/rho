@@ -1,4 +1,4 @@
-//! The shared provider contract, from `SPEC-02` section 7.
+//! The shared provider contract, from `SPEC-provider-interface` section 7.
 //!
 //! Each function drives a provider through one [`Script`] and asserts one rule.
 //! An outside author calls [`run_all`] to run every check, or calls one check.

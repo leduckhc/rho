@@ -29,7 +29,7 @@ pub struct Extensions {
 
 /// Discover skills for a session root.
 ///
-/// `trust_project` states whether the user trusts this root. Decision D-022 requires a
+/// `trust_project` states whether the user trusts this root. Decision D-project-skill-needs-trust requires a
 /// caller to state it, because a `SKILL.md` in the repository under edit is a prompt
 /// injection with a filename. Nothing infers trust.
 pub async fn load_skills(
@@ -81,7 +81,7 @@ pub async fn load_skills(
     }
 
     // A withheld skill is listed on purpose. A user who cannot see a skill cannot
-    // decide about it. See decision D-022.
+    // decide about it. See decision D-project-skill-needs-trust.
     if !set.withheld.is_empty() {
         let names: Vec<&str> = set.withheld.iter().map(|s| s.name.as_str()).collect();
         notices.push(format!(
@@ -204,7 +204,7 @@ pub async fn load(
     let cache = McpSchemaCache::load(&cache_path).unwrap_or_else(|_| McpSchemaCache::new());
     // `tools_for` returns at once. It advertises from the cache and connects on a
     // background task, so the first provider request already carries these tools and a
-    // late handshake never rewrites the stable prefix. See SPEC-09 section 4.
+    // late handshake never rewrites the stable prefix. See SPEC-mcp section 4.
     match rho_mcp::tools_for(&pool, &servers, &cache).await {
         Ok(mcp_tools) => {
             if mcp_tools.is_empty() {
@@ -284,7 +284,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_project_skill_is_withheld_and_the_notice_says_how_to_trust_it() {
-        // The user-visible half of decision D-022. A withheld skill must be listed, and
+        // The user-visible half of decision D-project-skill-needs-trust. A withheld skill must be listed, and
         // the notice must say what to do about it.
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join(".rho").join("skills").join("repo-skill");

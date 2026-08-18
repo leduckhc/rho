@@ -1,7 +1,7 @@
 //! The error type for the MCP client.
 //!
 //! Every message tells the user what to do next, and it names the server, so a
-//! failure points at the server that caused it. See `SPEC-09` section 6.
+//! failure points at the server that caused it. See `SPEC-mcp` section 6.
 
 /// An error from the MCP client, the pool, or one call.
 #[derive(Debug, thiserror::Error)]

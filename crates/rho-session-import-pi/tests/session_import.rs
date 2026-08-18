@@ -1,6 +1,6 @@
-//! SPEC-14 stage T4 red tests: the pi import path, feature F-54, section 9.
+//! SPEC-sessions stage T4 red tests: the pi import path, feature F-pi-session-import, section 9.
 //!
-//! SPEC-14 section 9 states the importer lives in the crate `rho-session-import-pi`,
+//! SPEC-sessions section 9 states the importer lives in the crate `rho-session-import-pi`,
 //! so these tests live here, not in `rho-core`. Every test fails on an unimplemented
 //! body. It uses `tempfile`. It never reads a real `~/.pi` file, so the result does not
 //! change per machine. No `sleep`. No network.
@@ -12,7 +12,7 @@ use rho_core::{ContentBlock, Record, RecordId, Role};
 use rho_session_import_pi::import_pi_session;
 use tempfile::tempdir;
 
-/// The known set that rho drops. See SPEC-14 section 9.
+/// The known set that rho drops. See SPEC-sessions section 9.
 const KNOWN_DROPPABLE: &[&str] = &["thinking_level_change", "session_info", "custom"];
 
 /// Write a pi session fixture. It covers the session header, a user text message, an
@@ -174,7 +174,7 @@ fn leaves_the_original_pi_file_unchanged() {
 // --- the shapes a real pi file holds, which a fixture missed --------------------
 
 /// Write a fixture with the shapes that 60 real pi files hold, and that the first
-/// implementation rejected. See SPEC-14 section 9 and decision D-058.
+/// implementation rejected. See SPEC-sessions section 9 and decision D-unmappable-pi-record-drops.
 fn write_real_shape_fixture(dir: &Path) -> std::path::PathBuf {
     let records = [
         serde_json::json!({
@@ -227,7 +227,7 @@ fn write_real_shape_fixture(dir: &Path) -> std::path::PathBuf {
 fn a_real_pi_shape_imports_without_an_error() {
     // The first implementation returned an error for each of these shapes, and three
     // fixture tests still passed. Then a run over 60 real pi files failed on 21 of them.
-    // So an unknown record drops with a count, and the import finishes. See D-058.
+    // So an unknown record drops with a count, and the import finishes. See D-unmappable-pi-record-drops.
     let dir = tempdir().expect("temp dir");
     let path = write_real_shape_fixture(dir.path());
 

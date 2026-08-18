@@ -2,7 +2,7 @@
 //!
 //! The state is a value. A pure reducer folds one `AgentEvent` into the state. A
 //! pure key handler folds one key press into the state. Neither does IO, so a
-//! test drives them with no terminal at all. See `SPEC-05` sections 1 to 3.
+//! test drives them with no terminal at all. See `SPEC-tui` sections 1 to 3.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rho_core::{
@@ -114,7 +114,7 @@ pub enum KeyAction {
 }
 
 impl TuiState {
-    /// Fold one agent event into the state. Pure. No IO. See `SPEC-05` section 3.
+    /// Fold one agent event into the state. Pure. No IO. See `SPEC-tui` section 3.
     pub fn apply(&mut self, event: &AgentEvent) {
         match event {
             AgentEvent::TurnStart => self.activity = ActivityState::Running,
@@ -365,7 +365,7 @@ impl TuiState {
 
     /// Fold one key press into the state. Pure. No IO. Return the action the event
     /// loop must run. Input never waits on model work, so a printable key always
-    /// appends, even while a turn streams. See `SPEC-05` section 5.
+    /// appends, even while a turn streams. See `SPEC-tui` section 5.
     pub fn handle_key(&mut self, key: KeyEvent) -> KeyAction {
         if is_ctrl_c(&key) {
             return self.handle_ctrl_c();
@@ -431,7 +431,7 @@ fn stop_reason_label(reason: AgentStopReason) -> &'static str {
 /// A one-line summary of a progress report, for the status column.
 ///
 /// A progress `message` is untrusted, because a child prints whatever it likes. So it
-/// is sanitised here, exactly like tool output. See `SPEC-07` section 9.
+/// is sanitised here, exactly like tool output. See `SPEC-background-tasks` section 9.
 fn summarise_progress(progress: &TaskProgress) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(percent) = progress.percent {
@@ -467,7 +467,7 @@ fn state_label(state: &TaskState) -> String {
 /// A short cost summary for a status row.
 ///
 /// Tokens rather than money, because two of the three providers report no charge. See
-/// decision D-032.
+/// decision D-measured-cost-and-cache.
 fn summarise_usage(usage: &rho_core::Usage) -> String {
     let mut text = format!(
         "{} in, {} out",

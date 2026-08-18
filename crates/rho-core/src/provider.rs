@@ -17,7 +17,7 @@ pub type ProviderStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, Provider
 pub struct ToolSpec {
     pub name: String,
     pub description: String,
-    /// The ACP tool category. See `ToolKind` in `SPEC-03`.
+    /// The ACP tool category. See `ToolKind` in `SPEC-tool-interface`.
     pub kind: ToolKind,
     /// A JSON Schema object for the tool arguments.
     pub input_schema: serde_json::Value,

@@ -1,8 +1,8 @@
-//! The failure rule from `SPEC-13` section 6 and section 7.
+//! The failure rule from `SPEC-config` section 6 and section 7.
 //!
 //! `rho-config` fails closed. A malformed file, an unknown key, and an unreadable file
 //! each return a typed `ConfigError`. A broken security key stops the run and never
-//! falls back to a permissive default. See decisions D-047 and D-017.
+//! falls back to a permissive default. See decisions D-config-fails-closed and D-plugin-does-not-classify-itself.
 
 mod common;
 
@@ -76,13 +76,13 @@ fn an_unreadable_file_is_a_read_error() {
 #[test]
 fn a_broken_approval_key_stops_the_run() {
     // A bad `approval` value is an error, and the run never falls back to `allow-all`.
-    // This is the decision D-017 fail-open family, in a new place.
+    // This is the decision D-plugin-does-not-classify-itself fail-open family, in a new place.
     let dir = temp_dir();
     let path = write_file(&dir, "config.toml", "approval = \"bananas\"\n");
     let sources = sources_with_project_file(path);
     match Config::load(&sources) {
         // The value is bad, so the error must name the parse, not something else. Per
-        // SPEC-13 section 6 the message names the key and the offending value, so a
+        // SPEC-config section 6 the message names the key and the offending value, so a
         // generic parse error cannot pass a test about a security key.
         Err(err @ ConfigError::Parse { .. }) => {
             let rendered = err.to_string();
@@ -113,7 +113,7 @@ fn a_broken_sandbox_key_stops_the_run() {
     let sources = sources_with_project_file(path);
     match Config::load(&sources) {
         // The value is bad, so the error must name the parse, not something else. Per
-        // SPEC-13 section 6 the message names the key and the offending value, so a
+        // SPEC-config section 6 the message names the key and the offending value, so a
         // generic parse error cannot pass a test about a security key.
         Err(err @ ConfigError::Parse { .. }) => {
             let rendered = err.to_string();

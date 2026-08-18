@@ -1,4 +1,4 @@
-//! The security core from SPEC-08 section 3. Trust, symlinks, and sanitisation.
+//! The security core from SPEC-skills section 3. Trust, symlinks, and sanitisation.
 
 mod common;
 

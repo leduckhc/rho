@@ -66,7 +66,7 @@ struct BashArgs {
 pub struct BashTool {
     tasks: Option<Arc<TaskRegistry>>,
     /// The OS confinement mode for the command. The default is `Off`, which runs
-    /// the command unconfined, as before. See `SPEC-10`.
+    /// the command unconfined, as before. See `SPEC-bash-sandbox`.
     sandbox: SandboxMode,
 }
 
@@ -90,7 +90,7 @@ impl BashTool {
     }
 
     /// Set the OS confinement mode. The default is `SandboxMode::Off`. See
-    /// `SPEC-10`.
+    /// `SPEC-bash-sandbox`.
     pub fn sandbox(mut self, mode: SandboxMode) -> Self {
         self.sandbox = mode;
         self
@@ -248,7 +248,7 @@ impl Tool for BashTool {
 /// Under a confinement `sandbox`, the program is the OS sandbox wrapper, not `sh`
 /// directly. When the mode needs confinement and no backend is available, this
 /// fails closed with an error, so the command never runs unconfined. See
-/// `SPEC-10`.
+/// `SPEC-bash-sandbox`.
 fn build_command(
     command_str: &str,
     session_root: &Path,
@@ -366,7 +366,7 @@ fn adopt_on_timeout(
 /// This task awaits `child.wait()`, and that await is the completion
 /// notification. The task is already awaiting before the child can exit, so the
 /// exit cannot be missed. It reads the exit code, not a bare signal, and it works
-/// the same on Windows. See `SPEC-07` section 3. So there is no signal handler
+/// the same on Windows. See `SPEC-background-tasks` section 3. So there is no signal handler
 /// and no poll loop.
 async fn supervise(
     mut child: tokio::process::Child,
@@ -727,7 +727,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_line_longer_than_the_cap_is_split() {
-        // The section 8 limit, named as in `SPEC-07`. A line longer than the cap
+        // The section 8 limit, named as in `SPEC-background-tasks`. A line longer than the cap
         // is split into pieces, and no piece passes the cap. This shares the
         // property that `reader_splits_a_line_that_never_ends` proves, under the
         // spec's own name.

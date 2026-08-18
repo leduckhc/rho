@@ -4,7 +4,7 @@
 //! request awaits its response, bounded by a timeout. A crash, a closed pipe, or
 //! a timeout returns a clear error, never a panic or a hang. The pattern follows
 //! `rho-plugin`'s process engine; the shared shape is a genuine extraction
-//! candidate, recorded in the stage report. See `SPEC-09` sections 3 and 4.
+//! candidate, recorded in the stage report. See `SPEC-mcp` sections 3 and 4.
 
 use std::collections::HashMap;
 use std::sync::Arc;

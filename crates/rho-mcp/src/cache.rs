@@ -5,7 +5,7 @@
 //! the tools from a cache at turn one, and connects on a background task. The
 //! first provider request already carries the tools, so a late connection never
 //! rewrites the stable prefix and never throws away the prompt cache. See
-//! `SPEC-09` section 4.
+//! `SPEC-mcp` section 4.
 //!
 //! Two correctness guards, and they are not optional:
 //! - The cache entry is keyed by the config fingerprint, so a reconfigured
