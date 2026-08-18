@@ -423,7 +423,18 @@ Help and the theme:
 - `help_rows_match_the_binding_table` — every help row comes from the binding table.
 - `theme_resolves_every_role` — each role maps to a 256-colour, 16-colour, and no-colour style.
 
-The frame mocks, each rendered at its stated width:
+The frame fixtures, guarded now, in `crates/rho-tui/tests/frames.rs`:
+- `frame_fixture_<name>_is_exact` — one test per frame. Every row is exactly the stated
+  width, and the frame holds 24 rows. Width means display width, not byte length, because
+  a box character is three bytes and one column.
+- `every_frame_fixture_is_grid_safe` — no frame holds a wide or combining character. Either
+  one makes a hand-drawn frame disagree with the terminal, and the disagreement is
+  invisible in a diff.
+- `the_frame_set_is_complete` — the directory holds ten frames. A missing frame would
+  quietly reduce the acceptance criteria.
+
+The frame renders, which drive the real renderer and compare it against each fixture. These
+need the renderer that stage U4 builds, so they land with it:
 - `frame_100_idle_renders_at_100_columns` — `100-idle.txt` matches at 100 columns.
 - `frame_100_streaming_renders_at_100_columns` — `100-streaming.txt` matches at 100 columns.
 - `frame_100_tool_run_renders_at_100_columns` — `100-tool-run.txt` matches at 100 columns.

@@ -281,6 +281,50 @@ Each one is judged twice: once by a critic for beauty, and once by a benchmark f
 interface that costs frames or memory is not a win here, because speed and memory are the
 reason rho exists.
 
+### Sprint 3 stage results
+
+| Stage | Attempt | Role | Result | Notes |
+| --- | --- | --- | --- | --- |
+| U0 | 1 | scout | fail | Two scouts lost: one overflowed its context on whole web pages, one hit a connection error. |
+| U0 | 2 | controller | pass | Read the sources with `curl` and a filter. Every claim carries a line number. |
+| U1 | 1 | designer | pass | Ten frames, exact at 100, 80, and 40 columns. Twelve contrast pairs, all AA. |
+| U2 | 1 | architect | pass | The plugin surface, and its panic claim narrowed to what the profile allows. |
+| U2b | 1 | architect | lost | The agent vanished with no report and no file. |
+| U2b | 2 | architect | pass | The experience spec, written section by section so a loss keeps the work. |
+| U3a | 1 | tester | pass | 29 red tests for the ladder and the paste. |
+| U3b | 1 | tester | pass | 19 red tests for motion, the theme, concise mode, and discovery. |
+| U3c | 1 | controller | pass | The ten frame tests belonged to neither brief. The controller wrote them. |
+
+### What the controller caught in sprint 3
+
+**A wrong attribution.** A scout credited the tool glyphs to pi. They are rho's own, in
+`render.rs`. `docs/tui.md` states no glyph set at all. A plausible memory of another tool's
+interface is the error that survives a review, so every claim in `docs/tui-prior-art.md` now
+carries a line number.
+
+**A byte length used as a width.** The controller's first check of the design frames reported
+every line as wrong. The check was wrong, not the frames: a box character is three bytes and
+one column. The frame test now measures display width, and it rejects a wide or combining
+character, because such a character makes a hand-drawn frame disagree with the terminal in a
+way a diff cannot show.
+
+**A claim the release profile forbids.** The plugin spec claimed a panicking view leaves the
+session alive. The workspace release profile sets `panic = "abort"`, so a panic aborts the
+process before a thread can unwind. The claim now holds only under a profile that unwinds,
+and the spec states that a linked view is trusted not to panic. The alternative was to
+reopen a measured footprint decision, and a spec does not reverse a measurement.
+
+**A gap in the controller's own split.** Two testers covered six topics, and the ten frame
+tests belonged to neither. That is a controller error, not a subagent error, and it is why
+the review gate asks which rendered states have no test.
+
+**Contrast verified rather than trusted.** All twelve text-on-background pairs were
+re-derived under the WCAG formula. Every claim matches to two decimals, and the tightest pair
+is 4.51 to one against a floor of 4.5.
+
+The red suite stands at 48 failing tests, each on an unimplemented body, with 604 tests
+passing across the workspace.
+
 ### Dispatch statistics for this sprint
 
 Eight subagent dispatches so far. Three hit the turn limit, and all three reported the
