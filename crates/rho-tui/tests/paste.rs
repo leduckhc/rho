@@ -146,3 +146,51 @@ fn attachment_path_outside_root_is_refused() {
         "a path outside the session root is refused: {outcome:?}"
     );
 }
+
+#[test]
+fn attachment_traversal_out_of_the_root_is_refused() {
+    // A sibling directory is not the interesting case. This one is: a path that *starts*
+    // with the session root and then walks out of it with `..`. A lexical prefix test
+    // accepts it, and the controller proved that the earlier test could not fail against
+    // exactly that implementation. See D-confine-needs-a-traversal-test.
+    let root = tempfile::tempdir().expect("a temp session root");
+    let outside = root.path().parent().expect("a parent").join("escape.png");
+    std::fs::write(&outside, b"secret").expect("write the outside file");
+
+    for path in [
+        root.path().join("../escape.png"),
+        root.path().join("nested/../../escape.png"),
+        root.path().join("./../escape.png"),
+    ] {
+        let outcome = attach_image(root.path(), &path, 100);
+        assert!(
+            matches!(outcome, AttachOutcome::Refused(_)),
+            "a traversal out of the root is refused: {} gave {outcome:?}",
+            path.display()
+        );
+    }
+
+    let _ = std::fs::remove_file(&outside);
+}
+
+#[test]
+fn attachment_through_a_symlink_out_of_the_root_is_refused() {
+    // A symlink inside the root that points outside it. The canonical form is what makes
+    // this refusable, and a lexical test cannot see it at all.
+    let root = tempfile::tempdir().expect("a temp session root");
+    let outside = tempfile::tempdir().expect("a temp dir outside the root");
+    let target = outside.path().join("secret.png");
+    std::fs::write(&target, b"secret").expect("write the outside file");
+
+    let link = root.path().join("looks-inside.png");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &link).expect("create the symlink");
+    #[cfg(not(unix))]
+    return;
+
+    let outcome = attach_image(root.path(), &link, 100);
+    assert!(
+        matches!(outcome, AttachOutcome::Refused(_)),
+        "a symlink out of the root is refused: {outcome:?}"
+    );
+}

@@ -26,6 +26,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-child-confined-by-composition](20260818-000223-D-child-confined-by-composition.md) | 20260818 | A child is confined by composition, not by comparison |
 | [D-concise-mode-opt-in](20260818-090746-D-concise-mode-opt-in.md) | 20260818 | concise mode is opt-in and off by default |
 | [D-config-fails-closed](20260818-014343-D-config-fails-closed.md) | 20260818 | Config fails closed on a malformed file, an unknown key, or an unreadable file |
+| [D-confine-needs-a-traversal-test](20260818-115706-D-confine-needs-a-traversal-test.md) | 20260818 | A path boundary is tested with a traversal, not a sibling |
 | [D-core-event-model-widens](20260817-170455-D-core-event-model-widens.md) | 20260817 | The architect may widen the core event model to fit ACP |
 | [D-credential-command-allowlist](20260818-014343-D-credential-command-allowlist.md) | 20260818 | A credential command inherits an allowlist, stricter than the bash denylist |
 | [D-duration-rounds-once](20260818-090744-D-duration-rounds-once.md) | 20260818 | the duration ladder rounds exactly once |
