@@ -86,7 +86,13 @@ record that names an earlier record as its parent. See `SPEC-14`.
 ## The compatibility promise
 
 - The first record is the header, and it carries a `version`. A reader refuses a version
-  it does not know, rather than guess.
+  it does not know, rather than guess. The test `resume_refuses_an_unknown_version` in
+  `SPEC-14` guards this, so `SessionError::Version` is proved and not just described.
+- The header also carries the resolved `approval` and `sandbox` mode names. A resume
+  reads them, so a session that ran read-only never resumes under a wider mode by
+  accident. A resume refuses to widen either mode unless the user passes `--allow-widen`.
+  See `SPEC-14` section 8a. This keeps a stored permission from silently widening under a
+  live config.
 - A new record type is additive. A reader ignores a record type it does not know, so an
   old reader still loads a newer file's known records.
 - The shared fields are stable. Every record carries an `id`, a `parentId`, and a

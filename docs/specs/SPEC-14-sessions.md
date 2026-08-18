@@ -48,8 +48,14 @@ pub struct Entry {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Record {
-    /// The header. The first record. One per file.
-    Session { version: u32, cwd: PathBuf },
+    /// The header. The first record. One per file. `approval` and `sandbox` name
+    /// the resolved modes the session ran under. See section 8a.
+    Session {
+        version: u32,
+        cwd: PathBuf,
+        approval: String,
+        sandbox: String,
+    },
     /// The provider or the model changed.
     ModelChange { provider: String, model: String },
     /// One conversation message. It carries the redacted content.
@@ -64,7 +70,13 @@ pub enum Record {
 ```
 
 The `Session` header names the format version, so a reader can refuse a version it does
-not know. The `cwd` records where the session ran. The `Message` record reuses the real
+not know. The `cwd` records where the session ran. The `approval` and `sandbox` fields
+name the resolved modes the session ran under. A resume reads them, so a read-only
+session never resumes under a wider mode by accident. See section 8a. The two fields are
+strings, not `rho-core` enums, because the record stays a pure `serde` derive and
+`rho-core` must not depend on `rho-config`. The value set for `approval` is `read-only`,
+`ask`, and `allow-all`. The value set for `sandbox` is `off`, `confined`, and `strict`.
+The `Message` record reuses the real
 `rho_core::Message` type, so the on-disk content model and the in-memory content model
 are the one type. See `crates/rho-core/src/content.rs`.
 
@@ -120,14 +132,28 @@ with `fast-json` on and with `fast-json` off. So neither path drifts.
 ### The record-size rule
 
 A codec is fast only when a record is small. A tool result of ten megabytes must not
-sit in the file verbatim. So the writer caps one record.
+sit in the file verbatim. So the writer caps one record at `MAX_RECORD_BYTES`. The cap
+is defined per record kind, because one rule cannot fit every shape. A `ToolResult` is
+text, a `ToolCall` is a structured call, and an assistant `Message` is text too, so each
+kind caps in the way that keeps it valid.
 
-- A record over `MAX_RECORD_BYTES` is capped before it is written.
-- For an oversize tool result, the writer stores the head of the text, up to the cap.
-- The writer stores a note in place of the dropped tail. The note states the full byte
-  count. The full payload spills to a sidecar file under the session directory.
-- The stored head plus the note is a valid `ContentBlock::Text`, so a reader needs no
+- A `ToolResult` block over the cap stores the head of the text, up to the cap. The
+  writer stores a note in place of the dropped tail. The note states the full byte
+  count. The full payload spills to a sidecar file under the session directory. The
+  stored head plus the note is a valid `ContentBlock::Text`, so a reader needs no
   special case.
+- An assistant `Message` text block over the cap caps the same way, with a head and a
+  note.
+- A `ToolCall` over the cap is never rewritten into a text note. That would drop
+  `tool_call_id` and `name`, and break the pairing invariant that every `ToolCall` has a
+  matching `ToolResult`. Instead the writer keeps the `id`, the `name`, and the
+  `tool_call_id`, caps the oversize string values inside `arguments`, and spills the full
+  `arguments` to a sidecar file. So the record stays a valid `ToolCall`.
+- A `Session`, a `ModelChange`, a `Usage`, a `Stop`, and a `Closed` record are bounded
+  by construction, so they need no cap.
+
+So no written record of any kind exceeds the cap, and a `ToolCall` always stays a
+`ToolCall`.
 
 ```rust
 /// The largest single record written to the file, in bytes.
@@ -145,7 +171,15 @@ pub struct SessionHeader {
     pub version: u32,
     pub session_id: String,
     pub cwd: PathBuf,
+    /// The resolved approval mode name. One of `read-only`, `ask`, `allow-all`.
+    pub approval: String,
+    /// The resolved sandbox mode name. One of `off`, `confined`, `strict`.
+    pub sandbox: String,
 }
+
+/// The largest single line a reader accepts, in bytes. A longer line is a decode
+/// error, never an allocation. See section 6a.
+pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 
 /// A typed session error.
 #[derive(Debug, thiserror::Error)]
@@ -205,6 +239,8 @@ pub struct SessionReader;
 
 impl SessionReader {
     /// Read every whole record. Drop only a truncated last line. See section 6.
+    /// Cap one line at `MAX_LINE_BYTES`. A longer line is a `SessionError::Decode`,
+    /// never an unbounded allocation. See section 6a.
     pub fn read(path: &Path) -> Result<ReadResult, SessionError>;
 }
 
@@ -216,17 +252,21 @@ impl SessionStore {
     pub fn new(root: impl Into<PathBuf>) -> Self;
 
     /// Create a new session file. Write the header. Return a writer. This is the
-    /// open path and the new path.
+    /// open path and the new path. `approval` and `sandbox` name the resolved
+    /// modes, and go into the header record.
     pub fn create(
         &self,
         session_id: &str,
         cwd: &Path,
+        approval: &str,
+        sandbox: &str,
     ) -> Result<SessionWriter, SessionError>;
 
     /// Open an existing file to append more records. Used by resume and fork.
     pub fn append_to(&self, path: &Path) -> Result<SessionWriter, SessionError>;
 
     /// List sessions with a cheap summary. Read only the first line of each file.
+    /// The first line obeys the same `MAX_LINE_BYTES` cap as `read`.
     pub fn list(&self) -> Result<Vec<SessionSummary>, SessionError>;
 
     /// Delete one session file. Every branch in the file goes with it.
@@ -302,6 +342,32 @@ to `observe`. A caller that wants ephemeral mode builds `SessionLog::Off`. That 
 opt-out for F-53. The config key `ephemeral` and the absence of `session-file` both
 select `Off`. See `SPEC-13`.
 
+### 5a. The redaction function that a record depends on
+
+The recorder masks a credential-shaped tool argument before it writes a record. A
+message content block never holds a `Secret` type, but a `ToolCall.arguments` value is
+free-form JSON, so it can carry a key. The recorder passes every argument value through a
+new function in `rho-redact`. This is decision D-043.
+
+```rust
+/// Mask every value under a key that `looks_like_a_secret` flags, anywhere in a JSON
+/// value. Recurse into every object and every array. Return a new value.
+pub fn redact_json_secrets(value: &serde_json::Value) -> serde_json::Value;
+```
+
+- It masks a value under a flagged key. The masked value is the string `"***"`.
+- It reads a key name only, never a value, because a value cannot be recognised
+  reliably. This matches `looks_like_a_secret`, which already reads the name.
+- It keeps every key name, every value under an unflagged key, and the whole tree shape.
+
+**This function is new work for stage T5. It does not exist today.** `crates/rho-redact/src/lib.rs`
+exports `looks_like_a_secret`, `sanitize_text`, and `sanitize_line` only. A reviewer
+proved that a call to `redact_json_secrets` fails with `E0425`. This is the same family
+as `confine`, the path boundary that stayed `todo!()` through a green stage, so it is
+named here as required new surface. **No session record may be written before this
+function exists.** `rho-redact` is the one home for redaction, per decision D-026, so no
+second implementation may live outside it.
+
 ## 6. Storage cost, and a truncated last line
 
 The append path cost is dominated by the write, not by the codec. One record is about
@@ -332,6 +398,24 @@ this.
 So a half-written tail never fails a resume, and never discards a whole record. A clean
 `close` flushes the buffer, so a closed file has no buffered tail to lose.
 
+### 6a. A bounded read
+
+A reader must survive a file it did not write. The 64 KB write cap in section 3 bounds
+what rho writes, but it does not protect the read path. A corrupt file, or a hostile
+file, can hold a single multi-megabyte line. That repeats defect 7, where an unbounded
+`bash` line reader turned 8 MB of output into 805 MB of memory. See decision D-016.
+
+So `SessionReader::read` and `SessionStore::list` cap one line at `MAX_LINE_BYTES`.
+
+- The reader reads at most `MAX_LINE_BYTES` for one line.
+- A line that reaches the cap is a `SessionError::Decode`. It is a decode error, never an
+  unbounded allocation.
+- The reader never grows a buffer without a bound, whatever the file holds.
+
+The read cap is larger than `MAX_RECORD_BYTES`, so a file written by rho always loads,
+and a file written by another tool, for example a pi file, still loads unless one line
+is pathological. So the bound protects memory without rejecting an honest file.
+
 ## 7. Branching
 
 A branch is a new leaf on the tree.
@@ -360,6 +444,54 @@ the file, its effect on a running turn, and its ACP method.
 | list | `SessionStore::list` | Read the first line of each file. | None. | `session/list` |
 | delete | `SessionStore::delete` | Remove the file and its branches. | None. | `session/delete` |
 | fork | `SessionStore::fork` | Copy a branch to a new file. | None. Start from the copy. | none, load then new |
+
+### The ACP methods are planned, and load differs from resume
+
+The ACP methods in the table above are not all live yet. `SPEC-06` marks `session/load`,
+`session/resume`, `session/list`, `session/delete`, and `session/close` as planned, after
+the TUI. So this spec states the file effect of each operation now, and `rho-acp` wires
+the method when the ACP frontend stage lands. The `session/new`, `session/prompt`, and
+`session/cancel` methods are the sprint-1 set that already exists.
+
+`session/load` and `session/resume` are two methods, not one. `session/load` rebuilds a
+session's state from the file and reports it to the client, without continuing the turn.
+`session/resume` loads the file and then continues the conversation with a new prompt. So
+a load is a read, and a resume is a read plus a continuation. Both read through
+`SessionReader::read` and `branch_messages`, and both obey the widening rule in section
+8a.
+
+### 8a. Resume must not widen a permission
+
+A session that ran read-only must not resume with a wider permission by accident. The
+header record holds the resolved `approval` and `sandbox` modes, per section 2. A resume
+reads them and compares them against the modes the current run would use.
+
+- The `approval` names order from strict to permissive: `read-only`, then `ask`, then
+  `allow-all`. A resume refuses a mode more permissive than the header names.
+- The `sandbox` names order from strict to permissive: `strict`, then `confined`, then
+  `off`. A resume refuses a mode more permissive than the header names.
+- A resume that would widen either mode stops, unless the user passes the explicit
+  override flag `--allow-widen`. The flag is the one way to widen on purpose. Over ACP,
+  the override is an explicit request field, not a default.
+- A resume that keeps or narrows either mode runs with no flag.
+
+The approval names form a total order here, so the comparison is representable. This is
+not the trait-object comparison that `SPEC-11` section 3 proved impossible. It compares
+two stored mode names, not two arbitrary `ApprovalPolicy` objects.
+
+### Resume repairs an unmatched tool call after a crash
+
+A crash can leave the file with an assistant `Message` that carries a `ToolCall`, and no
+matching `ToolResult`. The cancel path in the next subsection prevents this on a clean
+cancel, but a crash writes no cancel record, and a truncated tail can drop a `ToolResult`
+line. A provider rejects a call that has no result, so a resume must repair the pairing.
+
+- A resume that finds a trailing `ToolCall` with no matching `ToolResult` completes it
+  with a synthetic error `ToolResult`. The result is an error, and it says the call did
+  not finish before a crash.
+- So the rebuilt message list holds a matched pairing, and the next provider request is
+  valid. rho completes the call rather than dropping it, so the model sees that the call
+  was attempted.
 
 ### Cancel keeps the session open
 
@@ -443,6 +575,11 @@ The content block mapping, inside a message:
 
 The `id`, the `parentId`, and the `timestamp` carry across, so the tree shape is kept.
 
+**The import holds one invariant.** Every pi record maps one to one to a rho record,
+only the known droppable set drops, and the tree shape survives. The known droppable set
+is `thinking_level_change`, `session_info`, and `custom`. So no unknown record is
+invented, no known record is lost silently, and every kept record keeps its parent link.
+
 **What rho drops.** rho drops the record types it has no model for.
 
 - `thinking_level_change` drops. rho has no thinking-level concept.
@@ -454,15 +591,26 @@ The `id`, the `parentId`, and the `timestamp` carry across, so the tree shape is
 ## 10. Test cases
 
 Storage:
-- `append_writes_one_line_per_record` — a record adds exactly one line.
+- `n_appends_yield_exactly_n_lines` — for any N, N appends yield exactly N lines. The
+  invariant, not one example.
 - `append_returns_a_new_id_each_time` — two appends return two different ids.
+- `head_reports_the_last_written_id` — `SessionWriter::head` returns the id of the last
+  append, and `None` before the first append.
+- `path_returns_the_open_file_path` — `SessionWriter::path` returns the file the writer
+  opened.
 - `the_append_path_never_rewrites_an_earlier_byte` — the bytes before a new record are
   byte-identical after the append. This is the append-only proof.
-- `an_oversize_tool_result_is_capped_in_the_record` — a ten-megabyte result stores a
-  head plus a note, under `MAX_RECORD_BYTES`.
-- `both_codecs_agree_byte_for_byte` — `serde_json` and `sonic-rs` encode one record to
-  the identical line, and each reads the other's output. CI runs this with `fast-json`
-  on and off.
+- `no_written_record_of_any_kind_exceeds_the_cap` — for any input, no written record of
+  any kind exceeds `MAX_RECORD_BYTES`. The invariant over every record kind.
+- `an_oversize_record_of_every_kind_stays_under_the_cap` — an oversize `ToolResult`, an
+  oversize assistant `Message`, and an oversize `ToolCall` each write under the cap, and
+  the `ToolCall` stays a `ToolCall` with its `tool_call_id`.
+- `a_non_tool_result_record_over_the_cap_is_capped` — an oversize assistant message text
+  block is capped with a head and a note, the same as a tool result.
+- `both_codecs_agree_byte_for_byte` — for every `Record` variant, `serde_json` and
+  `sonic-rs` encode it to the identical line, and each reads the other's output in both
+  directions. This is a property over every variant, not one example. CI runs it with
+  `fast-json` on and off.
 
 Resume:
 - `resume_reads_every_whole_record` — a clean file loads every record.
@@ -473,6 +621,18 @@ Resume:
 - `resume_warns_on_a_truncated_last_line` — the resume path logs one warning.
 - `resume_after_a_model_change_appends_a_model_change_record` — a new model adds a
   record and keeps the old ones.
+- `resume_reopens_the_file_with_append_to` — `SessionStore::append_to` returns a writer
+  on the existing file, and a later append lands after the earlier records.
+- `a_giant_line_does_not_exhaust_memory` — a file with a multi-megabyte line over
+  `MAX_LINE_BYTES` returns a decode error and never allocates the whole line.
+- `resume_refuses_an_unknown_version` — a header with a version the reader does not know
+  returns `SessionError::Version`, and the resume stops.
+- `resume_does_not_widen_a_read_only_session` — a session whose header names `read-only`
+  refuses to resume under `allow-all` without `--allow-widen`, and runs under
+  `read-only` with no flag.
+- `resume_repairs_an_unmatched_tool_call_after_a_crash` — a file that ends with a
+  `ToolCall` and no matching `ToolResult` rebuilds a matched pairing with a synthetic
+  error result, so the next provider request is valid.
 
 Branch:
 - `a_branch_keeps_the_original_records` — a branch appends and deletes nothing.
@@ -483,14 +643,21 @@ Ephemeral and degrade:
 - `ephemeral_mode_writes_no_file` — `SessionLog::Off` creates no file.
 - `a_write_failure_degrades_to_ephemeral_with_a_warning` — a failing writer switches to
   ephemeral and the run continues. It never ends the run. See defect 9.
+- `session_log_is_ephemeral_reports_off_and_degraded` — `SessionLog::is_ephemeral` is
+  true for `Off` and true after a write failure degrades the log.
+- `recorder_is_ephemeral_follows_its_log` — `SessionRecorder::is_ephemeral` is true when
+  its log is ephemeral or degraded.
 
 Lifecycle:
 - `close_writes_a_closed_record` — close appends the `Closed` record.
 - `close_is_idempotent` — a second close writes nothing.
 - `cancel_keeps_the_session_open` — after a cancel the session accepts a new prompt.
 - `cancel_writes_a_stop_record` — a cancel appends one `Stop` with `Canceled`.
-- `cancel_leaves_no_half_written_tool_pairing` — every `ToolCall` on disk has a
-  matching `ToolResult` after a cancel.
+- `cancel_leaves_no_half_written_tool_pairing` — every `ToolCall` on disk has a matching
+  `ToolResult` after a cancel, after a crash with an unmatched call, and after a
+  truncated tail that dropped a result line. The invariant holds on all three paths.
+- `a_usage_record_round_trips` — a `Record::Usage` encodes and decodes back to the same
+  `Usage`, so the usage counters survive a resume.
 - `list_reads_only_the_first_line` — `list` on many files reads one line each.
 - `delete_removes_the_file_and_its_branches` — the file and every branch are gone.
 - `delete_does_not_touch_a_fork` — a fork survives a delete of its parent.
@@ -502,11 +669,17 @@ Redaction, the security core:
   a masked value, and the raw value never appears in the file.
 - `a_redacted_tool_argument_is_masked_on_the_way_in` — `record_prompt` and `observe`
   redact arguments through `rho-redact` before the record is written.
+- `redact_json_secrets_masks_a_secret_keyed_field` — `rho_redact::redact_json_secrets`
+  masks the value under a key that `looks_like_a_secret` flags, and keeps every other
+  value, every key name, and the tree shape. This test guards the new function in
+  section 5a.
 
 Pi import:
-- `imports_a_pi_text_message` — a pi text message maps to a rho `Text` block.
-- `imports_a_pi_tool_call` — a pi `toolCall` maps to a rho `ToolCall`.
-- `keeps_the_pi_parent_pointer` — the imported record keeps the pi `parentId`.
+- `every_pi_record_maps_one_to_one_or_drops_from_the_known_set` — the invariant over any
+  pi file: every pi record maps one to one to a rho record, only the known set
+  (`thinking_level_change`, `session_info`, `custom`) drops, and the tree shape survives
+  because every kept record keeps its `parentId`. This one property replaces the three
+  example tests for a text message, a tool call, and a kept parent pointer.
 - `drops_a_pi_thinking_level_change` — a `thinking_level_change` is not imported.
 - `leaves_the_original_pi_file_unchanged` — the pi file is byte-identical after import.
 

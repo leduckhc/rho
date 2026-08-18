@@ -1167,3 +1167,118 @@ for every build. A feature flag gives each user the trade they want.
 **Rules out:** A claim that rho is fast because of a JSON crate. A codec-specific
 attribute on a record type. A borrowed parse that ties a record to a read buffer. A
 single measurement as proof, because the bench reports two corpora and both matter.
+
+## D-051 — The approval default is Ask where answerable, read-only where not
+
+**Question (T1b architect):** what approval mode does rho use when the user states
+none, and how is it resolved per frontend?
+
+**Decision:** The owner chose an interactive Ask policy. rho defaults to `ask`
+wherever a human or a client can answer, and to `read-only` where nobody can answer.
+Allow-all is never a default. The resolution table in `SPEC-16` section 4 binds each
+case: an interactive TUI, `rho run` with a terminal, and `rho acp` with a capable
+client resolve to Ask; `rho run` with no terminal and `rho acp` with an incapable
+client resolve to read-only; a subagent child composes the parent policy.
+
+**Reason:** allow-all as a default is the fail-open shape that decisions D-012 and
+D-017 removed elsewhere. A human or a capable client can approve a mutating call, so
+Ask is safe and useful there. Nobody can approve a headless call, so read-only is the
+only safe default there.
+
+**Rules out:** allow-all as any resolved default. A single global default that
+ignores the frontend. Asking a client that never declared the capability.
+
+## D-052 — The Ask policy asks a frontend over a channel and fails closed
+
+**Question (T1b architect):** what is the public shape of the interactive policy, and
+what does it do when no answer arrives?
+
+**Decision:** `AskPolicy` implements the existing `ApprovalPolicy` trait, so it changes
+no caller. It holds an `mpsc::Sender<ApprovalRequest>` to the frontend and a `Duration`
+timeout. It sends an `ApprovalRequest` for a mutating kind and awaits an
+`ApprovalAnswer` on a `oneshot`. A read-only kind is allowed without a question. A
+timeout, a closed channel, and a dropped answer sender are each a denial. A denial
+reaches the model as a tool error and never ends the run. See `SPEC-16`.
+
+**Reason:** the trait must not change, because existing callers depend on it. A
+channel keeps the policy free of any UI type, so the TUI and the ACP frontend both use
+it. Fail-closed matches the project rule that an uncertain boundary denies.
+
+**Rules out:** a change to the `ApprovalPolicy` trait. A UI dependency inside
+`rho-core`. A timeout or a closed channel that reads as an allow. A denial that ends
+the run.
+
+## D-053 — A resume must not widen a permission
+
+**Question (T1b architect):** what stops a read-only session resuming under a wider
+mode when the live config changed?
+
+**Decision:** The session header record carries the resolved `approval` and `sandbox`
+mode names. A resume reads them and refuses a mode more permissive than the header
+names, unless the user passes `--allow-widen`. The `approval` order is `read-only`,
+`ask`, `allow-all`. The `sandbox` order is `strict`, `confined`, `off`. See `SPEC-14`
+section 8a and `ADR-004`.
+
+**Reason:** a session created read-only must not silently gain write access on a
+resume. The header is the only record that outlives the run, so the modes belong
+there. The comparison uses stored mode names, which form a total order, so it does not
+need the trait comparison that `SPEC-11` proved impossible.
+
+**Rules out:** a resume that reads the modes from the live config. A silent widen with
+no flag. Storing an `ApprovalPolicy` object in the record.
+
+## D-054 — Session redaction uses one new function in rho-redact
+
+**Question (T1b architect):** how does a credential-shaped tool argument stay out of
+the session file, given the function does not exist?
+
+**Decision:** Add `rho_redact::redact_json_secrets(&serde_json::Value) ->
+serde_json::Value` to `rho-redact`. It masks a value under a key that
+`looks_like_a_secret` flags, keeps every other value and key and the tree shape, and
+reads a key name only. It is new work for stage T5. No session record may be written
+before it exists. `rho-redact` stays the one home for redaction, per D-026.
+
+**Reason:** `SPEC-14` section 5 and decision D-043 both depend on this function, and a
+reviewer proved the call fails with `E0425` today. This is the same family as
+`confine`, left `todo!()` through a green stage, so the surface is named and gated.
+
+**Rules out:** a second redaction implementation outside `rho-redact`. Writing a raw
+tool argument to disk and filtering it later. Building the session writer before the
+function lands.
+
+## D-055 — The session reader caps one line
+
+**Question (T1b architect):** what stops a corrupt or hostile file with a
+multi-megabyte line from exhausting memory on a read?
+
+**Decision:** `SessionReader::read` and `SessionStore::list` cap one line at
+`MAX_LINE_BYTES`, which is 8 MiB. A line that reaches the cap is a
+`SessionError::Decode`, never an unbounded allocation. The read cap is larger than the
+64 KB write cap, so a file rho wrote always loads, and a foreign file loads unless one
+line is pathological. See `SPEC-14` section 6a.
+
+**Reason:** the 64 KB write cap bounds what rho writes, not what it reads, and a reader
+must survive a file it did not write. Defect 7 already shipped this shape: an unbounded
+`bash` reader turned 8 MB into 805 MB. See D-016.
+
+**Rules out:** an unbounded read buffer. Trusting the write cap to protect the read
+path. Rejecting an honest file that a foreign tool wrote.
+
+## D-056 — A remembered allow never covers a tool that runs a program
+**Question (controller, T1b review):** `SPEC-16` scopes a remembered allow to the tool
+name. What does that mean for `bash`?
+
+**Decision:** `AskPolicy` refuses to remember an allow for `ToolKind::Execute`. It treats
+an `AllowAlways` answer for that kind as `AllowOnce`, and it reports the change on the
+event stream. A `RejectAlways` answer is remembered for every kind. A user who wants
+every command approved must set `approval = allow-all` on purpose.
+
+**Reason:** A remembered allow keyed by the tool name is safe for `read` and for `write`,
+because the path is still confined. It is not safe for `bash`, because one allow would
+cover every later command in the session. A user who approves `git log` would approve a
+later `rm -rf`. That is one click between a prompt and blanket command approval, and it
+is the `ToolKind::Other` fail-open family from decision D-017 in a new place.
+
+**Rules out:** A remembered allow for any kind that runs a program. A memory keyed by the
+command string, because a shell string has too many equivalent spellings to compare
+safely. A silent degrade: the policy must report that the answer became one call only.

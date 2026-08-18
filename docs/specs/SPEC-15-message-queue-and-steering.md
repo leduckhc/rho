@@ -165,10 +165,15 @@ pattern, where new variants did not break an existing consumer.
 - `clear_drops_every_queued_message` — `clear` empties the queue.
 - `a_delivered_message_appends_a_new_turn` — a drained message adds a user message and
   edits no earlier turn.
-- `message_queued_event_reports_the_position` — a `push` during a run emits
-  `MessageQueued` with the right position.
-- `message_delivered_event_reports_the_count` — a drain emits `MessageDelivered` with
-  the count.
+- `the_reported_position_equals_the_queue_length_at_push` — for any sequence of pushes
+  during a run, each `MessageQueued` position equals the queue length at that push. The
+  invariant, not one example.
+- `the_delivered_count_equals_the_drained_count` — for any sequence, each
+  `MessageDelivered` count equals the number of messages the drain removed.
+- `with_capacity_sets_the_stated_cap` — `MessageQueue::with_capacity` rejects the push
+  past its stated cap, not the default cap.
+- `len_and_is_empty_track_the_queue` — `len` equals the number of queued messages, and
+  `is_empty` is true exactly when `len` is zero, across a push and a drain.
 
 Every test uses a scripted fake provider. No test uses the network. No test uses
 `sleep`. A test synchronises with a channel or a `Notify`.

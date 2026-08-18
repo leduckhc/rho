@@ -102,7 +102,8 @@ ACP backend.
 | T0 | 1 | controller | pass | Doc audit against the code. Nine feature rows were wrong. MCP had no rows at all. |
 | T1 | 1 | architect | partial | SPEC-13, SPEC-14, SPEC-15, and ADR-004. Session ops and steering added mid-flight by the owner. |
 | T1 | 2 | reviewer | fail | Three blockers and five majors. Every one is a repeat of a sprint-1 defect family. |
-| T1b | 1 | architect | running | Fixes the eight findings, and specs the Ask approval policy the owner chose. |
+| T1b | 1 | architect | pass | Eight findings fixed. SPEC-16 written. Five decisions, D-051 to D-055. |
+| T1b | 2 | controller | pass | Controller found one more fail-open: a remembered allow would have covered every `bash` call. |
 
 ### The T1 review, and why it failed
 

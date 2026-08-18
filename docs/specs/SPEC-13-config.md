@@ -48,6 +48,34 @@ A profile is not a seventh source. It is a named block inside a file. The merge 
 the profile after both files, so a profile value beats a plain file value. A flag still
 beats a profile.
 
+### The environment is one layer, and clap does not read it too
+
+`crates/rho-cli/src/cli.rs` binds `RHO_PROVIDER`, `RHO_MODEL`, and `RHO_LOG` with clap
+`env =`, so today those variables also arrive as flag values. That counts one variable in
+two layers with two precedences, which contradicts the single merge order above.
+
+**The single source of truth is the environment layer.** The CLI drops clap `env =` for
+`RHO_PROVIDER`, `RHO_MODEL`, and `RHO_LOG`. Section 2 layer 5 reads every `RHO_*`
+variable, and the flags layer reads only a real command-line flag. So a variable counts
+in exactly one layer.
+
+Migration: the CLI keeps the `--provider`, `--model`, and `--log` flags, and removes the
+`env = ...` attribute from each. The CLI collects the `RHO_*` variables into `Sources.env`
+instead, and `ConfigLayer::from_env` turns them into the environment layer. The user sees
+the same behaviour, because a flag still beats a variable, but the precedence now lives in
+one place.
+
+### A flag is set only when the user passes it
+
+Every flag in the flags layer is optional. The flag layer sets a key only when the user
+passes the flag. `crates/rho-cli/src/cli.rs` today holds `--read-only` as a plain `bool`,
+so it has no unset state. Folded into the top layer, a `false` from a flag the user never
+passed silently overrides a stricter file value.
+
+So `Cli.read_only` becomes an `Option<bool>`. The flag layer sets `approval` only when
+`read_only` is `Some(true)`. When the user passes no `--read-only` flag, the flags layer
+leaves `approval` unset, and a stricter file value survives.
+
 ## 3. The public API
 
 ```rust
@@ -119,6 +147,9 @@ pub enum ApprovalMode {
     AllowAll,
     /// Deny every mutating tool call. It maps to `rho_core::ReadOnlyPolicy`.
     ReadOnly,
+    /// Ask a frontend before a mutating tool call. It maps to the interactive
+    /// `AskPolicy` in `SPEC-16`.
+    Ask,
 }
 
 impl std::str::FromStr for ApprovalMode {
@@ -248,6 +279,15 @@ The `sandbox` value parses through `SandboxMode::from_str`, which exists today. 
 `approval` value parses through the new `ApprovalMode::from_str`. Both fail closed on
 an unknown name, and the message names the valid set.
 
+**The defaults for the two security keys are stated, not left implicit.** `Config::defaults`
+leaves `approval` unset, because the resolved default is not one static value. It comes
+from the mode resolution in `SPEC-16`: rho defaults to `ask` where a human or a client
+can answer, and to `read-only` where nobody can answer. A config `approval` value narrows
+that resolved default, and widens it only when the user states it. The `sandbox` default
+is `off`, which matches `SandboxMode::default` and the CLI flag default, per decision
+D-031. A sandbox that breaks a build is worse than none, so `off` is the stated default
+rather than a hidden one.
+
 An inline MCP server table is out of scope. It would pull `rho-mcp` into `rho-config`,
 which adds a runtime dependency to a config crate. So `mcp-config` names the existing
 server file instead. See section 9.
@@ -333,6 +373,8 @@ Files:
   `ConfigError::Read`.
 - `a_broken_approval_key_stops_the_run` — a bad `approval` value is an error, and the
   run never falls back to `allow-all`.
+- `a_broken_sandbox_key_stops_the_run` — a bad `sandbox` value is an error, and the run
+  never falls back to a weaker mode. The security key gets the same guard as `approval`.
 
 Profiles:
 - `a_named_profile_overrides_the_base_keys` — the profile's keys win.
@@ -353,8 +395,32 @@ Redaction, the security core:
 - `a_resolved_credential_never_reaches_a_log` — a resolution at `trace` level writes no
   credential to the subscriber.
 
-Every test uses `tempfile` for a file. Every test passes an in-memory `EnvLookup`. No
-test reads the real `~/.config/rho`, the real `~/.rho`, or the real environment.
+Defaults, layers, and parsing:
+- `config_defaults_sets_the_stated_defaults` — `Config::defaults` leaves `approval`
+  unset and sets `sandbox` to `off`, per section 4.
+- `from_env_builds_a_layer_from_rho_variables` — `ConfigLayer::from_env` maps
+  `RHO_MODEL` and `RHO_PROVIDER` into a layer, and reads no variable twice.
+- `load_merges_and_resolves_end_to_end` — `Config::load` reads the files, applies the
+  profile, the environment, and the flags, and resolves the credentials in one call.
+- `approval_mode_parses_each_name_and_fails_closed` — `ApprovalMode::from_str` parses
+  `read-only`, `ask`, and `allow-all`, and returns an error that names the valid set on
+  an unknown name.
+- `a_sandbox_key_parses_through_sandbox_mode` — a `sandbox` value parses through
+  `SandboxMode::from_str`, so the config and the core share one parser.
+- `system_env_reads_the_real_environment` — `SystemEnv` reads a variable the test set on
+  the real process, so the production `EnvLookup` is proved.
+- `the_environment_is_read_in_one_layer_only` — `RHO_MODEL` set with no `--model` flag
+  reaches the config through the environment layer, and a `--model` flag beats it. The
+  variable is not double-counted as a flag. This pins the precedence for the section 2
+  fix.
+- `an_unset_read_only_flag_does_not_override_a_file_approval` — a run with a file
+  `approval` of `read-only` and no `--read-only` flag keeps `read-only`, because the
+  flag layer sets `approval` only when the user passes the flag.
+
+Every test uses `tempfile` for a file. Every test passes an in-memory `EnvLookup`, with
+one exception: `system_env_reads_the_real_environment` sets a unique variable it owns and
+reads it back, so its result does not change per machine. No test reads the real
+`~/.config/rho` or the real `~/.rho`.
 
 ## 8. Out of scope for sprint 2
 
