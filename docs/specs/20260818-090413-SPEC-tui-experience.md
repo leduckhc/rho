@@ -352,14 +352,26 @@ zero. Every number here is a rule a test can pin.
 | Paste collapsing | 0 | 0 | the held paste text, N bytes per paste |
 | Attachments | 1 chip row per attachment | 0 | the image size, per attachment |
 | Concise mode | 0, it removes rows | 0 | one byte per tool row, the fold flag |
-| Motion | 0 | 0 | 8 bytes, the tick count |
+| Motion | 0 | 0 when the renderer writes cells, 1 when it calls `sweep_frame` | 8 bytes, the tick count |
 | Shortcuts and help | 0 in the resting UI | 0 | 0, the binding table is static |
 | Theme | 0 | 0 | 0 |
 | Guide | 0 in the resting UI | 0 | 0 |
 
-Motion holds to zero allocations per frame. It writes styles into cells that already
-exist. It never allocates a string per character. That is the codex defect this spec
-refuses.
+**Measured, and one row was wrong.** Stage U5 measured this table rather than trusting
+it. See `docs/benchmarks.md`.
+
+Motion never allocates a string per character, which is the codex defect this spec
+refuses, and the eight bytes hold. But `sweep_frame` returns a `Vec`, so it costs one
+allocation per call, not zero. The zero is reachable only when the renderer writes
+styles into cells that already exist, instead of calling `sweep_frame` and reading the
+result. So the row now states both numbers, and the zero is a target for the wiring
+stage rather than a claim about today.
+
+The measured baseline for the whole renderer is **300 allocations and 15406 bytes per
+frame**, on the minimal renderer that shipped in `SPEC-tui`. That is the number the wired
+renderer must beat, and it is the number a later claim of a zero-allocation frame must
+argue against. A budget that is asserted is prose. A budget that is measured is a
+constraint.
 
 ## Test cases
 

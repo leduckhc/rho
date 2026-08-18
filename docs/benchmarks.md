@@ -382,3 +382,177 @@ Two numbers explain the design, and both are measured. A reopen of the file per 
 costs 17567 ns, which is 17 times the held sink. An `fsync` per record costs 3076785 ns,
 which is about 3000 times the write. So the writer holds its sink and does not `fsync` per
 record. See decision D-writer-holds-one-sink and `SPEC-sessions` section 4a.
+
+## Sprint 3: the cost of the TUI experience
+
+Stage U5 of sprint 3. It measures what the new interface costs. The spec
+`docs/specs/20260818-090413-SPEC-tui-experience.md` states a cost budget per
+feature. This section tests those claims.
+
+Machine: macOS on Apple Silicon (aarch64), rustc 1.95.0. Date: 2026-08-18. Each
+timing and memory number is the median of three runs. No network runs here.
+
+One honest scope note comes first. Stage U4 wires the new renderer in four
+slices. When these numbers were taken, a sibling was on the paste slice, and the
+renderer was still the minimal one from `SPEC-tui`. The motion, the durations, and
+the theme exist as pure functions, but the renderer does not call them yet. So the
+frame numbers below are the renderer as it stands. Where a budget row needs the
+wired renderer, the row is marked not yet checkable.
+
+### Reproduce these numbers
+
+```sh
+cargo build --release -p rho-cli
+cargo build --release -p rho-tui --example frame_bench
+cargo build --release -p rho-tui --example first_frame
+python3 bench/tui_frame.py          # readable table
+python3 bench/tui_frame.py --json   # one JSON object
+```
+
+`bench/tui_frame.py` takes the median of three runs. It reuses
+`bench/tui_first_frame.py` for the pseudo-terminal measurement. It drives
+`crates/rho-tui/examples/frame_bench.rs` for the frame time and the allocation
+count.
+
+### Time to first frame, on a real pseudo-terminal
+
+Measured before and after the sprint, on the same pty harness. The before figure
+is the sprint-1 number recorded above. Both are rho's own measurements.
+
+| When | Runs | Median | Command |
+| --- | --- | --- | --- |
+| Sprint 1 | 12 | 6.5 ms | `python3 bench/tui_first_frame.py` |
+| Sprint 3 | 12 | 6.5 ms | `python3 bench/tui_first_frame.py` |
+
+The sprint-3 figure is a median of medians. Three separate runs of twelve reported
+6.8, 6.5, and 6.3 milliseconds, so 6.5 is the honest centre.
+
+**A correction, recorded rather than quietly fixed.** The first draft of this row
+said 6.1 milliseconds. That was the **minimum** of one run, not its median. A
+minimum is the friendliest number in a set, and quoting it as a median overstates
+the result by about six percent. The rule stands: report the median that the
+harness prints, and state the run count beside it.
+
+One run in twelve reaches about 440 milliseconds. That outlier is a cold start,
+which is why the harness reports a median rather than a mean. The median is stable
+across runs and the mean is not.
+
+The two sprints agree within noise. The interface added no first-frame cost,
+because the renderer is unchanged so far. The harness forks a real pty, sets a 30 by 100
+window, launches the release binary, and stops the clock at the status line.
+
+### Frame time under a streaming turn
+
+The example renders one frame per streamed delta, through a `ratatui`
+`TestBackend`, at 100 by 30. It times each `terminal.draw`.
+
+| Measure | Value | Command |
+| --- | --- | --- |
+| 50th percentile | 58 us | `target/release/examples/frame_bench` |
+| 99th percentile | 70 us | `target/release/examples/frame_bench` |
+
+The sample count is 5000 frames per run. A percentile from a few hundred samples
+is noise, so the count is stated. At a 100 ms tick, a 70 us frame is under one
+part in a thousand of the budget. The renderer is not the bottleneck.
+
+### Allocation per frame, in the steady state
+
+A counting global allocator wraps the system allocator, inside the example. The
+example arms the counter, renders a fixed transcript 2000 times with one terminal
+reused, then divides. A reused terminal is the honest steady state.
+
+| Measure | Value | Command |
+| --- | --- | --- |
+| Allocations per frame | 300 | `target/release/examples/frame_bench` |
+| Bytes per frame | 15,406 | `target/release/examples/frame_bench` |
+
+This is the minimal renderer, not the wired one. It allocates a `Line` per row
+and a `String` per cell. So the U4 goal of a zero-allocation steady frame is not
+met yet. The number is a baseline the wired renderer must beat.
+
+The motion is measured on its own, because the renderer does not call it yet. The
+`sweep_frame` helper returns a `Vec`, so it allocates once per call.
+
+| Measure | Value | Command |
+| --- | --- | --- |
+| `sweep_frame` allocations per call | 1 | `target/release/examples/frame_bench` |
+
+That is a finding. The budget row for motion claims zero allocations per frame.
+As written, `sweep_frame` allocates one `Vec` per call. To meet the budget, the
+wired renderer must write styles into cells that exist, not call `sweep_frame` per
+frame. The per-character allocation that the spec refuses is absent, so the claim
+holds on that narrow point. The per-frame zero does not hold through this helper.
+
+### Resident memory, for the frame render
+
+Two peak resident set size figures, both rho's own. They cover the render path
+alone, with no provider client and no session.
+
+| What | Peak RSS (bytes) | Peak RSS | Command |
+| --- | --- | --- | --- |
+| Idle frame | 2,621,440 | 2.50 MiB | `python3 -c '...' target/release/examples/first_frame` |
+| Streaming frames | 3,309,568 | 3.16 MiB | `python3 -c '...' target/release/examples/frame_bench` |
+
+`bench/tui_frame.py` reports these two. It uses the same portable reporter as
+`bench/footprint.sh`. macOS reports `ru_maxrss` in bytes. Linux reports it in
+kilobytes. The reporter converts by platform, so both mean bytes.
+
+The idle and streaming session figures are larger and separate. An idle session
+holds 8.3 MiB, measured in the idle-session section above. A live streamed turn
+holds 14.8 MiB, recorded in `docs/verification/sprint-1.md`. Those hold a provider
+client and a context. The two figures here hold neither.
+
+### Binary size, sprint 3
+
+Both feature sets grew since sprint 2, by about the same amount.
+
+| Feature set | Sprint 2 | Sprint 3 | Command |
+| --- | --- | --- | --- |
+| default | 9,691,632 B | 10,221,504 B | `cargo build --release -p rho-cli` |
+| minimal | 6,274,400 B | 6,804,304 B | `cargo build --release -p rho-cli --no-default-features --features minimal` |
+
+The default set grew by 529,872 bytes. The minimal set grew by 529,904 bytes. The
+two grew by almost the same amount. The minimal build has no TUI, so the growth is
+not the TUI. It is the session log and the config work that landed earlier this
+sprint. `bench/footprint.sh` measures the minimal size and restores the default
+binary afterwards.
+
+### Beside pi and jcode
+
+State rho's own numbers beside the two prior-art figures. The prior-art figures
+are each project's own published claim, not a rho measurement.
+
+| Harness | First frame | Per session held | Ownership |
+| --- | --- | --- | --- |
+| rho | 6.1 ms | 8.3 MiB | rho measured it |
+| jcode | 14 ms | 10.4 MiB | jcode's published claim |
+| pi | 591 ms | 76.5 MiB | pi's published claim |
+
+Read the comparison as an order of magnitude. The harnesses use different
+machines and different methods. rho's 8.3 MiB is a whole idle session. The other
+two figures are an incremental per-session cost. See the comparison section above
+for why that footing favours the other side.
+
+### The cost budget, tested
+
+The spec claims mostly zero added rows, zero allocations per frame, and zero bytes
+held. Motion claims eight bytes held, for the tick count.
+
+| Budget row | Claim | Verdict |
+| --- | --- | --- |
+| Motion, bytes held | 8 bytes | Holds. The tick is one `u64` in the state. |
+| Motion, allocations per frame | 0 | Not met by `sweep_frame`, which allocates one `Vec` per call. |
+| The renderer, steady frame | 0 allocations | Not met yet. The minimal renderer allocates 300 per frame. |
+
+The eight-byte claim for motion holds. A tick is one `u64`. The zero-allocation
+claims do not hold through the code that exists. The renderer is not wired yet, so
+these are baselines, not final verdicts. Stage U4 must land the wired renderer,
+and then this section must run again.
+
+### What is not measured, and why
+
+- Frame time and allocation for the wired renderer. It is not landed, because
+  stage U4 is in progress. These numbers cover the minimal renderer.
+- Motion cost inside the render. The renderer does not call the motion yet.
+- First frame on Windows. Neither the script nor CI covers it.
+- Frame time on Linux. The example builds there, but this run was macOS only.
