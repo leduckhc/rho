@@ -22,3 +22,10 @@ built, tested, and reachable by nothing. That is the defect class in
 **Rules out:** A spec that ships scrolling with no copy. Fuzzy palette filtering, `@`
 mentions, and `!` shell mode, which belong to S4. Queued messages, folds, and the approval
 gate, which belong to S5. A vim mode, per `D-vim-mode-waits`.
+
+---
+
+**Amended on 2026-08-18.** The three stages stand, and their content changed. S1 is now
+the inline band and freezing a row upward, not an in-app scroll. S2 shrinks to two rules:
+mouse capture stays off, and the draft opens in `$EDITOR`. S3 is unchanged. The spec is
+`SPEC-tui-inline-and-composer`, and `SPEC-tui-scroll-copy-composer` is superseded.

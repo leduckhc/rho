@@ -17,3 +17,11 @@ key that returns to the latest row.
 
 **Rules out:** A rail that always draws. Arrow heads. A rail wider than one column. A rail
 inside the composer box or the footer. A banner that stays while the view follows.
+
+---
+
+**Superseded on 2026-08-18 by `D-inline-viewport-not-alternate-screen`.**
+
+rho draws no scroll rail, because rho no longer scrolls the transcript. The terminal holds
+it, so the terminal's own scroll position is the only one. A rail would describe a window
+that does not exist.

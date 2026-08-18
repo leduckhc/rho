@@ -20,3 +20,11 @@ A derived answer also makes the invariant testable as a pairing, which step 12 o
 
 **Rules out:** A `follow: bool` field. A `sticky_bottom` flag. Any code that sets follow
 without moving the position. A reducer that resets the position when a row arrives.
+
+---
+
+**Superseded on 2026-08-18 by `D-inline-viewport-not-alternate-screen`.**
+
+`TuiState` holds no scroll position at all now, so there is nothing to derive. The rule the
+decision defended still stands as a habit: one fact lives in one field, and a second field
+that can disagree is a defect.

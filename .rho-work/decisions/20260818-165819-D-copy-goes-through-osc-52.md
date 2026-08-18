@@ -20,3 +20,11 @@ runs. A copy therefore starts no process.
 
 **Rules out:** `arboard`, `copypasta`, or any clipboard crate in `rho-tui`. A shell out to
 `pbcopy` or `xclip`. A copy performed inside the key handler, because the handler does no IO.
+
+---
+
+**Superseded on 2026-08-18 by `D-inline-viewport-not-alternate-screen`.**
+
+The transcript is ordinary terminal output now, so a drag selects it and the terminal
+copies it. rho needs no clipboard path, and it writes no OSC 52 sequence. The ban on a
+clipboard crate in `rho-tui` stands, and it is now free.

@@ -1,5 +1,19 @@
 # SPEC-tui-scroll-copy-composer — The transcript scrolls, the user copies, and the composer is real
 
+Status: **superseded on 2026-08-18 by `SPEC-tui-inline-and-composer`.** Read that spec
+instead. This one stays because its commit message and this note explain why.
+
+Its premise is false. It assumed rho must keep the alternate screen, so it specified an
+in-app scroll, a scroll rail, a keyboard selection, and an OSC 52 copy. A spike proved that
+`Viewport::Inline` plus `Terminal::insert_before` give a pinned composer and leave the
+transcript in the terminal's own scrollback. See
+`docs/verification/inline-viewport-spike.md` and
+`D-inline-viewport-not-alternate-screen`. The terminal then scrolls, selects, and searches,
+so sections 2 and 4 below describe work rho must not do.
+
+Sections 3, 5, and 6 survive in the new spec: the mouse stays uncaptured, the composer gets
+a cursor, and the editor never reaches a shell.
+
 Status: draft. Sprint 4, stages S1 to S3.
 Owning crate: `rho-tui`. Consumed by `rho-cli` and `rho-config`.
 
@@ -10,8 +24,10 @@ composer in the running product is a `String`.
 The scope is the three stages of `D-first-tui-spec-covers-three-stages`. S1 is scrolling and
 the follow rule. S2 is copy and the mouse. S3 wires the `Composer` that already exists.
 
-Features covered: F-transcript-scroll, F-scroll-rail, F-optional-mouse, F-keyboard-copy,
-F-scrollback-dump, F-composer-editing, F-draft-history, and F-external-editor.
+Features covered, before this spec was superseded: F-optional-mouse, F-composer-editing,
+F-draft-history, and F-external-editor. Four feature rows died with the premise. They named
+an in-app scroll, a scroll rail, a keyboard copy, and a scrollback dump. F-inline-band and
+F-freeze-upward replace them, because the terminal now does that work.
 
 ## 0. The rules this spec obeys
 
