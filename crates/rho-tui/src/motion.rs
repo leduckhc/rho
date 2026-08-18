@@ -8,12 +8,35 @@
 /// The sweep period, in ticks. Each tick is 100 milliseconds, so the period is 2 s.
 pub const SWEEP_PERIOD_TICKS: u64 = 20;
 
+/// The band half width, in columns. The raised cosine reaches zero at this distance,
+/// so the band footprint spans at most eleven columns: five each side, plus the peak.
+const BAND_HALF_WIDTH: f32 = 5.0;
+
+/// The columns that pad the lead-in, so the band enters from off the word. The band
+/// starts this far left of column zero and sweeps right, leaving cleanly to the right.
+const LEAD_IN_PADDING: f32 = 10.0;
+
+/// The columns the band centre advances each tick. Two columns per tick carries the
+/// centre from the left padding, across the word, and out to the right before the wrap,
+/// so the frame is plain at the wrap and the sweep is continuous across it.
+const COLUMNS_PER_TICK: f32 = 2.0;
+
 /// The raised-cosine weight of one column at one tick, from 0.0 to 1.0.
 ///
-/// The frame is a pure function of `tick`, so a test asserts a frame by its tick.
-/// The band half width is five columns, with ten columns of padding at each end.
-pub fn sweep_weight(_tick: u64, _column: usize) -> f32 {
-    todo!("sweep_weight is unimplemented in the red stage")
+/// The frame is a pure function of `tick`, so a test asserts a frame by its tick. The
+/// weight reads `tick % SWEEP_PERIOD_TICKS`, so `tick` and `tick + 20` are identical
+/// and the sweep returns to its start after one period. No clock is read here: the
+/// tick is the only time source. The band half width is five columns, with ten columns
+/// of padding on the lead-in so the band enters and leaves cleanly.
+pub fn sweep_weight(tick: u64, column: usize) -> f32 {
+    let phase = (tick % SWEEP_PERIOD_TICKS) as f32;
+    let center = phase * COLUMNS_PER_TICK - LEAD_IN_PADDING;
+    let distance = (column as f32 - center).abs();
+    if distance >= BAND_HALF_WIDTH {
+        0.0
+    } else {
+        0.5 * (1.0 + (std::f32::consts::PI * distance / BAND_HALF_WIDTH).cos())
+    }
 }
 
 /// The no-true-colour rendering of one swept cell, by weight.
@@ -24,9 +47,21 @@ pub enum MotionCell {
     Bold,
 }
 
-/// Map a sweep weight to its 256-colour or no-colour tier.
-pub fn motion_cell(_weight: f32) -> MotionCell {
-    todo!("motion_cell is unimplemented in the red stage")
+/// The weight below which a cell is dimmed, and at or below which it is plain. Above
+/// the plain ceiling the cell is bold. Three steps, matching the design's tiers.
+const DIM_CEILING: f32 = 0.2;
+const PLAIN_CEILING: f32 = 0.6;
+
+/// Map a sweep weight to its 256-colour or no-colour tier. Below 0.2 the cell is dim,
+/// to 0.6 it is plain, above 0.6 it is bold. A pure function of the weight.
+pub fn motion_cell(weight: f32) -> MotionCell {
+    if weight < DIM_CEILING {
+        MotionCell::Dim
+    } else if weight <= PLAIN_CEILING {
+        MotionCell::Plain
+    } else {
+        MotionCell::Bold
+    }
 }
 
 /// The inputs that decide whether the sweep animates.
@@ -62,14 +97,24 @@ impl MotionInputs {
 }
 
 /// True when the sweep animates. False under any one stop condition.
-pub fn motion_enabled(_inputs: &MotionInputs) -> bool {
-    todo!("motion_enabled is unimplemented in the red stage")
+pub fn motion_enabled(inputs: &MotionInputs) -> bool {
+    inputs.tui_motion
+        && !inputs.no_motion_flag
+        && inputs.stdout_is_terminal
+        && !inputs.reduce_motion_setting
+        && !inputs.reduce_motion_env
 }
 
 /// The rendered cells of the working word at one tick.
 ///
 /// One `MotionCell` per column of `word`. When motion is off, every cell is
 /// `Plain`, at every tick, so the word renders as a still, plain frame.
-pub fn sweep_frame(_word: &str, _tick: u64, _inputs: &MotionInputs) -> Vec<MotionCell> {
-    todo!("sweep_frame is unimplemented in the red stage")
+pub fn sweep_frame(word: &str, tick: u64, inputs: &MotionInputs) -> Vec<MotionCell> {
+    let columns = word.chars().count();
+    if !motion_enabled(inputs) {
+        return vec![MotionCell::Plain; columns];
+    }
+    (0..columns)
+        .map(|column| motion_cell(sweep_weight(tick, column)))
+        .collect()
 }

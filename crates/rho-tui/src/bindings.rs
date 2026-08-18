@@ -13,14 +13,48 @@ pub struct Binding {
     pub summary: &'static str,
 }
 
-/// The whole binding table.
+/// The whole binding table. The single source of truth for the help screen.
 pub fn bindings() -> &'static [Binding] {
-    todo!("bindings is unimplemented in the red stage")
+    const TABLE: &[Binding] = &[
+        Binding {
+            keys: "enter",
+            summary: "send the draft",
+        },
+        Binding {
+            keys: "alt+enter",
+            summary: "insert a newline",
+        },
+        Binding {
+            keys: "ctrl-c",
+            summary: "cancel the turn · press twice while idle to quit",
+        },
+        Binding {
+            keys: "ctrl-o",
+            summary: "expand or collapse the newest tool row",
+        },
+        Binding {
+            keys: "ctrl-e",
+            summary: "expand everything · press again to collapse",
+        },
+        Binding {
+            keys: "↑ ↓",
+            summary: "move the selection while the draft is empty",
+        },
+        Binding {
+            keys: "esc",
+            summary: "close a panel or collapse a row",
+        },
+    ];
+    TABLE
 }
 
-/// The help rows, generated from the binding table, so the two cannot drift.
+/// The help rows, generated from the binding table, so the two cannot drift. Each row
+/// carries a binding's keys and its summary, so the help can never omit a binding.
 pub fn help_rows() -> Vec<String> {
-    todo!("help_rows is unimplemented in the red stage")
+    bindings()
+        .iter()
+        .map(|binding| format!("  {:<12} {}", binding.keys, binding.summary))
+        .collect()
 }
 
 /// One slash command shown in the slash list.
@@ -33,13 +67,38 @@ pub struct SlashCommand {
 
 /// The whole slash-command list, in display order.
 pub fn slash_commands() -> &'static [SlashCommand] {
-    todo!("slash_commands is unimplemented in the red stage")
+    const COMMANDS: &[SlashCommand] = &[
+        SlashCommand {
+            name: "/model",
+            summary: "pick the model for this session",
+        },
+        SlashCommand {
+            name: "/sessions",
+            summary: "list, resume, or branch a session",
+        },
+        SlashCommand {
+            name: "/guide",
+            summary: "the two minute tour",
+        },
+        SlashCommand {
+            name: "/help",
+            summary: "every key and every command",
+        },
+        SlashCommand {
+            name: "/quit",
+            summary: "leave rho",
+        },
+    ];
+    COMMANDS
 }
 
 /// The slash commands whose name starts with the typed query, so the list filters
 /// as the user types. The query carries its leading slash, for example `/g`.
-pub fn filter_slash_commands(_query: &str) -> Vec<&'static SlashCommand> {
-    todo!("filter_slash_commands is unimplemented in the red stage")
+pub fn filter_slash_commands(query: &str) -> Vec<&'static SlashCommand> {
+    slash_commands()
+        .iter()
+        .filter(|command| command.name.starts_with(query))
+        .collect()
 }
 
 /// What running a typed slash command does.
@@ -54,6 +113,12 @@ pub enum SlashOutcome {
 
 /// Resolve a typed slash command. An unknown command reports rather than doing
 /// nothing. The input carries its leading slash, for example `/nope`.
-pub fn run_slash_command(_input: &str) -> SlashOutcome {
-    todo!("run_slash_command is unimplemented in the red stage")
+pub fn run_slash_command(input: &str) -> SlashOutcome {
+    match slash_commands()
+        .iter()
+        .find(|command| command.name == input)
+    {
+        Some(command) => SlashOutcome::Run(command.name.to_string()),
+        None => SlashOutcome::Unknown(format!("unknown command: {input}")),
+    }
 }

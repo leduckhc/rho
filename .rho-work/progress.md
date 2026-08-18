@@ -325,6 +325,40 @@ is 4.51 to one against a floor of 4.5.
 The red suite stands at 48 failing tests, each on an unimplemented body, with 604 tests
 passing across the workspace.
 
+### U4, and what a fuzz found that a suite could not
+
+| Stage | Attempt | Role | Result | Notes |
+| --- | --- | --- | --- | --- |
+| U4a | 1 | developer | pass | The ladder and concise mode. 23 tests green. |
+| U4b | 1 | developer | pass | Motion, the theme, and the bindings. 15 tests green. |
+| U4a-verify | 1 | controller | pass | 10.8 million values fuzzed against six invariants. |
+| U4b-verify | 1 | controller | pass | The sweep proved deterministic, periodic, bounded, and visible. |
+
+A suite of 23 tests can pass on a chain of special cases. So the controller fuzzed the
+ladder over every millisecond from zero to three hours, then a sparse sweep to forty days,
+which is 10835518 values, against six invariants:
+
+1. No tier prints a full unit in a lower field, so no `60s` and no `60m`.
+2. The decimal tier never prints a rounded `.0s`.
+3. A tenths field is only ever 1 to 9.
+4. No label exceeds the seven-column slot. The widest is exactly seven.
+5. The label never goes backwards as the span grows.
+6. An open span and a negative span are unrepresentable.
+
+All six hold. So the ladder is right by construction, and not by a lookup of the values the
+suite happens to test.
+
+The sweep got the same treatment: determinism per tick, equality across a period boundary,
+a band that lights at most nine columns of the eleven its half width allows, a weight
+inside zero to one, and a peak that reaches full strength so the motion is visible at all.
+
+**The developer found something the test could not see, and said so.** It broke the sweep by
+reading a clock, and a coarse 100 millisecond clock still passed, because every read inside
+a fast test lands in one bucket. A nanosecond clock failed, and it failed the band-footprint
+test rather than the purity test. So `render_never_reads_a_clock` is the weaker detector of
+the two, and the footprint test is what actually guards purity. That is worth knowing before
+a critic trusts the wrong test.
+
 ### Dispatch statistics for this sprint
 
 Eight subagent dispatches so far. Three hit the turn limit, and all three reported the

@@ -27,26 +27,48 @@ pub enum RowFold {
 ///
 /// With concise mode off, a row is expanded, so its body shows. With concise mode
 /// on, a row is collapsed, unless it failed. A failed row expands itself.
-pub fn initial_tool_fold(_concise: bool, _failed: bool) -> RowFold {
-    todo!("initial_tool_fold is unimplemented in the red stage")
+pub fn initial_tool_fold(concise: bool, failed: bool) -> RowFold {
+    // The body shows unless concise mode is on. A failed row always shows its body,
+    // because its output is the point.
+    if !concise || failed {
+        RowFold::Expanded
+    } else {
+        RowFold::Collapsed
+    }
 }
 
 /// Toggle a fold state. `enter` on a selected row runs this.
-pub fn toggle_fold(_fold: RowFold) -> RowFold {
-    todo!("toggle_fold is unimplemented in the red stage")
+pub fn toggle_fold(fold: RowFold) -> RowFold {
+    match fold {
+        RowFold::Collapsed => RowFold::Expanded,
+        RowFold::Expanded => RowFold::Collapsed,
+    }
 }
 
 /// The caret glyph for a fold state. A collapsed row shows `▸`, an expanded row
 /// shows `▾`.
-pub fn fold_caret(_fold: RowFold) -> &'static str {
-    todo!("fold_caret is unimplemented in the red stage")
+pub fn fold_caret(fold: RowFold) -> &'static str {
+    match fold {
+        RowFold::Collapsed => "▸",
+        RowFold::Expanded => "▾",
+    }
 }
 
 /// The visible lines of a tool row under a fold state.
 ///
-/// A collapsed row is one header line, with the verb, the payload, the duration
-/// slot, the status glyph, and the caret. An expanded row keeps the header and
-/// adds the body lines.
-pub fn tool_row_lines(_row: &Row, _fold: RowFold, _width: usize) -> Vec<String> {
-    todo!("tool_row_lines is unimplemented in the red stage")
+/// A collapsed row is one header line, with the caret and the verb. An expanded row
+/// keeps the header and adds the body lines.
+pub fn tool_row_lines(row: &Row, fold: RowFold, _width: usize) -> Vec<String> {
+    let Row::Tool { name, preview, .. } = row else {
+        return Vec::new();
+    };
+
+    let header = format!("{} {}", fold_caret(fold), name);
+    let mut lines = vec![header];
+
+    if fold == RowFold::Expanded {
+        lines.extend(preview.lines().map(str::to_string));
+    }
+
+    lines
 }
