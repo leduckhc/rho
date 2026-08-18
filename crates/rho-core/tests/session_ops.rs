@@ -3,6 +3,8 @@
 //! Every test drives the public `session` surface. It must fail on an unimplemented
 //! body, never on a type error. It uses `tempfile`, no `sleep`, and no network.
 
+mod common;
+
 use std::fs;
 use std::path::Path;
 
@@ -32,15 +34,44 @@ fn message_record(text: &str) -> Record {
     }
 }
 
+/// True when the file holds a ToolCall with the given id. A decode failure panics,
+/// because a skipped line can hide the very record the pairing check needs.
+fn file_contains_tool_call(path: &Path, call_id: &str) -> bool {
+    let text = fs::read_to_string(path).expect("read file");
+    for line in text.lines().filter(|l| !l.is_empty()) {
+        let entry: rho_core::Entry = decode(line)
+            .unwrap_or_else(|e| panic!("a session line failed to decode: {e:?}: {line}"));
+        if let Record::Message { message } = entry.record {
+            for block in message.content {
+                if let ContentBlock::ToolCall { id, .. } = block
+                    && id == call_id
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// True when the message list holds a ToolCall with the given id.
+fn messages_contain_tool_call(messages: &[Message], call_id: &str) -> bool {
+    messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .any(|b| matches!(b, ContentBlock::ToolCall { id, .. } if id == call_id))
+}
+
 /// True when every ToolCall in the file has a matching ToolResult.
 fn file_pairing_is_complete(path: &Path) -> bool {
     let text = fs::read_to_string(path).expect("read file");
     let mut calls = std::collections::HashSet::new();
     let mut results = std::collections::HashSet::new();
     for line in text.lines().filter(|l| !l.is_empty()) {
-        let Ok(entry) = decode::<rho_core::Entry>(line) else {
-            continue;
-        };
+        // A skipped line can hide the missing pairing, so a decode failure must panic,
+        // never `continue`. See F2 and decision D-049.
+        let entry: rho_core::Entry = decode(line)
+            .unwrap_or_else(|e| panic!("a session line failed to decode: {e:?}: {line}"));
         if let Record::Message { message } = entry.record {
             for block in message.content {
                 match block {
@@ -66,6 +97,19 @@ fn ephemeral_mode_writes_no_file() {
     let mut log = SessionLog::Off;
     let id = log.record(message_record("x"), None);
     assert!(id.is_none(), "an off log writes nothing and returns no id");
+    // An off log holds no path, so a directory it never touches cannot prove anything.
+    // The contract that is observable: it stays ephemeral and returns no id for any
+    // record kind, including a record that names a parent.
+    assert!(log.is_ephemeral(), "an off log is ephemeral");
+    let again = log.record(message_record("y"), Some(RecordId("p".to_string())));
+    assert!(
+        again.is_none(),
+        "an off log returns no id for a later record either"
+    );
+    assert!(
+        log.is_ephemeral(),
+        "an off log is still ephemeral after a second record"
+    );
     let entries: Vec<_> = fs::read_dir(dir.path()).expect("read dir").collect();
     assert!(entries.is_empty(), "Off creates no file in the directory");
 }
@@ -82,12 +126,20 @@ fn a_write_failure_degrades_to_ephemeral_with_a_warning() {
     let mut log = SessionLog::File(writer);
     // Make the underlying file unwritable by removing the directory out from under it.
     fs::remove_dir_all(dir.path()).ok();
-    let _ = log.record(message_record("first"), None);
-    // The run continues: a second record still returns without a panic.
-    let _ = log.record(message_record("second"), None);
+    // D-041 forbids a silent degrade, so the fallback must emit a warning. Capturing the
+    // subscriber makes the warning assertable, so a silent degrade fails this test.
+    let logs = common::capture_warnings(|| {
+        let _ = log.record(message_record("first"), None);
+        // The run continues: a second record still returns without a panic.
+        let _ = log.record(message_record("second"), None);
+    });
     assert!(
         log.is_ephemeral(),
         "a write failure degrades the log to ephemeral"
+    );
+    assert!(
+        !logs.trim().is_empty(),
+        "a write failure must emit a warning, never a silent degrade: log was empty"
     );
 }
 
@@ -224,6 +276,11 @@ fn cancel_leaves_no_half_written_tool_pairing() {
     });
     recorder.record_cancel();
     assert!(
+        file_contains_tool_call(&path, "call-1"),
+        "the open tool call must be on disk before the pairing check; a record_cancel \
+         that writes nothing would make the completeness check vacuously true"
+    );
+    assert!(
         file_pairing_is_complete(&path),
         "a cancel completes every open tool pairing on disk"
     );
@@ -248,6 +305,10 @@ fn cancel_leaves_no_half_written_tool_pairing() {
     let read = SessionReader::read(&crash).expect("read");
     let messages = branch_messages(&read.entries, &RecordId("m1".to_string()));
     assert!(
+        messages_contain_tool_call(&messages, "call-2"),
+        "the unmatched call must be present before the pairing check, or it is vacuous"
+    );
+    assert!(
         messages_pairing_is_complete(&messages),
         "a crash tail with an unmatched call rebuilds a matched pairing"
     );
@@ -266,6 +327,10 @@ fn cancel_leaves_no_half_written_tool_pairing() {
     fs::write(&trunc, format!("{header}\n{call}\n{half}")).expect("write trunc fixture");
     let read = SessionReader::read(&trunc).expect("read");
     let messages = branch_messages(&read.entries, &RecordId("m1".to_string()));
+    assert!(
+        messages_contain_tool_call(&messages, "call-2"),
+        "the unmatched call must be present before the pairing check, or it is vacuous"
+    );
     assert!(
         messages_pairing_is_complete(&messages),
         "a dropped result line rebuilds a matched pairing"
@@ -329,6 +394,14 @@ fn list_reads_only_the_first_line() {
     }
     let summaries = store.list().expect("list");
     assert_eq!(summaries.len(), 5, "list finds every session file");
+    let ids: std::collections::HashSet<String> =
+        summaries.iter().map(|s| s.session_id.clone()).collect();
+    for i in 0..5 {
+        assert!(
+            ids.contains(&format!("s{i}")),
+            "the summary carries the session id s{i}"
+        );
+    }
     for summary in &summaries {
         assert_eq!(
             summary.cwd,
@@ -336,6 +409,10 @@ fn list_reads_only_the_first_line() {
             "the summary comes from the header"
         );
         assert!(summary.size_bytes > 0, "the summary carries file metadata");
+        assert!(
+            summary.path.exists(),
+            "the summary path points at a real session file, not an empty default"
+        );
     }
 }
 

@@ -26,7 +26,13 @@ fn a_malformed_file_is_a_parse_error() {
     let dir = temp_dir();
     let path = write_file(&dir, "config.toml", "this is = = not toml");
     match Config::read_file(&path) {
-        Err(ConfigError::Parse { .. }) => {}
+        Err(err @ ConfigError::Parse { .. }) => {
+            // The message must name the file that failed, not report a generic parse.
+            assert!(
+                err.to_string().contains("config.toml"),
+                "the parse error must name the file that failed: {err}"
+            );
+        }
         other => panic!("malformed TOML must be a Parse error, got {other:?}"),
     }
 }
@@ -38,7 +44,14 @@ fn an_unknown_key_is_a_parse_error() {
     let dir = temp_dir();
     let path = write_file(&dir, "config.toml", "not-a-real-key = \"value\"\n");
     match Config::read_file(&path) {
-        Err(ConfigError::Parse { .. }) => {}
+        Err(err @ ConfigError::Parse { .. }) => {
+            // The message must name the offending key, so a typo is easy to fix and a
+            // generic error cannot pass a test about an unknown key.
+            assert!(
+                err.to_string().contains("not-a-real-key"),
+                "the parse error must name the unknown key: {err}"
+            );
+        }
         other => panic!("an unknown key must be a Parse error, got {other:?}"),
     }
 }
@@ -68,8 +81,20 @@ fn a_broken_approval_key_stops_the_run() {
     let path = write_file(&dir, "config.toml", "approval = \"bananas\"\n");
     let sources = sources_with_project_file(path);
     match Config::load(&sources) {
-        // The value is bad, so the error must name the parse, not something else.
-        Err(ConfigError::Parse { .. }) => {}
+        // The value is bad, so the error must name the parse, not something else. Per
+        // SPEC-13 section 6 the message names the key and the offending value, so a
+        // generic parse error cannot pass a test about a security key.
+        Err(err @ ConfigError::Parse { .. }) => {
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains("approval"),
+                "the parse error must name the approval key: {rendered}"
+            );
+            assert!(
+                rendered.contains("bananas"),
+                "the parse error must name the offending value: {rendered}"
+            );
+        }
         Err(other) => panic!("a broken approval key must be a Parse error, got {other:?}"),
         Ok(config) => panic!(
             "a broken approval key must stop the run, but it resolved to {:?}. \
@@ -87,8 +112,20 @@ fn a_broken_sandbox_key_stops_the_run() {
     let path = write_file(&dir, "config.toml", "sandbox = \"loose\"\n");
     let sources = sources_with_project_file(path);
     match Config::load(&sources) {
-        // The value is bad, so the error must name the parse, not something else.
-        Err(ConfigError::Parse { .. }) => {}
+        // The value is bad, so the error must name the parse, not something else. Per
+        // SPEC-13 section 6 the message names the key and the offending value, so a
+        // generic parse error cannot pass a test about a security key.
+        Err(err @ ConfigError::Parse { .. }) => {
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains("sandbox"),
+                "the parse error must name the sandbox key: {rendered}"
+            );
+            assert!(
+                rendered.contains("loose"),
+                "the parse error must name the offending value: {rendered}"
+            );
+        }
         Err(other) => panic!("a broken sandbox key must be a Parse error, got {other:?}"),
         Ok(config) => panic!(
             "a broken sandbox key must stop the run, but it resolved to {:?}. \

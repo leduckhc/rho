@@ -350,6 +350,8 @@ stages:
     dod:
       - Each sprint-2 defect has a test that pins the invariant, or a CI guard.
       - A guard was broken on purpose, and it tripped.
+      - CI runs the codec tests twice: with `fast-json` on, and with `fast-json` off.
+      - CI runs the minimal build, so an optional dependency cannot creep into it.
       - docs/benchmarks.md records the ACP memory number, and the command that produced it.
       - The benchmark table names the machine and the date for every number.
     gate:

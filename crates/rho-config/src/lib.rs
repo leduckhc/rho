@@ -145,7 +145,9 @@ pub struct Config {
     pub session_file: Option<PathBuf>,
     pub ephemeral: bool,
     pub sandbox: SandboxMode,
-    pub approval: ApprovalMode,
+    /// The approval mode the user stated, or `None` when the user stated none.
+    /// `None` means the frontend resolves the mode, per `SPEC-16` section 4.
+    pub approval: Option<ApprovalMode>,
     pub skill_paths: Vec<PathBuf>,
     pub discover_skills: bool,
     pub mcp_config: Option<PathBuf>,

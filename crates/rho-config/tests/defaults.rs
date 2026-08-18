@@ -169,7 +169,7 @@ fn an_unset_read_only_flag_does_not_override_a_file_approval() {
     let config = Config::load(&sources).expect("a valid approval value");
     assert_eq!(
         config.approval,
-        ApprovalMode::ReadOnly,
+        Some(ApprovalMode::ReadOnly),
         "an unset flag must not widen a stricter file approval"
     );
 }

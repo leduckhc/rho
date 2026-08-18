@@ -465,3 +465,42 @@ pub fn turn_ending_with(stop_reason: rho_core::StopReason) -> Vec<StreamEvent> {
         StreamEvent::Done { stop_reason },
     ]
 }
+
+// ---------------------------------------------------------------------------
+// Tracing capture, so a test can assert a warning was emitted rather than
+// silently degraded. See decisions D-041 and D-016.
+// ---------------------------------------------------------------------------
+
+/// A `tracing` writer that collects every emitted byte into a shared buffer.
+#[derive(Clone)]
+pub struct LogCapture(pub Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+    type Writer = LogCapture;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Run `f` under a subscriber that captures `WARN`-and-above output, and return the
+/// captured text. A silent degrade leaves this empty, so a test can fail on it.
+pub fn capture_warnings(f: impl FnOnce()) -> String {
+    let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let writer = LogCapture(Arc::clone(&buffer));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(writer)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    String::from_utf8(buffer.lock().unwrap().clone()).expect("utf8 log")
+}

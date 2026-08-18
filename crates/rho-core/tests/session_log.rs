@@ -8,8 +8,8 @@ use std::fs;
 use std::path::Path;
 
 use rho_core::{
-    AgentStopReason, ContentBlock, MAX_RECORD_BYTES, Message, Record, RecordId, Role, SessionStore,
-    Usage, decode, encode,
+    AgentStopReason, ContentBlock, MAX_RECORD_BYTES, Message, Record, RecordId, Role, SessionError,
+    SessionReader, SessionStore, Usage, decode, encode,
 };
 use tempfile::tempdir;
 
@@ -62,6 +62,31 @@ fn every_record_variant() -> Vec<Record> {
 fn line_count(path: &Path) -> usize {
     let text = fs::read_to_string(path).expect("read session file");
     text.lines().filter(|l| !l.is_empty()).count()
+}
+
+/// Every file under `dir`, walked recursively. Used to find a spilled sidecar.
+fn all_files_under(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir).expect("read dir") {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            out.extend(all_files_under(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// True when some file under `dir`, other than the session file, holds `needle`.
+/// This is how a test proves the full payload spilled to a sidecar. See D-044.
+fn a_sidecar_holds(dir: &Path, session_file: &Path, needle: &str) -> bool {
+    all_files_under(dir).into_iter().any(|path| {
+        path != session_file
+            && fs::read_to_string(&path)
+                .map(|content| content.contains(needle))
+                .unwrap_or(false)
+    })
 }
 
 // --- storage ---------------------------------------------------------------
@@ -155,7 +180,7 @@ fn no_written_record_of_any_kind_exceeds_the_cap() {
     // The invariant over every record kind. Feed each variant an oversize payload and
     // assert no written line exceeds MAX_RECORD_BYTES.
     let big = "A".repeat(4 * MAX_RECORD_BYTES);
-    let (_dir, store) = temp_store();
+    let (dir, store) = temp_store();
     let mut writer = store
         .create("s", Path::new("/work"), "read-only", "off")
         .expect("create");
@@ -193,7 +218,42 @@ fn no_written_record_of_any_kind_exceeds_the_cap() {
             "a written line {} exceeds the cap {MAX_RECORD_BYTES}",
             line.len()
         );
+        // A byte-truncating writer keeps the line short but corrupts it. So every capped
+        // line must still decode as an Entry, and the record kind must survive with
+        // valid content. See F4.
+        let entry: rho_core::Entry =
+            decode(line).expect("a capped line must still decode as an Entry");
+        match entry.record {
+            Record::Session { .. } => {}
+            Record::Message { message } => {
+                assert!(
+                    !message.content.is_empty(),
+                    "a capped message keeps a valid content block, never a corrupt line"
+                );
+                match &message.content[0] {
+                    ContentBlock::Text { .. } => {}
+                    ContentBlock::ToolCall { id, name, .. } => {
+                        assert!(!id.is_empty(), "a capped ToolCall keeps its id");
+                        assert!(!name.is_empty(), "a capped ToolCall keeps its name");
+                    }
+                    ContentBlock::ToolResult { tool_call_id, .. } => {
+                        assert!(
+                            !tool_call_id.is_empty(),
+                            "a capped ToolResult keeps its tool_call_id"
+                        );
+                    }
+                    other => panic!("unexpected content block in this fixture: {other:?}"),
+                }
+            }
+            other => panic!("unexpected record kind in this fixture: {other:?}"),
+        }
     }
+    // The three oversize payloads must have spilled their full bytes to a sidecar,
+    // rather than sit inline. See D-044.
+    assert!(
+        a_sidecar_holds(dir.path(), writer.path(), &big),
+        "the full oversize payload must spill to a sidecar under the session directory"
+    );
 }
 
 #[test]
@@ -201,7 +261,7 @@ fn an_oversize_record_of_every_kind_stays_under_the_cap() {
     // An oversize ToolResult, an oversize assistant Message, and an oversize ToolCall
     // each write under the cap, and the ToolCall stays a ToolCall with its tool_call_id.
     let big = "B".repeat(4 * MAX_RECORD_BYTES);
-    let (_dir, store) = temp_store();
+    let (dir, store) = temp_store();
     let mut writer = store
         .create("s", Path::new("/work"), "read-only", "off")
         .expect("create");
@@ -235,6 +295,13 @@ fn an_oversize_record_of_every_kind_stays_under_the_cap() {
     };
     assert_eq!(call_id, "call-1", "the ToolCall keeps its id");
     assert_eq!(name, "bash", "the ToolCall keeps its name");
+    // The full arguments must spill to a sidecar, never sit inline over the cap. The
+    // pairing invariant depends on the ToolCall staying a ToolCall, asserted above. See
+    // SPEC-14 section 3 and D-044.
+    assert!(
+        a_sidecar_holds(dir.path(), writer.path(), &big),
+        "the full ToolCall arguments must spill to a sidecar under the session directory"
+    );
 }
 
 #[test]
@@ -242,7 +309,7 @@ fn a_non_tool_result_record_over_the_cap_is_capped() {
     // An oversize assistant message text block is capped with a head and a note, the
     // same as a tool result. The written line fits the cap and stays a valid Message.
     let big = "C".repeat(4 * MAX_RECORD_BYTES);
-    let (_dir, store) = temp_store();
+    let (dir, store) = temp_store();
     let mut writer = store
         .create("s", Path::new("/work"), "read-only", "off")
         .expect("create");
@@ -258,17 +325,36 @@ fn a_non_tool_result_record_over_the_cap_is_capped() {
     let Record::Message { message } = entry.record else {
         panic!("a capped message stays a Message");
     };
+    let ContentBlock::Text { text: capped } = &message.content[0] else {
+        panic!("the head plus the note is a valid text block");
+    };
+    // The note must state the full byte count, so a reader knows the tail was dropped.
+    // A byte-truncating writer drops the tail with no note and fails this. See SPEC-14
+    // section 3 and D-044.
     assert!(
-        matches!(message.content[0], ContentBlock::Text { .. }),
-        "the head plus the note is a valid text block"
+        capped.contains(&big.len().to_string()),
+        "the note must state the full byte count {}, note was {:?}",
+        big.len(),
+        &capped[capped.len().saturating_sub(200)..]
+    );
+    // The full payload must spill to a sidecar under the session directory.
+    assert!(
+        a_sidecar_holds(dir.path(), writer.path(), &big),
+        "the full oversize text must spill to a sidecar under the session directory"
     );
 }
 
 #[test]
 fn both_codecs_agree_byte_for_byte() {
     // A property over every Record variant. The active codec is deterministic, and it
-    // reads back its own output. CI runs this with `fast-json` on and off, so the two
-    // codecs must produce the one byte-identical line and each reads the other's output.
+    // reads back its own output.
+    //
+    // This test runs under whichever codec the build selects. `fast-json` selects
+    // `sonic-rs`, and the default selects `serde_json`. So the cross-codec rule in
+    // SPEC-14 section 3 holds only when the suite runs in both modes. Stage T10 adds
+    // that CI matrix. Until T10 lands, do not claim that CI proves it. The golden
+    // vector below is what makes the two modes comparable at all: it pins the exact
+    // bytes, so a codec that drifts fails in either mode.
     for record in every_record_variant() {
         let entry = rho_core::Entry {
             id: RecordId("id-1".to_string()),
@@ -283,4 +369,57 @@ fn both_codecs_agree_byte_for_byte() {
         let round: rho_core::Entry = decode(&line).expect("decode the codec's own output");
         assert_eq!(round, entry, "decode reverses encode for every variant");
     }
+}
+
+#[test]
+fn the_codec_matches_a_golden_line_in_either_mode() {
+    // The cross-codec rule needs a fixed point that does not depend on the build. So one
+    // record has its bytes pinned here. A codec that spells a field differently, orders a
+    // key differently, or escapes a character differently fails this test, whether the
+    // build selects `serde_json` or `sonic-rs`. See SPEC-14 section 3 and ADR-005.
+    let entry = rho_core::Entry {
+        id: RecordId("id-1".to_string()),
+        parent_id: Some(RecordId("id-0".to_string())),
+        timestamp: "2026-06-25T22:17:00.785Z".to_string(),
+        record: Record::Stop {
+            stop_reason: AgentStopReason::EndTurn,
+        },
+    };
+    let line = encode(&entry).expect("encode");
+    assert_eq!(
+        line,
+        r#"{"id":"id-1","parentId":"id-0","timestamp":"2026-06-25T22:17:00.785Z","type":"stop","reason":"end_turn"}"#,
+        "the codec must write the pinned bytes, in either codec mode"
+    );
+    let round: rho_core::Entry = decode(&line).expect("decode the golden line");
+    assert_eq!(round, entry, "the golden line decodes back to the record");
+}
+
+// --- typed errors reached through the public surface ------------------------
+
+#[test]
+fn reading_a_missing_file_is_an_io_error() {
+    // SessionError::Io is reached through the public reader, not by constructing it.
+    // Opening a file that does not exist is an io failure, so read returns Io.
+    let dir = tempdir().expect("temp dir");
+    let missing = dir.path().join("does-not-exist.jsonl");
+    let result = SessionReader::read(&missing);
+    assert!(
+        matches!(result, Err(SessionError::Io(_))),
+        "reading a missing session file is a SessionError::Io, got {result:?}"
+    );
+}
+
+#[test]
+fn encoding_an_unserializable_value_is_an_encode_error() {
+    // SessionError::Encode is reached through the public `encode` seam, not by
+    // constructing it. A map with a non-string key cannot serialize to JSON, so the
+    // codec's error must surface as SessionError::Encode.
+    let mut map: std::collections::BTreeMap<(i32, i32), i32> = std::collections::BTreeMap::new();
+    map.insert((1, 2), 3);
+    let result = encode(&map);
+    assert!(
+        matches!(result, Err(SessionError::Encode(_))),
+        "a value the codec cannot encode must surface as SessionError::Encode, got {result:?}"
+    );
 }

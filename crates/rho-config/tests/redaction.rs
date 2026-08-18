@@ -28,7 +28,7 @@ fn config_holding(source: CredentialSource) -> Config {
         session_file: None,
         ephemeral: false,
         sandbox: SandboxMode::Off,
-        approval: ApprovalMode::ReadOnly,
+        approval: Some(ApprovalMode::ReadOnly),
         skill_paths: Vec::new(),
         discover_skills: true,
         mcp_config: None,
@@ -97,9 +97,30 @@ fn a_resolved_credential_never_reaches_a_log() {
         .finish();
 
     tracing::subscriber::with_default(subscriber, || {
-        let source = CredentialSource::parse(SECRET_TEXT);
-        let env = env_map(&[]);
-        let _ = source.resolve("api", &env);
+        let env = env_map(&[("CRED_VAR", SECRET_TEXT)]);
+
+        // The literal source, kept from the original test.
+        let literal = CredentialSource::parse(SECRET_TEXT);
+        let _ = literal.resolve("api", &env);
+
+        // The environment source reads the resolved value; it is a path that would log.
+        let from_env = CredentialSource::Env("CRED_VAR".to_string());
+        let _ = from_env.resolve("api", &env);
+
+        // The command source runs a child and reads its output. It is the most likely
+        // path to log a resolved credential, so it must be exercised under the
+        // subscriber too.
+        let path = std::env::var("PATH").unwrap_or_default();
+        let cmd_env = env_map(&[("PATH", path.as_str())]);
+        let from_command = CredentialSource::Command {
+            argv: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("printf '%s' '{SECRET_TEXT}'"),
+            ],
+            pass_env: vec![],
+        };
+        let _ = from_command.resolve("api", &cmd_env);
     });
 
     let logged = String::from_utf8(buffer.lock().unwrap().clone()).expect("utf8 log");

@@ -209,7 +209,15 @@ pub struct Config {
     pub session_file: Option<PathBuf>,
     pub ephemeral: bool,
     pub sandbox: SandboxMode,
-    pub approval: ApprovalMode,
+    /// The approval mode the user stated, or `None` when the user stated none.
+    ///
+    /// `None` is not a permissive default. It means the frontend resolves the mode
+    /// from the table in `SPEC-16` section 4, which yields `ask` where a human or a
+    /// client can answer, and `read-only` where nobody can answer. A `Config` that
+    /// collapsed the unset case into one static value would make the `ask` default
+    /// unreachable, and it would hide a user's explicit `read-only` behind the same
+    /// value. That is the `--read-only: bool` fault in a second place.
+    pub approval: Option<ApprovalMode>,
     pub skill_paths: Vec<PathBuf>,
     pub discover_skills: bool,
     pub mcp_config: Option<PathBuf>,

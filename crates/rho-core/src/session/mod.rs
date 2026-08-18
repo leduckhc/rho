@@ -231,6 +231,15 @@ impl SessionReader {
         let _ = path;
         todo!("stage T5 implements the reader")
     }
+
+    /// Read a session from any buffered source.
+    ///
+    /// This is the seam a test uses. A test passes a reader that counts the bytes it
+    /// hands out, and asserts the count stays at or under `MAX_LINE_BYTES` for one
+    /// line. So a test can fail against an unbounded implementation. See section 6a.
+    pub fn read_from<R: std::io::BufRead>(_source: R) -> Result<ReadResult, SessionError> {
+        todo!("stage T5 implements the bounded read")
+    }
 }
 
 /// The set of session files under one directory.

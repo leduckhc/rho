@@ -126,8 +126,11 @@ corpus:
 Both codecs must produce a byte-identical line for the same record. Each must read the
 other's output. So a file written under one codec loads under the other.
 
-A named test proves it: `both_codecs_agree_byte_for_byte`. CI must run the codec tests
-with `fast-json` on and with `fast-json` off. So neither path drifts.
+A named test proves it: `both_codecs_agree_byte_for_byte`. The test is meaningful only
+when the feature exists, so `rho-core` declares an optional `sonic-rs` dependency and a
+`fast-json` feature. Stage T5 implements the second codec behind that feature. Stage T10
+adds the CI matrix that runs the codec tests with the feature on and with the feature
+off. Until T10 lands, no document may claim that CI runs both paths.
 
 ### The record-size rule
 
@@ -422,6 +425,37 @@ So `SessionReader::read` and `SessionStore::list` cap one line at `MAX_LINE_BYTE
 The read cap is larger than `MAX_RECORD_BYTES`, so a file written by rho always loads,
 and a file written by another tool, for example a pi file, still loads unless one line
 is pathological. So the bound protects memory without rejecting an honest file.
+
+**The bound needs a seam, or no test can prove it.** A reviewer proved the point. A reader
+that calls `fs::read_to_string`, and then rejects a long line, allocates the whole line
+first and still returns the right error. So a test on the returned error cannot see the
+defect. That is exactly how the first memory-cap test passed against the broken `bash`
+reader in decision D-016.
+
+So the reader takes its input through a `BufRead`, and a test drives it with a reader that
+counts the bytes it hands out.
+
+```rust
+impl SessionReader {
+    /// Read a session file from a path.
+    ///
+    /// This opens the file and calls `read_from`. It reads at most `MAX_LINE_BYTES` for
+    /// one line, whatever the file holds.
+    pub fn read(path: &Path) -> Result<ReadResult, SessionError>;
+
+    /// Read a session from any buffered source.
+    ///
+    /// This is the seam a test uses. A test passes a reader that counts the bytes it
+    /// hands out, and asserts the count stays at or under `MAX_LINE_BYTES` for one line.
+    /// So the test can fail against an unbounded implementation.
+    pub fn read_from<R: std::io::BufRead>(source: R) -> Result<ReadResult, SessionError>;
+}
+```
+
+A test asserts the bound, not only the error: `a_giant_line_stops_the_reader_at_the_cap`
+drives `read_from` with a counting reader, and it asserts the reader stopped at or near
+the cap. `a_giant_line_does_not_exhaust_memory` keeps the error assertion. Both must fail
+against a `read_to_string` implementation.
 
 ## 7. Branching
 

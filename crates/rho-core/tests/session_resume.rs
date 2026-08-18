@@ -3,8 +3,13 @@
 //! Every test drives the public `session` surface. It must fail on an unimplemented
 //! body, never on a type error. It uses `tempfile`, no `sleep`, and no network.
 
+mod common;
+
 use std::fs;
+use std::io::{self, BufRead, Read};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rho_core::{
     ContentBlock, Entry, MAX_LINE_BYTES, Message, Record, RecordId, Role, SessionError,
@@ -12,6 +17,33 @@ use rho_core::{
     check_resume_permission,
 };
 use tempfile::tempdir;
+
+/// A buffered source that counts the bytes it hands out, so a test can prove the
+/// reader stopped at the cap instead of pulling the whole giant line into memory.
+struct CountingReader<R> {
+    inner: R,
+    count: Arc<AtomicUsize>,
+}
+
+impl<R: Read> Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.count.fetch_add(n, Ordering::SeqCst);
+        Ok(n)
+    }
+}
+
+impl<R: BufRead> BufRead for CountingReader<R> {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.inner.fill_buf()
+    }
+    fn consume(&mut self, amt: usize) {
+        // `consume` marks bytes as taken by the reader. Counting here measures the
+        // bytes the reader actually pulled through, not the bytes merely viewed.
+        self.count.fetch_add(amt, Ordering::SeqCst);
+        self.inner.consume(amt);
+    }
+}
 
 // --- helpers ---------------------------------------------------------------
 
@@ -135,17 +167,26 @@ fn resume_recovers_after_a_truncated_last_line() {
 
 #[test]
 fn resume_warns_on_a_truncated_last_line() {
-    // The resume path warns when the read reports a truncated tail. The reader exposes
-    // the signal the warning is built on.
+    // The resume path warns when the read reports a truncated tail. D-041 forbids a
+    // silent degrade, so a dropped tail must reach a log, not vanish. Capturing the
+    // subscriber makes the warning assertable, so this test fails on a silent drop.
     let (dir, _store) = temp_store();
     let path = dir.path().join("s.jsonl");
     let good = message_line("m1", Some("h"), "kept");
     let half = good[..good.len() / 3].to_string();
     write_lines(&path, &[header_line(1, "read-only", "off"), good, half]);
-    let read = SessionReader::read(&path).expect("read");
+    let mut captured = None;
+    let logs = common::capture_warnings(|| {
+        captured = Some(SessionReader::read(&path).expect("read"));
+    });
+    let read = captured.expect("the read ran");
     assert!(
         read.truncated_tail,
         "truncated_tail is the one signal the resume warning uses"
+    );
+    assert!(
+        !logs.trim().is_empty(),
+        "a truncated tail must emit a warning, never a silent drop: log was empty"
     );
 }
 
@@ -244,6 +285,37 @@ fn a_giant_line_does_not_exhaust_memory() {
 }
 
 #[test]
+fn a_giant_line_stops_the_reader_at_the_cap() {
+    // The bound must hold while the line is read, not after. A source wraps a reader
+    // that counts the bytes handed out. An implementation that reads the whole giant
+    // line first and rejects it afterwards hands out the whole line, so the count
+    // blows past the cap and this test fails. A bounded reader stops near the cap.
+    //
+    // The giant line is four times the cap, so the gap between "stopped at the cap"
+    // and "read the whole line" is unmistakable. This is the D-016 lesson: assert the
+    // bound on the bytes pulled through, not the size of the kept output.
+    let header = header_line(1, "read-only", "off");
+    let huge = "z".repeat(4 * MAX_LINE_BYTES);
+    let giant = message_line("m1", Some("h"), &huge);
+    let source_bytes = format!("{header}\n{giant}").into_bytes();
+    let giant_len = source_bytes.len();
+
+    let count = Arc::new(AtomicUsize::new(0));
+    let reader = CountingReader {
+        inner: io::Cursor::new(source_bytes),
+        count: Arc::clone(&count),
+    };
+    let _ = SessionReader::read_from(reader);
+
+    let handed_out = count.load(Ordering::SeqCst);
+    assert!(
+        handed_out <= MAX_LINE_BYTES + 1024 * 1024,
+        "the reader must stop near the cap ({MAX_LINE_BYTES} bytes), but it pulled \
+         {handed_out} bytes through, out of a {giant_len} byte source"
+    );
+}
+
+#[test]
 fn resume_refuses_an_unknown_version() {
     let (dir, _store) = temp_store();
     let path = dir.path().join("s.jsonl");
@@ -332,6 +404,40 @@ fn allow_widen_permits_a_wider_resume() {
     assert!(
         allowed.is_ok(),
         "an explicit --allow-widen must permit a wider resume, got {allowed:?}"
+    );
+}
+
+#[test]
+fn sandbox_widen_is_refused() {
+    // The sandbox half of the widening rule. The four widening tests above all move
+    // the approval field, so an implementation that ignores the sandbox entirely
+    // passes every one of them. This test moves only the sandbox: the header names
+    // `strict`, the run would use `Off`, and the approval is unchanged. So it fails
+    // against a check that compares only the approval. This is decision D-053, a
+    // security boundary.
+    let (_dir, store) = temp_store();
+    let writer = store
+        .create("s", Path::new("/work"), "read-only", "strict")
+        .expect("create");
+    let read = SessionReader::read(writer.path()).expect("read");
+
+    let refused = check_resume_permission(
+        &read.header,
+        // The approval is unchanged: the header stores `read-only`, and the run uses it.
+        StoredApproval::ReadOnly,
+        // Only the sandbox widens, from `strict` to `off`.
+        StoredSandbox::Off,
+        false,
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(SessionError::Widen {
+                field: "sandbox",
+                ..
+            })
+        ),
+        "a strict-sandbox session must refuse an off-sandbox resume, got {refused:?}"
     );
 }
 

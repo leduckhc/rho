@@ -108,6 +108,44 @@ ACP backend.
 | T4 | 1 | tester | partial | Turn limit. 39 session tests red. The pi import tests were missing. |
 | T4 | 2 | tester | pass | Resumed with a narrow brief. Three pi import tests, in a new crate the spec named. |
 | T4 | 3 | controller | pass | Controller found the widening rule had no API, so no test could reach it. |
+| T2b | 1 | reviewer | fail | Proved three red tests pass against a real defect. Ten findings. |
+| T2c | 1 | tester | partial | Turn limit after three fixes. Reported honestly, and named the exact stopping point. |
+| T2d | 1 | tester | partial | Turn limit again, in `rho-core`. Most fixes landed, and the F2 proof passed. |
+| T2e | 1 | tester | pass | `rho-config` hardening. The F9 proof failed the old test, as it should. |
+| T2f | 1 | controller | pass | Controller finished the codec golden vector, and found the `Option` fault in `Config::approval`. |
+
+### The red-stage review, and what proof looks like
+
+The reviewer did not read tests and give an opinion. It wrote the wrong implementation in
+a scratch crate under `/tmp` and ran the tests against it. Three tests passed against a
+real defect.
+
+| Test | Wrong implementation that passed it |
+| --- | --- |
+| the four widening tests | `check_resume_permission` that ignores the sandbox |
+| `cancel_leaves_no_half_written_tool_pairing` | `record_cancel` that writes nothing |
+| `a_giant_line_does_not_exhaust_memory` | `fs::read_to_string`, then reject by length |
+
+The third one is defect 7 again. An assertion on a returned error cannot observe an
+allocation. So `SessionReader` gained `read_from`, a `BufRead` seam, and a test drives it
+with a reader that counts the bytes it hands out.
+
+Two more claims died. `SPEC-14` said CI runs the codec tests with `fast-json` on and off,
+and `rho-core` had no such feature. The feature now exists, the CI matrix is a T10 item,
+and no document claims it works before then. A golden line now pins the codec bytes, so
+the two modes are comparable at all.
+
+The last fault was in a type. `Config::approval` was `ApprovalMode`, and the spec said the
+default is unset. A type with no unset state forced `Config::load` to invent `read-only`,
+which made the owner's `ask` default unreachable. See decision D-057.
+
+### Dispatch statistics for this sprint
+
+Eight subagent dispatches so far. Three hit the turn limit, and all three reported the
+exact stopping point, so a narrow follow-up finished the work. The pattern is now clear
+enough to act on: **a brief with more than about four fix items will not finish.** So a
+hardening pass gets split by crate, and each fix names its file and its test.
+
 
 ### What the controller fixed in the red stages
 

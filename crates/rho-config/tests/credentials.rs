@@ -102,4 +102,46 @@ fn a_command_child_inherits_only_the_allowlist() {
         "leak",
         "pass_env must let the named variable through"
     );
+
+    // A variable the real process holds, that the allowlist never names, must not
+    // reach the child. D-046 says the child clears its environment and inherits only
+    // PATH, HOME, and the pass_env names. This is the assertion the old test lacked:
+    // it looked only for SECRET_TOKEN, which lives in the in-memory map and never in
+    // the real process environment, so an implementation that forwarded the whole
+    // process environment to the child passed against the very bug it should catch.
+    let probe = ["TERM", "SHELL", "LANG", "USER"]
+        .into_iter()
+        .find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(|value| (name, value))
+        });
+    let Some((probe_name, probe_value)) = probe else {
+        // A bare CI environment may hold none of these. Skip cleanly rather than fail
+        // for a reason that has nothing to do with the allowlist.
+        eprintln!("skipping the real-environment leak check: no probe variable is set");
+        return;
+    };
+    // The in-memory environment does not name the probe variable, and pass_env does
+    // not either. Only a child that inherited the real process environment could see
+    // it. A correct child cannot.
+    let leaks_real_env = CredentialSource::Command {
+        argv: vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("printf '%s' \"${{{probe_name}}}\""),
+        ],
+        pass_env: vec![],
+    };
+    let env = env_map(&[("PATH", path.as_str())]);
+    let secret = leaks_real_env
+        .resolve("api", &env)
+        .expect("the command runs");
+    assert!(
+        !secret.expose().contains(&probe_value),
+        "the child saw a real-environment variable ({probe_name}) the allowlist never \
+         named: the implementation must clear the environment and pass only PATH, HOME, \
+         and pass_env"
+    );
 }
