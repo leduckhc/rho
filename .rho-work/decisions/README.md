@@ -24,9 +24,11 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-cancel-wake-race](20260817-175024-D-cancel-wake-race.md) | 20260817 | Fix the `CancelToken::cancelled` wake race |
 | [D-cap-a-large-tool-result](20260818-014343-D-cap-a-large-tool-result.md) | 20260818 | A large tool result is capped in the record, not stored verbatim |
 | [D-child-confined-by-composition](20260818-000223-D-child-confined-by-composition.md) | 20260818 | A child is confined by composition, not by comparison |
+| [D-concise-mode-opt-in](20260818-090746-D-concise-mode-opt-in.md) | 20260818 | concise mode is opt-in and off by default |
 | [D-config-fails-closed](20260818-014343-D-config-fails-closed.md) | 20260818 | Config fails closed on a malformed file, an unknown key, or an unreadable file |
 | [D-core-event-model-widens](20260817-170455-D-core-event-model-widens.md) | 20260817 | The architect may widen the core event model to fit ACP |
 | [D-credential-command-allowlist](20260818-014343-D-credential-command-allowlist.md) | 20260818 | A credential command inherits an allowlist, stricter than the bash denylist |
+| [D-duration-rounds-once](20260818-090744-D-duration-rounds-once.md) | 20260818 | the duration ladder rounds exactly once |
 | [D-jcode-bash-lessons](20260817-231304-D-jcode-bash-lessons.md) | 20260817 | What reading jcode's `bash` tool changed |
 | [D-jcode-edit-lessons](20260817-224427-D-jcode-edit-lessons.md) | 20260817 | What reading jcode's `edit` tool changed |
 | [D-log-capture-proves-itself](20260818-060126-D-log-capture-proves-itself.md) | 20260818 | A log capture in a test must prove itself first |
@@ -58,6 +60,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-serde-json-default-codec](20260818-014343-D-serde-json-default-codec.md) | 20260818 | serde_json is the default codec, and sonic-rs is an off-by-default feature |
 | [D-session-config](20260817-175834-D-session-config.md) | 20260817 | `Session` needs a `SessionConfig` |
 | [D-session-context-accessor](20260817-175024-D-session-context-accessor.md) | 20260817 | `Session` gets a read-only context accessor |
+| [D-seven-column-duration-slot](20260818-090745-D-seven-column-duration-slot.md) | 20260818 | every duration sits in a seven-column slot |
 | [D-shared-working-tree](20260817-224703-D-shared-working-tree.md) | 20260817 | Another agent shares this working tree, so read the diff before you commit |
 | [D-skill-allowed-tools-ignored](20260817-215003-D-skill-allowed-tools-ignored.md) | 20260817 | `allowed-tools` in a skill is parsed, warned about, and ignored |
 | [D-slug-ids](20260818-041358-D-slug-ids.md) | 20260818 | An artifact is named by a timestamp and a slug, never by a counter |
