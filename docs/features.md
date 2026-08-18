@@ -117,10 +117,10 @@ and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
 
 | ID | Name | Outcome | Owning crate | Status | Extension point |
 |----|------|---------|--------------|--------|-----------------|
-| F-70 | Layered config | Global config (`~/.config/rho/config.toml`) merges with project config (`.rho/config.toml`). Project values override global values. | `rho-config` | `planned` | Third parties add config keys by defining a `ConfigSchema` struct (planned). |
-| F-71 | Environment variable override | Every config key can be set with an environment variable. The pattern is `RHO_<KEY>`. | `rho-config` | `planned` | No extension point. Env vars always override file values. |
-| F-72 | Credential resolution | API keys resolve from: env var, config file, shell command (`!op read ...`), or env var interpolation. No key is ever logged. | `rho-config` | `planned` | Callers supply a `CredentialResolver` closure to add a custom source (planned). |
-| F-73 | Profile support | The user selects a named profile at startup. Each profile overrides any subset of config keys. | `rho-config` | `planned` | Profiles are defined in the config file. No code extension needed. |
+| F-70 | Layered config | Global config (`~/.config/rho/config.toml`) merges with project config (`.rho/config.toml`). Project values override global values. | `rho-config` | `sprint-2` | Third parties add config keys by defining a `ConfigSchema` struct (planned). |
+| F-71 | Environment variable override | Every scalar config key can be set with an environment variable. The pattern is `RHO_<KEY>`. A table key has no environment form. | `rho-config` | `sprint-2` | No extension point. Env vars always override file values. |
+| F-72 | Credential resolution | API keys resolve from: env var, config file, shell command (`!op read ...`), or env var interpolation. No key is ever logged. A hung helper times out after 30 seconds. | `rho-config` | `sprint-2` | Callers supply a `CredentialResolver` closure to add a custom source (planned). |
+| F-73 | Profile support | The user selects a named profile at startup. Each profile overrides any subset of config keys. | `rho-config` | `sprint-2` | Profiles are defined in the config file. No code extension needed. |
 
 ---
 

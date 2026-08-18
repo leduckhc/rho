@@ -241,6 +241,17 @@ impl CredentialSource {
     /// Resolve to a `Secret`. Never log the result. The child of a command source
     /// inherits only the `pass_env` names.
     pub fn resolve(&self, name: &str, env: &dyn EnvLookup) -> Result<Secret, ConfigError>;
+
+    /// Resolve one credential, with a stated timeout for a command source.
+    ///
+    /// `resolve` calls this with `DEFAULT_CREDENTIAL_TIMEOUT`. A test states a short
+    /// timeout, so it need not wait 30 seconds to prove that a hung helper fails.
+    pub fn resolve_with_timeout(
+        &self,
+        name: &str,
+        env: &dyn EnvLookup,
+        timeout: std::time::Duration,
+    ) -> Result<Secret, ConfigError>;
 }
 
 impl Config {
@@ -300,6 +311,37 @@ An inline MCP server table is out of scope. It would pull `rho-mcp` into `rho-co
 which adds a runtime dependency to a config crate. So `mcp-config` names the existing
 server file instead. See section 9.
 
+### The environment key table
+
+Layer 5 reads one variable per scalar key. The name is `RHO_` plus the file key in upper
+case, with a dash written as an underscore.
+
+| File key | Variable | Type |
+| --- | --- | --- |
+| `provider` | `RHO_PROVIDER` | string |
+| `model` | `RHO_MODEL` | string |
+| `session-root` | `RHO_SESSION_ROOT` | path |
+| `session-file` | `RHO_SESSION_FILE` | path |
+| `ephemeral` | `RHO_EPHEMERAL` | bool |
+| `sandbox` | `RHO_SANDBOX` | string, parsed by `SandboxMode::from_str` |
+| `approval` | `RHO_APPROVAL` | string, parsed by `ApprovalMode::from_str` |
+| `skill-paths` | `RHO_SKILL_PATHS` | path list, split by the platform path separator |
+| `no-skills` | `RHO_NO_SKILLS` | bool |
+| `mcp-config` | `RHO_MCP_CONFIG` | path |
+
+A `subagents` table, a `credentials` table, and a `profiles` table have no environment
+form. A table does not fit one variable, and no test needs one.
+
+**The boolean rule.** A value is trimmed, and the comparison ignores case. `1`, `true`,
+and `yes` are true. `0`, `false`, and `no` are false. Any other value fails closed with a
+`ConfigError::Parse` that names the key and the value. So a typed `RHO_EPHEMERAL=maybe`
+stops the run rather than resolving to false in silence.
+
+**A security key from the environment is not a softer path.** `RHO_SANDBOX=loose` and
+`RHO_APPROVAL=bananas` each fail closed, with the same error as the same value in a file.
+The environment layer carries the value as a string, and the one parser in the merge
+decides. So there is one gate, not two. See decisions D-017 and D-047.
+
 ## 5. Credential resolution
 
 A credential never sits in `rho-config` as a plain string longer than one parse step.
@@ -330,7 +372,12 @@ key, so it earns a tighter rule.
   `pass_env` names it. So `op` reads its own session token only when the file lists it.
 - The child inherits no credential that `rho-config` itself resolved.
 - The child gets a null standard input.
-- The child has a timeout. A hung helper fails the resolution.
+- The child has a timeout of `DEFAULT_CREDENTIAL_TIMEOUT`, which is 30 seconds. A hung
+  helper fails the resolution with a `ConfigError::Credential` that says it timed out.
+  rho kills the child, then reaps it, so no process leaks and no zombie stays.
+- A helper that waits for a person is the normal case here, not a rare one. `op read`
+  waits for a biometric prompt, and a prompt that nobody answers waits forever. Without
+  the timeout, rho waits with it, with no message and no way out.
 
 `bash` uses a denylist, because a shell needs a wide and open-ended set of variables. A
 credential helper needs a tiny set, so an allowlist is the safer trade here. The
