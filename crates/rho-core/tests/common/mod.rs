@@ -494,13 +494,70 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
 
 /// Run `f` under a subscriber that captures `WARN`-and-above output, and return the
 /// captured text. A silent degrade leaves this empty, so a test can fail on it.
+///
+/// **Why this installs a global subscriber.** A thread-local subscriber alone is not
+/// enough. With no global subscriber, `tracing` reports the current level filter as
+/// `OFF`, so a `warn!` takes its fast path and never reaches a thread-local capture. The
+/// result is a test that passes or fails by which test ran first. This capture was flaky
+/// one run in twenty for exactly that reason.
+///
+/// So a global subscriber is installed once per test binary, and it writes into a
+/// thread-local buffer. The global sets the level filter, and the thread-local buffer
+/// keeps parallel tests apart.
 pub fn capture_warnings(f: impl FnOnce()) -> String {
-    let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let writer = LogCapture(Arc::clone(&buffer));
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(writer)
-        .with_max_level(tracing::Level::WARN)
-        .finish();
-    tracing::subscriber::with_default(subscriber, f);
-    String::from_utf8(buffer.lock().unwrap().clone()).expect("utf8 log")
+    install_capture();
+    CAPTURE.with(|cell| cell.lock().unwrap().clear());
+    f();
+    let text = CAPTURE.with(|cell| String::from_utf8(cell.lock().unwrap().clone()).expect("utf8"));
+    // A capture that captures nothing would make every log assertion vacuous, so prove
+    // the pipe works before a caller trusts an empty result.
+    tracing::warn!("capture-probe");
+    let probe = CAPTURE.with(|cell| String::from_utf8(cell.lock().unwrap().clone()).expect("utf8"));
+    assert!(
+        probe.contains("capture-probe"),
+        "the log capture is broken, so no log assertion in this test means anything"
+    );
+    CAPTURE.with(|cell| cell.lock().unwrap().clear());
+    text
+}
+
+thread_local! {
+    /// The captured log bytes for this thread. A global subscriber writes here.
+    static CAPTURE: Mutex<Vec<u8>> = const { Mutex::new(Vec::new()) };
+}
+
+/// A writer that appends to the calling thread's capture buffer.
+#[derive(Clone, Default)]
+pub struct ThreadCapture;
+
+impl std::io::Write for ThreadCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        CAPTURE.with(|cell| cell.lock().unwrap().extend_from_slice(buf));
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadCapture {
+    type Writer = ThreadCapture;
+    fn make_writer(&'a self) -> Self::Writer {
+        ThreadCapture
+    }
+}
+
+/// Install the global capture subscriber once per test binary.
+fn install_capture() {
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(ThreadCapture)
+            .with_max_level(tracing::Level::WARN)
+            .without_time()
+            .finish();
+        // A second install would fail, and the `OnceLock` makes that impossible.
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("the capture subscriber installs once per test binary");
+    });
 }

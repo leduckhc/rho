@@ -6,14 +6,62 @@
 mod common;
 
 use std::fs;
+use std::io::{self, Write};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rho_core::{
     AgentEvent, AgentStopReason, ContentBlock, Message, Record, RecordId, Role, SessionLog,
-    SessionReader, SessionRecorder, SessionStore, StreamEvent, ToolOutput, Usage, branch_messages,
-    decode, encode,
+    SessionReader, SessionRecorder, SessionStore, SessionWriter, StreamEvent, ToolOutput, Usage,
+    branch_messages, decode, encode,
 };
 use tempfile::tempdir;
+
+// --- sink seams ------------------------------------------------------------
+//
+// The writer holds one open sink for the life of the session, and writes one record as
+// one write. The controller measured a held handle at ~1us per record against ~17.5us
+// for a reopen per record over 20000 records on macos arm64, so a per-record reopen was
+// rejected. A held handle cannot be forced to fail by removing the directory, because an
+// already-open file descriptor keeps succeeding on Unix after its path is unlinked. So
+// the degrade tests inject a sink that fails on demand, through `SessionWriter::with_sink`,
+// the same style of seam as `SessionReader::read_from`.
+
+/// A sink that counts write calls, so a test can prove one write per record.
+struct CountingSink {
+    writes: Arc<AtomicUsize>,
+}
+
+impl Write for CountingSink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A sink that fails on the Nth write, so a test can force a write failure without
+/// removing the session directory. See the note above.
+struct FailingSink {
+    writes: usize,
+    fail_at: usize,
+}
+
+impl Write for FailingSink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.writes += 1;
+        if self.writes >= self.fail_at {
+            return Err(io::Error::other("the sink failed on purpose"));
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 // --- helpers ---------------------------------------------------------------
 
@@ -116,22 +164,25 @@ fn ephemeral_mode_writes_no_file() {
 
 #[test]
 fn a_write_failure_degrades_to_ephemeral_with_a_warning() {
-    // A failing writer switches to ephemeral and the run continues. It never ends the
-    // run. The writer opens on a path whose parent does not exist, so a write fails.
-    let dir = tempdir().expect("temp dir");
-    let store = SessionStore::new(dir.path());
-    let writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
-        .expect("create");
+    // A failing sink switches the log to ephemeral and the run continues. It never ends
+    // the run. This injects a sink that fails on the second write, rather than removing
+    // the session directory: the writer now holds one open handle, and a held handle
+    // keeps succeeding after its path is unlinked, so the directory trick could not
+    // force a failure. See the sink-seam note at the top of this file. D-041 forbids a
+    // silent degrade, so the fallback must emit a warning.
+    let writer = SessionWriter::with_sink(
+        "degrade.jsonl",
+        Box::new(FailingSink {
+            writes: 0,
+            fail_at: 2,
+        }),
+    );
     let mut log = SessionLog::File(writer);
-    // Make the underlying file unwritable by removing the directory out from under it.
-    fs::remove_dir_all(dir.path()).ok();
-    // D-041 forbids a silent degrade, so the fallback must emit a warning. Capturing the
-    // subscriber makes the warning assertable, so a silent degrade fails this test.
     let logs = common::capture_warnings(|| {
-        let _ = log.record(message_record("first"), None);
-        // The run continues: a second record still returns without a panic.
-        let _ = log.record(message_record("second"), None);
+        let _ = log.record(message_record("first"), None); // write 1 succeeds
+        // The run continues: the second record fails the sink, degrades, and returns
+        // without a panic.
+        let _ = log.record(message_record("second"), None); // write 2 fails
     });
     assert!(
         log.is_ephemeral(),
@@ -148,18 +199,22 @@ fn session_log_is_ephemeral_reports_off_and_degraded() {
     let off = SessionLog::Off;
     assert!(off.is_ephemeral(), "Off is ephemeral");
 
-    let dir = tempdir().expect("temp dir");
-    let store = SessionStore::new(dir.path());
-    let writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
-        .expect("create");
+    // A file log is healthy until a write fails. This injects a sink that fails on its
+    // first write, rather than removing the directory, because the writer holds one
+    // open handle now. See the sink-seam note at the top of this file.
+    let writer = SessionWriter::with_sink(
+        "degrade2.jsonl",
+        Box::new(FailingSink {
+            writes: 0,
+            fail_at: 1,
+        }),
+    );
     let mut degraded = SessionLog::File(writer);
     assert!(
         !degraded.is_ephemeral(),
         "a healthy file log is not ephemeral"
     );
-    fs::remove_dir_all(dir.path()).ok();
-    let _ = degraded.record(message_record("x"), None);
+    let _ = degraded.record(message_record("x"), None); // write 1 fails
     assert!(
         degraded.is_ephemeral(),
         "the log is ephemeral after a write failure"
@@ -594,5 +649,158 @@ fn redact_json_secrets_masks_a_secret_keyed_field() {
     assert!(
         out["nested"].get("password").is_some(),
         "the nested key name is kept"
+    );
+}
+
+// --- the write contract ----------------------------------------------------
+
+#[test]
+fn the_append_path_writes_once_per_record() {
+    // SPEC-14 section 3: a buffered writer, one write per record. A counting sink proves
+    // exactly one write per append, so a writer that batches two records into one write
+    // fails this. The sink counts write calls; the writer builds the line and its
+    // newline into one buffer, so one record is one write.
+    let writes = Arc::new(AtomicUsize::new(0));
+    let sink = CountingSink {
+        writes: Arc::clone(&writes),
+    };
+    let mut writer = SessionWriter::with_sink("count.jsonl", Box::new(sink));
+    for i in 0..5 {
+        writer
+            .append(message_record(&format!("m{i}")), None)
+            .expect("append");
+    }
+    assert_eq!(
+        writes.load(Ordering::SeqCst),
+        5,
+        "five records must cause exactly five writes, never a batched write"
+    );
+}
+
+#[test]
+fn a_session_file_holds_one_timestamp_format() {
+    // Decision: epoch milliseconds as a decimal string, everywhere. A pi import converts
+    // an RFC 3339 timestamp into this format, so a resumed import never holds two formats
+    // in one file. Assert every line's timestamp, over every record kind, parses as u64.
+    let (_dir, store) = temp_store();
+    let mut writer = store
+        .create("s", Path::new("/work"), "read-only", "off")
+        .expect("create"); // Session header
+    let a = writer
+        .append(
+            Record::ModelChange {
+                provider: "openrouter".to_string(),
+                model: "anthropic/claude".to_string(),
+            },
+            None,
+        )
+        .expect("model change");
+    let b = writer
+        .append(message_record("hello"), Some(a))
+        .expect("message");
+    let c = writer
+        .append(
+            Record::Usage {
+                usage: Usage::default(),
+            },
+            Some(b),
+        )
+        .expect("usage");
+    writer
+        .append(
+            Record::Stop {
+                stop_reason: AgentStopReason::EndTurn,
+            },
+            Some(c),
+        )
+        .expect("stop");
+    writer.close().expect("close"); // Closed record
+
+    let text = fs::read_to_string(writer.path()).expect("read");
+    let mut lines = 0;
+    for line in text.lines().filter(|l| !l.is_empty()) {
+        lines += 1;
+        let value: serde_json::Value = serde_json::from_str(line).expect("a session line is json");
+        let timestamp = value
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .expect("every record carries a timestamp string");
+        assert!(
+            timestamp.parse::<u64>().is_ok(),
+            "the timestamp {timestamp:?} must be epoch milliseconds, one format per file"
+        );
+    }
+    assert_eq!(lines, 6, "the fixture covers every record kind");
+}
+
+// --- what a real drive of the operations found -------------------------------
+//
+// The controller ran the operations for real, in a scratch binary under /tmp: create
+// three sessions, close each one, list, resume, widen, fork, delete, then read a missing
+// file twice. Two faults came out that no test covered. See SPEC-14 section 8.
+
+#[test]
+fn append_to_a_closed_session_reopens_it_and_keeps_closed_last() {
+    // A closed file ends with a `Closed` record, and SPEC-14 calls that the last record.
+    // A real drive appended two records after it, so the file held `Closed` in the middle
+    // and any reader would report a closed session that kept talking. A resume must
+    // either refuse, or state that the session reopened. It states it.
+    let (_dir, store) = temp_store();
+    let mut writer = store
+        .create("s", Path::new("/work"), "read-only", "off")
+        .expect("create");
+    writer
+        .append(message_record("before"), None)
+        .expect("append");
+    writer.close().expect("close");
+
+    let mut reopened = store.append_to(writer.path()).expect("append_to");
+    reopened
+        .append(message_record("after"), None)
+        .expect("append after a close");
+
+    let text = fs::read_to_string(writer.path()).expect("read the file");
+    let kinds: Vec<String> = text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).expect("a json line");
+            value
+                .get("type")
+                .and_then(|t| t.as_str())
+                .expect("every record names its type")
+                .to_string()
+        })
+        .collect();
+
+    // The invariant: a `closed` record is never followed by anything except a `reopened`
+    // record. So a reader can always tell a closed session from a reopened one.
+    for (index, kind) in kinds.iter().enumerate() {
+        if kind == "closed" && index + 1 < kinds.len() {
+            assert_eq!(
+                kinds[index + 1],
+                "reopened",
+                "a closed record may only be followed by a reopened record, got {kinds:?}"
+            );
+        }
+    }
+    assert!(
+        kinds.contains(&"reopened".to_string()),
+        "a resume after a close must record that the session reopened, got {kinds:?}"
+    );
+}
+
+#[test]
+fn an_io_error_names_the_path() {
+    // A real drive read a missing file and got "No such file or directory (os error 2)".
+    // The message did not say which file, so a user with 500 sessions learns nothing. A
+    // config error already names its path, and a session error must do the same.
+    let (dir, _store) = temp_store();
+    let missing = dir.path().join("no-such-session.jsonl");
+    let error = SessionReader::read(&missing).expect_err("a missing file is an error");
+    let message = error.to_string();
+    assert!(
+        message.contains("no-such-session.jsonl"),
+        "an io error must name the path that failed, got {message:?}"
     );
 }

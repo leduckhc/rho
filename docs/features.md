@@ -87,16 +87,16 @@ and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
 
 | ID | Name | Outcome | Owning crate | Status | Extension point |
 |----|------|---------|--------------|--------|-----------------|
-| F-50 | Append-only session log | Every message, tool call, tool result, and event is appended to a JSONL file on disk. The file is never rewritten. The codec is one seam: `serde_json` by default, and `sonic-rs` behind the `fast-json` feature. | `rho-core` | `planned` | A third party reads the file directly; the format is stable and documented. Compile with `--features fast-json` for the faster codec. See `ADR-005`. |
-| F-51 | Session resume | The user passes a session file path and rho continues the conversation from the last message. | `rho-core` | `planned` | No external extension point. Callers choose the session file path. |
-| F-52 | Session branching | The user navigates to an earlier turn and continues from that point. rho creates a new branch in the same file. The original branch is not deleted. | `rho-core` | `planned` | No external extension point in sprint 1. |
-| F-53 | Ephemeral mode | The user opts out of session persistence. No file is written. | `rho-core` | `planned` | Callers set `session_path = None` at startup. |
-| F-54 | Pi session import | The `rho-session-import-pi` crate converts a pi session file to rho's JSONL format. The conversion is one-way. The original pi file is not changed. | `rho-session-import-pi` | `planned` | No extension point. The converter is a standalone crate. |
-| F-55 | Session close | A close ends a session cleanly and writes the last record. A second close changes nothing, because close is idempotent. | `rho-core` | `planned` | Frontends call close. `rho-acp` maps `session/close` to it. |
-| F-56 | Session cancel without close | A cancel stops the running turn and keeps the session open. The file holds no half-written tool pairing. | `rho-core` | `planned` | Any holder of the `CancelToken` cancels. `rho-acp` maps `session/cancel` to it. |
-| F-57 | Session list | rho lists sessions with a short summary each. A list of 500 sessions reads 500 header records, not 500 whole files. | `rho-core` | `planned` | `rho-acp` maps `session/list` to it. A caller reads the header record directly. |
-| F-58 | Session delete | A delete removes one session file. The command states what happens to a branch inside that file. | `rho-core` | `planned` | `rho-acp` maps `session/delete` to it. |
-| F-59 | Session fork | A fork copies a session to a new id from a chosen record. The original file is not changed. | `rho-core` | `planned` | A caller picks the record to fork from. F-52 branches inside one file instead. |
+| F-50 | Append-only session log | Every message, tool call, tool result, and event is appended to a JSONL file on disk. The file is never rewritten. The codec is one seam: `serde_json` by default, and `sonic-rs` behind the `fast-json` feature. | `rho-core` | `sprint-2` | A third party reads the file directly; the format is stable and documented. Compile with `--features fast-json` for the faster codec. See `ADR-005`. |
+| F-51 | Session resume | The user passes a session file path and rho continues the conversation from the last message. | `rho-core` | `sprint-2` | No external extension point. Callers choose the session file path. |
+| F-52 | Session branching | The user navigates to an earlier turn and continues from that point. rho creates a new branch in the same file. The original branch is not deleted. | `rho-core` | `sprint-2` | No external extension point in sprint 1. |
+| F-53 | Ephemeral mode | The user opts out of session persistence. No file is written. | `rho-core` | `sprint-2` | Callers set `session_path = None` at startup. |
+| F-54 | Pi session import | The `rho-session-import-pi` crate converts a pi session file to rho's JSONL format. The conversion is one-way. The original pi file is not changed. | `rho-session-import-pi` | `sprint-2` | No extension point. The converter is a standalone crate. |
+| F-55 | Session close | A close ends a session cleanly and writes the last record. A second close changes nothing, because close is idempotent. | `rho-core` | `sprint-2` | Frontends call close. `rho-acp` maps `session/close` to it. |
+| F-56 | Session cancel without close | A cancel stops the running turn and keeps the session open. The file holds no half-written tool pairing. | `rho-core` | `sprint-2` | Any holder of the `CancelToken` cancels. `rho-acp` maps `session/cancel` to it. |
+| F-57 | Session list | rho lists sessions with a short summary each. A list of 500 sessions reads 500 header records, not 500 whole files. | `rho-core` | `sprint-2` | `rho-acp` maps `session/list` to it. A caller reads the header record directly. |
+| F-58 | Session delete | A delete removes one session file. The command states what happens to a branch inside that file. | `rho-core` | `sprint-2` | `rho-acp` maps `session/delete` to it. |
+| F-59 | Session fork | A fork copies a session to a new id from a chosen record. The original file is not changed. | `rho-core` | `sprint-2` | A caller picks the record to fork from. F-52 branches inside one file instead. |
 
 ---
 

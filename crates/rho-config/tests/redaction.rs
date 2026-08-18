@@ -121,9 +121,22 @@ fn a_resolved_credential_never_reaches_a_log() {
             pass_env: vec![],
         };
         let _ = from_command.resolve("api", &cmd_env);
+
+        // Prove the capture works before trusting an empty result.
+        //
+        // This test asserts that something is absent. A broken capture would make it pass
+        // against any implementation, including one that prints the credential. A sibling
+        // capture in `rho-core` was flaky one run in twenty for exactly this reason: with
+        // no global subscriber, `tracing` reports the level filter as `OFF`, and a macro
+        // takes its fast path. So emit a known line and require it.
+        tracing::warn!("capture-probe");
     });
 
     let logged = String::from_utf8(buffer.lock().unwrap().clone()).expect("utf8 log");
+    assert!(
+        logged.contains("capture-probe"),
+        "the log capture is broken, so this test proves nothing: {logged:?}"
+    );
     assert!(
         !logged.contains(SECRET_TEXT),
         "a credential must never reach a log, even at trace level: {logged:?}"

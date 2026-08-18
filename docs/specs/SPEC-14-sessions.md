@@ -38,7 +38,13 @@ pub struct Entry {
     pub id: RecordId,
     #[serde(rename = "parentId")]
     pub parent_id: Option<RecordId>,
-    /// An RFC 3339 timestamp, for example `2026-06-25T22:17:00.785Z`.
+    /// The record time, as epoch milliseconds in a decimal string.
+    ///
+    /// One session file holds one timestamp format. rho adds no date dependency for one
+    /// field, so it writes epoch milliseconds. The pi importer converts a pi RFC 3339
+    /// timestamp into this format, so an imported file matches a native file. Two formats
+    /// in one file would be worse than either format alone, because a reader would have to
+    /// guess per line. See decision D-060.
     pub timestamp: String,
     #[serde(flatten)]
     pub record: Record,
@@ -64,8 +70,11 @@ pub enum Record {
     Usage { usage: Usage },
     /// The run stopped, with a reason.
     Stop { stop_reason: AgentStopReason },
-    /// The session closed cleanly. The last record of a closed file.
+    /// The session closed cleanly. The last record of a closed file, unless a resume
+    /// reopened it.
     Closed,
+    /// A resume reopened a closed session. Only this record may follow a `Closed`.
+    Reopened,
 }
 ```
 
@@ -407,6 +416,58 @@ this.
 
 So a half-written tail never fails a resume, and never discards a whole record. A clean
 `close` flushes the buffer, so a closed file has no buffered tail to lose.
+
+### 4a. The writer holds one sink, and the sink is a seam
+
+The writer owns an open sink for the life of the session, and it writes one record as one
+write. It does not reopen the file per record, and it does not `fsync` per record.
+
+The first implementation reopened the file per record, because three degrade tests removed
+the session directory, and on Unix an open descriptor keeps writing to an unlinked inode.
+So the tests could only pass with a reopen. The controller measured the cost before it
+ruled.
+
+| Approach | Per record |
+| --- | --- |
+| reopen per record | 17567 ns |
+| held sink, one write per record | 1034 ns |
+| held sink, and `fsync` per record | 3076785 ns |
+
+A reopen is 17 times slower, and rho exists because a session must be cheap. So the design
+keeps the held sink, and the writer takes the sink as a parameter. A test injects a sink
+that fails on demand, which proves the degrade path without a filesystem trick. This is the
+same seam as `read_from` in section 6a.
+
+```rust
+impl SessionWriter {
+    /// Build a writer over any sink. The store passes an open file. A test passes a sink
+    /// that fails on demand, to prove the degrade path.
+    pub fn with_sink(path: impl Into<PathBuf>, sink: Box<dyn std::io::Write + Send>) -> Self;
+}
+```
+
+An `fsync` per record costs three milliseconds, which is 3000 times the cost of the write.
+So rho does not `fsync` per record. A crash can lose the last records, and section 6 states
+what a resume does with a truncated tail.
+
+### 4b. A resume after a close states the reopen
+
+A closed file ends with `Closed`. A user may still continue a conversation they closed, so
+`SessionStore::append_to` may append after it. Then the file would hold `Closed` in the
+middle, and no reader could tell a closed session from one that kept talking.
+
+So `append_to` writes a `Reopened` record when the file ended with `Closed`. The invariant
+is stated as a test: **a `Closed` record is followed by nothing, or by exactly one
+`Reopened` record.**
+
+A real drive of the operations found this. Every unit test closed a session or resumed one,
+and no test did both to the same file.
+
+### 4c. Every io error names its path
+
+A bare operating-system message says `No such file or directory` and never says which file.
+A user with 500 sessions learns nothing from that. So every `SessionError::Io` names the
+path, exactly as `ConfigError::Read` does. A real drive found this too.
 
 ### 6a. A bounded read
 
@@ -799,6 +860,13 @@ Ephemeral and degrade:
 
 Lifecycle:
 - `close_writes_a_closed_record` — close appends the `Closed` record.
+- `append_to_a_closed_session_reopens_it_and_keeps_closed_last` — a `Closed` record is
+  followed by nothing, or by exactly one `Reopened` record.
+- `an_io_error_names_the_path` — a missing file yields an error whose message holds the
+  path.
+- `the_append_path_writes_once_per_record` — one record costs one write on the sink.
+- `a_session_file_holds_one_timestamp_format` — every timestamp in a file parses as a
+  `u64`, over every record kind.
 - `close_is_idempotent` — a second close writes nothing.
 - `cancel_keeps_the_session_open` — after a cancel the session accepts a new prompt.
 - `cancel_writes_a_stop_record` — a cancel appends one `Stop` with `Canceled`.

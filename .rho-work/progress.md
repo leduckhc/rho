@@ -168,6 +168,61 @@ This is the sprint-1 lesson again, in one sentence. **A fixture describes what a
 expects. A real file holds what exists.** So the sample size matters: one real file proved
 nothing, and 60 real files found four defects.
 
+### The green stages, and what driving them found
+
+| Stage | Attempt | Role | Result | Notes |
+| --- | --- | --- | --- | --- |
+| T3 | 1 | developer | pass | 36 config tests green. Two breaks proved the fail-closed parse and the allowlist. |
+| T3b | 1 | developer | pass | Closed two gaps the T3 report named. 45 tests. The timeout test returns in 1.00 s. |
+| T5 | 1 | developer | pass | 47 session tests green, in both codec modes. Three breaks proved three boundaries. |
+| T5c | 1 | developer | pass | The sink seam, the rewritten degrade tests, and one timestamp format. |
+| T5d | 1 | controller | pass | A real drive of the operations found a reopen fault and a nameless io error. |
+
+**T3 reported two gaps rather than hiding them.** `ConfigLayer::from_env` mapped two keys
+while F-71 claimed every key, and the credential command had no timeout although the spec
+said it did. So a helper waiting for a biometric prompt would hang rho forever. Both are
+closed, test first. The timeout test returns in 1.00 second against a child that never
+exits, and it hung for ten seconds with the kill removed.
+
+**T5 flagged a divergence instead of hiding it, and the measurement decided.** The writer
+reopened the file per record, because three degrade tests removed the session directory and
+an open descriptor on Unix keeps writing to an unlinked inode. Measured: a reopen costs
+17567 ns per record, a held sink costs 1034 ns, and an `fsync` per record costs 3076785 ns.
+So the tests were wrong, not the design. The writer now holds a sink, a test injects a sink
+that fails on demand, and a real append costs 1762 ns per record. See D-059.
+
+**Then the controller drove the operations for real.** Create three sessions, close each,
+list, resume, widen, fork, delete, and read a missing file twice. Two faults came out that
+190 passing tests did not cover.
+
+| Fault | Why no test saw it |
+| --- | --- |
+| A resume after a close left `Closed` in the middle of the file | Every test closed a session or resumed one. None did both to one file. |
+| An io error said `No such file or directory` and named no path | Every test knew which file it had just created. |
+
+A `Reopened` record now states the reopen, and the invariant is a test: a `Closed` record is
+followed by nothing, or by exactly one `Reopened` record. Every io error names its path. See
+D-061.
+
+The lesson repeats with a new face. **A test proves a case. A run proves the product.** The
+first version of this lesson came from sprint 1, where 222 tests passed while the product
+was unusable.
+
+### A flaky test, and the vacuous family behind it
+
+One rho-core test failed one run in twenty. The hunt took 20 runs to reproduce and one
+reading of `tracing` to explain: with no global subscriber, the current level filter is
+`OFF`, so a `warn!` takes its fast path and never reaches a thread-local capture. Which
+test ran first decided the outcome.
+
+The fix installs one global subscriber per test binary, writing into a thread-local buffer.
+25 clean runs of `rho-core`, and 12 of `rho-config`.
+
+The important part is not the flake. `a_resolved_credential_never_reaches_a_log` asserts
+that a secret is **absent** from a log. A broken capture makes it pass against an
+implementation that prints the credential in full. So every capture helper now emits a probe
+line and requires it back, before any absence means anything. See decision D-062.
+
 ### Dispatch statistics for this sprint
 
 Eight subagent dispatches so far. Three hit the turn limit, and all three reported the

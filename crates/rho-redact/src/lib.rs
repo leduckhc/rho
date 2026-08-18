@@ -122,8 +122,25 @@ pub fn sanitize_line(input: &str) -> String {
 ///
 /// See `SPEC-14` section 5a and decision D-054.
 pub fn redact_json_secrets(value: &serde_json::Value) -> serde_json::Value {
-    let _ = value;
-    todo!("stage T5 implements redact_json_secrets")
+    /// The value that replaces a flagged field. One masked shape, everywhere.
+    const MASK: &str = "***";
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (key, child) in map {
+                if looks_like_a_secret(key) {
+                    out.insert(key.clone(), serde_json::Value::String(MASK.to_string()));
+                } else {
+                    out.insert(key.clone(), redact_json_secrets(child));
+                }
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(redact_json_secrets).collect())
+        }
+        other => other.clone(),
+    }
 }
 
 /// Consume the rest of an escape sequence, after its escape character.

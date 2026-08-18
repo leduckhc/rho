@@ -1325,3 +1325,84 @@ fix, 60 of 60 files import, and 15646 records map.
 **Rules out:** A silent drop. Every drop is counted, and the count names the type or the
 role, so a caller can see what it lost. Also ruled out: an import that stops on one
 unknown record, and a fixture-only proof for a format that another program writes.
+
+## D-059 — The writer holds one sink, and a test injects a failing sink
+**Question (controller, T5 review):** the writer reopened the session file per record,
+because three degrade tests removed the session directory. Is that the design, or is it the
+test?
+
+**Decision:** The writer holds one open sink for the life of the session, and it writes one
+record as one write. `SessionWriter::with_sink` takes the sink, so a test injects a sink
+that fails on demand. The three degrade tests now use that seam instead of removing a
+directory. rho does not `fsync` per record.
+
+**Reason:** Measured, not argued. A reopen costs 17567 ns per record, a held sink costs
+1034 ns, and an `fsync` per record costs 3076785 ns. So a reopen is 17 times slower than a
+held sink, in a project that exists because a session must be cheap. The test could only
+pass with a reopen, because an open descriptor on Unix keeps writing to an unlinked inode.
+`AGENTS.md` says a test that forces a defect into the design is the reviewer's call, and
+this was that case. The developer flagged it rather than hiding it, which is what the rule
+asks for. A real append through the finished writer now costs 1762 ns per record, which
+includes the encode and the id.
+
+**Rules out:** A reopen per record. An `fsync` per record, which costs 3000 times the
+write. A degrade test that depends on filesystem behaviour rather than on a stated seam.
+
+## D-060 — One session file holds one timestamp format, and it is epoch milliseconds
+**Question (controller, T5 review):** the writer wrote epoch milliseconds, the spec
+documented RFC 3339, and the pi importer carried pi's RFC 3339 strings across unchanged.
+Which format wins?
+
+**Decision:** Epoch milliseconds, as a decimal string, everywhere. rho adds no date
+dependency. The pi importer converts a pi RFC 3339 timestamp into epoch milliseconds, so an
+imported file matches a native file. A test asserts that every timestamp in a file parses
+as a `u64`, over every record kind.
+
+**Reason:** A resumed import would have held two formats in one file, and a reader would
+have to guess per line. That is worse than either format alone. A date crate for one field
+is not worth the dependency tree, and hand-written civil-date maths is a defect farm. Epoch
+milliseconds need neither.
+
+**Rules out:** A date dependency in `rho-core` for this field. A mixed-format file. A
+human-readable timestamp on disk, which is the cost of this choice, paid on purpose.
+
+## D-061 — A reopen is stated on disk, and every io error names its path
+**Question (controller, real drive of the session operations):** what happens when a resume
+appends to a closed session, and what does an io error tell the user?
+
+**Decision:** `SessionStore::append_to` writes a `Reopened` record when the file ended with
+`Closed`. The invariant is that a `Closed` record is followed by nothing, or by exactly one
+`Reopened` record. Every `SessionError::Io` names the path that failed.
+
+**Reason:** A drive of the operations found both. A close followed by a resume left `Closed`
+in the middle of the file, so a reader could not tell a closed session from one that kept
+talking. Every unit test closed a session or resumed one, and none did both to one file. The
+io message said `No such file or directory` and never said which file, which tells a user
+with 500 sessions nothing. `ConfigError::Read` already names its path, so the session error
+now matches it.
+
+**Rules out:** A silent append after a close. A bare operating-system message with no path.
+
+## D-062 — A log capture in a test must prove itself first
+**Question (controller, flakiness hunt):** a warning test failed one run in twenty. Why,
+and what stops the whole family of log assertions from lying?
+
+**Decision:** A test capture installs a global subscriber once per test binary, and it
+writes into a thread-local buffer. Every capture helper emits a known probe line and
+asserts the probe arrived, before a caller trusts the captured text.
+
+**Reason:** A thread-local subscriber alone is not enough. With no global subscriber,
+`tracing` reports the current level filter as `OFF`, so a `warn!` takes its fast path and
+never reaches the capture. Whether that happened depended on which test ran first, so the
+failure was one run in twenty. The global subscriber sets the filter, and the thread-local
+buffer keeps parallel tests apart. After the fix: 25 clean runs of `rho-core`, and 12 of
+`rho-config`.
+
+The probe matters more than the flakiness. `a_resolved_credential_never_reaches_a_log`
+asserts that a secret is **absent** from a log. A broken capture makes that test pass
+against an implementation that prints the credential in full. That is the vacuous-test
+family from decision D-016, in a new place: a test that cannot fail is worse than no test.
+So the capture proves itself, and then the absence means something.
+
+**Rules out:** A thread-local-only capture. An assertion on an empty log with no proof that
+the log could have held anything. A flaky test left in the suite because it usually passes.

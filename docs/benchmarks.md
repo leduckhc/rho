@@ -356,3 +356,29 @@ Read one caution with these numbers. A session append is one record of about 200
 bytes, so the encode costs about 100 ns and the write costs microseconds. A faster
 codec does not make `store` faster. The codec matters on resume, and it matters
 more on the provider SSE path.
+
+## Session log, append and resume
+
+Measured in sprint 2 on macOS on Apple Silicon (aarch64), rustc 1.95.0, release build with
+the workspace profile. The bench drives the real `SessionWriter` and the real
+`SessionReader`, not a copy of their logic.
+
+```sh
+# The scratch bench lives outside the repository, because it links rho-core by path.
+# Source: 20000 appends of a 150-byte assistant message, then one full read.
+```
+
+| Path | Result |
+| --- | --- |
+| Append, 20000 records | 35.2 ms total, 1762 ns per record |
+| Lines written | 20001 for 20000 appends, plus the header |
+| File size | 5977922 bytes |
+| Resume, full read | 20000 entries in 12.6 ms, 452.5 MiB per second |
+
+The append cost includes the encode and the id. The write path holds one open sink and
+writes one record as one write.
+
+Two numbers explain the design, and both are measured. A reopen of the file per record
+costs 17567 ns, which is 17 times the held sink. An `fsync` per record costs 3076785 ns,
+which is about 3000 times the write. So the writer holds its sink and does not `fsync` per
+record. See decision D-059 and `SPEC-14` section 4a.
