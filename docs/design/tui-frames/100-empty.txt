@@ -1,0 +1,26 @@
+```
+ρ rho   ~/Work/Vibe/rho · main                sonnet-4.5 · openrouter · 48.2k in, 3.1k out        3s
+────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                ▄▀▀▄                                                
+                                                █  █                                                
+                                                █▄▄▀                                                
+                                                █                                                   
+                                                                                                    
+                                    rho · the harness, unbundled                                    
+                                                                                                    
+                                  sonnet-4.5 · openrouter · ready                                   
+                                                                                                    
+                                  ❯       type a prompt to begin                                    
+                                  /       list the commands                                         
+                                  ?       show the keys                                             
+                                  /guide  take the two minute tour                                  
+                                                                                                    
+                                                                                                    
+╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ❯ Type a prompt. / for commands. ? for help.                                                     │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+  ready                                                           enter send · / commands · ? help  
+```
