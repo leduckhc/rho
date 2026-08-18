@@ -6,6 +6,8 @@ This document is the contract for all later stages. The architect writes specs a
 - `sprint-1` — shipped in sprint 1.
 - `sprint-2` — shipped after sprint 1, in sprint 2. The code is in the tree.
 - `planned` — on the roadmap. No code yet.
+- `partial` — some of the feature is in the tree, and the row says which part. The rest
+  reports that it is not built, so a user never meets silence.
 - `considered` — not decided; requires a design spike first.
 
 A status states what the code proves, not what a plan intends. `workflow-sprint-2.yaml`
@@ -77,7 +79,7 @@ and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
 | F-lifecycle-hook-points | Lifecycle hook points | Hooks fire at these lifecycle points: session start, before provider request, after provider response, and before tool call. They also fire after tool result, at turn end, and at session end. | `rho-core` | `planned` | The set of hook points is fixed per sprint. New points require an interface change. |
 | F-out-of-process-plugin-tier-2 | Out-of-process plugin (Tier 2) | A subprocess in any language connects over stdio JSON-RPC. It lists its tools and serves tool calls. A crashed plugin does not take down the session. | `rho-plugin` | `sprint-1` | Write a plugin in any language. The JSON-RPC protocol is the extension point. |
 | F-plugin-schema-cache | Plugin schema cache | rho caches the tool schemas advertised by each plugin on disk. At startup, schemas appear in the first provider request without waiting for the plugin process to connect. | `rho-plugin` | `planned` | Third-party plugins do not need to change. The cache is transparent. |
-| F-slash-commands | Slash commands | The user types `/command` in the TUI or ACP client. An in-tree handler or a Tier-1 hook responds. | `rho-core` | `planned` | A `CommandHandler` impl registers a new slash command without forking. |
+| F-slash-commands | Slash commands | The user types `/command` in the TUI or ACP client. An in-tree handler or a Tier-1 hook responds. The TUI part is built. `/` opens the list. Typing filters it. The arrows, tab, and a left click select a row. `/help` and `/quit` run. `/model`, `/sessions`, and `/guide` each report that they are not built yet. A command that does nothing reads as a defect. | `rho-core` | `partial` | A `CommandHandler` impl registers a new slash command without forking. The handler trait is not built yet. So a new command still needs an entry in `rho-tui::slash_commands`. |
 | F-skills-filesystem | Skills (filesystem) | rho discovers `SKILL.md` files in configured directories. Skill descriptions appear in the system prompt. The agent loads the full file on demand. | `rho-skills` | `sprint-2` | Add a directory to the `skill_paths` config key. No code change required. |
 | F-prompt-templates | Prompt templates | The user invokes a `.md` file in a configured directory as a template. rho expands it before sending. | `rho-core` | `planned` | Add a directory to the `prompt_paths` config key. No code change required. |
 

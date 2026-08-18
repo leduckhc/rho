@@ -11,6 +11,10 @@ pub struct Binding {
     pub keys: &'static str,
     /// The one-line summary shown on the help screen.
     pub summary: &'static str,
+    /// True when a key handler answers this binding. A `false` row says so on the help
+    /// screen, because an interface that promises a key it ignores reads as broken. See
+    /// `D-a-panel-nobody-can-open`.
+    pub built: bool,
 }
 
 /// The whole binding table. The single source of truth for the help screen.
@@ -19,41 +23,71 @@ pub fn bindings() -> &'static [Binding] {
         Binding {
             keys: "enter",
             summary: "send the draft",
+            built: true,
         },
         Binding {
             keys: "alt+enter",
             summary: "insert a newline",
+            built: false,
         },
         Binding {
             keys: "ctrl-c",
             summary: "cancel the turn · press twice while idle to quit",
+            built: true,
+        },
+        Binding {
+            keys: "ctrl-d",
+            summary: "quit while the draft is empty",
+            built: true,
+        },
+        Binding {
+            keys: "/",
+            summary: "open the command list · tab completes · enter runs",
+            built: true,
+        },
+        Binding {
+            keys: "?",
+            summary: "open this help",
+            built: true,
         },
         Binding {
             keys: "ctrl-o",
             summary: "expand or collapse the newest tool row",
+            built: false,
         },
         Binding {
             keys: "ctrl-e",
             summary: "expand everything · press again to collapse",
+            built: false,
         },
         Binding {
             keys: "↑ ↓",
-            summary: "move the selection while the draft is empty",
+            summary: "move the selection in an open list",
+            built: true,
         },
         Binding {
             keys: "esc",
-            summary: "close a panel or collapse a row",
+            summary: "close a panel and keep the draft",
+            built: true,
         },
     ];
     TABLE
 }
 
 /// The help rows, generated from the binding table, so the two cannot drift. Each row
-/// carries a binding's keys and its summary, so the help can never omit a binding.
+/// carries a binding's keys and its summary, so the help can never omit a binding. An
+/// unwired binding carries a warning, because silence on a promised key reads as a bug.
 pub fn help_rows() -> Vec<String> {
     bindings()
         .iter()
-        .map(|binding| format!("  {:<12} {}", binding.keys, binding.summary))
+        .map(|binding| {
+            let note = if binding.built {
+                String::new()
+            } else {
+                " · not built yet".to_string()
+            };
+            format!("  {:<12} {}{note}", binding.keys, binding.summary)
+        })
         .collect()
 }
 

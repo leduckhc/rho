@@ -23,9 +23,11 @@ pub use paste::{
     LARGE_PASTE_CHARS, PasteChip, RoutedInput, attach_image, image_chip_label, paste_chip_label,
     route_burst,
 };
-pub use render::render;
+pub use render::{render, slash_row_index};
 pub use sanitize::{fit_to_width, sanitize_line};
-pub use state::{ActivityState, KeyAction, Row, ToolRowStatus, TuiState};
+pub use state::{
+    ActivityState, Approval, KeyAction, Panel, Row, SlashList, ToolRowStatus, TuiState,
+};
 
 pub use bindings::{
     Binding, SlashCommand, SlashOutcome, bindings, filter_slash_commands, help_rows,

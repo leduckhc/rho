@@ -7,7 +7,10 @@
 
 use std::io::{self, Stdout};
 
-use crossterm::event::{Event, EventStream, KeyEventKind};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind, MouseButton,
+    MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -18,6 +21,7 @@ use ratatui::backend::CrosstermBackend;
 use rho_core::{AgentEvent, AgentEvents, CancelToken, ContentBlock, Session};
 
 use crate::render::render;
+use crate::slash_row_index;
 use crate::state::{KeyAction, TuiState};
 
 /// A terminal backed by standard output.
@@ -78,7 +82,7 @@ impl App {
             tokio::select! {
                 maybe_key = input.next() => {
                     match maybe_key {
-                        Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
+                        Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                             match state.handle_key(key) {
                                 KeyAction::None => {}
                                 KeyAction::Submit(text) => {
@@ -99,6 +103,28 @@ impl App {
                             }
                             draw(terminal, state)?;
                         }
+                        // A resize must redraw. This arm used to fall into the catch-all
+                        // below, so the frame kept the old width until the next key.
+                        Some(Ok(Event::Resize(_, _))) => {
+                            draw(terminal, state)?;
+                        }
+                        // A click on a slash row runs that command, so the list the
+                        // renderer draws is selectable by mouse as well as by arrow.
+                        Some(Ok(Event::Mouse(mouse))) => {
+                            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                                let size = terminal
+                                    .size()
+                                    .map_err(|error| TuiError::Io(error.to_string()))?;
+                                if let Some(index) =
+                                    slash_row_index(state, size.width, size.height, mouse.row)
+                                {
+                                    if state.click_slash_row(index) == KeyAction::Exit {
+                                        break;
+                                    }
+                                    draw(terminal, state)?;
+                                }
+                            }
+                        }
                         Some(Ok(_)) => {}
                         Some(Err(error)) => return Err(TuiError::Io(error.to_string())),
                         None => break,
@@ -116,14 +142,23 @@ impl App {
                             draw(terminal, state)?;
                         }
                         Some(Err(error)) => {
-                            state.status = format!("run error: {error}");
+                            // The transcript is the only channel the user reads. This used
+                            // to write `state.status`, which no code draws, so a failed run
+                            // reported nothing at all.
+                            state.push_error(format!("run error: {error}"));
+                            // The driver returns on a failed turn with no `AgentEnd`, so the
+                            // frontend ends the run itself. Without this the state stays
+                            // `Running` and Ctrl-C can never quit again.
+                            state.end_run(true);
                             *events = None;
                             *cancel = None;
                             draw(terminal, state)?;
                         }
                         None => {
+                            state.end_run(false);
                             *events = None;
                             *cancel = None;
+                            draw(terminal, state)?;
                         }
                     }
                 }
@@ -157,7 +192,10 @@ fn draw(terminal: &mut Term, state: &TuiState) -> Result<(), TuiError> {
 fn setup_terminal() -> Result<Term, TuiError> {
     enable_raw_mode().map_err(|error| TuiError::Io(error.to_string()))?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).map_err(|error| TuiError::Io(error.to_string()))?;
+    // Mouse capture makes the slash list clickable. Without it crossterm never reports
+    // a click, so a list the design calls selectable was reachable only by keyboard.
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .map_err(|error| TuiError::Io(error.to_string()))?;
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend).map_err(|error| TuiError::Io(error.to_string()))
 }
@@ -165,8 +203,12 @@ fn setup_terminal() -> Result<Term, TuiError> {
 /// Leave the alternate screen and raw mode. Restore the terminal for the user.
 fn restore_terminal(terminal: &mut Term) -> Result<(), TuiError> {
     disable_raw_mode().map_err(|error| TuiError::Io(error.to_string()))?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)
-        .map_err(|error| TuiError::Io(error.to_string()))?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )
+    .map_err(|error| TuiError::Io(error.to_string()))?;
     terminal
         .show_cursor()
         .map_err(|error| TuiError::Io(error.to_string()))

@@ -50,7 +50,10 @@ fn render_shows_status_line() {
     state.apply(&AgentEvent::TurnStart);
 
     let text = render_to_string(&state, 60, 6);
-    assert!(text.contains("running"), "buffer was:\n{text}");
+    // The controller ruled that the U4 design supersedes the sprint-1 vocabulary:
+    // a running turn reads `working` in the footer, not `running`. See the
+    // controller finding on slice U4-D.
+    assert!(text.contains("working"), "buffer was:\n{text}");
     assert!(text.contains("openai/gpt-4o"), "buffer was:\n{text}");
 }
 
@@ -71,15 +74,23 @@ fn render_thinking_row_is_dimmed_and_collapsed() {
         index: 0,
         delta: "first line\nsecond line\nthird line".to_string(),
     }));
+    // The controller ruled that the U4 design supersedes the sprint-1 thinking
+    // row shape: a thinking block renders the `∴` glyph and a duration, not its
+    // text. This test keeps the property it protects: a multi-line block still
+    // collapses to one line, and the later lines never render.
+    state.row_durations = vec![Some(2_400)];
 
     let lines = render_to_lines(&state, 60, 8);
-    // The thinking block collapses to one line, so the second line never renders.
     assert!(
-        lines.iter().any(|line| line.contains("first line")),
-        "lines were:\n{lines:#?}"
+        lines.iter().any(|line| line.contains("∴ thought for 2.4s")),
+        "the thinking row did not take the ∴ glyph and its duration; lines were:\n{lines:#?}"
     );
     assert!(
         !lines.iter().any(|line| line.contains("second line")),
+        "the thinking block did not collapse; lines were:\n{lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("third line")),
         "the thinking block did not collapse; lines were:\n{lines:#?}"
     );
 }
@@ -125,4 +136,109 @@ fn render_sanitises_a_tool_preview_with_an_escape_sequence() {
     );
     // The visible letters survive.
     assert!(text.contains("red"), "buffer was:\n{text}");
+}
+
+// ---- Telling the user what the state is. ----------------------------------
+//
+// `state.status` was written in five places and drawn in none, so the arming
+// message for a second Ctrl-C never reached the screen. A user then reported that
+// Ctrl-C does not close the session, when in fact it closes 11 ms after the second
+// press. These tests pin the feedback, not the mechanism.
+
+#[test]
+fn the_footer_tells_the_user_to_press_ctrl_c_again() {
+    let mut state = TuiState::default();
+    state.handle_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('c'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ));
+    assert!(state.exit_armed, "the first Ctrl-C arms the gate");
+    let frame = render_to_string(&state, 100, 12);
+    assert!(
+        frame.contains("ctrl-c again"),
+        "the armed exit gate must be on screen, got:\n{frame}"
+    );
+}
+
+#[test]
+fn the_footer_says_canceling_while_a_cancel_is_in_flight() {
+    let mut state = TuiState::default();
+    state.apply(&AgentEvent::TurnStart);
+    state.handle_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('c'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ));
+    let frame = render_to_string(&state, 100, 12);
+    assert!(
+        frame.contains("canceling"),
+        "a cancel must show on screen, got:\n{frame}"
+    );
+}
+
+#[test]
+fn a_mouse_row_maps_to_the_command_under_it() {
+    let mut state = TuiState::default();
+    state.handle_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('/'),
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    let height: u16 = 24;
+    let lines = render_to_lines(&state, 100, height);
+    let commands = rho_tui::filter_slash_commands("/");
+
+    // Find the drawn row of the last command, then ask the mapper for it.
+    let last = commands[commands.len() - 1].name;
+    let row = lines
+        .iter()
+        .position(|line| line.contains(last))
+        .expect("the last command must be drawn") as u16;
+    assert_eq!(
+        rho_tui::slash_row_index(&state, 100, height, row),
+        Some(commands.len() - 1),
+        "the mapper and the renderer must agree on the row"
+    );
+
+    // A click on the footer is not a command row.
+    assert_eq!(
+        rho_tui::slash_row_index(&state, 100, height, height - 1),
+        None
+    );
+}
+
+#[test]
+fn the_footer_stops_saying_canceling_when_the_run_dies_without_an_end_event() {
+    let mut state = TuiState::default();
+    state.apply(&AgentEvent::TurnStart);
+    state.handle_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('c'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ));
+    state.end_run(true);
+    let frame = render_to_string(&state, 100, 12);
+    assert!(
+        !frame.contains("canceling"),
+        "the cancel word outlived the run:\n{frame}"
+    );
+    assert!(
+        !frame.contains("working"),
+        "the working word outlived the run:\n{frame}"
+    );
+}
+
+#[test]
+fn a_click_below_a_dropped_panel_maps_to_nothing() {
+    // At a small height the panel is dropped, so no row belongs to a command. Without
+    // this guard a click could run a command the user never saw.
+    let mut state = TuiState::default();
+    state.handle_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('/'),
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    for row in 0..4u16 {
+        assert_eq!(
+            rho_tui::slash_row_index(&state, 100, 4, row),
+            None,
+            "a four-row frame draws no panel, so row {row} is not a command"
+        );
+    }
 }

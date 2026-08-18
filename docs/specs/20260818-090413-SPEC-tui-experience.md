@@ -378,6 +378,31 @@ constraint.
 All render tests use `ratatui::backend::TestBackend`. No test opens a real terminal.
 Each test name states the one assertion it proves.
 
+The input wiring, added after a user drove the interface and found four dead keys. The
+panels, the help screen, and the slash list were built, rendered, and tested, and no key
+reached any of them. See `D-a-panel-nobody-can-open`.
+- `ctrl_d_on_an_empty_draft_exits` — Ctrl-D leaves rho, the way it ends a shell.
+- `ctrl_d_with_a_draft_keeps_the_draft_and_inserts_nothing` — a chord never types a `d`.
+- `a_control_chord_never_becomes_a_letter` — Ctrl-O, Ctrl-E, Ctrl-D, and Ctrl-X type nothing.
+- `slash_on_an_empty_draft_opens_the_command_list` — `/` opens the list at row 0.
+- `the_slash_list_filters_as_the_user_types` — the query carries every typed character.
+- `the_arrows_move_the_slash_selection_and_stop_at_the_ends` — the selection clamps.
+- `enter_runs_the_selected_command_and_quit_exits` — `/quit` plus Enter returns `Exit`.
+- `enter_never_submits_the_slash_text_as_a_prompt` — a command never reaches the model.
+- `tab_completes_the_selected_command_without_running_it` — Tab completes `/mo` to `/model`.
+- `tab_on_an_empty_filter_changes_nothing` — Tab with no match leaves the draft alone.
+- `question_mark_on_an_empty_draft_opens_help` — `?` opens help and types nothing.
+- `question_mark_inside_a_draft_is_just_text` — `why?` stays a question.
+- `esc_closes_a_panel` — Esc returns to the resting interface.
+- `esc_keeps_the_draft_so_a_path_is_not_lost` — `/usr/bin/foo` survives Esc and then sends.
+- `backspace_past_the_slash_closes_the_list` — deleting the slash closes the panel.
+- `a_command_that_is_not_built_reports_instead_of_doing_nothing` — `/model` says so on screen.
+- `an_unknown_command_reports_on_screen` — `/nope` reports as an error row.
+- `an_unknown_command_keeps_the_draft_it_reported_on` — a report never eats the draft.
+- `the_footer_tells_the_user_to_press_ctrl_c_again` — the armed exit gate is on screen.
+- `the_footer_says_canceling_while_a_cancel_is_in_flight` — a cancel is visible.
+- `a_mouse_row_maps_to_the_command_under_it` — `slash_row_index` agrees with the renderer.
+
 Duration ladder, the documented rungs:
 - `duration_one_decimal_under_ten_seconds` — `2400ms` renders `2.4s`.
 - `duration_strips_trailing_zero` — `2000ms` renders `2s`, not `2.0s`.
@@ -464,8 +489,9 @@ The exclusions from `SPEC-tui` still hold. This spec adds no feature beyond the 
 list. These stay out:
 
 - Markdown rendering and syntax highlighting in the transcript.
-- Mouse support and scrollback search.
-- A model picker and a session picker in the TUI.
+- Scrollback search.
+- A model picker and a session picker in the TUI. `/model` and `/sessions` are in the
+  command list, and each reports that it is not built yet.
 - A second motion, an idle motion, and any 3D animation.
 - A remembered execute approval. See `D-no-remembered-execute-allow`.
 - A real duration for a span that a clock cannot represent.

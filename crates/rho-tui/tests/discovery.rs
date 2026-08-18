@@ -89,3 +89,40 @@ fn guide_is_a_slash_command() {
         .any(|command| command.name == "/guide");
     assert!(has_guide, "the slash list has no `/guide` command");
 }
+
+#[test]
+fn the_help_screen_marks_a_binding_that_is_not_wired() {
+    // The help screen became reachable, and it listed four keys that answer nothing:
+    // ctrl-o, ctrl-e, alt+enter, and the arrow selection outside a panel. An interface
+    // that promises a key it does not answer is the defect D-a-panel-nobody-can-open
+    // describes, so an unwired binding says so on its own row.
+    let rendered = help_rows().join("\n");
+    for binding in bindings() {
+        if binding.built {
+            continue;
+        }
+        let row = help_rows()
+            .into_iter()
+            .find(|row| row.contains(binding.keys))
+            .expect("every binding has a row");
+        assert!(
+            row.contains("not built yet"),
+            "the unwired binding {:?} reads as working: {row:?}",
+            binding.keys
+        );
+    }
+    // At least one binding is wired, and a wired row carries no warning.
+    let wired = bindings()
+        .iter()
+        .find(|binding| binding.built)
+        .expect("some binding is wired");
+    let row = help_rows()
+        .into_iter()
+        .find(|row| row.contains(wired.keys))
+        .expect("every binding has a row");
+    assert!(
+        !row.contains("not built yet"),
+        "a wired binding must not carry the warning: {row:?}"
+    );
+    assert!(rendered.contains("enter"), "the table still lists enter");
+}

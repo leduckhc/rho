@@ -300,7 +300,8 @@ moves. Idle, it reads `enter send · / commands · ? help`.
 
 - **The slash-command list.** Typing `/` in an empty draft opens the list above the
   composer, framed by two full-width rules, pi's width-computed border. Typing filters
-  it. `↑ ↓` choose, enter runs, esc closes. The selected row carries the `❯` marker and
+  it. `↑ ↓` choose, enter runs, tab completes, esc closes and keeps the draft. A left
+  click runs the row under the pointer. The selected row carries the `❯` marker and
   renders reversed. `100-slash-list.txt` shows it open.
 - **The shortcut list.** Typing `?` in an empty draft opens the key list in the same
   framed panel. Every binding on it is read from the real binding table, so the help can
@@ -309,8 +310,8 @@ moves. Idle, it reads `enter send · / commands · ? help`.
   short sequence of example rows and names each part. The empty state and the help panel
   both name it, so the path is two keys long from first launch.
 
-The first Ctrl-C while idle prints `press ctrl-c again to quit` in the footer, which
-teaches the exit without a document.
+The first Ctrl-C while idle prints `press ctrl-c again to quit · any key to stay` in the
+footer, which teaches the exit without a document.
 
 ## 11. The empty state
 
@@ -366,7 +367,7 @@ every glyph single width.
 
 ## Out of scope
 
-Markdown rendering, syntax highlighting, mouse support, scrollback search, a model
+Markdown rendering, syntax highlighting, scrollback search, a model
 picker, and a session picker stay out, as `SPEC-tui` already states. This document
 designs no feature beyond the owner's list: paste collapsing, motion, durations, concise
 mode, attachments, shortcuts and help, the guide, slash commands, the header, and the
