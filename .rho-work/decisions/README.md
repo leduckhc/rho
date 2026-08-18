@@ -66,6 +66,9 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-three-tiers](20260817-232444-D-three-tiers.md) | 20260817 | Three tiers, named for what each contributes |
 | [D-todo-in-a-green-stage](20260817-175834-D-todo-in-a-green-stage.md) | 20260817 | Three `todo!()` bodies survived stage S4, and one is a security boundary |
 | [D-truncated-tail-warns](20260818-014343-D-truncated-tail-warns.md) | 20260818 | Resume drops a truncated last line and warns, and keeps every whole record |
+| [D-tui-plugin-is-a-tier-2-trait](20260818-055346-D-tui-plugin-is-a-tier-2-trait.md) | 20260818 | The terminal view surface is a Tier-2 in-tree trait |
+| [D-tui-plugin-render-budget](20260818-055346-D-tui-plugin-render-budget.md) | 20260818 | A terminal view render has an 8 ms budget and a worker thread |
+| [D-tui-plugin-trust-default-no-transcript](20260818-055346-D-tui-plugin-trust-default-no-transcript.md) | 20260818 | A terminal view reads nothing until the user opts in |
 | [D-two-weak-tests](20260818-003819-D-two-weak-tests.md) | 20260818 | Two weak tests found by breaking the code, and one design consequence recorded |
 | [D-unmappable-pi-record-drops](20260818-030907-D-unmappable-pi-record-drops.md) | 20260818 | An unmappable pi record drops with a count, and the import finishes |
 | [D-website-direction](20260817-170455-D-website-direction.md) | 20260817 | Website direction is mockup C, with A's command-prompt labels |
