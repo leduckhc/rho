@@ -105,6 +105,30 @@ python3 bench/tui_first_frame.py
 The figure includes building the provider client, because a user cannot start a session
 without one.
 
+#### How the harness ends a run
+
+The harness closes the pty master first, and it kills the child second. Then it waits with
+a deadline of five seconds. `bench/ptyharness.py` holds that order, and
+`bench/test_ptyharness.py` pins it.
+
+The order is not a style choice. A run stops reading the master as soon as it has its
+sample, so the pty buffer fills. The child then blocks inside a write to its own terminal.
+`SIGKILL` cannot finish while that write sits in the kernel, and the child stays in state
+`?Es`. A close of the master makes the write fail with `EIO`, which frees the child at
+once. Measured with the release binary on 2026-08-18, three runs for each order:
+
+| Teardown order | Time to reap the child |
+| --- | --- |
+| Close the master, then `SIGKILL` | 13 ms, 13 ms, 13 ms |
+| `SIGKILL`, master open, no drain | 11 ms, more than 8 s, more than 8 s |
+| `SIGKILL`, master open, keep draining | 0 ms, 0 ms, 0 ms |
+
+The shipped code had no deadline, so it hung on the first wedged run. A deadline alone only
+converts that hang into a slow benchmark: with the wrong order kept, twelve runs took 60.4
+seconds and every run reported a child over its deadline. With the order corrected, the
+same twelve runs take 0.42 seconds. The old shape also never closed the master, so twelve
+runs leaked twelve file descriptors. See `docs/verification/pty-harness-teardown.md`.
+
 **For comparison, using each project's own published figure.** jcode reports 14.0 ms to
 first frame and 48.7 ms to first input. pi reports 590.7 ms to first frame. Those come from
 a different harness on different hardware, so read the comparison as an order of magnitude

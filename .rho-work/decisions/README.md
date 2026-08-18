@@ -50,6 +50,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-project-skill-needs-trust](20260817-215003-D-project-skill-needs-trust.md) | 20260817 | A project skill is not loaded until the project is trusted |
 | [D-provider-contract-crate](20260817-175201-D-provider-contract-crate.md) | 20260817 | The provider contract suite is a real crate, not a private test file |
 | [D-provider-extension-verified-outside](20260817-200505-D-provider-extension-verified-outside.md) | 20260817 | The provider extension point is verified from outside the workspace |
+| [D-pty-teardown-closes-before-it-waits](20260818-155000-D-pty-teardown-closes-before-it-waits.md) | 20260818 | A pty harness closes the master, then kills, then waits with a deadline |
 | [D-reader-line-cap](20260818-020639-D-reader-line-cap.md) | 20260818 | The session reader caps one line |
 | [D-recorder-consumes-events](20260818-014343-D-recorder-consumes-events.md) | 20260818 | The session log is an event-stream consumer, not a field in Session |
 | [D-redact-json-secrets](20260818-020639-D-redact-json-secrets.md) | 20260818 | Session redaction uses one new function in rho-redact |
