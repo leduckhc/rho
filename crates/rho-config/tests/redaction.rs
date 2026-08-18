@@ -1,0 +1,110 @@
+//! The redaction invariant from `SPEC-13` section 5 and section 7.
+//!
+//! A resolved credential is a `Secret`, and `Secret` redacts by construction. These
+//! tests assert the invariant, not one example field: no formatted output and no log
+//! line holds the credential text. This satisfies F-103 and answers the sprint-1
+//! "credential in a log" defect.
+
+mod common;
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
+use common::env_map;
+use rho_config::{ApprovalMode, Config, CredentialSource};
+use rho_core::{SandboxMode, SubagentLimits};
+
+/// The unique credential text. It must appear in no formatted value and no log line.
+const SECRET_TEXT: &str = "sk-live-topsecret-value";
+
+/// Build a `Config` that holds one parsed credential.
+fn config_holding(source: CredentialSource) -> Config {
+    let mut credentials = BTreeMap::new();
+    credentials.insert("api".to_string(), source);
+    Config {
+        provider: Some("openrouter".to_string()),
+        model: Some("some-model".to_string()),
+        session_root: None,
+        session_file: None,
+        ephemeral: false,
+        sandbox: SandboxMode::Off,
+        approval: ApprovalMode::ReadOnly,
+        skill_paths: Vec::new(),
+        discover_skills: true,
+        mcp_config: None,
+        subagents: SubagentLimits::default(),
+        credentials,
+    }
+}
+
+#[test]
+fn a_resolved_credential_never_appears_in_a_formatted_value() {
+    // The `Debug` of a `Config` that holds a literal credential prints `Secret(***)`
+    // and never the value. This tests every public type that can hold a credential,
+    // through the one `Config` that owns them all.
+    let source = CredentialSource::parse(SECRET_TEXT);
+    let config = config_holding(source);
+
+    let debug = format!("{config:?}");
+    assert!(
+        !debug.contains(SECRET_TEXT),
+        "the Debug of a Config must never contain the credential text"
+    );
+    assert!(
+        debug.contains("Secret(***)"),
+        "the credential must render as the fixed mask"
+    );
+
+    // The invariant also holds for the source itself, not only inside a Config.
+    let source = CredentialSource::parse(SECRET_TEXT);
+    let source_debug = format!("{source:?}");
+    assert!(
+        !source_debug.contains(SECRET_TEXT),
+        "the Debug of a CredentialSource must never contain the credential text"
+    );
+}
+
+/// A writer that collects every log byte into a shared buffer.
+#[derive(Clone)]
+struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for BufferWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufferWriter {
+    type Writer = BufferWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+#[test]
+fn a_resolved_credential_never_reaches_a_log() {
+    // A resolution at `trace` level writes no credential to the subscriber. Redaction
+    // is by construction: no code in `rho-config` writes a credential to `tracing`.
+    let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let writer = BufferWriter(Arc::clone(&buffer));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(writer)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        let source = CredentialSource::parse(SECRET_TEXT);
+        let env = env_map(&[]);
+        let _ = source.resolve("api", &env);
+    });
+
+    let logged = String::from_utf8(buffer.lock().unwrap().clone()).expect("utf8 log");
+    assert!(
+        !logged.contains(SECRET_TEXT),
+        "a credential must never reach a log, even at trace level: {logged:?}"
+    );
+}

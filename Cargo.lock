@@ -2683,10 +2683,14 @@ dependencies = [
 name = "rho-config"
 version = "0.1.0"
 dependencies = [
+ "rho-core",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2695,6 +2699,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "rho-redact",
  "serde",
  "serde_json",
  "tempfile",
@@ -2805,6 +2810,18 @@ dependencies = [
 [[package]]
 name = "rho-redact"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "rho-session-import-pi"
+version = "0.1.0"
+dependencies = [
+ "rho-core",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "rho-skills"

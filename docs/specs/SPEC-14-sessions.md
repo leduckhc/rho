@@ -192,6 +192,13 @@ pub enum SessionError {
     Decode(String),
     #[error("unsupported session version {0}")]
     Version(u32),
+    /// A resume would widen a permission, and the user did not allow it.
+    #[error("a resume would widen {field} from {stored} to {requested}; pass --allow-widen to allow it")]
+    Widen {
+        field: &'static str,
+        stored: String,
+        requested: String,
+    },
 }
 
 /// Appends records to one session file. It owns the open file handle.
@@ -479,6 +486,59 @@ The approval names form a total order here, so the comparison is representable. 
 not the trait-object comparison that `SPEC-11` section 3 proved impossible. It compares
 two stored mode names, not two arbitrary `ApprovalPolicy` objects.
 
+The rule needs an API, or no test can reach it. A rule with no function is the family
+that left `confine` at `todo!()` through a green stage. So `rho-core` owns the comparison,
+and the comparison is one function over two names.
+
+```rust
+/// The approval modes, ordered from strict to permissive.
+///
+/// The order is the whole point. `PartialOrd` gives the comparison that section 8a
+/// states, and it makes a widening resume representable as a refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StoredApproval {
+    ReadOnly,
+    Ask,
+    AllowAll,
+}
+
+/// The sandbox modes, ordered from strict to permissive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StoredSandbox {
+    Strict,
+    Confined,
+    Off,
+}
+
+impl StoredApproval {
+    /// Parse a stored name. An unknown name is the strictest mode, never the loosest.
+    pub fn parse(name: &str) -> Self;
+}
+
+impl StoredSandbox {
+    /// Parse a stored name. An unknown name is the strictest mode, never the loosest.
+    pub fn parse(name: &str) -> Self;
+}
+
+/// Compare the stored modes in a header against the modes this run would use.
+///
+/// Return `Ok(())` when the run keeps or narrows both modes. Return
+/// `SessionError::Widen` when the run would widen either mode and `allow_widen` is
+/// false. Return `Ok(())` when the run would widen and `allow_widen` is true, because
+/// the user said so on purpose.
+pub fn check_resume_permission(
+    header: &SessionHeader,
+    approval: StoredApproval,
+    sandbox: StoredSandbox,
+    allow_widen: bool,
+) -> Result<(), SessionError>;
+```
+
+An unknown mode name parses to the strictest mode. So a file from a later rho, or a file
+a human edited, cannot widen a permission through a name this build does not know. That
+is the opposite of `ToolKind::Other`, which counted an unknown kind as safe and failed
+open. See decision D-017.
+
 ### Resume repairs an unmatched tool call after a crash
 
 A crash can leave the file with an assistant `Message` that carries a `ToolCall`, and no
@@ -544,6 +604,17 @@ file's day.
 
 Feature F-54 lives in the crate `rho-session-import-pi`. It converts a pi session file
 to rho's format. The conversion is one-way. The pi file is not changed.
+
+The crate exposes one function. It returns records, and it writes no file. So a caller
+decides where the records go, and the byte-unchanged rule is easy to prove.
+
+```rust
+/// Read a pi session file and return the rho records it maps to.
+///
+/// The pi file is opened read-only. The function writes nothing, so the pi file keeps
+/// every byte. A record type with no rho model drops, per the table below.
+pub fn import_pi_session(pi_path: &Path) -> Result<Vec<Entry>, SessionError>;
+```
 
 A pi session file is JSONL at `~/.pi/agent/sessions/<project>/<stamp>_<uuid>.jsonl`. The
 shape below is confirmed against a real file on disk.
@@ -627,9 +698,15 @@ Resume:
   `MAX_LINE_BYTES` returns a decode error and never allocates the whole line.
 - `resume_refuses_an_unknown_version` — a header with a version the reader does not know
   returns `SessionError::Version`, and the resume stops.
-- `resume_does_not_widen_a_read_only_session` — a session whose header names `read-only`
-  refuses to resume under `allow-all` without `--allow-widen`, and runs under
-  `read-only` with no flag.
+- `resume_does_not_widen_a_read_only_session` — `check_resume_permission` on a header that
+  names `read-only` returns `SessionError::Widen` for a run that would use `allow-all`.
+- `resume_allows_a_narrower_mode` — the same check returns `Ok` for a run that keeps or
+  narrows both modes, with no flag.
+- `allow_widen_permits_a_wider_resume` — the same check returns `Ok` for a wider run when
+  `allow_widen` is true, because the user asked for it.
+- `an_unknown_mode_name_parses_to_the_strictest_mode` — `StoredApproval::parse` and
+  `StoredSandbox::parse` return the strictest mode for a name they do not know, so an
+  unknown name can never widen.
 - `resume_repairs_an_unmatched_tool_call_after_a_crash` — a file that ends with a
   `ToolCall` and no matching `ToolResult` rebuilds a matched pairing with a synthetic
   error result, so the next provider request is valid.

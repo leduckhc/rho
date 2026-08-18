@@ -104,6 +104,31 @@ ACP backend.
 | T1 | 2 | reviewer | fail | Three blockers and five majors. Every one is a repeat of a sprint-1 defect family. |
 | T1b | 1 | architect | pass | Eight findings fixed. SPEC-16 written. Five decisions, D-051 to D-055. |
 | T1b | 2 | controller | pass | Controller found one more fail-open: a remembered allow would have covered every `bash` call. |
+| T2 | 1 | tester | pass | 29 config tests, all red on `todo!()`. Every SPEC-13 test name exists. |
+| T4 | 1 | tester | partial | Turn limit. 39 session tests red. The pi import tests were missing. |
+| T4 | 2 | tester | pass | Resumed with a narrow brief. Three pi import tests, in a new crate the spec named. |
+| T4 | 3 | controller | pass | Controller found the widening rule had no API, so no test could reach it. |
+
+### What the controller fixed in the red stages
+
+The tester reports were accurate. The gaps were in the specs and in two test bodies.
+
+1. **The widening rule had no function.** `SPEC-14` section 8a said a resume refuses to
+   widen a permission. No spec signature expressed the comparison, so the test asserted
+   only that the header round-trips. That is the `confine` family again: a rule with no
+   API cannot be tested. The spec now states `StoredApproval`, `StoredSandbox`, and
+   `check_resume_permission`, and four tests cover the refusal, the narrowing, the
+   override, and an unknown mode name. An unknown name parses to the strictest mode, so a
+   file from a later build can never widen.
+2. **Two failure tests accepted any error.** `a_broken_approval_key_stops_the_run` and
+   `a_broken_sandbox_key_stops_the_run` matched `Err(_)`. A read fault would have passed
+   them. Both now name the error variant.
+3. **The import signature was missing.** The tester flagged that `SPEC-14` section 9 named
+   a crate and no function. The spec now states `import_pi_session`, and states that it
+   returns records and writes no file.
+
+The red suite is 74 failing tests across three crates, and 491 tests still pass. Every
+failure is an unimplemented body with a message that names stage T5.
 
 ### The T1 review, and why it failed
 

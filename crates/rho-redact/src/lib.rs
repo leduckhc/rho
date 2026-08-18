@@ -111,6 +111,21 @@ pub fn sanitize_line(input: &str) -> String {
         .collect()
 }
 
+/// Mask every value under a key that `looks_like_a_secret` flags, anywhere in a JSON
+/// value. Recurse into every object and every array. Return a new value.
+///
+/// - It masks a value under a flagged key. The masked value is the string `"***"`.
+/// - It reads a key name only, never a value, because a value cannot be recognised
+///   reliably. This matches [`looks_like_a_secret`], which already reads the name.
+/// - It keeps every key name, every value under an unflagged key, and the whole tree
+///   shape.
+///
+/// See `SPEC-14` section 5a and decision D-054.
+pub fn redact_json_secrets(value: &serde_json::Value) -> serde_json::Value {
+    let _ = value;
+    todo!("stage T5 implements redact_json_secrets")
+}
+
 /// Consume the rest of an escape sequence, after its escape character.
 ///
 /// Handles the two shapes that matter. A control sequence starts `[` and ends with a

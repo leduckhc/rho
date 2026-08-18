@@ -11,3 +11,4 @@ authors.workspace = true
 description = "Shared redaction for rho: credential-name detection and terminal-safe text."
 
 [dependencies]
+serde_json = "1.0.151"
