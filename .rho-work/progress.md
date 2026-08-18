@@ -257,6 +257,30 @@ That crate is what a third party uses to prove its own provider conforms. A harn
 fails three runs in eight teaches an author to distrust the suite, and a distrusted suite
 gets skipped.
 
+## Sprint 3, the terminal interface
+
+`workflow-sprint-3.yaml` drives this sprint. The goal is an interface a critic ranks at or
+above pi, codex, claude code, and jcode, in a binary that stays the fastest of them.
+
+The sprint has one rule that the earlier sprints did not. **A critic panel must agree.** Four
+critics judge beauty, usability, performance, and accessibility. None of them writes the
+code. The stage ends only when every critic returns `top-peak` in the same round, and a
+finding accepted as a known limit needs a reason the critic accepts.
+
+| Stage | Attempt | Role | Result | Notes |
+| --- | --- | --- | --- | --- |
+| U0 | 1 | scout | running | Three scouts read prior art in parallel: pi and jcode, codex and claude code, and Makit. |
+
+The owner named the features: a large paste collapses to one line, a working state animates,
+a session and a turn and a tool call and a thinking block each report an elapsed time, a
+concise mode collapses a tool call and a thinking block, an attachment pastes, shortcuts and
+a guide are discoverable, slash commands list themselves, the header stuns a critic, and a
+third party extends the interface.
+
+Each one is judged twice: once by a critic for beauty, and once by a benchmark for cost. An
+interface that costs frames or memory is not a win here, because speed and memory are the
+reason rho exists.
+
 ### Dispatch statistics for this sprint
 
 Eight subagent dispatches so far. Three hit the turn limit, and all three reported the
