@@ -28,6 +28,9 @@ Ten frame mocks prove this layout. `100-idle.txt` is the reference frame.
 | 3 to 10 | Composer, a rounded box | grows with the draft, capped |
 | 1 | Footer: activity and key hints | fixed, 1 row |
 
+The footer holds two roles on one row. The activity word and its duration take `text`,
+because they report the current state. The key hints on the right take `muted`.
+
 The fixed cost is six rows: header, rule, a three-row composer, and the footer. A 24-row
 terminal gives the transcript 18 rows. Only the transcript scrolls. When the composer or
 a panel grows, it takes rows from the transcript, never from the header or the footer.
@@ -73,12 +76,17 @@ default. Section 4 gives the light table and every measured ratio.
 
 | Role | Used for | 256-colour | 16-colour | No colour |
 | --- | --- | --- | --- | --- |
-| `text` | assistant body, user text, header title | terminal default | default | plain |
+| `text` | assistant body, user text, header title, the footer activity word | terminal default | default | plain |
 | `muted` | thinking, rules, hints, payloads, placeholders | 245 `#8a8a8a` | default + dim | dim |
 | `accent` | brand, user marker `❯`, running, ok, selection | 78 `#5fd787` | green | bold |
 | `error` | failed tools, error rows | 203 `#ff5f5f` | red | bold |
 | `warn` | a live duration past a minute, awaiting input | 179 `#d7af5f` | yellow | bold |
 | `caution` | the approval panel | 173 `#d7875f` | yellow + bold | bold, reversed glyph |
+
+The three colour columns are alternatives, one per terminal mode. They never stack. A
+renderer that paints the 256-colour value and then adds the no-colour modifier dims a role
+twice, and the ratios in section 4 assume one dimming. See
+`D-a-role-column-is-not-a-stack`.
 
 Makit's status semantics map one to one. Running, connected, and ok take `accent`, which
 is Makit's primary green. Error and offline take `error`. Idle, exited, and muted take

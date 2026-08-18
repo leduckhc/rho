@@ -22,7 +22,7 @@ use crate::duration::{duration_slot, format_duration};
 use crate::motion::{MotionCell, motion_cell, sweep_weight};
 use crate::sanitize::sanitize_line;
 use crate::state::{ActivityState, Approval, Panel, Row, SlashList, ToolRowStatus, TuiState};
-use crate::theme::{Role, RoleStyle, role_256};
+use crate::theme::{Role, role_256};
 
 /// The brand mark. The `ρ` renders in the accent role, so it is the first accent
 /// on screen.
@@ -122,8 +122,11 @@ pub fn render(state: &TuiState, frame: &mut Frame<'_>) {
         y += 1;
     }
     if layout.footer {
-        let (footer, word_at) = footer_line(state, width);
-        put(frame, y, width, &footer, style_for(Role::Muted));
+        let (footer, word_at, hint_at) = footer_line(state, width);
+        // The hints are muted, and the activity word is text. One muted row for both made
+        // `done · end turn` as faint as the hints, and a user reported it as invisible.
+        put(frame, y, width, &footer, text_style());
+        restyle(frame, y, hint_at, width, style_for(Role::Muted));
         apply_sweep(state, frame, y, word_at);
     }
 }
@@ -561,9 +564,16 @@ fn composer_lines(state: &TuiState, width: usize) -> Vec<(String, Style)> {
     }
 
     let mut lines = vec![(border(width, '╭', '╮'), muted)];
-    for row in rows {
+    for (index, row) in rows.into_iter().enumerate() {
         let inner = pad(&row, inner_width);
-        lines.push((format!("│{inner}│"), text_style()));
+        // The placeholder is muted, as `docs/tui-design.md` section 8 states. It drew in
+        // the default foreground, which reads as bright as the assistant's answer.
+        let style = if show_placeholder && index == 0 {
+            muted
+        } else {
+            text_style()
+        };
+        lines.push((format!("│{inner}│"), style));
     }
     lines.push((border(width, '╰', '╯'), muted));
     lines
@@ -571,9 +581,10 @@ fn composer_lines(state: &TuiState, width: usize) -> Vec<(String, Style)> {
 
 // ---- The footer. ----------------------------------------------------------
 
-/// The footer content row, and the column where the working word begins, so the
-/// sweep can style it. The word column is `None` when no word animates.
-fn footer_line(state: &TuiState, width: usize) -> (String, Option<usize>) {
+/// The footer content row, the column where the working word begins, and the column where
+/// the key hints begin. The word column is `None` when no word animates. The hint column
+/// lets the caller paint the hints muted and the activity word as text.
+fn footer_line(state: &TuiState, width: usize) -> (String, Option<usize>, usize) {
     let running =
         state.activity == ActivityState::Running || matches!(state.panel, Panel::Approval(_));
     let (left, word_col) = if running {
@@ -618,7 +629,19 @@ fn footer_line(state: &TuiState, width: usize) -> (String, Option<usize>) {
         .saturating_sub(left.width())
         .saturating_sub(right.width());
     let line = format!("  {left}{}{right}  ", " ".repeat(gap));
-    (pad(&line, width), word_col)
+    // Where the hints start, so the caller can paint them muted.
+    let hint_at = EDGE_MARGIN + left.width() + gap;
+    (pad(&line, width), word_col, hint_at)
+}
+
+/// Repaint the style of the cells from `start` to `end` on row `y`, keeping the symbols.
+/// The footer holds two roles on one row, and the sweep uses the same mechanism.
+fn restyle(frame: &mut Frame<'_>, y: usize, start: usize, end: usize, style: Style) {
+    let buf = frame.buffer_mut();
+    let width = buf.area.width as usize;
+    for column in start..end.min(width) {
+        buf[(column as u16, y as u16)].set_style(style);
+    }
 }
 
 /// The narrowest width that still shows the full footer hints. Below it, the hints
@@ -807,27 +830,24 @@ fn text_style() -> Style {
     Style::default()
 }
 
-/// A ratatui style for a role, from the 256-colour table plus the no-colour
-/// modifiers that carry the same meaning.
+/// A ratatui style for a role, in the 256-colour mode.
+///
+/// `docs/tui-design.md` section 3 gives three columns for every role: a 256-colour value,
+/// a 16-colour value, and a no-colour modifier set. They are alternatives, one per
+/// terminal mode, and not a stack. This function was adding the no-colour modifiers on
+/// top of the 256-colour value, so every muted row drew grey 245 **and** `DIM`. That is
+/// two dimmings where the design measured one, and the contrast table in section 4 assumes
+/// 245 alone at 5.19 to 1. A user reported the footer as almost invisible.
+///
+/// `caution` keeps its bold weight, because the design gives the approval panel a stronger
+/// weight in every mode. No other role carries a modifier here.
 fn style_for(role: Role) -> Style {
-    let mut style = match role_256(role) {
+    let style = match role_256(role) {
         Some(index) => Style::default().fg(Color::Indexed(index)),
         None => Style::default(),
     };
-    let RoleStyle {
-        color: _,
-        dim,
-        bold,
-        reversed,
-    } = crate::theme::role_none(role);
-    if dim {
-        style = style.add_modifier(Modifier::DIM);
-    }
-    if bold {
-        style = style.add_modifier(Modifier::BOLD);
-    }
-    if reversed {
-        style = style.add_modifier(Modifier::REVERSED);
+    if role == Role::Caution {
+        return style.add_modifier(Modifier::BOLD);
     }
     style
 }

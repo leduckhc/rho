@@ -175,3 +175,39 @@ python3 bench/test_ptyharness.py                            0 failure(s)
 ```
 
 The suite was 667 tests before this work and 698 after.
+
+## Contrast, reported after the wiring landed
+
+The user reported two faults after driving the wired interface. The placeholder read too
+bright. The footer read as almost invisible. One line of code caused both.
+
+`style_for` applied the 256-colour value from the role table and the no-colour modifier set
+on top of it. So `muted` drew grey 245 **and** `DIM`. The design records 245 at 5.19 to 1,
+and that number assumes one dimming. The placeholder drew in the default foreground, though
+section 8 of the design gives it `muted`.
+
+No test asserted a style anywhere in the crate. The frame fixtures compare symbols only,
+because `render_rows` reads `cell.symbol()`. So every colour was unpinned.
+
+Three tests now pin it, and each one was watched to fail:
+
+| Mutation | Test that failed |
+| --- | --- |
+| The no-colour `DIM` goes back on top of grey 245 | `a_muted_cell_is_grey_but_never_dim_as_well` |
+| The placeholder draws as text again | `the_placeholder_is_muted` |
+| The whole footer goes back to muted | `the_footer_activity_word_reads_as_text_and_the_hints_stay_muted` |
+
+A probe reads the escape codes the release binary really writes, rather than a model of
+them. `pyte` cannot help here, because it does not model `DIM`.
+
+```
+idle frame: DIM sequences (ESC[2m) = 0
+idle frame: grey 245 sequences     = 4
+
+placeholder: ESC[38;5;245;49m  before "Type a prompt"
+activity:    ESC[39;49m        before "ready"
+hints:       ESC[38;5;245;49m  before "enter send"
+```
+
+So the placeholder is muted, the hints are muted, the activity word is the terminal
+default, and no cell is dimmed twice. See `D-a-role-column-is-not-a-stack`.

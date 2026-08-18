@@ -9,6 +9,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | --- | --- | --- |
 | [D-a-budget-is-measured-not-asserted](20260818-120304-D-a-budget-is-measured-not-asserted.md) | 20260818 | A cost budget is measured, or it is prose |
 | [D-a-panel-nobody-can-open](20260818-171500-D-a-panel-nobody-can-open.md) | 20260818 | A rendered panel with no key that opens it is not a feature |
+| [D-a-role-column-is-not-a-stack](20260818-181500-D-a-role-column-is-not-a-stack.md) | 20260818 | A theme role resolves in one mode, and the columns never stack |
 | [D-acp-cancelled-spelling](20260817-171334-D-acp-cancelled-spelling.md) | 20260817 | The ACP cancelled stop reason needs an explicit serde rename |
 | [D-acp-is-real-acp](20260817-164906-D-acp-is-real-acp.md) | 20260817 | The headless frontend is ACP, and it is the real ACP |
 | [D-append-only-jsonl](20260818-014343-D-append-only-jsonl.md) | 20260818 | The session file is append-only JSONL with a per-record parent pointer |
