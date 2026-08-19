@@ -38,11 +38,15 @@ const PLACEHOLDER: &str = "Type a prompt. / for commands. ? for help.";
 /// `D-no-remembered-execute-allow` forbids a remembered execute approval.
 const APPROVAL_CHOICES: &str = "[y] allow once · [n] deny · [esc] deny and cancel the turn";
 
-/// The widest transcript measure. Text wraps to `min(TEXT_MEASURE_CAP, width - MARGIN)`,
-/// so a wide terminal keeps a readable line length.
-const TEXT_MEASURE_CAP: usize = 80;
 /// The columns the transcript measure leaves off the frame width.
-const TEXT_MEASURE_MARGIN: usize = 10;
+///
+/// Exactly one, and it belongs to the scroll rail, which draws at `width - 1`. Text that used the
+/// whole width lost its last character to the rail every time the transcript overflowed.
+///
+/// Reserving the column only while the rail shows does not work: the measure decides how many rows
+/// the text wraps to, the row count decides whether it overflows, and the overflow would decide
+/// the measure. So it is reserved always. See `D-text-fills-the-width`.
+const RAIL_COLUMN: usize = 1;
 /// The most history matches the search panel lists at once. The panel borrows its rows
 /// from the live area, so it must stay small.
 const HISTORY_MATCH_ROWS: usize = 5;
@@ -306,7 +310,7 @@ fn transcript_window(state: &TuiState, width: usize, visible: usize) -> (Vec<Sty
 /// A blank row separates turns and leads the row below it. A run of tool rows stays
 /// together, so the last line is a content line and never a separator.
 fn transcript_lines(state: &TuiState, width: usize) -> Vec<StyledLine> {
-    let measure = TEXT_MEASURE_CAP.min(width.saturating_sub(TEXT_MEASURE_MARGIN));
+    let measure = width.saturating_sub(RAIL_COLUMN).max(1);
     let mut out: Vec<StyledLine> = Vec::new();
     for index in 0..state.rows.len() {
         let row = &state.rows[index];
@@ -552,8 +556,15 @@ fn push_row(
             let indented = measure.saturating_sub(head.width());
             if indented >= NOTICE_MIN_TEXT {
                 for (line_index, line) in wrap(&text, indented).iter().enumerate() {
+                    // `wrap` cannot break a word longer than its width, so a long word arrives on
+                    // a line of its own and the label indent can then push it past the frame. A
+                    // word that fits the frame must never be cut, so such a line drops the indent.
+                    // Found by `a_notice_survives_a_narrow_screen` when the measure widened.
+                    let overflows = head.width() + line.width() > width;
                     let row = if line_index == 0 {
                         format!("{head}{line}")
+                    } else if overflows {
+                        line.to_string()
                     } else {
                         format!("{}{line}", " ".repeat(head.width()))
                     };
@@ -661,7 +672,7 @@ fn conversation_is_empty(state: &TuiState) -> bool {
 /// The notice rows as display lines, in order, styled the same way the transcript styles
 /// them. One source for the style, so the splash and the transcript cannot drift.
 fn notice_lines(state: &TuiState, width: usize) -> Vec<StyledLine> {
-    let measure = TEXT_MEASURE_CAP.min(width.saturating_sub(TEXT_MEASURE_MARGIN));
+    let measure = width.saturating_sub(RAIL_COLUMN).max(1);
     let mut out: Vec<StyledLine> = Vec::new();
     for (index, row) in state.rows.iter().enumerate() {
         if matches!(row, Row::Notice { .. }) {
@@ -1381,7 +1392,8 @@ fn markdown_role(kind: MarkdownKind) -> Role {
 
 /// A horizontal rule, drawn across the text measure.
 fn rule_row(width: usize) -> String {
-    pad(&GLYPH_RULE.repeat(width.min(TEXT_MEASURE_CAP)), width)
+    // A divider spans the frame. It was capped at the old reading measure, which left it short.
+    pad(&GLYPH_RULE.repeat(width), width)
 }
 
 /// Wrap a block of text, one source line at a time, so a line break survives.

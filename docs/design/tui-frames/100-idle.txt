@@ -6,13 +6,13 @@
                                                                                                     
                                                                                                     
                                                                                                     
+                                                                                                    
 ❯ add a duration to every tool row, and keep the text beside it still                               
                                                                                                     
 ∴ thought for 2.4s                                                                                  
                                                                                                     
-I will add a seven column duration slot to each tool row, then wire the session                     
-clock into the header. The slot is right aligned, so a live tick never moves the                    
-glyph beside it.                                                                                    
+I will add a seven column duration slot to each tool row, then wire the session clock into the      
+header. The slot is right aligned, so a live tick never moves the glyph beside it.                  
                                                                                                     
   ✓ read  crates/rho-tui/src/render.rs · 220 lines                                              0.3s
   ✓ edit  crates/rho-tui/src/render.rs · +18 -4                                                 0.2s

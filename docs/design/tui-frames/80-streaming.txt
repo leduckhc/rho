@@ -16,9 +16,9 @@
                                                                                 
 ∴ thought for 1.8s                                                              
                                                                                 
-The header reserves a seven column slot at its right edge. I will               
-drive it from the tick count the state carries, so a test asserts an            
-exact frame with no timer. The renderer stays a pure function of the            
+The header reserves a seven column slot at its right edge. I will drive it from 
+the tick count the state carries, so a test asserts an exact frame with no      
+timer. The renderer stays a pure function of the                                
 ────────────────────────────────────────────────────────────────────────────────
 ❯ also pin the carry case from the ladder█                                      
 ────────────────────────────────────────────────────────────────────────────────

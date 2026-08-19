@@ -504,3 +504,39 @@ The change went into the role table and not into the renderer. `RoleStyle` had `
 `MdQuote` also returned as its own role. It was folded into `Muted` when a quote was only quiet,
 and a quiet lean is a meaning no other role carries. The rule stays the same as when six roles
 were trimmed to two: a role exists only when no current role says the thing.
+
+## Text fills the width
+
+The transcript wrapped at `min(80, width - 10)`, so a 156 column terminal used about half its
+screen. It now wraps at `width - 1`. There is no margin on either side.
+
+**One column is reserved, and only one.** The scroll rail draws at `width - 1` as an overlay on the
+transcript, so text using the whole width lost its last character to the rail whenever the
+transcript overflowed, which is the normal state of a session.
+
+Reserving that column only while the rail shows is circular, and the cycle is worth naming: the
+measure decides how many rows the text wraps to, the row count decides whether it overflows, and
+the overflow would decide the measure. A layout that depends on its own output flickers at the
+boundary. So the column is reserved always. See `D-text-fills-the-width`.
+
+Four tests pin it: text wider than 120 columns on a 156 column frame, the rail never overwriting a
+character, a horizontal rule filling every column, and a 20 column terminal still showing every
+word.
+
+### The fixtures were regenerated, and the diff was read first
+
+Four design frames changed. The diff was checked before staging, and every change is a line holding
+more words. Row counts stay at 24 and the chrome is untouched. At 40 columns the measure went from
+30 to 39, which is the clearest gain:
+
+```
+-❯ now bind the session clock
+-  to the header slot
++❯ now bind the session clock to the
++  header slot
+```
+
+Two of the four new tests failed on their first run, against correct code, because they measured
+**every** row including the composer rules and the footer. Those are chrome and fill the frame by
+design, so one reported a widest row of 156 and one failed on a full-width divider. Both now filter
+to the transcript rows they are about.
