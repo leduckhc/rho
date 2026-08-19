@@ -452,3 +452,62 @@ and no caller uses it. The old F-token-and-cost-accounting row claimed the total
    gate fails for reasons that have nothing to do with the stage.
 6. **Verify a CI guard by breaking the rule on purpose.** Each of the three new
    guards was confirmed to fail on a real violation, not merely to pass today.
+
+## Handover, and a new controller
+
+A new controller session took over the terminal interface work. The previous session was
+`01a016a4-48c9-77c7-8203-aac7b6eb36bc`. It ended mid-task, so this section states what the
+new controller verified, and what it found open. Every claim below was re-run, not read from
+a report.
+
+The tree is `/Users/le/Work/Vibe/rho-altscreen`, on branch `feat/tui-alternate-screen`, at
+commit `a72c987`.
+
+### What the gate proves today
+
+The controller ran all five gate commands itself.
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | 0 warnings |
+| `cargo test --workspace --all-features` | 815 pass, 0 fail |
+| `cargo build -p rho-cli --no-default-features --features minimal` | ok |
+| `bench/check-ids.py`, `bench/check-prose.py` | 0 violations, 0 violations |
+
+`grep -rn 'todo!\|unimplemented!' crates/*/src` finds nothing. The 815 figure in the previous
+session's report is true.
+
+### What a live run proves
+
+The controller drove the release binary through a pty, with a terminal emulator reading the
+frames. The alternate screen opens once and closes once. Mouse reporting turns on three times
+and off three times. The exit code is 0. The help panel draws all 25 key rows. `esc` returns
+to the splash and leaves no stale cell. The slash list draws clean.
+
+`TuiError::TooSmall` is correct in the product. A 2-row terminal exits 1 and prints `rho: the
+terminal is 2 rows, and rho needs at least 4`. It never opens the alternate screen. A 4-row
+terminal runs.
+
+### Open items the new controller found
+
+| Item | Evidence |
+| --- | --- |
+| The startup warnings are invisible. rho prints them, then opens the alternate screen. | The notices write at byte 5 and byte 320. The alternate screen opens at byte 535. |
+| Three `docs/features.md` rows contradict the code. | `F-inline-band` says rho never opens the alternate screen. `F-freeze-upward` claims a machinery that commit `a72c987` deleted. `F-optional-mouse` states the old default. |
+| Three tests the spec names do not exist. | `a_terminal_too_short_reports_and_does_not_draw`, `the_composer_keeps_its_ten_row_cap`, and `the_transcript_takes_the_rows_the_composer_leaves`. |
+| `plan_screen` is public and has no direct test. | `crates/rho-tui/src/lib.rs:31` exports it. No test calls it. |
+| The reasoning spec is untracked. | `../rho-reasoning` holds `20260819-134615-SPEC-reasoning-across-providers.md`, and git does not. |
+| Bedrock drops a thinking block from a request. | `crates/rho-provider-bedrock/src/lib.rs:613` is `_ => {}`. No `budget_tokens` field exists. |
+| The branch is 29 commits ahead of `origin/main`, and unpushed. | CI has seen none of this work. |
+
+The hidden warning is the one defect here that a test cannot see. It is an ordering rule
+between the notices in `rho-cli` and the screen guard in `rho-tui`. One of the hidden lines
+says a project skill stays unloaded until the owner trusts it. The owner needs to read that
+line.
+
+### The lesson this handover adds
+
+7. **A deleted feature leaves a false row behind.** Commit `a72c987` removed the freeze
+   machinery and left `F-freeze-upward` claiming it shipped. Step 13 is not paperwork. A row
+   that outlives its code misleads the next reader.
