@@ -243,10 +243,10 @@ task, and rho verifies the result. See decision D-a-child-does-not-grade-itself.
 
 | ID | Name | Outcome | Owning crate | Status | Extension point |
 |----|------|---------|--------------|--------|-----------------|
-| F-agent-task | Agent task | A child carries a goal, its declared artifacts, and its acceptance checks, not a bare prompt. | `rho-core` | `sprint-2` | Build an `AgentTask`. |
-| F-artifact-spec | Artifact spec | A deliverable rho can check: a file, a command that exits zero, or a named kind. A new kind is a new variant or a registered checker. | `rho-core` | `sprint-2` | Register an `ArtifactChecker` for a named kind. |
-| F-acceptance-gate | Acceptance gate | rho verifies the artifacts and runs the checks after the child stops. A child cannot certify its own work. | `rho-core` | `sprint-2` | Implement the `Gate` trait. |
-| F-unverified-child-claims | Unverified child claims | The child reports its open questions and what it did not check. These stay separate from the gate verdict, and they are never proof. | `rho-core` | `sprint-2` | No extension point. This is a security boundary. |
+| F-agent-task | Agent task | A child carries a goal, its declared artifacts, and its acceptance checks, not a bare prompt. | `rho-core` | `built` | Build an `AgentTask`. |
+| F-artifact-spec | Artifact spec | A deliverable rho can check: a file, a command that exits zero, or a named kind. A new kind is a new variant or a registered checker. A file path obeys `confine`. | `rho-core` | `built` | Register an `ArtifactChecker` for a named kind. |
+| F-acceptance-gate | Acceptance gate | rho verifies the artifacts and runs the checks after the child stops. A child cannot certify its own work, because no public constructor builds a verdict. | `rho-core` | `built` | Implement the `Gate` trait. |
+| F-unverified-child-claims | Unverified child claims | The child reports its open questions and what it did not check. These stay separate from the gate verdict, and they are never proof. | `rho-core` | `built` | No extension point. This is a security boundary. |
 
 ## MCP client
 

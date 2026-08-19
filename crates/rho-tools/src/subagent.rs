@@ -267,6 +267,15 @@ async fn run_one_child(
             "[the {} subagent used all {} of its turns. What follows is what it had.]\n\n",
             report.agent, report.turns
         )),
+        // The gate refused the work. This is not a death, so it does not count
+        // toward the retry cap: the child ran and produced something wrong, and a
+        // retry with a clearer goal is the right next move.
+        AgentOutcome::Rejected { failed } => text.push_str(&format!(
+            "[the {} subagent finished, and rho's checks failed: {}. The work is not accepted. \
+             Fix it here, or delegate again with a clearer goal.]\n\n",
+            report.agent,
+            failed.join(", ")
+        )),
         // A child that did not finish counts as a death for the retry cap.
         // The same work dying again and again must stop, or a poisoned task
         // burns the whole budget. The key is the agent and the work, so a

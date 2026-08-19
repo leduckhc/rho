@@ -6,6 +6,7 @@
 //! builds on the types here.
 
 mod agent;
+mod agent_task;
 mod cancel;
 mod content;
 mod context;
@@ -23,6 +24,10 @@ mod tool;
 mod usage;
 
 pub use agent::{AgentConfig, AgentEvent, AgentEvents, AgentStopReason, Session, SessionConfig};
+pub use agent_task::{
+    Acceptance, AgentTask, ArtifactChecker, ArtifactSpec, CheckOutcome, CheckResult, ChildClaims,
+    CommandRunner, DefaultGate, Gate, GateContext, GateReport,
+};
 pub use cancel::CancelToken;
 pub use content::{ContentBlock, ImageSource, Message, Role};
 pub use context::Context;

@@ -201,6 +201,16 @@ pub struct AgentReport {
     /// line.
     pub usage: Usage,
     pub turns: u32,
+    /// rho's verified verdict on the task. Empty when the task declared no checks.
+    ///
+    /// This is the truth. `claims` is what the child said. An old record with no
+    /// field reads as an empty, passing report, which is correct: a task with no
+    /// declared check has nothing to fail.
+    #[serde(default)]
+    pub gate: crate::GateReport,
+    /// The child's own, unverified claims. Never a substitute for `gate`.
+    #[serde(default)]
+    pub claims: crate::ChildClaims,
     /// Where the full transcript was written, for a human. Never sent to the
     /// model.
     pub transcript: Option<PathBuf>,
@@ -219,6 +229,15 @@ pub enum AgentOutcome {
     Failed {
         reason: String,
     },
+    /// The child stopped, but rho's gate failed one or more checks. It holds the
+    /// failed labels.
+    ///
+    /// It is never `Done`, so a reader that trusts only the outcome still sees a
+    /// failure. Added by `SPEC-agent-tasks`. See decision
+    /// D-a-child-does-not-grade-itself.
+    Rejected {
+        failed: Vec<String>,
+    },
 }
 
 // --- Refusals (SPEC-subagents section 7: refusing must teach) ---
@@ -227,6 +246,8 @@ pub enum AgentOutcome {
 /// and what to do. See `SPEC-subagents` section 7.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum SubagentError {
+    #[error("a task needs a goal. Say what the child must achieve, not only which agent to run.")]
+    EmptyGoal,
     #[error(
         "the depth limit is {limit} and this would be depth {attempted}. \
          Do the work here. A subagent started from the rho command line holds no \
@@ -609,6 +630,11 @@ pub async fn collect_report(
         summary,
         usage,
         turns,
+        // `collect_report` watches a stream. It does not run the gate, because a
+        // gate needs a sandboxed command runner that `rho-core` must not hold. A
+        // caller runs the gate and merges the verdict.
+        gate: crate::GateReport::default(),
+        claims: crate::ChildClaims::default(),
         transcript,
     }
 }

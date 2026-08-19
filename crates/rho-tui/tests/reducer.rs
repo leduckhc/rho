@@ -425,6 +425,8 @@ fn report(outcome: rho_core::AgentOutcome) -> rho_core::AgentReport {
             ..Default::default()
         },
         turns: 3,
+        gate: Default::default(),
+        claims: Default::default(),
         transcript: None,
     }
 }

@@ -1351,5 +1351,11 @@ fn outcome_label(outcome: &rho_core::AgentOutcome) -> (String, bool) {
         rho_core::AgentOutcome::Failed { reason } => {
             (format!("failed: {}", crate::sanitize_line(reason)), true)
         }
+        // The gate refused the work. It counts as a failure, and the label names
+        // the checks that failed, because "rejected" alone teaches nothing.
+        rho_core::AgentOutcome::Rejected { failed } => (
+            format!("rejected: {}", crate::sanitize_line(&failed.join(", "))),
+            true,
+        ),
     }
 }
