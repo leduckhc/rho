@@ -246,6 +246,42 @@ pub enum AgentOutcome {
     },
 }
 
+impl AgentOutcome {
+    /// Whether this outcome is a failure the parent must notice.
+    ///
+    /// The only place that decides. Four sites used to answer this question in their
+    /// own words, so a new variant meant editing four matches and the newest one
+    /// defaulted to success. Ask the type instead.
+    pub fn is_failure(&self) -> bool {
+        !matches!(self, Self::Done)
+    }
+
+    /// The wire name, matching this enum's own serde spelling.
+    ///
+    /// A transcript groups by it, so a second spelling would split one outcome into
+    /// two buckets.
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::OutOfTurns => "out_of_turns",
+            Self::Canceled => "canceled",
+            Self::Failed { .. } => "failed",
+            Self::Rejected { .. } => "rejected",
+        }
+    }
+
+    /// A short phrase for a human or a model, including the reason when there is one.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Done => "done".to_string(),
+            Self::OutOfTurns => "out of turns".to_string(),
+            Self::Canceled => "cancelled".to_string(),
+            Self::Failed { reason } => format!("failed: {reason}"),
+            Self::Rejected { failed } => format!("rejected: {}", failed.join(", ")),
+        }
+    }
+}
+
 // --- Refusals (SPEC-subagents section 7: refusing must teach) ---
 
 /// A refusal to spawn or run a child. Every variant names the limit, its value,
@@ -1167,7 +1203,7 @@ pub async fn collect_report(
                 .write(&crate::TranscriptEntry::now(
                     &agent,
                     crate::TranscriptBody::End {
-                        outcome: outcome_wire_name(&outcome),
+                        outcome: outcome.wire_name().to_string(),
                     },
                 ))
                 .await;
@@ -1190,21 +1226,6 @@ pub async fn collect_report(
         claims: crate::ChildClaims::default(),
         transcript,
     }
-}
-
-/// The wire name of an outcome, matching its serde spelling.
-///
-/// A transcript reader groups by this, so it must match `AgentOutcome`'s own wire
-/// name rather than a second spelling.
-fn outcome_wire_name(outcome: &AgentOutcome) -> String {
-    match outcome {
-        AgentOutcome::Done => "done",
-        AgentOutcome::OutOfTurns => "out_of_turns",
-        AgentOutcome::Canceled => "canceled",
-        AgentOutcome::Failed { .. } => "failed",
-        AgentOutcome::Rejected { .. } => "rejected",
-    }
-    .to_string()
 }
 
 /// Map a run's stop reason onto a child outcome.

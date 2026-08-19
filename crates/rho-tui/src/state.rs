@@ -1354,19 +1354,10 @@ fn thousands(value: u64) -> String {
 }
 
 /// The outcome word for a finished child, and whether it counts as a failure.
+/// The outcome word for a finished child, and whether it counts as a failure.
+///
+/// Both answers come from `AgentOutcome` itself. Three crates used to spell this out
+/// separately, so a new variant meant three edits and the TUI's copy drifted.
 fn outcome_label(outcome: &rho_core::AgentOutcome) -> (String, bool) {
-    match outcome {
-        rho_core::AgentOutcome::Done => ("done".to_string(), false),
-        rho_core::AgentOutcome::OutOfTurns => ("out of turns".to_string(), true),
-        rho_core::AgentOutcome::Canceled => ("canceled".to_string(), true),
-        rho_core::AgentOutcome::Failed { reason } => {
-            (format!("failed: {}", crate::sanitize_line(reason)), true)
-        }
-        // The gate refused the work. It counts as a failure, and the label names
-        // the checks that failed, because "rejected" alone teaches nothing.
-        rho_core::AgentOutcome::Rejected { failed } => (
-            format!("rejected: {}", crate::sanitize_line(&failed.join(", "))),
-            true,
-        ),
-    }
+    (crate::sanitize_line(&outcome.label()), outcome.is_failure())
 }

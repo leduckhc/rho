@@ -598,20 +598,9 @@ async fn finish_child(
     if let Some(path) = &report.transcript {
         text.push_str(&format!("\n\n[full transcript: {}]", path.display()));
     }
-    // Every outcome that is not plain success sets `is_error`. A parent that reads
-    // only the flag must never read a failure as a success.
-    //
-    // `Rejected` was fixed first and its three siblings were missed, in this same
-    // function, a few lines apart. That is the fail-open family again, so the match
-    // is exhaustive on purpose: a new outcome variant now forces a decision here
-    // rather than defaulting to success.
-    let failed = match report.outcome {
-        AgentOutcome::Done => false,
-        AgentOutcome::OutOfTurns
-        | AgentOutcome::Canceled
-        | AgentOutcome::Failed { .. }
-        | AgentOutcome::Rejected { .. } => true,
-    };
+    // One place decides what counts as a failure, and it is the type. Four sites used
+    // to answer this in their own words, and the newest one defaulted to success.
+    let failed = report.outcome.is_failure();
     if !intersection.dropped.is_empty() {
         text.push_str(&format!(
             "\n\n[note: these requested tools were dropped because the parent does not hold \

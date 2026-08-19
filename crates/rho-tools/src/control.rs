@@ -31,19 +31,6 @@ struct CancelArgs {
     id: u64,
 }
 
-/// One word for an outcome, for a status line a model reads.
-fn outcome_word(outcome: &rho_core::AgentOutcome) -> String {
-    match outcome {
-        rho_core::AgentOutcome::Done => "done".to_string(),
-        rho_core::AgentOutcome::OutOfTurns => "out of turns".to_string(),
-        rho_core::AgentOutcome::Canceled => "cancelled".to_string(),
-        rho_core::AgentOutcome::Failed { reason } => format!("failed ({reason})"),
-        rho_core::AgentOutcome::Rejected { failed } => {
-            format!("rejected ({})", failed.join(", "))
-        }
-    }
-}
-
 /// Name the children that are live now, for a refusal that teaches.
 fn live_summary(env: &SpawnEnv) -> String {
     // Only this session's own descendants. The registry is process-wide, so `live`
@@ -226,7 +213,7 @@ impl Tool for AgentStatusTool {
                     "{} (id {}) finished: {}. {} turn(s), {} token(s).",
                     report.agent,
                     args.id,
-                    outcome_word(&report.outcome),
+                    report.outcome.label(),
                     report.turns,
                     report.usage.input_tokens + report.usage.output_tokens
                 );
