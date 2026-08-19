@@ -33,11 +33,14 @@ fn render_to_string(state: &TuiState, width: u16, height: u16) -> String {
 #[test]
 fn render_shows_transcript_rows() {
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::Stream(StreamEvent::TextStart { index: 0 }));
-    state.apply(&AgentEvent::Stream(StreamEvent::TextDelta {
-        index: 0,
-        delta: "the answer".to_string(),
-    }));
+    state.apply(&AgentEvent::Stream(StreamEvent::TextStart { index: 0 }), 0);
+    state.apply(
+        &AgentEvent::Stream(StreamEvent::TextDelta {
+            index: 0,
+            delta: "the answer".to_string(),
+        }),
+        0,
+    );
 
     let text = render_to_string(&state, 40, 10);
     assert!(text.contains("the answer"), "buffer was:\n{text}");
@@ -47,20 +50,30 @@ fn render_shows_transcript_rows() {
 fn render_shows_status_line() {
     let mut state = TuiState::default();
     state.model = "openai/gpt-4o".to_string();
-    state.apply(&AgentEvent::TurnStart);
+    state.apply(&AgentEvent::TurnStart, 0);
 
     let text = render_to_string(&state, 60, 6);
     // The controller ruled that the U4 design supersedes the sprint-1 vocabulary:
     // a running turn reads `working` in the footer, not `running`. See the
     // controller finding on slice U4-D.
     assert!(text.contains("working"), "buffer was:\n{text}");
-    assert!(text.contains("openai/gpt-4o"), "buffer was:\n{text}");
+    // The model id left the band for the banner, which freezes once above the band.
+    // See `SPEC-tui-inline-and-composer` section 2. So the band no longer holds it,
+    // and the banner does.
+    assert!(
+        !text.contains("openai/gpt-4o"),
+        "the model id must not draw in the band:\n{text}"
+    );
+    assert!(
+        rho_tui::banner_line(&state, 60).contains("openai/gpt-4o"),
+        "the banner must carry the model id"
+    );
 }
 
 #[test]
 fn render_shows_input_buffer() {
     let mut state = TuiState::default();
-    state.input = "hello there".to_string();
+    state.draft.set_text("hello there");
 
     let text = render_to_string(&state, 40, 6);
     assert!(text.contains("hello there"), "buffer was:\n{text}");
@@ -69,11 +82,17 @@ fn render_shows_input_buffer() {
 #[test]
 fn render_thinking_row_is_dimmed_and_collapsed() {
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::Stream(StreamEvent::ThinkingStart { index: 0 }));
-    state.apply(&AgentEvent::Stream(StreamEvent::ThinkingDelta {
-        index: 0,
-        delta: "first line\nsecond line\nthird line".to_string(),
-    }));
+    state.apply(
+        &AgentEvent::Stream(StreamEvent::ThinkingStart { index: 0 }),
+        0,
+    );
+    state.apply(
+        &AgentEvent::Stream(StreamEvent::ThinkingDelta {
+            index: 0,
+            delta: "first line\nsecond line\nthird line".to_string(),
+        }),
+        0,
+    );
     // The controller ruled that the U4 design supersedes the sprint-1 thinking
     // row shape: a thinking block renders the `∴` glyph and a duration, not its
     // text. This test keeps the property it protects: a multi-line block still
@@ -98,12 +117,15 @@ fn render_thinking_row_is_dimmed_and_collapsed() {
 #[test]
 fn render_lines_fit_width() {
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::Stream(StreamEvent::TextStart { index: 0 }));
-    state.apply(&AgentEvent::Stream(StreamEvent::TextDelta {
-        index: 0,
-        delta: "x".repeat(500),
-    }));
-    state.input = "y".repeat(500);
+    state.apply(&AgentEvent::Stream(StreamEvent::TextStart { index: 0 }), 0);
+    state.apply(
+        &AgentEvent::Stream(StreamEvent::TextDelta {
+            index: 0,
+            delta: "x".repeat(500),
+        }),
+        0,
+    );
+    state.draft.set_text(&"y".repeat(500));
 
     let width = 40u16;
     let lines = render_to_lines(&state, width, 10);
@@ -119,15 +141,21 @@ fn render_lines_fit_width() {
 fn render_sanitises_a_tool_preview_with_an_escape_sequence() {
     // Tool output is untrusted. A real escape sequence must not reach the buffer.
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::ToolStart {
-        id: "call-1".to_string(),
-        name: "bash".to_string(),
-        kind: rho_core::ToolKind::Execute,
-    });
-    state.apply(&AgentEvent::ToolUpdate {
-        id: "call-1".to_string(),
-        output: "red\u{1b}[31mtext\u{1b}[0m".to_string(),
-    });
+    state.apply(
+        &AgentEvent::ToolStart {
+            id: "call-1".to_string(),
+            name: "bash".to_string(),
+            kind: rho_core::ToolKind::Execute,
+        },
+        0,
+    );
+    state.apply(
+        &AgentEvent::ToolUpdate {
+            id: "call-1".to_string(),
+            output: "red\u{1b}[31mtext\u{1b}[0m".to_string(),
+        },
+        0,
+    );
 
     let text = render_to_string(&state, 60, 6);
     assert!(
@@ -163,7 +191,7 @@ fn the_footer_tells_the_user_to_press_ctrl_c_again() {
 #[test]
 fn the_footer_says_canceling_while_a_cancel_is_in_flight() {
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::TurnStart);
+    state.apply(&AgentEvent::TurnStart, 0);
     state.handle_key(crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Char('c'),
         crossterm::event::KeyModifiers::CONTROL,
@@ -208,7 +236,7 @@ fn a_mouse_row_maps_to_the_command_under_it() {
 #[test]
 fn the_footer_stops_saying_canceling_when_the_run_dies_without_an_end_event() {
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::TurnStart);
+    state.apply(&AgentEvent::TurnStart, 0);
     state.handle_key(crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Char('c'),
         crossterm::event::KeyModifiers::CONTROL,
@@ -322,10 +350,13 @@ fn the_footer_activity_word_reads_as_text_and_the_hints_stay_muted() {
     // The user reported `done · end turn` as almost invisible. The whole footer row was
     // painted muted, including the activity word, which the design gives to `text`.
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::TurnStart);
-    state.apply(&AgentEvent::AgentEnd {
-        stop_reason: rho_core::AgentStopReason::EndTurn,
-    });
+    state.apply(&AgentEvent::TurnStart, 0);
+    state.apply(
+        &AgentEvent::AgentEnd {
+            stop_reason: rho_core::AgentStopReason::EndTurn,
+        },
+        0,
+    );
     let row = find_row(&state, 100, 12, "done");
     let cells = row_cells(&state, 100, 12, row);
     let line: String = cells.iter().map(|(symbol, _, _)| symbol.as_str()).collect();

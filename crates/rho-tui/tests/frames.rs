@@ -1,25 +1,25 @@
 //! The design frames are fixtures, and a fixture that does not line up is a lie.
 //!
-//! `docs/design/tui-frames/` holds ten frames that `docs/tui-design.md` treats as the
+//! `docs/design/tui-frames/` holds the frames that `docs/tui-design.md` treats as the
 //! layout acceptance criteria. This file guards the fixtures themselves: the exact
 //! display width, the exact row count, and the absence of a character that would break
 //! a monospace grid.
+//!
+//! The frames now describe the inline band of `SPEC-tui-inline-and-composer`. The band
+//! has no header row and no rule row, and it is `BAND_ROWS` rows tall. The banner is a
+//! separate one-row fixture, because it freezes above the band. See section 4.1.
 //!
 //! **Why a display width and not a length.** A box character such as `─` is three bytes
 //! and one column. The controller's first check of these frames used a byte length and
 //! reported every line as wrong. So width here means what the terminal draws, measured
 //! the same way `crates/rho-tui/src/sanitize.rs` measures it.
-//!
-//! The render comparison, which drives the real renderer and asserts it reproduces each
-//! frame, needs the renderer that stage U4 builds. `SPEC-tui-experience` names those ten
-//! tests, and they land with the implementation.
 
 use std::path::{Path, PathBuf};
 
 use unicode_width::UnicodeWidthStr;
 
-/// The rows a frame holds, excluding the two fence lines.
-const FRAME_ROWS: usize = 24;
+/// The rows a band frame holds. It matches the band height rho asks for.
+const FRAME_ROWS: usize = 14;
 
 fn frames_dir() -> PathBuf {
     // The tests run with the crate root as the working directory.
@@ -131,8 +131,22 @@ fn frame_fixture_40_streaming_is_exact() {
 }
 
 #[test]
+fn frame_fixture_banner_is_exact() {
+    // The banner is one row, and it freezes above the band. So it is not `FRAME_ROWS`
+    // tall, and it gets its own width check.
+    let lines = frame_lines("100-banner.txt");
+    assert_eq!(lines.len(), 1, "the banner is one row");
+    assert_eq!(
+        UnicodeWidthStr::width(lines[0].as_str()),
+        100,
+        "the banner spans the width"
+    );
+}
+
+#[test]
 fn every_frame_fixture_is_grid_safe() {
     for name in [
+        "100-banner.txt",
         "100-idle.txt",
         "100-streaming.txt",
         "100-tool-run.txt",
@@ -161,8 +175,8 @@ fn the_frame_set_is_complete() {
     found.sort();
     assert_eq!(
         found.len(),
-        10,
-        "the design states ten frames, the directory holds {}: {found:?}",
+        11,
+        "the design states ten band frames plus one banner, the directory holds {}: {found:?}",
         found.len()
     );
 }
@@ -174,11 +188,12 @@ fn the_frame_set_is_complete() {
 // See `SPEC-tui-experience`, the `## Test cases` section.
 // ---------------------------------------------------------------------------
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use rho_core::{AgentStopReason, ToolKind};
 use rho_tui::{
-    ActivityState, Approval, Panel, Row, RowFold, SlashList, ToolRowStatus, TuiState, render,
+    ActivityState, Approval, Panel, Row, RowFold, ToolRowStatus, TuiState, banner_line, render,
 };
 
 /// The rendered text of a state, one string per row, at the given size.
@@ -203,8 +218,12 @@ fn render_rows(state: &TuiState, width: u16) -> Vec<String> {
 /// Compare a rendered frame against its fixture, row by row. Report the first
 /// differing row with both versions, so a mismatch is a finding, not a puzzle.
 fn assert_renders(name: &str, width: u16, state: &TuiState) {
-    let expected = frame_lines(name);
     let actual = render_rows(state, width);
+    if std::env::var("RHO_REGEN").is_ok() {
+        write_fixture(name, &actual);
+        return;
+    }
+    let expected = frame_lines(name);
     assert_eq!(
         actual.len(),
         expected.len(),
@@ -220,6 +239,18 @@ fn assert_renders(name: &str, width: u16, state: &TuiState) {
             index + 1
         );
     }
+}
+
+/// Write a fenced fixture from rendered rows. It runs only under `RHO_REGEN`, so the
+/// design owner regenerates the frames when the band shape changes.
+fn write_fixture(name: &str, rows: &[String]) {
+    let mut text = String::from("```\n");
+    for row in rows {
+        text.push_str(row);
+        text.push('\n');
+    }
+    text.push_str("```\n");
+    std::fs::write(frames_dir().join(name), text).expect("write the fixture");
 }
 
 /// A state seeded with the header fields every 100-column frame shares.
@@ -326,7 +357,9 @@ fn frame_100_streaming_renders_at_100_columns() {
     let mut state = base_state();
     state.activity = ActivityState::Running;
     state.turn_millis = Some(12_000);
-    state.input = "also pin the carry case from the ladder".into();
+    state
+        .draft
+        .set_text("also pin the carry case from the ladder");
     push(
         &mut state,
         Row::User {
@@ -412,6 +445,7 @@ fn frame_100_approval_renders_at_100_columns() {
     state.panel = Panel::Approval(Approval {
         title: "bash asks to run".into(),
         command: "rm -rf target && cargo build --release".into(),
+        root: "~/Work/Vibe/rho".into(),
         millis: Some(8_000),
     });
     push(
@@ -473,13 +507,27 @@ fn frame_100_empty_renders_at_100_columns() {
 }
 
 #[test]
+fn frame_banner_renders_at_100_columns() {
+    // The banner freezes above the band, so a fixture pins its one row.
+    let state = base_state();
+    let actual = vec![banner_line(&state, 100)];
+    if std::env::var("RHO_REGEN").is_ok() {
+        write_fixture("100-banner.txt", &actual);
+        return;
+    }
+    let expected = frame_lines("100-banner.txt");
+    assert_eq!(
+        expected, actual,
+        "the banner fixture must match the renderer"
+    );
+}
+
+#[test]
 fn frame_100_slash_list_renders_at_100_columns() {
     let mut state = base_state();
-    state.input = "/".into();
-    state.panel = Panel::SlashList(SlashList {
-        query: "/".into(),
-        selected: 0,
-    });
+    // Reach the slash panel through the key handler, so the fixture builds a state a
+    // real key can build. A hand-built panel proves nothing. See `D-a-panel-nobody-can-open`.
+    state.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
     push(
         &mut state,
         Row::User {
@@ -531,7 +579,9 @@ fn frame_80_streaming_renders_at_80_columns() {
     let mut state = base_state();
     state.activity = ActivityState::Running;
     state.turn_millis = Some(12_000);
-    state.input = "also pin the carry case from the ladder".into();
+    state
+        .draft
+        .set_text("also pin the carry case from the ladder");
     push(
         &mut state,
         Row::User {
@@ -559,7 +609,7 @@ fn frame_40_streaming_renders_at_40_columns() {
     let mut state = base_state();
     state.activity = ActivityState::Running;
     state.turn_millis = Some(12_000);
-    state.input = "also pin the carry case".into();
+    state.draft.set_text("also pin the carry case");
     push(
         &mut state,
         Row::User {

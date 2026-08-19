@@ -17,36 +17,47 @@ accent is never a wash. Status has fixed semantics, never ad hoc colour.
 
 ## 1. The layout
 
-Ten frame mocks prove this layout. `100-idle.txt` is the reference frame.
+The frame mocks prove this layout. `100-idle.txt` is the reference frame. rho draws an
+inline band and never enters the alternate screen. Each final row leaves the band for the
+terminal's own scrollback. See `SPEC-tui-inline-and-composer`.
 
 | Rows | Region | Fixed or grows |
 | --- | --- | --- |
-| 1 | Header content | fixed, 1 row |
-| 1 | Header rule, `─` full width | fixed, 1 row |
-| rest | Transcript | grows, scrolls, newest row kept visible |
+| rest | Live rows of the current turn | grows into the space the composer leaves |
 | 0 to 7 | A transient panel: slash list, help, or approval | fixed per panel, absent by default |
-| 3 to 10 | Composer, a rounded box | grows with the draft, capped |
+| 3 to 12 | Composer, between two rules | grows with the draft, then scrolls |
 | 1 | Footer: activity and key hints | fixed, 1 row |
+
+The sum of the maximums is twenty, and the band holds fourteen. So the regions yield in a
+stated rank. The footer keeps its row. A panel takes its rows next. The composer scrolls
+inside what remains, and it never drops below three rows. The live rows yield first.
+
+**An approval never yields a row.** A panel that states a destructive command states all
+of it, including the session root. An early mock dropped the session root line to save one
+row, so the panel named `rm -rf target` and hid the directory it ran in. The composer gives
+up the row instead. See `D-ledger-wins-the-band`.
+
+The header of the old layout leaves the band. It becomes a one-row banner, frozen once
+above the band when the session starts. The working directory and the model do not change
+during a session, so the banner never repaints.
 
 The footer holds two roles on one row. The activity word and its duration take `text`,
 because they report the current state. The key hints on the right take `muted`.
 
-The fixed cost is six rows: header, rule, a three-row composer, and the footer. A 24-row
-terminal gives the transcript 18 rows. Only the transcript scrolls. When the composer or
-a panel grows, it takes rows from the transcript, never from the header or the footer.
-When the transcript is long, it drops rows from the top, exactly as today's renderer does.
+The band asks for `BAND_ROWS` rows, which is 14. It never takes the whole terminal, so the
+shell prompt returns below it. As the band shrinks, the live rows drop first, then the
+footer, then the composer border. The composer input row is the last survivor.
 
-## 2. The header
+## 2. The banner
 
-One content row and one rule. Two rows total.
+One row, frozen once above the band when the session starts.
 
 ```
-ρ rho   ~/Work/Vibe/rho · main                sonnet-4.5 · openrouter · 48.2k in, 3.1k out   12m 08s
-────────────────────────────────────────────────────────────────────────────────────────────────────
+ρ rho  ~/Work/Vibe/rho · main · sonnet-4.5 · openrouter
 ```
 
 pi, codex, and claude code each spend two or three rows on identity. rho spends one, and
-puts the whole session on it. That density is the statement: the header stuns by what it
+puts the whole session on it. That density is the statement: the banner stuns by what it
 fits, not by what it fills. Each element earns its place:
 
 - `ρ rho` — the brand mark. A user with five terminals open needs the product named. The
@@ -55,17 +66,14 @@ fits, not by what it fills. Each element earns its place:
   tree, so the tree must be named where the eye rests.
 - `sonnet-4.5 · openrouter` — the model and the provider. The model decides quality and
   cost, so it never hides in a menu.
-- `48.2k in, 3.1k out` — the token count, in the exact format `state.rs` already emits.
-  It is the honest cost meter for providers that report no charge.
-- `12m 08s` — the session clock, right aligned in the seven-column duration slot. It
-  ticks while a turn runs. See section 7.
+- `48.2k in, 3.1k out` — the token count moved to the footer, in the exact format
+  `state.rs` already emits. It is the honest cost meter for providers that report no
+  charge.
+- The session clock moved to the footer, right aligned in the seven-column duration slot.
+  It ticks while a turn runs. See section 7.
 
-The rule row is the frame that recedes. It draws in the muted role, full width, computed
-at draw time exactly like pi's `DynamicBorder`.
-
-When the terminal narrows, the header drops elements in this order: the token count, the
-provider, the directory, the branch, and last the model. The brand and the session clock
-survive at every width. `40-streaming.txt` shows the 40-column result.
+The banner draws once and never repaints, because the working directory and the model do
+not change during a session.
 
 ## 3. The palette, by role
 
@@ -119,7 +127,7 @@ UTF-8, or when the user sets `tui.glyphs = "ascii"`.
 | activity mark | `◈` | `*` |
 | approval mark | `!` | `!` |
 | separator | `·` | `\|` |
-| rules and borders | `─ ╭ ╮ ╰ ╯ │` | `- + \|` |
+| rules | `─` | `-` |
 | truncation | `…` | `..` |
 
 ## 4. Contrast
@@ -252,9 +260,20 @@ state carries. No render reads a clock.
 
 ## 8. The composer
 
-A rounded box, `╭─╮ │ ╰─╯`, borders in `muted`, prompt `❯ ` in `accent`. The box is the
-one drawn frame in the resting interface, because the draft is the one thing the user
-owns. One text row at rest, so three rows with borders.
+Two full-width rules in `muted`, and the draft between them. The prompt `❯ ` takes
+`accent`. The sides are open:
+
+```
+─────────────────────────────────────────────
+❯
+─────────────────────────────────────────────
+```
+
+The rules mark the draft, and they cost nothing to keep straight. A vertical border must
+land on an exact column on every row, so it drifts when a wide glyph or an escape code
+misreports its width. A full-width rule cannot drift. The open sides also give the draft
+two more columns, which matters most at 60 columns, and they read as a shell rather than
+as an application window. One text row at rest, so three rows with the rules.
 
 The placeholder, shown in `muted` when the draft is empty, is exactly:
 
@@ -262,11 +281,14 @@ The placeholder, shown in `muted` when the draft is empty, is exactly:
 Type a prompt. / for commands. ? for help.
 ```
 
-- **Multi-line drafts.** `alt+enter` inserts a newline, and `shift+enter` does too where
-  the terminal distinguishes it. Continuation rows indent two columns to align under the
-  prompt. The box grows one row per line, to a cap of eight text rows, ten with borders.
-  Past the cap the draft scrolls inside the box, the cursor row stays visible, and the
-  top row shows a `muted` `…` in its first column.
+- **Multi-line drafts.** `shift+enter` inserts a newline. `ctrl-j` and `alt+enter` do it
+  too, for a terminal that does not report `shift+enter`. Continuation rows indent two
+  columns to align under the
+  prompt. The draft shows ten rows at most, which is twelve with the rules. A longer
+  draft is never refused. It scrolls, the window keeps the cursor row, and a `muted` `…`
+  in the first column of the top or the bottom row states that the draft continues that
+  way. At twelve rows the composer takes all but two rows of the band, so one live row
+  and the footer are what remain.
 - **A large paste.** A paste over 1000 characters collapses to one placeholder chip:
   `[paste 12431 chars]`. A second paste of the same size reads `[paste 12431 chars #2]`,
   codex's repeat suffix, because two same-size pastes must stay distinct. The full text
@@ -313,7 +335,14 @@ moves. Idle, it reads `enter send · / commands · ? help`.
   renders reversed. `100-slash-list.txt` shows it open.
 - **The shortcut list.** Typing `?` in an empty draft opens the key list in the same
   framed panel. Every binding on it is read from the real binding table, so the help can
-  never drift from the keys. `100-help.txt` shows it.
+  never drift from the keys. The table is longer than the band, so the panel draws a
+  window of eight rows. A counted header states the position, for example `keys 1-8 of
+  21`, and a marker states the direction, for example `↓ 13 more below`. `↑ ↓` scroll the
+  window. `100-help.txt` shows it.
+
+  > The panel drew every row of the table before this rule. The table needs twenty-seven
+  > rows, and the band holds fourteen, so the help screen rendered **no rows at all**. A
+  > frame fixture pinned that blank output as correct. See `D-ledger-wins-the-band`.
 - **The guide.** `/guide` runs a two-minute tour in the transcript itself: it prints a
   short sequence of example rows and names each part. The empty state and the help panel
   both name it, so the path is two keys long from first launch.
@@ -352,7 +381,7 @@ transcript wraps to the narrower measure.
 At 40 columns, in order: the header keeps only the brand, the model, and the session
 clock. The footer hints reduce to `? help`. Tool payloads truncate with `…`. The empty
 state drops the block art. What never drops: every glyph, every duration slot, every
-caret, the composer box, and the approval panel's choices. Nothing at 40 columns is
+caret, the composer rules, and the approval panel's choices. Nothing at 40 columns is
 unreadable; it is only shorter.
 
 ## 13. The frame index
@@ -367,6 +396,7 @@ unreadable; it is only shorter.
 | `100-empty.txt` | the first-launch frame |
 | `100-slash-list.txt` | the command list, open and selected |
 | `100-help.txt` | the shortcut list from the real binding table |
+| `tui-mock.html` | the thirteen design frames, including the squeeze and the paged help |
 | `80-streaming.txt` | the 80-column drop tier |
 | `40-streaming.txt` | the 40-column drop tier |
 

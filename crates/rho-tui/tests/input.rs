@@ -17,7 +17,7 @@ fn ctrl_c() -> KeyEvent {
 fn input_key_appends_while_running() {
     let mut state = TuiState::default();
     // Drive the state into a running turn.
-    state.apply(&AgentEvent::TurnStart);
+    state.apply(&AgentEvent::TurnStart, 0);
     assert_eq!(state.activity, ActivityState::Running);
 
     // A key press appends even while the model streams. Input never blocks on
@@ -25,7 +25,7 @@ fn input_key_appends_while_running() {
     state.handle_key(key(KeyCode::Char('h')));
     state.handle_key(key(KeyCode::Char('i')));
 
-    assert_eq!(state.input, "hi");
+    assert_eq!(state.draft_text(), "hi");
     assert_eq!(state.activity, ActivityState::Running);
 }
 
@@ -35,7 +35,7 @@ fn input_backspace_removes_last_char() {
     state.handle_key(key(KeyCode::Char('a')));
     state.handle_key(key(KeyCode::Char('b')));
     state.handle_key(key(KeyCode::Backspace));
-    assert_eq!(state.input, "a");
+    assert_eq!(state.draft_text(), "a");
 }
 
 #[test]
@@ -46,14 +46,14 @@ fn input_enter_submits_and_clears() {
     let action = state.handle_key(key(KeyCode::Enter));
 
     assert_eq!(action, KeyAction::Submit("hi".to_string()));
-    assert_eq!(state.input, "");
+    assert_eq!(state.draft_text(), "");
     assert_eq!(state.rows.len(), 1);
 }
 
 #[test]
 fn ctrl_c_while_running_cancels_not_exits() {
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::TurnStart);
+    state.apply(&AgentEvent::TurnStart, 0);
 
     let action = state.handle_key(ctrl_c());
     assert_eq!(action, KeyAction::Cancel);
@@ -128,7 +128,7 @@ fn ctrl_d_with_a_draft_keeps_the_draft_and_inserts_nothing() {
     typed(&mut state, "hi");
     assert_eq!(state.handle_key(ctrl('d')), KeyAction::None);
     // The old handler pushed the letter of any chord into the draft.
-    assert_eq!(state.input, "hi");
+    assert_eq!(state.draft_text(), "hi");
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn a_control_chord_never_becomes_a_letter() {
     for chord in ['o', 'e', 'd', 'x'] {
         state.handle_key(ctrl(chord));
     }
-    assert_eq!(state.input, "", "a chord must never type its letter");
+    assert_eq!(state.draft_text(), "", "a chord must never type its letter");
 }
 
 #[test]
@@ -211,7 +211,7 @@ fn enter_never_submits_the_slash_text_as_a_prompt() {
         "a command must not reach the model"
     );
     assert_eq!(*panel_of(&state), rho_tui::Panel::Help);
-    assert!(state.input.is_empty(), "running a command clears the draft");
+    assert!(state.draft_is_empty(), "running a command clears the draft");
 }
 
 #[test]
@@ -220,7 +220,7 @@ fn question_mark_on_an_empty_draft_opens_help() {
     state.handle_key(key(KeyCode::Char('?')));
     assert_eq!(*panel_of(&state), rho_tui::Panel::Help);
     assert!(
-        state.input.is_empty(),
+        state.draft_is_empty(),
         "the key must not type a question mark"
     );
 }
@@ -229,7 +229,7 @@ fn question_mark_on_an_empty_draft_opens_help() {
 fn question_mark_inside_a_draft_is_just_text() {
     let mut state = TuiState::default();
     typed(&mut state, "why?");
-    assert_eq!(state.input, "why?");
+    assert_eq!(state.draft_text(), "why?");
     assert_eq!(*panel_of(&state), rho_tui::Panel::None);
 }
 
@@ -249,7 +249,7 @@ fn backspace_past_the_slash_closes_the_list() {
     state.handle_key(key(KeyCode::Backspace));
     state.handle_key(key(KeyCode::Backspace));
     assert_eq!(*panel_of(&state), rho_tui::Panel::None);
-    assert!(state.input.is_empty());
+    assert!(state.draft_is_empty());
 }
 
 #[test]
@@ -289,7 +289,7 @@ fn esc_keeps_the_draft_so_a_path_is_not_lost() {
     typed(&mut state, "/usr/bin/foo");
     state.handle_key(key(KeyCode::Esc));
     assert_eq!(*panel_of(&state), rho_tui::Panel::None);
-    assert_eq!(state.input, "/usr/bin/foo");
+    assert_eq!(state.draft_text(), "/usr/bin/foo");
     // From here it is ordinary text, and Enter sends it.
     assert_eq!(
         state.handle_key(key(KeyCode::Enter)),
@@ -302,7 +302,11 @@ fn an_unknown_command_keeps_the_draft_it_reported_on() {
     let mut state = TuiState::default();
     typed(&mut state, "/nope");
     state.handle_key(key(KeyCode::Enter));
-    assert_eq!(state.input, "/nope", "reporting must not eat the draft");
+    assert_eq!(
+        state.draft_text(),
+        "/nope",
+        "reporting must not eat the draft"
+    );
     assert_eq!(*panel_of(&state), rho_tui::Panel::None);
 }
 
@@ -313,7 +317,7 @@ fn tab_completes_the_selected_command_without_running_it() {
     let mut state = TuiState::default();
     typed(&mut state, "/mo");
     state.handle_key(key(KeyCode::Tab));
-    assert_eq!(state.input, "/model");
+    assert_eq!(state.draft_text(), "/model");
     match panel_of(&state) {
         rho_tui::Panel::SlashList(list) => assert_eq!(list.query, "/model"),
         other => panic!("tab must keep the list open, got {other:?}"),
@@ -329,9 +333,9 @@ fn tab_completes_the_selected_command_without_running_it() {
 fn tab_on_an_empty_filter_changes_nothing() {
     let mut state = TuiState::default();
     typed(&mut state, "/zz");
-    let before = state.input.clone();
+    let before = state.draft_text();
     state.handle_key(key(KeyCode::Tab));
-    assert_eq!(state.input, before);
+    assert_eq!(state.draft_text(), before);
 }
 
 // ---- A run that ends with no AgentEnd. -------------------------------------
@@ -345,7 +349,7 @@ fn tab_on_an_empty_filter_changes_nothing() {
 #[test]
 fn a_run_that_ends_with_no_stop_event_returns_to_idle() {
     let mut state = TuiState::default();
-    state.apply(&rho_core::AgentEvent::TurnStart);
+    state.apply(&rho_core::AgentEvent::TurnStart, 0);
     state.handle_key(ctrl_c());
     assert!(state.canceling, "a cancel while running sets the flag");
 
@@ -358,7 +362,7 @@ fn a_run_that_ends_with_no_stop_event_returns_to_idle() {
 #[test]
 fn ctrl_c_can_still_quit_after_a_run_that_never_ended() {
     let mut state = TuiState::default();
-    state.apply(&rho_core::AgentEvent::TurnStart);
+    state.apply(&rho_core::AgentEvent::TurnStart, 0);
     state.handle_key(ctrl_c());
     state.end_run(true);
 
@@ -370,7 +374,7 @@ fn ctrl_c_can_still_quit_after_a_run_that_never_ended() {
 #[test]
 fn a_cancel_that_closes_the_stream_reads_as_canceled() {
     let mut state = TuiState::default();
-    state.apply(&rho_core::AgentEvent::TurnStart);
+    state.apply(&rho_core::AgentEvent::TurnStart, 0);
     state.handle_key(ctrl_c());
     state.end_run(false);
     assert_eq!(state.activity, ActivityState::Idle);
@@ -380,11 +384,14 @@ fn a_cancel_that_closes_the_stream_reads_as_canceled() {
 #[test]
 fn the_canceling_flag_clears_when_the_turn_ends() {
     let mut state = TuiState::default();
-    state.apply(&rho_core::AgentEvent::TurnStart);
+    state.apply(&rho_core::AgentEvent::TurnStart, 0);
     state.handle_key(ctrl_c());
-    state.apply(&rho_core::AgentEvent::AgentEnd {
-        stop_reason: rho_core::AgentStopReason::Canceled,
-    });
+    state.apply(
+        &rho_core::AgentEvent::AgentEnd {
+            stop_reason: rho_core::AgentStopReason::Canceled,
+        },
+        0,
+    );
     assert!(!state.canceling, "AgentEnd must clear the cancel flag");
 }
 

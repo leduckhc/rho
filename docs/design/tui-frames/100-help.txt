@@ -1,26 +1,16 @@
 ```
-ρ rho   ~/Work/Vibe/rho · main                sonnet-4.5 · openrouter · 48.2k in, 3.1k out   12m 08s
-────────────────────────────────────────────────────────────────────────────────────────────────────
-❯ add a duration to every tool row, and keep the text beside it still                               
-                                                                                                    
 Done. Every tool row now carries a duration, and 214 tests pass.                                    
+  keys  1-8 of 22                                                                    ↓ 14 more below
+  enter          send the draft                                                                     
+  shift+enter    insert a newline, where the terminal reports the key                               
+  ctrl-j         insert a newline, in every terminal                                                
+  alt+enter      insert a newline, in every terminal                                                
+  ctrl-c         cancel the turn · press twice while idle to quit                                   
+  ctrl-d         quit while the draft is empty                                                      
+  ctrl-r         search the history                                                                 
+  ctrl-x ctrl-e  edit the draft in the editor                                                       
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-  keys                                                                                              
-    enter            send the draft                                                                 
-    alt+enter        insert a newline · not built yet                                               
-    ctrl-c           cancel the turn · press twice while idle to quit                               
-    ctrl-d           quit while the draft is empty                                                  
-    /                open the command list · tab completes · enter runs                             
-    ?                open this help                                                                 
-    ctrl-o           expand or collapse the newest tool row · not built yet                         
-    ctrl-e           expand everything · press again to collapse · not built yet                    
-    ↑ ↓              move the selection in an open list                                             
-    esc              close a panel and keep the draft                                               
-  commands                                                                                          
-    type / to list them · /guide is the two minute tour                                             
+❯ █                                                                                                 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ ❯ █                                                                                              │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-  ready                                                                                  esc close  
+  ready                                                  ↑ ↓ scroll · esc close · / lists commands  
 ```

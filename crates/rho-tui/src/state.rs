@@ -10,6 +10,7 @@ use rho_core::{
 };
 
 use crate::concise::RowFold;
+use crate::paste::Composer;
 
 /// One rendered transcript row.
 #[derive(Clone, Debug, PartialEq)]
@@ -98,6 +99,8 @@ pub enum Panel {
     SlashList(SlashList),
     /// The shortcut list, generated from the binding table.
     Help,
+    /// The reverse history search, opened by `ctrl-r`.
+    HistorySearch(HistorySearch),
 }
 
 /// The approval prompt content. The command is verbatim, so the user sees exactly
@@ -108,6 +111,13 @@ pub struct Approval {
     pub title: String,
     /// The verbatim command awaiting approval.
     pub command: String,
+    /// The directory the command runs in.
+    ///
+    /// A command means nothing without the tree it acts on. `rm -rf target` is routine in
+    /// a build directory and ruinous in a home directory, so the panel states the root
+    /// beside the command, and it never drops the row to save space. See
+    /// `D-ledger-wins-the-band`.
+    pub root: String,
     /// The elapsed span awaiting approval, for the duration slot.
     pub millis: Option<i64>,
 }
@@ -121,12 +131,42 @@ pub struct SlashList {
     pub selected: usize,
 }
 
+/// The reverse-search panel state: the typed query and the selected match.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct HistorySearch {
+    /// The typed query. An empty query matches every entry.
+    pub query: String,
+    /// The selected row index into the filtered matches.
+    pub selected: usize,
+}
+
+/// The history entries that hold `query`, newest first, as indexes into the history.
+///
+/// The match is a case-insensitive substring. An empty query matches every entry. The
+/// result lists the newest match first, so the panel opens on the most recent draft.
+pub fn filter_history(history: &[String], query: &str) -> Vec<usize> {
+    let needle = query.to_lowercase();
+    history
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, entry)| entry.to_lowercase().contains(&needle))
+        .map(|(index, _)| index)
+        .collect()
+}
+
 /// The whole TUI state. A pure function of the events applied so far, plus the
 /// local input buffer and one flag for the Ctrl-C exit gate.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TuiState {
     pub rows: Vec<Row>,
-    pub input: String,
+    /// The draft, with its paste chips and its cursor.
+    pub draft: Composer,
+    /// The drafts submitted in this session, oldest first. It lives for the session only.
+    pub history: Vec<String>,
+    /// The wrap width the composer last drew at. The loop sets it, so a row motion key
+    /// wraps the same way the screen does. Zero wraps on newlines only.
+    pub composer_width: usize,
     pub activity: ActivityState,
     pub status: String,
     /// The model id, shown on the status line.
@@ -163,6 +203,16 @@ pub struct TuiState {
     pub concise: bool,
     /// The transient panel, if any.
     pub panel: Panel,
+    /// The first binding the help window shows, counted from zero.
+    ///
+    /// The table is longer than the band, so the window scrolls. The arrows move it, and
+    /// they clamp it to `help_visible_rows`. See `D-ledger-wins-the-band`.
+    pub help_offset: usize,
+    /// The count of help rows the band can draw, set by the app loop each frame.
+    ///
+    /// The reducer needs it to clamp a scroll key. Without it the offset climbed past the
+    /// last row, and a press back moved nothing until every press was paid back.
+    pub help_visible_rows: usize,
     /// True when the last turn ended in an error, for the footer word.
     pub last_error: bool,
     /// True after a Ctrl-C cancel while a turn runs, until the turn ends. It drives the
@@ -175,6 +225,30 @@ pub struct TuiState {
     pub row_folds: Vec<RowFold>,
     /// The expanded body lines of each tool row, parallel to `rows`.
     pub row_bodies: Vec<Vec<String>>,
+    /// The count of rows the terminal already owns, oldest first.
+    ///
+    /// A row below this index is in the terminal's scrollback. rho can never repaint it,
+    /// so the reducer must never write it. See `D-a-frozen-row-never-repaints`.
+    pub frozen_rows: usize,
+    /// The count of events dropped because their row was already frozen.
+    ///
+    /// A provider that repeats itself is visible here. A silent drop would hide a defect.
+    /// See `D-a-late-event-for-a-frozen-row-is-dropped`.
+    pub late_events: usize,
+    /// The start instant of each row, parallel to `rows`. The reducer writes it when it
+    /// pushes the row, and reads it when the row finishes. This is private, because a
+    /// duration is the public fact.
+    row_started: Vec<Option<i64>>,
+    /// The start instant of the running turn, for the footer clock.
+    turn_started: Option<i64>,
+    /// True after one `esc` with no panel. A second `esc` then clears the draft.
+    esc_armed: bool,
+    /// True after `ctrl-x`. The next `ctrl-e` then opens the editor.
+    awaiting_editor: bool,
+    /// The recall position in the history, or `None` while the live draft is shown.
+    history_pos: Option<usize>,
+    /// The live draft, saved when a recall starts, so a forward recall restores it.
+    history_stash: Option<String>,
 }
 
 /// What the app must do after a key press. The key handler is pure. It returns
@@ -189,41 +263,92 @@ pub enum KeyAction {
     Cancel,
     /// Exit the app.
     Exit,
+    /// Edit this text in the editor, then replace the draft with the result.
+    EditDraft(String),
 }
 
 impl TuiState {
-    /// Fold one agent event into the state. Pure. No IO. See `SPEC-tui` section 3.
-    pub fn apply(&mut self, event: &AgentEvent) {
+    /// Fold one agent event into the state, at `now_millis` on the caller's clock.
+    ///
+    /// Pure. No IO. The clock arrives as data, so the reducer reads no clock and a test
+    /// drives time. The same call writes the row metadata, so a row and its duration can
+    /// never disagree. See `D-the-reducer-owns-the-row-metadata`.
+    pub fn apply(&mut self, event: &AgentEvent, now_millis: i64) {
         match event {
             AgentEvent::TurnStart => {
                 self.activity = ActivityState::Running;
                 self.canceling = false;
+                self.turn_started = Some(now_millis);
             }
-            AgentEvent::Stream(stream) => self.apply_stream(stream),
-            AgentEvent::ToolStart { id, name, kind } => self.on_tool_start(id, name, *kind),
+            AgentEvent::Stream(stream) => self.apply_stream(stream, now_millis),
+            AgentEvent::ToolStart { id, name, kind } => {
+                self.on_tool_start(id, name, *kind, now_millis)
+            }
             AgentEvent::ToolUpdate { id, output } => self.on_tool_update(id, output),
-            AgentEvent::ToolEnd { id, output } => self.on_tool_end(id, output.is_error),
+            AgentEvent::ToolEnd { id, output } => self.on_tool_end(id, output.is_error, now_millis),
             AgentEvent::TurnEnd { .. } => {}
             AgentEvent::AgentSpawned { id, agent, depth } => {
-                self.on_agent_spawned(id.0, agent, *depth)
+                self.on_agent_spawned(id.0, agent, *depth, now_millis)
             }
             AgentEvent::AgentProgressed { id, turns, usage } => {
                 self.on_agent_progressed(id.0, *turns, usage)
             }
             AgentEvent::AgentFinished { id, report } => self.on_agent_finished(id.0, report),
-            AgentEvent::TaskStart { id, command, .. } => self.on_task_start(id, command),
+            AgentEvent::TaskStart { id, command, .. } => {
+                self.on_task_start(id, command, now_millis)
+            }
             AgentEvent::TaskProgressed { id, progress } => self.on_task_progress(id, progress),
             AgentEvent::TaskEnd { id, state, .. } => self.on_task_end(id, state),
-            AgentEvent::AgentEnd { stop_reason } => self.on_agent_end(*stop_reason),
+            AgentEvent::AgentEnd { stop_reason } => self.on_agent_end(*stop_reason, now_millis),
         }
     }
 
-    fn apply_stream(&mut self, event: &StreamEvent) {
+    /// Push a row, and keep every parallel array the same length.
+    ///
+    /// Every push goes through here. A row whose metadata array is short would read another
+    /// row's duration, or none at all.
+    fn push_row(&mut self, row: Row, started: Option<i64>) {
+        self.rows.push(row);
+        self.row_durations.push(None);
+        self.row_started.push(started);
+    }
+
+    /// State the session context the banner reports.
+    ///
+    /// The banner names where rho runs, so a user with two sessions can tell them apart.
+    /// The renderer read these fields from the first frame, and nothing wrote them, so the
+    /// banner drew three separators around nothing.
+    pub fn set_context(
+        &mut self,
+        cwd: impl Into<String>,
+        branch: impl Into<String>,
+        provider: impl Into<String>,
+    ) {
+        self.cwd = cwd.into();
+        self.branch = branch.into();
+        self.provider = provider.into();
+    }
+
+    /// The rows the band still owns, oldest first.
+    pub fn live_rows(&self) -> &[Row] {
+        let start = self.frozen_rows.min(self.rows.len());
+        &self.rows[start..]
+    }
+
+    /// Record that `rows` more rows left the band. A count past the end saturates.
+    pub fn mark_frozen(&mut self, rows: usize) {
+        self.frozen_rows = self.frozen_rows.saturating_add(rows).min(self.rows.len());
+    }
+
+    fn apply_stream(&mut self, event: &StreamEvent, now_millis: i64) {
         match event {
             StreamEvent::TextStart { .. } => {
-                self.rows.push(Row::Assistant {
-                    text: String::new(),
-                });
+                self.push_row(
+                    Row::Assistant {
+                        text: String::new(),
+                    },
+                    Some(now_millis),
+                );
             }
             StreamEvent::TextDelta { delta, .. } => {
                 if let Some(Row::Assistant { text }) = self.last_assistant_mut() {
@@ -231,13 +356,24 @@ impl TuiState {
                 }
             }
             StreamEvent::ThinkingStart { .. } => {
-                self.rows.push(Row::Thinking {
-                    text: String::new(),
-                });
+                self.push_row(
+                    Row::Thinking {
+                        text: String::new(),
+                    },
+                    Some(now_millis),
+                );
             }
             StreamEvent::ThinkingDelta { delta, .. } => {
                 if let Some(Row::Thinking { text }) = self.last_thinking_mut() {
                     text.push_str(delta);
+                }
+            }
+            // A thinking block ends, so its span is settled. The slot is written here,
+            // because a row must carry its duration before it can freeze.
+            StreamEvent::ThinkingEnd { .. } => {
+                if let Some(index) = self.last_live_index(|row| matches!(row, Row::Thinking { .. }))
+                {
+                    self.settle_duration(index, now_millis);
                 }
             }
             StreamEvent::ToolCallStart { index, id, name } => {
@@ -252,43 +388,89 @@ impl TuiState {
                     .find(|(i, _, _)| i == index)
                     .cloned();
                 if let Some((_, id, name)) = found {
-                    self.rows.push(Row::Tool {
-                        id,
-                        name,
-                        kind: ToolKind::Other,
-                        status: ToolRowStatus::Pending,
-                        preview: String::new(),
-                    });
+                    self.push_row(
+                        Row::Tool {
+                            id,
+                            name,
+                            kind: ToolKind::Other,
+                            status: ToolRowStatus::Pending,
+                            preview: String::new(),
+                        },
+                        Some(now_millis),
+                    );
                 }
             }
             StreamEvent::MessageStart { .. }
             | StreamEvent::TextEnd { .. }
-            | StreamEvent::ThinkingEnd { .. }
             | StreamEvent::ToolCallDelta { .. }
             | StreamEvent::Usage(_)
             | StreamEvent::Done { .. } => {}
         }
     }
 
-    /// Find a subagent row by id.
-    fn agent_row_mut(&mut self, id: u64) -> Option<&mut Row> {
+    /// Write the span of the row at `index`, from its start instant to `now_millis`.
+    ///
+    /// The slot is always written, even with no start instant, because a row that never
+    /// settles its metadata could never freeze. A span below zero means the clock stepped
+    /// back, and the duration ladder renders an empty slot for it.
+    fn settle_duration(&mut self, index: usize, now_millis: i64) {
+        let span = self
+            .row_started
+            .get(index)
+            .copied()
+            .flatten()
+            .map(|start| now_millis - start);
+        if let Some(slot) = self.row_durations.get_mut(index) {
+            *slot = span;
+        }
+    }
+
+    /// The index of the newest live row that matches, or `None`.
+    fn last_live_index(&self, matches: impl Fn(&Row) -> bool) -> Option<usize> {
+        let start = self.frozen_rows.min(self.rows.len());
         self.rows
+            .iter()
+            .enumerate()
+            .skip(start)
+            .rev()
+            .find(|(_, row)| matches(row))
+            .map(|(index, _)| index)
+    }
+
+    /// Find a subagent row by id, among the live rows only.
+    ///
+    /// A frozen row is unreachable here by design. See
+    /// `D-a-late-event-for-a-frozen-row-is-dropped`.
+    fn agent_row_mut(&mut self, id: u64) -> Option<&mut Row> {
+        let start = self.frozen_rows.min(self.rows.len());
+        self.rows[start..]
             .iter_mut()
             .find(|row| matches!(row, Row::Agent { id: row_id, .. } if *row_id == id))
     }
 
-    fn on_agent_spawned(&mut self, id: u64, name: &str, depth: u32) {
+    /// True when a frozen row already holds this subagent id.
+    fn frozen_has_agent(&self, id: u64) -> bool {
+        let end = self.frozen_rows.min(self.rows.len());
+        self.rows[..end]
+            .iter()
+            .any(|row| matches!(row, Row::Agent { id: row_id, .. } if *row_id == id))
+    }
+
+    fn on_agent_spawned(&mut self, id: u64, name: &str, depth: u32, now_millis: i64) {
         // A definition name is untrusted text, because it comes from a file on disk.
-        self.rows.push(Row::Agent {
-            id,
-            name: crate::sanitize_line(name),
-            depth,
-            turns: 0,
-            cost: String::new(),
-            finished: false,
-            failed: false,
-            outcome: "running".to_string(),
-        });
+        self.push_row(
+            Row::Agent {
+                id,
+                name: crate::sanitize_line(name),
+                depth,
+                turns: 0,
+                cost: String::new(),
+                finished: false,
+                failed: false,
+                outcome: "running".to_string(),
+            },
+            Some(now_millis),
+        );
     }
 
     fn on_agent_progressed(&mut self, id: u64, turns: u32, usage: &rho_core::Usage) {
@@ -301,6 +483,8 @@ impl TuiState {
         {
             *row_turns = turns;
             *row_cost = cost;
+        } else if self.frozen_has_agent(id) {
+            self.late_events += 1;
         }
     }
 
@@ -322,27 +506,41 @@ impl TuiState {
             *finished = true;
             *row_failed = failed;
             *outcome = word;
+        } else if self.frozen_has_agent(id) {
+            self.late_events += 1;
         }
     }
 
-    /// Find a task row by id.
+    /// Find a task row by id, among the live rows only.
     fn task_row_mut(&mut self, id: &str) -> Option<&mut Row> {
-        self.rows
+        let start = self.frozen_rows.min(self.rows.len());
+        self.rows[start..]
             .iter_mut()
             .find(|row| matches!(row, Row::Task { id: row_id, .. } if row_id == id))
     }
 
-    fn on_task_start(&mut self, id: &TaskId, command: &str) {
+    /// True when a frozen row already holds this task id.
+    fn frozen_has_task(&self, id: &str) -> bool {
+        let end = self.frozen_rows.min(self.rows.len());
+        self.rows[..end]
+            .iter()
+            .any(|row| matches!(row, Row::Task { id: row_id, .. } if row_id == id))
+    }
+
+    fn on_task_start(&mut self, id: &TaskId, command: &str, now_millis: i64) {
         // A command is untrusted text, because the model wrote it. Sanitise it before
         // it reaches the screen.
-        self.rows.push(Row::Task {
-            id: id.0.clone(),
-            command: crate::sanitize_line(command),
-            state: "running".to_string(),
-            finished: false,
-            failed: false,
-            progress: String::new(),
-        });
+        self.push_row(
+            Row::Task {
+                id: id.0.clone(),
+                command: crate::sanitize_line(command),
+                state: "running".to_string(),
+                finished: false,
+                failed: false,
+                progress: String::new(),
+            },
+            Some(now_millis),
+        );
     }
 
     fn on_task_progress(&mut self, id: &TaskId, progress: &TaskProgress) {
@@ -353,6 +551,8 @@ impl TuiState {
         }) = self.task_row_mut(&id.0)
         {
             *row_progress = summary;
+        } else if self.frozen_has_task(&id.0) {
+            self.late_events += 1;
         }
     }
 
@@ -369,10 +569,12 @@ impl TuiState {
             *row_state = label;
             *finished = true;
             *row_failed = failed;
+        } else if self.frozen_has_task(&id.0) {
+            self.late_events += 1;
         }
     }
 
-    fn on_tool_start(&mut self, id: &str, name: &str, kind: ToolKind) {
+    fn on_tool_start(&mut self, id: &str, name: &str, kind: ToolKind, now_millis: i64) {
         if let Some(row) = self.tool_row_mut(id) {
             if let Row::Tool {
                 kind: row_kind,
@@ -383,66 +585,179 @@ impl TuiState {
                 *row_kind = kind;
                 *status = ToolRowStatus::Running;
             }
-        } else {
-            self.rows.push(Row::Tool {
+            return;
+        }
+        // A start for an id the terminal already owns is late. It must not push a second
+        // row, because the transcript would then report the call twice.
+        if self.frozen_has_tool(id) {
+            self.late_events += 1;
+            return;
+        }
+        self.push_row(
+            Row::Tool {
                 id: id.to_string(),
                 name: name.to_string(),
                 kind,
                 status: ToolRowStatus::Running,
                 preview: String::new(),
-            });
-        }
+            },
+            Some(now_millis),
+        );
     }
 
     fn on_tool_update(&mut self, id: &str, output: &str) {
         if let Some(Row::Tool { preview, .. }) = self.tool_row_mut(id) {
             *preview = output.to_string();
+        } else if self.frozen_has_tool(id) {
+            self.late_events += 1;
         }
     }
 
-    fn on_tool_end(&mut self, id: &str, is_error: bool) {
-        if let Some(Row::Tool { status, .. }) = self.tool_row_mut(id) {
+    fn on_tool_end(&mut self, id: &str, is_error: bool, now_millis: i64) {
+        let Some(index) = self.live_tool_index(id) else {
+            if self.frozen_has_tool(id) {
+                self.late_events += 1;
+            }
+            return;
+        };
+        if let Some(Row::Tool { status, .. }) = self.rows.get_mut(index) {
             *status = if is_error {
                 ToolRowStatus::Failed
             } else {
                 ToolRowStatus::Ok
             };
         }
+        // The status flip makes the row final, so its span settles in the same call.
+        self.settle_duration(index, now_millis);
     }
 
-    fn on_agent_end(&mut self, stop_reason: AgentStopReason) {
+    fn on_agent_end(&mut self, stop_reason: AgentStopReason, now_millis: i64) {
         self.activity = ActivityState::Idle;
         self.canceling = false;
         self.last_stop = Some(stop_reason);
         self.status = format!("done: {}", stop_reason_label(stop_reason));
+        if let Some(start) = self.turn_started {
+            self.turn_millis = Some(now_millis - start);
+        }
     }
 
     fn last_assistant_mut(&mut self) -> Option<&mut Row> {
-        self.rows
+        let start = self.frozen_rows.min(self.rows.len());
+        self.rows[start..]
             .iter_mut()
             .rev()
             .find(|row| matches!(row, Row::Assistant { .. }))
     }
 
     fn last_thinking_mut(&mut self) -> Option<&mut Row> {
-        self.rows
+        let start = self.frozen_rows.min(self.rows.len());
+        self.rows[start..]
             .iter_mut()
             .rev()
             .find(|row| matches!(row, Row::Thinking { .. }))
     }
 
+    /// Find a tool row by id, among the live rows only.
     fn tool_row_mut(&mut self, id: &str) -> Option<&mut Row> {
-        self.rows
+        let start = self.frozen_rows.min(self.rows.len());
+        self.rows[start..]
             .iter_mut()
             .find(|row| matches!(row, Row::Tool { id: row_id, .. } if row_id == id))
     }
 
-    /// Append the submitted user input as a `User` row and clear the input.
-    /// Return the submitted text, so the caller can start a run with it.
+    /// The absolute index of a live tool row with this id.
+    fn live_tool_index(&self, id: &str) -> Option<usize> {
+        let start = self.frozen_rows.min(self.rows.len());
+        self.rows
+            .iter()
+            .enumerate()
+            .skip(start)
+            .find(|(_, row)| matches!(row, Row::Tool { id: row_id, .. } if row_id == id))
+            .map(|(index, _)| index)
+    }
+
+    /// True when a frozen row already holds this tool id.
+    fn frozen_has_tool(&self, id: &str) -> bool {
+        let end = self.frozen_rows.min(self.rows.len());
+        self.rows[..end]
+            .iter()
+            .any(|row| matches!(row, Row::Tool { id: row_id, .. } if row_id == id))
+    }
+
+    /// Append the submitted draft as a `User` row and empty the draft.
+    ///
+    /// It takes the model text with `Composer::take`, so a held paste reaches the model
+    /// in full. It pushes the user row through `push_row`, so the parallel metadata arrays
+    /// stay aligned. It records the text in the history, and it drops a repeat.
     pub fn submit_input(&mut self) -> String {
-        let text = std::mem::take(&mut self.input);
-        self.rows.push(Row::User { text: text.clone() });
+        let text = self.draft.take();
+        self.push_row(Row::User { text: text.clone() }, None);
+        self.push_history(&text);
+        self.reset_history_nav();
         text
+    }
+
+    /// The draft as the user sees it, with a chip label for each held paste.
+    pub fn draft_text(&self) -> String {
+        self.draft.display_string()
+    }
+
+    /// True when the draft holds nothing.
+    pub fn draft_is_empty(&self) -> bool {
+        self.draft.is_empty()
+    }
+
+    /// Record a submitted draft in the history. It drops an empty draft and a repeat.
+    fn push_history(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if self.history.last().map(String::as_str) == Some(text) {
+            return;
+        }
+        self.history.push(text.to_string());
+    }
+
+    /// Reset the history recall, so the next `up` starts from the newest entry.
+    fn reset_history_nav(&mut self) {
+        self.history_pos = None;
+        self.history_stash = None;
+    }
+
+    /// Recall the previous draft. Return `false` at the oldest entry.
+    ///
+    /// The first recall saves the live draft, so a forward recall can restore it.
+    pub fn recall_previous(&mut self) -> bool {
+        if self.history.is_empty() {
+            return false;
+        }
+        let target = match self.history_pos {
+            None => {
+                self.history_stash = Some(self.draft.model_text());
+                self.history.len() - 1
+            }
+            Some(0) => return false,
+            Some(pos) => pos - 1,
+        };
+        self.history_pos = Some(target);
+        self.draft.set_text(&self.history[target]);
+        true
+    }
+
+    /// Recall the next draft, and then the live draft. Return `false` past the end.
+    pub fn recall_next(&mut self) -> bool {
+        let Some(pos) = self.history_pos else {
+            return false;
+        };
+        if pos + 1 < self.history.len() {
+            self.history_pos = Some(pos + 1);
+            self.draft.set_text(&self.history[pos + 1]);
+        } else {
+            let live = self.history_stash.take().unwrap_or_default();
+            self.draft.set_text(&live);
+            self.history_pos = None;
+        }
+        true
     }
 
     /// Fold one key press into the state. Pure. No IO. Return the action the event
@@ -458,67 +773,236 @@ impl TuiState {
         // Any key other than Ctrl-C clears the exit arm.
         self.exit_armed = false;
 
+        // A `ctrl-x` armed the editor. The next key resolves it. A `ctrl-e` opens the
+        // editor. Any other key clears the arm and runs as usual.
+        if self.awaiting_editor {
+            self.awaiting_editor = false;
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('e') {
+                return KeyAction::EditDraft(self.draft.model_text());
+            }
+        }
+
+        // A single `esc` arms the draft clear. Any other key disarms it.
+        if key.code != KeyCode::Esc {
+            self.esc_armed = false;
+        }
+
         // A chord is never text. The old handler pushed the letter of every chord into
         // the draft, so Ctrl-D typed a `d` instead of leaving.
-        if key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        //
+        // Shift+Enter is a chord too, and it is named one key at a time. SHIFT may never
+        // join the mask below, because `shift+a` is how a capital letter arrives, and a
+        // chord drops its text. A shifted Enter carries no text, so it is safe to route.
+        let shift_enter = key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT);
+        if shift_enter
+            || key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
         {
-            return self.handle_chord(key.code);
+            return self.handle_chord(key);
         }
 
         match &self.panel {
             Panel::SlashList(list) => return self.handle_slash_key(key.code, list.clone()),
             Panel::Help => return self.handle_help_key(key.code),
+            Panel::HistorySearch(search) => {
+                return self.handle_search_key(key.code, search.clone());
+            }
             // An approval prompt answers its own keys, which stage U6 wires.
             Panel::Approval(_) | Panel::None => {}
         }
 
         match key.code {
             KeyCode::Enter => {
-                if self.input.is_empty() {
+                if self.draft.is_empty() {
                     KeyAction::None
                 } else {
                     KeyAction::Submit(self.submit_input())
                 }
             }
             KeyCode::Backspace => {
-                self.input.pop();
+                self.draft.backspace();
+                KeyAction::None
+            }
+            KeyCode::Delete => {
+                self.draft.delete_forward();
+                KeyAction::None
+            }
+            KeyCode::Left => {
+                self.draft.move_left();
+                KeyAction::None
+            }
+            KeyCode::Right => {
+                self.draft.move_right();
+                KeyAction::None
+            }
+            KeyCode::Home => {
+                self.draft.move_line_start();
+                KeyAction::None
+            }
+            KeyCode::End => {
+                self.draft.move_line_end();
+                KeyAction::None
+            }
+            // Up moves the cursor one display row. At the top row it recalls the previous
+            // draft, so a tall draft keeps the arrow and a one-row draft reaches history.
+            KeyCode::Up => {
+                if !self.draft.move_row_up(self.composer_width) {
+                    self.recall_previous();
+                }
+                KeyAction::None
+            }
+            KeyCode::Down => {
+                if !self.draft.move_row_down(self.composer_width) {
+                    self.recall_next();
+                }
+                KeyAction::None
+            }
+            // A second `esc` with no panel clears the draft into the history.
+            KeyCode::Esc => {
+                if self.esc_armed {
+                    self.esc_armed = false;
+                    let text = self.draft.take();
+                    self.push_history(&text);
+                    self.reset_history_nav();
+                } else {
+                    self.esc_armed = true;
+                }
                 KeyAction::None
             }
             // The composer promises `/ for commands` and `? for help`, so both keys open
             // their panel on an empty draft. Inside a draft they stay ordinary text,
             // because `why?` is a question and not a request for help.
-            KeyCode::Char('/') if self.input.is_empty() => {
-                self.input.push('/');
+            KeyCode::Char('/') if self.draft.is_empty() => {
+                self.draft.insert("/");
                 self.panel = Panel::SlashList(SlashList {
                     query: "/".to_string(),
                     selected: 0,
                 });
                 KeyAction::None
             }
-            KeyCode::Char('?') if self.input.is_empty() => {
+            KeyCode::Char('?') if self.draft.is_empty() => {
                 self.panel = Panel::Help;
                 KeyAction::None
             }
             KeyCode::Char(ch) => {
-                self.input.push(ch);
+                self.draft.insert(&ch.to_string());
                 KeyAction::None
             }
             _ => KeyAction::None,
         }
     }
 
-    /// Answer a chord. A chord never types its letter.
-    fn handle_chord(&mut self, code: KeyCode) -> KeyAction {
-        match code {
+    /// Answer a chord. A chord never types its letter. It carries the readline motions,
+    /// the newline keys, the reverse search, and the two editor bindings.
+    fn handle_chord(&mut self, key: KeyEvent) -> KeyAction {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        // A panel owns the keyboard. A chord while the search is open still edits the
+        // query through its own handler, so a stray chord never leaks into the draft.
+        if matches!(self.panel, Panel::HistorySearch(_)) {
+            return KeyAction::None;
+        }
+        match key.code {
             // Ctrl-D on an empty draft leaves rho, the way it ends a shell. With a draft
             // it does nothing, because a stray chord must not throw away written work.
-            KeyCode::Char('d') if self.input.is_empty() && self.panel == Panel::None => {
+            KeyCode::Char('d') if ctrl && self.draft.is_empty() && self.panel == Panel::None => {
                 KeyAction::Exit
+            }
+            // Shift+Enter is the newline key. Alt+Enter and Ctrl+Enter do it too, like
+            // Ctrl-J, because a terminal that hides one modifier must leave a way in.
+            KeyCode::Enter => {
+                self.draft.insert_newline();
+                KeyAction::None
+            }
+            KeyCode::Char('j') if ctrl => {
+                self.draft.insert_newline();
+                KeyAction::None
+            }
+            // Ctrl-X arms the editor. Ctrl-G opens it at once. Both edit the draft.
+            KeyCode::Char('x') if ctrl => {
+                self.awaiting_editor = true;
+                KeyAction::None
+            }
+            KeyCode::Char('g') if ctrl => KeyAction::EditDraft(self.draft.model_text()),
+            // Ctrl-R opens the reverse search. It keeps the draft, so Esc can restore it.
+            KeyCode::Char('r') if ctrl => {
+                self.panel = Panel::HistorySearch(HistorySearch::default());
+                KeyAction::None
+            }
+            KeyCode::Char('a') if ctrl => {
+                self.draft.move_line_start();
+                KeyAction::None
+            }
+            KeyCode::Char('e') if ctrl => {
+                self.draft.move_line_end();
+                KeyAction::None
+            }
+            KeyCode::Char('k') if ctrl => {
+                self.draft.kill_to_line_end();
+                KeyAction::None
+            }
+            KeyCode::Char('u') if ctrl => {
+                self.draft.kill_to_line_start();
+                KeyAction::None
+            }
+            KeyCode::Char('w') if ctrl => {
+                self.draft.kill_word_left();
+                KeyAction::None
+            }
+            KeyCode::Char('y') if ctrl => {
+                self.draft.yank();
+                KeyAction::None
+            }
+            KeyCode::Char('b') if alt => {
+                self.draft.move_word_left();
+                KeyAction::None
+            }
+            KeyCode::Char('f') if alt => {
+                self.draft.move_word_right();
+                KeyAction::None
             }
             _ => KeyAction::None,
         }
+    }
+
+    /// Answer a key while the reverse search is open. The panel owns the keyboard, so a
+    /// character edits the query and never the draft. Enter accepts the match. Esc keeps
+    /// the draft that was there before the search opened.
+    fn handle_search_key(&mut self, code: KeyCode, mut search: HistorySearch) -> KeyAction {
+        match code {
+            KeyCode::Esc => {
+                self.panel = Panel::None;
+            }
+            KeyCode::Enter => {
+                let matches = filter_history(&self.history, &search.query);
+                if let Some(&index) = matches.get(search.selected) {
+                    self.draft.set_text(&self.history[index]);
+                }
+                self.panel = Panel::None;
+            }
+            KeyCode::Up => {
+                search.selected = search.selected.saturating_sub(1);
+                self.panel = Panel::HistorySearch(search);
+            }
+            KeyCode::Down => {
+                let count = filter_history(&self.history, &search.query).len();
+                search.selected = (search.selected + 1).min(count.saturating_sub(1));
+                self.panel = Panel::HistorySearch(search);
+            }
+            KeyCode::Backspace => {
+                search.query.pop();
+                search.selected = 0;
+                self.panel = Panel::HistorySearch(search);
+            }
+            KeyCode::Char(ch) => {
+                search.query.push(ch);
+                search.selected = 0;
+                self.panel = Panel::HistorySearch(search);
+            }
+            _ => {}
+        }
+        KeyAction::None
     }
 
     /// Answer a key while the slash list is open.
@@ -539,18 +1023,18 @@ impl TuiState {
                 self.panel = Panel::SlashList(list);
             }
             KeyCode::Backspace => {
-                self.input.pop();
-                if self.input.is_empty() {
+                self.draft.backspace();
+                if self.draft.is_empty() {
                     self.panel = Panel::None;
                 } else {
-                    list.query = self.input.clone();
+                    list.query = self.draft_text();
                     list.selected = 0;
                     self.panel = Panel::SlashList(list);
                 }
             }
             KeyCode::Char(ch) => {
-                self.input.push(ch);
-                list.query = self.input.clone();
+                self.draft.insert(&ch.to_string());
+                list.query = self.draft_text();
                 list.selected = 0;
                 self.panel = Panel::SlashList(list);
             }
@@ -560,8 +1044,8 @@ impl TuiState {
             KeyCode::Tab => {
                 if let Some(command) = crate::filter_slash_commands(&list.query).get(list.selected)
                 {
-                    self.input = command.name.to_string();
-                    list.query = self.input.clone();
+                    self.draft.set_text(command.name);
+                    list.query = self.draft_text();
                     list.selected = 0;
                     self.panel = Panel::SlashList(list);
                 }
@@ -572,10 +1056,47 @@ impl TuiState {
     }
 
     /// Answer a key while the help panel is open. Esc closes it, and so does `?`.
+    /// The largest help offset the screen can show.
+    ///
+    /// `help_visible_rows` is set by the app loop each frame, so the reducer clamps against
+    /// the same geometry the renderer draws with.
+    fn help_scroll_max(&self) -> usize {
+        // Zero means the app loop has not drawn yet, and it must not mean "one row". A
+        // zero here clamped the offset to almost nothing, so a scroll key banked presses
+        // that the screen never answered. The standard band is the honest fallback.
+        let visible = if self.help_visible_rows == 0 {
+            crate::render::help_visible_rows(crate::render::BAND_ROWS)
+        } else {
+            self.help_visible_rows
+        };
+        crate::bindings::bindings()
+            .len()
+            .saturating_sub(visible.max(1))
+    }
+
     fn handle_help_key(&mut self, code: KeyCode) -> KeyAction {
         match code {
             KeyCode::Esc | KeyCode::Char('?') => {
                 self.panel = Panel::None;
+                self.help_offset = 0;
+                KeyAction::None
+            }
+            // The window states `↓ n more below`, and the footer offers `↑ ↓ scroll`. Both
+            // are promises, so the arrows answer them. The panel drew both while these
+            // keys did nothing, which is `D-a-panel-nobody-can-open`.
+            // The offset is clamped here, where it moves, and not only where it draws.
+            // Clamping at draw time let this value climb past the last row, so a press
+            // back moved nothing until the user had paid back every press. Scroll state
+            // that the screen cannot show is scroll state that lies.
+            KeyCode::Down => {
+                self.help_offset = self
+                    .help_offset
+                    .saturating_add(1)
+                    .min(self.help_scroll_max());
+                KeyAction::None
+            }
+            KeyCode::Up => {
+                self.help_offset = self.help_offset.saturating_sub(1);
                 KeyAction::None
             }
             _ => KeyAction::None,
@@ -592,7 +1113,7 @@ impl TuiState {
         let Some(name) = chosen else {
             // Nothing matched, so report the text the user typed, and keep it. The draft
             // may be a path rather than a command, and a report must not eat it.
-            let message = match crate::run_slash_command(&self.input.clone()) {
+            let message = match crate::run_slash_command(&self.draft_text()) {
                 crate::SlashOutcome::Unknown(message) => message,
                 crate::SlashOutcome::Run(name) => format!("unknown command: {name}"),
             };
@@ -602,7 +1123,7 @@ impl TuiState {
         };
 
         // A matched command consumes the draft, because the draft was the command.
-        self.input.clear();
+        self.draft.take();
         self.panel = Panel::None;
 
         match name.as_str() {
@@ -655,10 +1176,13 @@ impl TuiState {
     /// Push a one-line error row. The transcript is the only channel the user reads,
     /// so a message that matters goes here and not into a field nobody draws.
     pub fn push_error(&mut self, message: impl Into<String>) {
-        self.rows.push(Row::Error {
-            message: crate::sanitize_line(&message.into()),
-            detail: Vec::new(),
-        });
+        self.push_row(
+            Row::Error {
+                message: crate::sanitize_line(&message.into()),
+                detail: Vec::new(),
+            },
+            None,
+        );
     }
 
     fn handle_ctrl_c(&mut self) -> KeyAction {
@@ -685,6 +1209,60 @@ impl TuiState {
 /// True when a key event is Ctrl-C.
 fn is_ctrl_c(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
+}
+
+/// True when nothing can change the row at `index` again.
+///
+/// A frozen row lives in the terminal's scrollback, and rho can never repaint it. So this
+/// answers the only question that matters before a row leaves the band.
+///
+/// There is one arm per `Row` variant and no wildcard arm, so a new variant fails the
+/// build. Its author must then state the rule. See `D-row-finality-is-explicit`.
+///
+/// Two invariants hold the assistant and thinking rules up. The row list is append-only,
+/// so no row moves. Both delta paths search from the newest row, so only the newest row of
+/// a kind can grow.
+pub fn row_is_final(state: &TuiState, index: usize) -> bool {
+    let Some(row) = state.rows.get(index) else {
+        return false;
+    };
+    // A finished turn settles every row, because no event can arrive for it.
+    let turn_ended = state.activity == ActivityState::Idle;
+    match row {
+        // No reducer path writes a user row after it is pushed.
+        Row::User { .. } => true,
+        // Nothing updates an error row.
+        Row::Error { .. } => true,
+        // `last_assistant_mut` reaches only the newest assistant row.
+        Row::Assistant { .. } => turn_ended || newer_row_of_kind(state, index, RowKind::Assistant),
+        // `last_thinking_mut` reaches only the newest thinking row.
+        Row::Thinking { .. } => turn_ended || newer_row_of_kind(state, index, RowKind::Thinking),
+        // `tool_row_mut` finds a pending or a running row by id. A tool call cannot
+        // outlive its turn, so a finished turn settles it too.
+        Row::Tool { status, .. } => {
+            turn_ended || matches!(status, ToolRowStatus::Ok | ToolRowStatus::Failed)
+        }
+        // `agent_row_mut` finds a live child by id. A child outlives the turn that spawned
+        // it, so a finished turn proves nothing here.
+        Row::Agent { finished, .. } => *finished,
+        // `task_row_mut` finds a live task by id. A task outlives its turn too.
+        Row::Task { finished, .. } => *finished,
+    }
+}
+
+/// The two row kinds that grow by delta.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowKind {
+    Assistant,
+    Thinking,
+}
+
+/// True when a newer row of the same kind exists, so a delta cannot reach `index`.
+fn newer_row_of_kind(state: &TuiState, index: usize, kind: RowKind) -> bool {
+    state.rows.iter().skip(index + 1).any(|row| match kind {
+        RowKind::Assistant => matches!(row, Row::Assistant { .. }),
+        RowKind::Thinking => matches!(row, Row::Thinking { .. }),
+    })
 }
 
 /// A short label for a stop reason, shown on the status line.

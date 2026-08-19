@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>rho TUI — direction B, Breath</title>
+<style>
+  :root {
+    /* The six theme roles, as the 256-colour indices `theme.rs` resolves. */
+    --text:    #d0d0d0;  /* Role::Text, the terminal default            */
+    --muted:   #8a8a8a;  /* Role::Muted, index 245                      */
+    --accent:  #5fd787;  /* Role::Accent, index 78                      */
+    --error:   #ff5f5f;  /* Role::Error, index 203                      */
+    --warn:    #d7af5f;  /* Role::Warn, index 179                       */
+    --caution: #d7875f;  /* Role::Caution, index 173                    */
+    --bg:      #0c0c0c;
+    --panel:   #141414;
+    --edge:    #262626;
+    --ink:     #e8e8e8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #08080a; color: var(--ink);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header { padding: 28px 32px 12px; border-bottom: 1px solid var(--edge); }
+  h1 { margin: 0 0 6px; font-size: 19px; font-weight: 600; letter-spacing: -0.01em; }
+  header p { margin: 0; color: #9a9a9a; max-width: 76ch; font-size: 13px; }
+  header code { color: var(--accent); }
+  main { display: grid; grid-template-columns: 232px 1fr; min-height: calc(100vh - 96px); }
+  nav { border-right: 1px solid var(--edge); padding: 18px 0; }
+  nav h2 {
+    margin: 0 0 8px; padding: 0 18px; font-size: 10px; letter-spacing: 0.09em;
+    text-transform: uppercase; color: #6f6f6f;
+  }
+  nav h2:not(:first-child) { margin-top: 20px; }
+  nav button {
+    display: block; width: 100%; text-align: left; padding: 6px 18px;
+    background: none; border: 0; border-left: 2px solid transparent;
+    color: #b4b4b4; font: inherit; font-size: 13px; cursor: pointer;
+  }
+  nav button:hover { background: #101014; color: var(--ink); }
+  nav button[aria-current="true"] {
+    border-left-color: var(--accent); background: #101014; color: var(--ink);
+  }
+  section.stage { padding: 24px 32px 56px; min-width: 0; }
+  .why {
+    margin: 0 0 18px; padding: 12px 14px; background: var(--panel);
+    border: 1px solid var(--edge); border-radius: 6px; max-width: 96ch;
+  }
+  .why b { color: var(--ink); font-weight: 600; }
+  .why span { color: #9a9a9a; }
+  .term {
+    background: var(--bg); border: 1px solid var(--edge); border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; width: max-content; max-width: 100%;
+  }
+  pre {
+    margin: 0; color: var(--text); white-space: pre;
+    font-family: "SF Mono", "JetBrains Mono", Menlo, monospace;
+    font-size: 13px; line-height: 1.45; letter-spacing: 0;
+  }
+  .muted { color: var(--muted); }
+  .accent { color: var(--accent); }
+  .error { color: var(--error); }
+  .warn { color: var(--warn); }
+  .caution { color: var(--caution); font-weight: 600; }
+  .rev { background: var(--text); color: var(--bg); }
+  .cursor { background: var(--ink); color: var(--bg); }
+  .sel { background: #23303a; }
+  .own {
+    display: flex; gap: 10px; align-items: center; margin: 10px 0 4px;
+    font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: #6f6f6f;
+  }
+  .own::after { content: ""; flex: 1; height: 1px; background: var(--edge); }
+  .own.band { color: var(--accent); }
+  .own.band::after { background: #1d3a29; }
+  table.keys { border-collapse: collapse; margin-top: 20px; font-size: 12.5px; }
+  table.keys td { padding: 3px 16px 3px 0; color: #9a9a9a; vertical-align: top; }
+  table.keys td:first-child {
+    font-family: "SF Mono", Menlo, monospace; color: var(--accent); white-space: nowrap;
+  }
+  footer { padding: 0 32px 40px; color: #6f6f6f; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>rho TUI — direction B, <span style="color:var(--accent)">Breath</span></h1>
+  <p>
+    The thesis: <b>the band takes the rows it needs, and no more.</b>
+    The baseline band is 14 rows, always, and the idle frame is 57% blank.
+    Here the band rests at 4 rows: rule, <code>❯</code>, rule, footer.
+    It grows while a turn runs, one row per live row.
+    The cap is the terminal height minus four, so 20 rows on an 80×24 terminal.
+    Four rows of the terminal's own scrollback always stay in view, so the band
+    never becomes the alternate screen by stealth.
+    The band never shrinks while a turn streams, because a shrink under moving
+    text reads as flicker.
+    It shrinks at two moments only: the turn ends, or you close a panel.
+    Each frame below states its own height, so the switcher shows the breath.
+    The colours are the six theme roles as <code>theme.rs</code> resolves them.
+  </p>
+</header>
+<main>
+  <nav id="nav"></nav>
+  <section class="stage">
+    <p class="why" id="why"></p>
+    <div id="frame"></div>
+    <table class="keys" id="keys"></table>
+  </section>
+</main>
+<footer id="foot"></footer>
+
+<script>
+/* A frame is authored as text. `«role|text»` paints a run in a theme role.
+   Two regions: `scroll` is what the terminal owns, `band` is what rho owns. */
+let W = 100;               /* the frame width, set per frame */
+const BAND_ROWS = 14;      /* `BAND_ROWS` in render.rs today: the fixed height this
+                              direction retires. Every frame declares its own height. */
+
+/* The visible length of an authored line, with the markup removed. */
+function bare(line) {
+  return [...line.replace(/«([a-z]+)\|/g, "").replace(/»/g, "")].length;
+}
+/* Pad or cut one authored line to the frame width, ignoring the markup. */
+function fit(line) {
+  const short = W - bare(line);
+  return short > 0 ? line + " ".repeat(short) : line;
+}
+function paint(line) {
+  return fit(line)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/«([a-z]+)\|/g, (_, role) => `<span class="${role}">`)
+    .replace(/»/g, "</span>");
+}
+function render(f) {
+  W = f.w || 100;
+  const scroll = f.scroll.flatMap(resolve).map(paint).join("\n");
+  // The band draws exactly its declared height, so the mock cannot hide a row.
+  const rows = f.band.flatMap(resolve);
+  const pad = Array(Math.max(0, (f.bandRows ?? BAND_ROWS) - rows.length)).fill("");
+  const band = [...pad, ...rows].map(paint).join("\n");
+  return `<div class="own">the terminal owns this — wheel, drag-select, ⌘F</div>
+    <div class="term"><pre>${scroll}</pre></div>
+    <div class="own band">rho owns this band — ${f.bandRows ?? BAND_ROWS} rows, sized to the content</div>
+    <div class="term"><pre>${band}</pre></div>`;
+}
+
+/* Resolve one authored item into rendered lines, now that `W` is known.
+
+   A row is never hand-spaced. Hand-counted spacing is how all 38 right-aligned elements
+   in the first draft of this mock ended 11 to 24 columns short of the width, while the
+   renderer put them flush. So a row that carries a right-aligned segment is authored as
+   `{ j: [left, right] }`, and a two-column list row as `{ col: [left, right] }`. */
+function resolve(item) {
+  if (typeof item === "string") return [item];
+  if (item.composer) return composer(item.composer.flatMap(resolve));
+  if (item.j) return [J(item.j[0], item.j[1])];
+  if (item.col) return [COL(item.col[0], item.col[1], item.col[2])];
+  if (item.sel) return [SEL(item.sel)];
+  throw new Error(`an authored row named no shape: ${JSON.stringify(item)}`);
+}
+
+/* Right-align `right` at the last column, as `justify` in render.rs does. */
+function J(left, right) {
+  const gap = W - bare(left) - bare(right);
+  if (gap < 1) {
+    throw new Error(
+      `a justified row is ${1 - gap} columns too wide at ${W}: ${JSON.stringify(strip(left))}`
+    );
+  }
+  return left + " ".repeat(gap) + right;
+}
+
+/* A two-column row, as `format!("  {:<width$}{}")` in render.rs does. `at` is the column
+   the second column starts on, and it defaults to the widest key column the help uses. */
+function COL(left, right, at = 17) {
+  const gap = at - bare(left);
+  if (gap < 1) {
+    throw new Error(
+      `a column row overflows its ${at}-column gutter: ${JSON.stringify(strip(left))}`
+    );
+  }
+  return left + " ".repeat(gap) + right;
+}
+
+/* A selected row. The reverse run must cover the whole width, so the padding goes inside
+   the markup. Justifying a `rev` row instead would leave an unhighlighted gap. */
+function SEL(text) {
+  return `«rev|${text}${" ".repeat(Math.max(0, W - [...text].length))}»`;
+}
+
+/* An authored line with its role markup removed, for an error message. */
+function strip(line) {
+  return line.replace(/«([a-z]+)\|/g, "").replace(/»/g, "");
+}
+
+const B = {
+  banner: "«accent|ρ rho»  «muted|~/Work/Vibe/rho · main · sonnet-4.5 · openrouter»",
+};
+/* A full-width panel rule, for the help panel. The composer draws its own. */
+const RULE = (w = 100) => `«muted|${"─".repeat(w)}»`;
+
+/* The composer: two rules and the draft between them. The sides are open, so the draft
+   uses the full width and a border cannot drift by a column. The draft shows at most
+   `COMPOSER_TEXT_ROWS` rows, which is `COMPOSER_MAX_ROWS` with both rules. A longer draft
+   is not refused, it scrolls: the visible window holds the cursor row, and a `…` in the
+   first column of the top or bottom row states that text continues that way. */
+const COMPOSER_TEXT_ROWS = 10;
+const COMPOSER_MAX_ROWS = COMPOSER_TEXT_ROWS + 2;
+function composer(rows) {
+  if (rows.length > COMPOSER_TEXT_ROWS) {
+    throw new Error(
+      `the composer shows ${rows.length} draft rows, and the window is ${COMPOSER_TEXT_ROWS}.` +
+      ` A longer draft scrolls, so pass the visible window, not the whole draft.`
+    );
+  }
+  // A full-width rule. `fit` pads each draft row, so no row needs a trailing border.
+  const rule = `«muted|${"─".repeat(W)}»`;
+  return [rule, ...rows, rule];
+}
+
+/* The elastic rule, stated once so every frame can cite it:
+
+   height  = the rows the content needs, top to bottom, with no blank filler
+   cap     = terminal rows − 4, so four rows of scrollback always stay visible
+   grow    = any time a live row, a panel, or a draft row arrives
+   shrink  = only when the turn ends, or when the user closes a panel or cuts the draft
+   forbid  = a shrink while a turn streams; a finished row frees its slot for the next
+             live row, or leaves it blank until the turn ends */
+
+const FRAMES = {
+  rest: {
+    group: "the breath",
+    label: "Rest — 4 rows",
+    why: "<b>Four rows at rest.</b> <span>The band holds the composer and the footer, and nothing else. The greeting froze into scrollback with the banner, because it never changes. The baseline spent fourteen rows here, and eight of them were blank. The shell prompt is four rows away, not fourteen.</span>",
+    bandRows: 4,
+    scroll: [
+      "«muted|$» cargo test --workspace",
+      "«muted|test result: ok. 780 passed; 0 failed»",
+      B.banner,
+      "«muted|  rho · the harness, unbundled»",
+      "«muted|  ask for a change, or type / to see what this build can do»",
+    ],
+    band: [
+      { composer: ["«accent|❯» «muted|Type a prompt. / for commands. ? for help.»"] },
+      { j: ["  «muted|ready»", "«muted|enter send · / commands · ? help»"] },
+    ],
+    keys: [["enter", "send the draft"], ["/", "the command palette"], ["?", "the help screen"], ["ctrl-d", "quit on an empty draft"]],
+  },
+
+  streaming: {
+    group: "the breath",
+    label: "Mid-turn — 10 rows",
+    why: "<b>The band breathes in.</b> <span>Live rows arrived, so the band grew from four rows to ten. Finished rows froze upward into scrollback, as before. The band holds only what can still change. It will not give a row back while this turn streams, because a shrink under moving text reads as flicker.</span>",
+    bandRows: 10,
+    scroll: [
+      B.banner,
+      "«accent|❯» add a duration to every tool row",
+      "",
+      { j: ["  «accent|✓» read  «muted|crates/rho-tui/src/render.rs · 853 lines»", "«muted|0.2s»"] },
+      { j: ["  «accent|✓» edit  «muted|crates/rho-tui/src/render.rs · +18 −4»", "«muted|0.4s»"] },
+    ],
+    band: [
+      { j: ["  «accent|✓» bash  «muted|cargo test -p rho-tui»", "«muted|3.1s»"] },
+      "«muted|∴ thought for 2.4s»",
+      "Done. Every tool row now carries a duration, and the slot is seven columns",
+      "wide, so a live tick never reflows the text beside it.",
+      { j: ["  «warn|●» bash  «muted|cargo test --workspace»", "«warn|1m 12s»"] },
+      "      «muted|running 780 tests»",
+      { composer: ["«accent|❯» «cursor|█»"] },
+      { j: ["  «accent|◈» working · 1m 30s", "«muted|ctrl-c cancel · / commands · ? help»"] },
+    ],
+    keys: [["ctrl-c", "cancel the turn, twice while idle to quit"], ["any key", "types, because input never waits on the model"]],
+  },
+
+  grown: {
+    group: "the breath",
+    label: "Draft + approval — 18 rows",
+    why: "<b>A full draft and a panel, together.</b> <span>The composer takes twelve rows, its cap. The approval takes four, a spacer takes one, and the footer takes one. That is eighteen rows, inside the twenty-row cap of an 80×24 terminal. The fixed band could not hold this frame: the approval and this draft cannot share fourteen rows. Elasticity ends that competition.</span>",
+    bandRows: 18,
+    scroll: [
+      B.banner,
+      "«accent|❯» clean the build and rerun the suite",
+      "",
+    ],
+    band: [
+      { j: ["«caution|  ! bash asks to run»", "«muted|12s»"] },
+      "«caution|  ┃» «text|rm -rf target && cargo test --workspace»",
+      "«muted|  ┃  the session root is ~/Work/Vibe/rho»",
+      "«caution|  [y] allow once · [n] deny · [esc] deny and cancel the turn»",
+      "",
+      { composer: [
+        "«muted|…» rewrite section 8 so it states the two rules, and say why",
+        "  the sides are open. Name the drift a vertical border can take",
+        "  when a wide glyph misreports its width, because that is the",
+        "  reason and not the taste.",
+        "",
+        "  Then reconcile the layout table, the glyph tier, and the narrow",
+        "  section, so no row still promises a corner glyph.",
+        "",
+        "  Run the prose check on the file, and report the count. Keep every",
+        "  sentence under twenty words.«cursor|█»",
+      ] },
+      { j: ["  «caution|◈ waiting for you»", "«muted|y allow · n deny · esc cancel»"] },
+    ],
+    keys: [
+      ["y", "allow once"],
+      ["n", "deny, and let the turn continue"],
+      ["esc", "deny, and cancel the turn"],
+      ["ctrl-g, ctrl-x ctrl-e", "a draft this long belongs in $EDITOR"],
+    ],
+  },
+
+  settle: {
+    group: "the breath",
+    label: "Turn ends — back to 4",
+    why: "<b>The band breathes out.</b> <span>The turn ended, so every row froze into scrollback in its final form. Ten band rows became four, in one step. The band shrinks only at two moments: a turn ends, or you close a panel. It never shrinks because a row finished mid-turn, so streaming text cannot flicker.</span>",
+    bandRows: 4,
+    scroll: [
+      B.banner,
+      "«accent|❯» add a duration to every tool row",
+      "",
+      { j: ["  «accent|✓» read  «muted|crates/rho-tui/src/render.rs · 853 lines»", "«muted|0.2s»"] },
+      { j: ["  «accent|✓» edit  «muted|crates/rho-tui/src/render.rs · +18 −4»", "«muted|0.4s»"] },
+      { j: ["  «accent|✓» bash  «muted|cargo test --workspace»", "«muted|1m 41s»"] },
+      "«muted|∴ thought for 2.4s»",
+      "Done. Every tool row now carries a duration, and the slot is seven columns",
+      "wide, so a live tick never reflows the text beside it.",
+    ],
+    band: [
+      { composer: ["«accent|❯» «muted|Type a prompt. / for commands. ? for help.»"] },
+      { j: ["  «muted|done · end turn · 1m 41s»", "«muted|enter send · / commands · ? help»"] },
+    ],
+    keys: [["enter", "send the next draft"], ["ctrl-r", "search this session's drafts"]],
+  },
+
+  palette: {
+    group: "discovery",
+    label: "The palette — 9 rows",
+    why: "<b>The palette adds five rows, not fourteen.</b> <span>The band is nine rows while the list is open. Esc closes the list, and the band returns to four. That shrink follows a user action, so it is feedback, not flicker. Every promise on screen answers a key.</span>",
+    bandRows: 9,
+    scroll: [B.banner, "«accent|❯» /", ""],
+    band: [
+      { col: ["«muted|  /model»", "«muted|choose the model for this session»", 13] },
+      { sel: "  /sessions  list, resume, or delete a session" },
+      { col: ["«muted|  /guide»", "«muted|the two minute tour»", 13] },
+      { col: ["«muted|  /help»", "«muted|the shortcut list»", 13] },
+      { col: ["«muted|  /quit»", "«muted|leave rho»", 13] },
+      { composer: ["«accent|❯» /s«cursor|█»"] },
+      { j: ["  «muted|5 commands»", "«muted|↑ ↓ move · tab complete · enter run»"] },
+    ],
+    keys: [["/", "open the palette"], ["↑ ↓", "move the selection"], ["tab", "complete the draft"], ["esc", "close it, and keep the draft"]],
+  },
+
+  history: {
+    group: "discovery",
+    label: "History search — 6 rows",
+    why: "<b>ctrl-r takes two rows per match, and no filler.</b> <span>The match is a case-insensitive substring, newest first. Enter puts the entry in the draft. Esc closes the search, and the band drops back to four rows.</span>",
+    bandRows: 6,
+    scroll: [B.banner, "«accent|❯» run the gate and report", "The gate is green: fmt, clippy, 780 tests, minimal build."],
+    band: [
+      { col: ["«muted|  2»", "«muted|run the gate and report»", 5] },
+      { sel: "  1  run bash to print the word banana, then tell me what it printed" },
+      { composer: ["«accent|❯» «muted|(reverse-i-search)»`run«cursor|█|'"] },
+      { j: ["  «muted|2 matches»", "«muted|↑ ↓ move · enter accept · esc cancel»"] },
+    ],
+    keys: [["ctrl-r", "open the search"], ["↑ ↓", "move"], ["enter", "accept into the draft"], ["esc", "close, and keep the draft"]],
+  },
+
+  help: {
+    group: "discovery",
+    label: "Help, tall terminal — 30 rows",
+    why: "<b>The whole binding table, at last.</b> <span>The real <code>help_panel</code> builds twenty-seven rows, and the fixed band showed zero of them. On a 40-row terminal the cap is thirty-six, so the band grows to twenty-nine and shows every binding. The rows come from the binding table, so a key and its help cannot drift apart. A key that is not built says so.</span>",
+    bandRows: 29,
+    scroll: [B.banner, "«accent|❯» ?"],
+    band: [
+      RULE(),
+      "  keys",
+      { col: ["    enter", "«muted|send the draft»", 21] },
+      { col: ["    shift+enter", "«muted|insert a newline»", 21] },
+      { col: ["    ctrl-j", "«muted|insert a newline · the fallback in every terminal»", 21] },
+      { col: ["    ctrl-c", "«muted|cancel the turn · press twice while idle to quit»", 21] },
+      { col: ["    ctrl-d", "«muted|quit while the draft is empty»", 21] },
+      { col: ["    ctrl-r", "«muted|search the history»", 21] },
+      { col: ["    ctrl-x ctrl-e", "«muted|edit the draft in the editor»", 21] },
+      { col: ["    ctrl-g", "«muted|edit the draft in the editor»", 21] },
+      { col: ["    ctrl-a", "«muted|move to the line start»", 21] },
+      { col: ["    ctrl-e", "«muted|move to the line end»", 21] },
+      { col: ["    ctrl-k", "«muted|cut to the line end»", 21] },
+      { col: ["    ctrl-u", "«muted|cut to the line start»", 21] },
+      { col: ["    ctrl-w", "«muted|cut the word to the left»", 21] },
+      { col: ["    ctrl-y", "«muted|paste the last cut»", 21] },
+      { col: ["    alt-b", "«muted|move one word left»", 21] },
+      { col: ["    alt-f", "«muted|move one word right»", 21] },
+      { col: ["    /", "«muted|open the command list · tab completes · enter runs»", 21] },
+      { col: ["    ?", "«muted|open this help»", 21] },
+      { col: ["«muted|    ctrl-o»", "«muted|expand or collapse the newest tool row · not built yet»", 21] },
+      { col: ["    ↑ ↓", "«muted|recall the history · move the selection in an open list»", 21] },
+      { col: ["    esc", "«muted|close a panel · press twice to clear the draft»", 21] },
+      "  commands",
+      { col: ["", "«muted|type / to list them · /guide is the two minute tour»", 4] },
+      { composer: ["«accent|❯» «cursor|█»"] },
+      { j: ["  «muted|help · 21 keys»", "«muted|esc or ? closes»"] },
+    ],
+    keys: [["?", "open and close"], ["esc", "close"]],
+  },
+
+  helpshort: {
+    group: "discovery",
+    label: "Help, 24-row terminal — 20 rows",
+    why: "<b>The same help under the cap.</b> <span>On a 24-row terminal the cap is twenty rows, terminal height minus four. The panel clamps to its window and shows thirteen keys. The <code>…</code> row states that eight more rows continue below. ↑ ↓ move the window, the same keys that move an open list. Four rows of scrollback stay visible above the band.</span>",
+    bandRows: 20,
+    scroll: [B.banner, "«accent|❯» ?"],
+    band: [
+      RULE(),
+      "  keys",
+      { col: ["    enter", "«muted|send the draft»", 21] },
+      { col: ["    shift+enter", "«muted|insert a newline»", 21] },
+      { col: ["    ctrl-j", "«muted|insert a newline · the fallback in every terminal»", 21] },
+      { col: ["    ctrl-c", "«muted|cancel the turn · press twice while idle to quit»", 21] },
+      { col: ["    ctrl-d", "«muted|quit while the draft is empty»", 21] },
+      { col: ["    ctrl-r", "«muted|search the history»", 21] },
+      { col: ["    ctrl-x ctrl-e", "«muted|edit the draft in the editor»", 21] },
+      { col: ["    ctrl-g", "«muted|edit the draft in the editor»", 21] },
+      { col: ["    ctrl-a", "«muted|move to the line start»", 21] },
+      { col: ["    ctrl-e", "«muted|move to the line end»", 21] },
+      { col: ["    ctrl-k", "«muted|cut to the line end»", 21] },
+      { col: ["    ctrl-u", "«muted|cut to the line start»", 21] },
+      { col: ["    ctrl-w", "«muted|cut the word to the left»", 21] },
+      "«muted|… 8 more rows · ↓ scrolls»",
+      { composer: ["«accent|❯» «cursor|█»"] },
+      { j: ["  «muted|help · 13 of 21 keys»", "«muted|↑ ↓ scroll · esc or ? closes»"] },
+    ],
+    keys: [["↑ ↓", "scroll the window"], ["?", "open and close"], ["esc", "close"]],
+  },
+
+  narrow: {
+    group: "widths",
+    w: 60,
+    label: "Narrow, 60 columns — 5 rows",
+    why: "<b>Width and height degrade on separate axes.</b> <span>The hints reduce to the one that matters, as the width rules state. The height stays elastic: one live row, the composer, the footer, five rows. The duration slot keeps its seven columns, because a reflowing row is worse than a short one.</span>",
+    bandRows: 5,
+    scroll: [
+      "«accent|ρ rho»  «muted|~/rho · main · sonnet-4.5»",
+      "«accent|❯» summarise the diff",
+      { j: ["  «accent|✓» bash  «muted|git diff --stat»", "«muted|0.1s»"] },
+      "Nine files, and the band renderer is most of it.",
+    ],
+    band: [
+      { j: ["  «warn|●» read  «muted|crates/rho-tui/src/render.rs»", "«warn|1.2s»"] },
+      { composer: ["«accent|❯» «cursor|█»"] },
+      { j: ["  «accent|◈» working · 8s", "«muted|? help»"] },
+    ],
+    keys: [["?", "the help screen, at every width"]],
+  },
+};
+
+const nav = document.getElementById("nav");
+const groups = [...new Set(Object.values(FRAMES).map(f => f.group))];
+for (const group of groups) {
+  const h = document.createElement("h2");
+  h.textContent = group;
+  nav.append(h);
+  for (const [id, f] of Object.entries(FRAMES)) {
+    if (f.group !== group) continue;
+    const b = document.createElement("button");
+    b.textContent = f.label;
+    b.dataset.id = id;
+    b.onclick = () => show(id);
+    nav.append(b);
+  }
+}
+function show(id) {
+  const f = FRAMES[id];
+  document.getElementById("why").innerHTML = f.why;
+  document.getElementById("frame").innerHTML = render(f);
+  document.getElementById("keys").innerHTML = (f.keys || [])
+    .map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
+  for (const b of nav.querySelectorAll("button")) {
+    b.setAttribute("aria-current", String(b.dataset.id === id));
+  }
+  location.hash = id;
+}
+document.getElementById("foot").textContent =
+  "Author: designer B. The band takes the rows it needs, and no more. " +
+  "Cap: terminal rows − 4. No shrink while a turn streams. " +
+  "A frame here becomes a fixture in docs/design/tui-frames/.";
+show(location.hash.slice(1) in FRAMES ? location.hash.slice(1) : "rest");
+</script>
+</body>
+</html>

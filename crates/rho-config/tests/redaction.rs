@@ -31,6 +31,7 @@ fn config_holding(source: CredentialSource) -> Config {
         approval: Some(ApprovalMode::ReadOnly),
         skill_paths: Vec::new(),
         discover_skills: true,
+        tui_mouse: false,
         mcp_config: None,
         subagents: SubagentLimits::default(),
         credentials,

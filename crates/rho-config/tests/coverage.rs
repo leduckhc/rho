@@ -27,6 +27,7 @@ fn config_with_credentials(credentials: BTreeMap<String, CredentialSource>) -> C
         approval: Some(ApprovalMode::ReadOnly),
         skill_paths: Vec::new(),
         discover_skills: true,
+        tui_mouse: false,
         mcp_config: None,
         subagents: SubagentLimits::default(),
         credentials,

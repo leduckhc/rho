@@ -32,3 +32,16 @@ shows its tail until the rows freeze.
 **Rules out:** `EnterAlternateScreen` in `rho-tui`. A scroll offset in `TuiState`. A scroll
 rail. A follow banner. A keyboard selection of transcript rows. An OSC 52 copy. A
 `ctrl-p` dump to the scrollback, because the rows are already there. A second renderer.
+
+---
+
+**Superseded on 2026-08-19 by `D-alternate-screen-after-all`.**
+
+The reason above is still correct: `Viewport::Inline` does give a fixed composer, and the
+spike that proved it was real. The premise changed. rho now wants the alternate screen for
+the terminal height, and not for the composer. A fourteen-row band cannot hold a twelve-row
+draft, a seven-row panel, and a footer, and the arithmetic forced the help screen to draw a
+window and forced an approval to consider dropping a row.
+
+`ctrl-p` pays back the scrollback, and a spike proved it recovers every row. See
+`docs/verification/alt-screen-spike.md`.

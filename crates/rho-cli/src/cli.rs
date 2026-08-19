@@ -57,6 +57,15 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = SandboxArg::Off)]
     pub sandbox: SandboxArg,
 
+    /// Let the TUI capture the mouse, so the wheel scrolls the band and a click
+    /// selects a list row.
+    ///
+    /// Off by default, because capture takes drag-select away from the terminal. With
+    /// capture off, the wheel, a drag, and the terminal search all work on the
+    /// transcript. See decision D-native-selection-is-the-default.
+    #[arg(long, global = true)]
+    pub mouse: bool,
+
     /// Load skills that live in this repository.
     ///
     /// A skill can instruct the model and can carry scripts, so a skill from the
@@ -356,6 +365,53 @@ async fn run_headless(cli: &Cli, prompt: String) -> i32 {
     if failed { EXIT_FAILURE } else { 0 }
 }
 
+/// The working directory, with the home directory shortened to `~`.
+fn display_cwd() -> String {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let text = cwd.to_string_lossy().to_string();
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && text.starts_with(&home) => text.replacen(&home, "~", 1),
+        _ => text,
+    }
+}
+
+/// The current git branch, or an empty string outside a repository.
+///
+/// A failed command is not an error here. The banner simply omits the field, because a
+/// session outside a repository is normal.
+fn git_branch() -> String {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// The `RHO_*` variables, as the config layer wants them.
+///
+/// This is the one place the process environment is read for the interface. A test never
+/// reads the real environment, because `resolve_mouse` takes the list as data.
+fn rho_env_vars() -> Vec<(String, String)> {
+    std::env::vars()
+        .filter(|(name, _)| name.starts_with("RHO_"))
+        .collect()
+}
+
+/// Whether the TUI captures the mouse. The flag wins, then the environment, then off.
+///
+/// `--mouse` and `RHO_TUI_MOUSE` both reach this. The config file does not, because no
+/// binary reads a config file yet. See decision D-the-layered-config-has-no-caller.
+fn resolve_mouse(flag: bool, env: &[(String, String)]) -> bool {
+    if flag {
+        return true;
+    }
+    rho_config::ConfigLayer::from_env(env)
+        .tui_mouse
+        .unwrap_or(false)
+}
+
 /// Run the interactive TUI. Return a non-zero code on failure.
 #[cfg(feature = "tui")]
 async fn run_interactive(cli: &Cli) -> i32 {
@@ -364,6 +420,10 @@ async fn run_interactive(cli: &Cli) -> i32 {
         Err(error) => return fail(error),
     };
     let model = config.model.clone();
+    let provider_name = provider::resolve_provider_name(cli.provider.as_deref(), None)
+        .unwrap_or_else(|_| String::new());
+    // The interface reads one switch. The flag wins, then the environment, then off.
+    let mouse = resolve_mouse(cli.mouse, &rho_env_vars());
     // Hold `_tasks` and `_extras` for the whole run. Dropping the task registry kills
     // every background task, and dropping the MCP pool stops every server, so an early
     // drop would end work the model is still waiting on.
@@ -376,7 +436,13 @@ async fn run_interactive(cli: &Cli) -> i32 {
     }
     let _extras = extras;
 
-    let mut app = rho_tui::App::new(session, model);
+    // The banner names where this session runs. Without it the banner drew separators
+    // around three empty fields, because nothing ever wrote them.
+    let cwd = display_cwd();
+    let branch = git_branch();
+    let mut app = rho_tui::App::new(session, model)
+        .with_mouse(mouse)
+        .with_context(cwd, branch, provider_name);
     match app.run().await {
         Ok(()) => 0,
         Err(error) => fail(anyhow::anyhow!(error)),
@@ -541,5 +607,41 @@ mod tests {
     fn sandbox_flag_rejects_an_unknown_mode() {
         let result = Cli::try_parse_from(["rho", "--model", "m", "--sandbox", "loose"]);
         assert!(result.is_err(), "an unknown mode must be rejected");
+    }
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::resolve_mouse;
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn the_mouse_is_off_by_default() {
+        assert!(!resolve_mouse(false, &[]));
+    }
+
+    #[test]
+    fn the_flag_turns_the_mouse_on() {
+        assert!(resolve_mouse(true, &[]));
+    }
+
+    #[test]
+    fn the_env_var_turns_the_mouse_on() {
+        assert!(resolve_mouse(false, &env(&[("RHO_TUI_MOUSE", "true")])));
+    }
+
+    #[test]
+    fn a_bad_env_value_leaves_the_mouse_off() {
+        // The layer omits an unaccepted boolean, so the resolution fails closed.
+        assert!(!resolve_mouse(
+            false,
+            &env(&[("RHO_TUI_MOUSE", "yes please")])
+        ));
     }
 }

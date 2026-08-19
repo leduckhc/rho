@@ -26,9 +26,19 @@ pub fn bindings() -> &'static [Binding] {
             built: true,
         },
         Binding {
+            keys: "shift+enter",
+            summary: "insert a newline, where the terminal reports the key",
+            built: true,
+        },
+        Binding {
+            keys: "ctrl-j",
+            summary: "insert a newline, in every terminal",
+            built: true,
+        },
+        Binding {
             keys: "alt+enter",
-            summary: "insert a newline",
-            built: false,
+            summary: "insert a newline, in every terminal",
+            built: true,
         },
         Binding {
             keys: "ctrl-c",
@@ -38,6 +48,61 @@ pub fn bindings() -> &'static [Binding] {
         Binding {
             keys: "ctrl-d",
             summary: "quit while the draft is empty",
+            built: true,
+        },
+        Binding {
+            keys: "ctrl-r",
+            summary: "search the history",
+            built: true,
+        },
+        Binding {
+            keys: "ctrl-x ctrl-e",
+            summary: "edit the draft in the editor",
+            built: true,
+        },
+        Binding {
+            keys: "ctrl-g",
+            summary: "edit the draft in the editor",
+            built: true,
+        },
+        Binding {
+            keys: "ctrl-a",
+            summary: "move to the line start",
+            built: true,
+        },
+        Binding {
+            keys: "ctrl-e",
+            summary: "move to the line end",
+            built: true,
+        },
+        Binding {
+            keys: "ctrl-k",
+            summary: "cut to the line end",
+            built: true,
+        },
+        Binding {
+            keys: "ctrl-u",
+            summary: "cut to the line start",
+            built: true,
+        },
+        Binding {
+            keys: "ctrl-w",
+            summary: "cut the word to the left",
+            built: true,
+        },
+        Binding {
+            keys: "ctrl-y",
+            summary: "paste the last cut",
+            built: true,
+        },
+        Binding {
+            keys: "alt-b",
+            summary: "move one word left",
+            built: true,
+        },
+        Binding {
+            keys: "alt-f",
+            summary: "move one word right",
             built: true,
         },
         Binding {
@@ -56,18 +121,13 @@ pub fn bindings() -> &'static [Binding] {
             built: false,
         },
         Binding {
-            keys: "ctrl-e",
-            summary: "expand everything · press again to collapse",
-            built: false,
-        },
-        Binding {
             keys: "↑ ↓",
-            summary: "move the selection in an open list",
+            summary: "recall the history · move the selection in an open list",
             built: true,
         },
         Binding {
             keys: "esc",
-            summary: "close a panel and keep the draft",
+            summary: "close a panel · press twice to clear the draft",
             built: true,
         },
     ];

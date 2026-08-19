@@ -409,7 +409,8 @@ impl Composer {
     pub fn move_line_end(&mut self);
 
     /// Move the cursor one display row. It returns `false` when no such row exists, so the
-    /// caller gives the key to the history instead.
+    /// caller gives the key to the history instead. The column is kept where it can be:
+    /// the cursor lands on the last unit at or before the old column.
     pub fn move_row_up(&mut self, width: usize) -> bool;
     pub fn move_row_down(&mut self, width: usize) -> bool;
 
@@ -426,8 +427,15 @@ impl Composer {
     pub fn yank(&mut self);
 
     /// The display rows at this width, wrapped, capped by `COMPOSER_MAX_TEXT_ROWS`.
+    ///
+    /// A draft taller than the cap scrolls with the cursor. The window holds the cursor
+    /// row, and it holds the newest rows once the cursor reaches the end. A window that
+    /// always started at row zero would draw the cursor outside the box.
     pub fn display_lines(&self, width: usize) -> Vec<String>;
     /// The cursor cell, as a row and a column into `display_lines`.
+    ///
+    /// The row is relative to the drawn window, so `cursor_cell(w).0` is always less than
+    /// `display_lines(w).len()`. A test asserts that bound over every cursor position.
     pub fn cursor_cell(&self, width: usize) -> (usize, usize);
     /// True when the draft holds no unit.
     pub fn is_empty(&self) -> bool;
@@ -651,6 +659,8 @@ proves it fails for the right reason.
 | `kill_word_left_cuts_one_word` | one word goes, and the kill buffer holds it |
 | `the_composer_height_is_capped` | twenty draft rows render `COMPOSER_MAX_TEXT_ROWS` |
 | `the_cursor_cell_follows_the_wrap` | a wrapped row puts the cursor on the second row |
+| `the_cursor_row_is_always_inside_the_drawn_rows` | over every cursor position, the row is below `display_lines().len()` |
+| `a_tall_draft_shows_the_rows_around_the_cursor` | a twenty-row draft draws the rows the cursor is on |
 | `the_draft_grows_and_the_live_area_shrinks` | the band height is unchanged |
 | `set_text_replaces_the_held_pastes` | `take` returns the new text alone |
 | `an_empty_draft_reports_empty` | `is_empty` and `draft_is_empty` agree |
@@ -666,7 +676,7 @@ proves it fails for the right reason.
 | `the_panel_owns_the_keyboard` | a character typed into the search never reaches the draft |
 | `the_editor_command_prefers_visual` | `$VISUAL` wins over `$EDITOR` |
 | `the_editor_command_falls_back_to_vi` | with neither set, the answer is `vi` |
-| `the_editor_argv_never_reaches_a_shell` | `vi; rm -rf ~` gives the program `vi` and three arguments |
+| `the_editor_argv_never_reaches_a_shell` | `vi; rm -rf ~` gives the program `vi;` and three inert arguments |
 | `a_failed_editor_keeps_the_draft` | the draft is unchanged, and one error row exists |
 | `ctrl_x_ctrl_e_returns_edit_draft` | the handler returns `KeyAction::EditDraft` with the draft |
 | `ctrl_g_returns_edit_draft` | the same for the second binding |

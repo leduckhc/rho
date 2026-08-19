@@ -50,6 +50,9 @@ pub struct ConfigLayer {
     pub approval: Option<String>,
     pub skill_paths: Option<Vec<PathBuf>>,
     pub no_skills: Option<bool>,
+    /// Whether the TUI captures the mouse. Off by default, so the terminal keeps
+    /// drag-select and its own wheel. See `D-native-selection-is-the-default`.
+    pub tui_mouse: Option<bool>,
     /// A path to the MCP server file. See section 6.
     pub mcp_config: Option<PathBuf>,
     pub subagents: Option<SubagentLimitsLayer>,
@@ -163,6 +166,8 @@ pub struct Config {
     pub approval: Option<ApprovalMode>,
     pub skill_paths: Vec<PathBuf>,
     pub discover_skills: bool,
+    /// Whether the TUI captures the mouse. False by default.
+    pub tui_mouse: bool,
     pub mcp_config: Option<PathBuf>,
     pub subagents: rho_core::SubagentLimits,
     /// Credential sources, by name. A value resolves through `resolve_credential`.
@@ -181,6 +186,7 @@ impl ConfigLayer {
         self.approval = over.approval.or(self.approval);
         self.skill_paths = over.skill_paths.or(self.skill_paths);
         self.no_skills = over.no_skills.or(self.no_skills);
+        self.tui_mouse = over.tui_mouse.or(self.tui_mouse);
         self.mcp_config = over.mcp_config.or(self.mcp_config);
         self.subagents = over.subagents.or(self.subagents);
         self.credentials = over.credentials.or(self.credentials);
@@ -210,6 +216,7 @@ impl ConfigLayer {
                     layer.skill_paths = Some(std::env::split_paths(value).collect())
                 }
                 "RHO_NO_SKILLS" => layer.no_skills = parse_env_bool("no-skills", value).ok(),
+                "RHO_TUI_MOUSE" => layer.tui_mouse = parse_env_bool("tui-mouse", value).ok(),
                 "RHO_MCP_CONFIG" => layer.mcp_config = Some(PathBuf::from(value)),
                 _ => {}
             }
@@ -544,6 +551,7 @@ impl Config {
             skill_paths: merged.skill_paths.unwrap_or_default(),
             // `no-skills = true` disables discovery. The default is discovery on.
             discover_skills: !merged.no_skills.unwrap_or(false),
+            tui_mouse: merged.tui_mouse.unwrap_or(false),
             mcp_config: merged.mcp_config,
             subagents: build_subagents(merged.subagents.as_ref()),
             credentials,

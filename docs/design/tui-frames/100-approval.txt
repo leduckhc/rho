@@ -1,26 +1,16 @@
 ```
-ρ rho   ~/Work/Vibe/rho · main                sonnet-4.5 · openrouter · 48.2k in, 3.1k out   12m 08s
-────────────────────────────────────────────────────────────────────────────────────────────────────
                                                                                                     
 ❯ clean the build tree and rebuild the release binary                                               
                                                                                                     
 The target directory holds 12 GB. I will remove it, then rebuild.                                   
                                                                                                     
                                                                                                     
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
+  ! bash asks to run                                                                              8s
+  ┃ rm -rf target && cargo build --release                                                          
+  ┃  the session root is ~/Work/Vibe/rho                                                            
+  [y] allow once · [n] deny · [esc] deny and cancel the turn                                        
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-!  approval · bash asks to run                                                                  8s  
-     rm -rf target && cargo build --release                                                         
-     [y] allow once    [n] deny    [esc] deny and cancel the turn                                   
+❯ █                                                                                                 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ ❯ █                                                                                              │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
   ◈ waiting · 41s                                              ctrl-c cancel · / commands · ? help  
 ```

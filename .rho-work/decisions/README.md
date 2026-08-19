@@ -12,6 +12,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-a-role-column-is-not-a-stack](20260818-181500-D-a-role-column-is-not-a-stack.md) | 20260818 | A theme role resolves in one mode, and the columns never stack |
 | [D-acp-cancelled-spelling](20260817-171334-D-acp-cancelled-spelling.md) | 20260817 | The ACP cancelled stop reason needs an explicit serde rename |
 | [D-acp-is-real-acp](20260817-164906-D-acp-is-real-acp.md) | 20260817 | The headless frontend is ACP, and it is the real ACP |
+| [D-alternate-screen-after-all](20260819-093316-D-alternate-screen-after-all.md) | 20260819 | rho takes the whole screen, and it gives the transcript back with one key |
 | [D-append-only-jsonl](20260818-014343-D-append-only-jsonl.md) | 20260818 | The session file is append-only JSONL with a per-record parent pointer |
 | [D-approval-default-ask](20260818-020639-D-approval-default-ask.md) | 20260818 | The approval default is Ask where answerable, read-only where not |
 | [D-approval-option-not-enum](20260818-025953-D-approval-option-not-enum.md) | 20260818 | The resolved approval mode is an Option, so an unset value stays unset |
@@ -35,6 +36,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-duration-rounds-once](20260818-090744-D-duration-rounds-once.md) | 20260818 | the duration ladder rounds exactly once |
 | [D-jcode-bash-lessons](20260817-231304-D-jcode-bash-lessons.md) | 20260817 | What reading jcode's `bash` tool changed |
 | [D-jcode-edit-lessons](20260817-224427-D-jcode-edit-lessons.md) | 20260817 | What reading jcode's `edit` tool changed |
+| [D-ledger-wins-the-band](20260818-215406-D-ledger-wins-the-band.md) | 20260818 | The band stays a fixed fourteen rows, and an approval never yields |
 | [D-log-capture-proves-itself](20260818-060126-D-log-capture-proves-itself.md) | 20260818 | A log capture in a test must prove itself first |
 | [D-mcp-does-not-classify-itself](20260817-215003-D-mcp-does-not-classify-itself.md) | 20260817 | An MCP server does not classify its own tools |
 | [D-mcp-shared-by-default](20260817-215003-D-mcp-shared-by-default.md) | 20260817 | An MCP server is shared between sessions by default |

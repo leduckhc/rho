@@ -1,6 +1,4 @@
 ```
-ρ rho   ~/Work/Vibe/rho · main         sonnet-4.5 · 48.2k in, 3.1k out   12m 08s
-────────────────────────────────────────────────────────────────────────────────
                                                                                 
 ❯ now bind the session clock to the header slot                                 
                                                                                 
@@ -11,16 +9,8 @@ drive it from the tick count the state carries, so a test asserts an
 exact frame with no timer. The renderer stays a pure function of the            
                                                                                 
                                                                                 
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-╭──────────────────────────────────────────────────────────────────────────────╮
-│ ❯ also pin the carry case from the ladder█                                   │
-╰──────────────────────────────────────────────────────────────────────────────╯
+────────────────────────────────────────────────────────────────────────────────
+❯ also pin the carry case from the ladder█                                      
+────────────────────────────────────────────────────────────────────────────────
   ◈ working · 12s                          ctrl-c cancel · / commands · ? help  
 ```
