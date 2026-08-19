@@ -374,6 +374,46 @@ comment says which one is load-bearing.
 **That is the second time in this sitting that breaking the code exposed a weak test.** Step
 7 of the development flow paid for itself twice in one day.
 
+## The security review, and what it found
+
+A security review of `CancelToken::child` ran after the fix. It found **no defect in the
+primitive**, and it proved that with stress tests rather than by reading: sibling to sibling
+is unreachable, a sibling self-cancel never wakes a parked parent, and every parked sibling
+wakes on a parent cancel. It also proved the snapshot-at-creation reasoning in
+`D-cancel-wake-race` holds for every ancestor in the chain, not only the nearest one.
+
+It found two weak tests, and it was right about both.
+
+**One of my tests was misnamed and could not see the bug it implied.**
+`a_leaf_cancelling_never_cancels_an_ancestor_under_contention` awaited the cancel before
+asserting, so it did not contend, and it checked flags only. A flag check cannot catch a
+**wake-only upward leak**: a bug that pulses the parent's `Notify` without setting its flag.
+The test is renamed to `a_leaf_cancelling_never_sets_an_ancestor_flag`, which is what it
+actually proves, and the gap is now covered by
+`a_sibling_self_cancel_never_wakes_a_parked_parent`.
+
+**No test noticed that the broadcast is load-bearing.** Swapping `notify_waiters` for
+`notify_one` woke only one sibling, and the whole suite stayed green. That matters now,
+because `spawn_agents` parks several siblings on one parent token at once.
+`a_parent_cancel_wakes_every_parked_sibling` parks six siblings, proves each one parked, then
+cancels the parent. It fails on `notify_one`.
+
+Both new tests were proved by breaking the code:
+
+| Break | Result |
+| --- | --- |
+| Pulse the parent's notify on a child cancel | FAILED: "a sibling self-cancel must not wake a parked parent" |
+| `notify_waiters` becomes `notify_one` | FAILED: "sibling 1 never woke, so the parent cancel did not broadcast" |
+
+The review used a wall-clock timeout to prove a parked parent stayed parked. The versions in
+the repository use `yield_now` and `is_finished` instead, so they are deterministic and use no
+`sleep`. Each one also cancels the parent at the end, to prove the parked assertion is not
+passing for the wrong reason.
+
+**Cost.** `is_cancelled` now walks the parent chain. The chain is bounded by
+`SubagentLimits.max_depth`, and `rho-cli` pins that to 1, so the walk is at most two links on
+the hot path.
+
 ## An operator error worth recording
 
 The first credential probe used double quotes, so the **outer shell** expanded

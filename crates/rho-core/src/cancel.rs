@@ -50,6 +50,11 @@ impl CancelToken {
     /// Request cancellation. Idempotent.
     ///
     /// It never touches the parent.
+    ///
+    /// `notify_waiters` is load-bearing, and it must not become `notify_one`.
+    /// Several sibling children wait on one parent's notify at the same time, so a
+    /// parent cancel has to wake all of them. A security review proved this by
+    /// swapping the call and watching only one sibling wake.
     pub fn cancel(&self) {
         self.inner.flag.store(true, Ordering::SeqCst);
         self.inner.notify.notify_waiters();
@@ -210,11 +215,16 @@ mod tests {
         }
     }
 
-    // The other direction, under the same contention. A descendant cancelling
-    // must never wake or cancel an ancestor, because a child that hits its own
-    // timeout must not end its parent's run.
+    // The other direction: a descendant cancelling must never cancel an ancestor,
+    // because a child that hits its own timeout must not end its parent's run.
+    //
+    // This test checks **flags only**, and it awaits the cancel before asserting,
+    // so it is sequential. A security review pointed out that the original name
+    // said "under_contention" and the body did not contend, and that a flag check
+    // cannot catch a wake-only upward leak. That gap is covered by
+    // `a_sibling_self_cancel_never_wakes_a_parked_parent` below.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_leaf_cancelling_never_cancels_an_ancestor_under_contention() {
+    async fn a_leaf_cancelling_never_sets_an_ancestor_flag() {
         for _ in 0..500 {
             let root = CancelToken::new();
             let middle = root.child();
@@ -227,6 +237,109 @@ mod tests {
             assert!(leaf.is_cancelled(), "the leaf cancelled itself");
             assert!(!middle.is_cancelled(), "an ancestor must stay live");
             assert!(!root.is_cancelled(), "the root must stay live");
+        }
+    }
+
+    // A wake-only upward leak: a bug that pulses the parent's `Notify` without
+    // setting its flag. A flag assertion cannot see it, so this test parks the
+    // parent in `cancelled()` and proves a sibling's self-cancel does not wake it.
+    //
+    // A security review found this gap. It used a wall-clock timeout to prove the
+    // parent stayed parked. This version uses `yield_now` and `is_finished`, so it
+    // is deterministic and uses no `sleep`.
+    #[tokio::test]
+    async fn a_sibling_self_cancel_never_wakes_a_parked_parent() {
+        let parent = CancelToken::new();
+        let first = parent.child();
+        let second = parent.child();
+
+        // Park the parent inside `cancelled()`.
+        let parked = parent.clone();
+        let handle = tokio::spawn(async move { parked.cancelled().await });
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !handle.is_finished(),
+            "the parent must park before we cancel"
+        );
+
+        // A sibling cancels itself, which is what a child timeout does.
+        first.cancel();
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            !handle.is_finished(),
+            "a sibling self-cancel must not wake a parked parent"
+        );
+        assert!(
+            !parent.is_cancelled(),
+            "a sibling self-cancel must not cancel the parent"
+        );
+        assert!(
+            !second.is_cancelled(),
+            "a sibling self-cancel must not reach another sibling"
+        );
+
+        // Prove the check above is not vacuous: the parent really can wake.
+        parent.cancel();
+        let woke = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        assert!(woke.is_ok(), "the parent must wake on its own cancel");
+        woke.unwrap().unwrap();
+        assert!(
+            second.is_cancelled(),
+            "a parent cancel must reach every sibling"
+        );
+    }
+
+    // Several siblings park on one parent's notify at the same time, which is
+    // exactly what `spawn_agents` creates when it runs a fan-out. A parent cancel
+    // must wake **every** one of them.
+    //
+    // This is the test that catches `notify_one`. A security review found that
+    // swapping the broadcast for `notify_one` woke only one sibling, and that no
+    // test in this file noticed. It does now.
+    #[tokio::test]
+    async fn a_parent_cancel_wakes_every_parked_sibling() {
+        let parent = CancelToken::new();
+        let siblings: Vec<CancelToken> = (0..6).map(|_| parent.child()).collect();
+
+        let handles: Vec<_> = siblings
+            .iter()
+            .map(|sibling| {
+                let waiter = sibling.clone();
+                tokio::spawn(async move { waiter.cancelled().await })
+            })
+            .collect();
+
+        // Park every sibling before the cancel, so none can take the flag fast path.
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        for (index, handle) in handles.iter().enumerate() {
+            assert!(
+                !handle.is_finished(),
+                "sibling {index} must park before we cancel"
+            );
+        }
+
+        parent.cancel();
+
+        for (index, handle) in handles.into_iter().enumerate() {
+            let woke = tokio::time::timeout(Duration::from_secs(5), handle).await;
+            assert!(
+                woke.is_ok(),
+                "sibling {index} never woke, so the parent cancel did not broadcast"
+            );
+            woke.unwrap().unwrap();
+        }
+        for (index, sibling) in siblings.iter().enumerate() {
+            assert!(
+                sibling.is_cancelled(),
+                "sibling {index} must read cancelled"
+            );
         }
     }
 
