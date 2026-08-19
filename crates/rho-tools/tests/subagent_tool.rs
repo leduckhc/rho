@@ -726,3 +726,104 @@ async fn the_model_cannot_declare_a_command_check() {
     );
     let _ = output;
 }
+
+// --- Steering and cancelling a live child from a tool ---
+
+#[tokio::test]
+async fn steer_agent_refuses_an_unknown_id_and_says_which_are_live() {
+    // A child that already finished is the common case, and it is a result, not a
+    // fault. The refusal must teach: it names the live children so the model can
+    // choose again.
+    let dir = tempfile::tempdir().unwrap();
+    let env = spawn_env(
+        dir.path(),
+        vec![text_turn("done")],
+        Some(vec!["read".to_string()]),
+        vec!["read".to_string()],
+    );
+    let tool = rho_tools::SteerAgentTool::new(Arc::clone(&env));
+
+    let output = tool
+        .execute(
+            serde_json::json!({ "id": 999, "message": "look elsewhere" }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("an unknown id is a result, not a fault");
+
+    let text = output_text(&output);
+    assert!(
+        text.contains("999"),
+        "the refusal must name the id that failed, got: {text}"
+    );
+    assert!(
+        text.contains("no subagent") || text.contains("not running"),
+        "the refusal must say why, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn steer_agent_reaches_a_live_child() {
+    // The tool writes into the queue the child drains, so the message really
+    // arrives. A tool that pushed into its own queue would look identical and do
+    // nothing.
+    let dir = tempfile::tempdir().unwrap();
+    let env = spawn_env(
+        dir.path(),
+        vec![text_turn("done")],
+        Some(vec!["read".to_string()]),
+        vec!["read".to_string()],
+    );
+    let spawn = env
+        .node
+        .spawn_child("scout", rho_core::CancelToken::new())
+        .unwrap();
+    let id = spawn.node.id();
+
+    let tool = rho_tools::SteerAgentTool::new(Arc::clone(&env));
+    let output = tool
+        .execute(
+            serde_json::json!({ "id": id.0, "message": "check parser.rs instead" }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+
+    assert!(!output.is_error, "steering a live child must succeed");
+    assert_eq!(
+        spawn.queue().len(),
+        1,
+        "the message must land in the queue the child drains"
+    );
+}
+
+#[tokio::test]
+async fn cancel_agent_stops_one_child_and_leaves_its_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = spawn_env(
+        dir.path(),
+        vec![text_turn("done")],
+        Some(vec!["read".to_string()]),
+        vec!["read".to_string()],
+    );
+    let parent = rho_core::CancelToken::new();
+    let first = env.node.spawn_child("scout", parent.child()).unwrap();
+    let second = env.node.spawn_child("greedy", parent.child()).unwrap();
+
+    let tool = rho_tools::CancelAgentTool::new(Arc::clone(&env));
+    let output = tool
+        .execute(
+            serde_json::json!({ "id": first.node.id().0 }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+    assert!(!output.is_error);
+
+    let live = env.node.registry().live();
+    let first_handle = live.iter().find(|h| h.id == first.node.id()).unwrap();
+    let second_handle = live.iter().find(|h| h.id == second.node.id()).unwrap();
+    assert!(first_handle.is_cancelled(), "the named child must stop");
+    assert!(!second_handle.is_cancelled(), "a sibling must keep running");
+    assert!(!parent.is_cancelled(), "the parent must keep running");
+}

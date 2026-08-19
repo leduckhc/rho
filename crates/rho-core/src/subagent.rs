@@ -538,6 +538,14 @@ impl AgentNode {
         self.id
     }
 
+    /// The registry this node belongs to.
+    ///
+    /// A caller needs it to list the live children, to steer one, or to cancel
+    /// one. See `SPEC-subagents` section 7a.
+    pub fn registry(&self) -> &AgentRegistry {
+        &self.registry
+    }
+
     /// This node's depth. The root is depth 0.
     pub fn depth(&self) -> u32 {
         self.depth

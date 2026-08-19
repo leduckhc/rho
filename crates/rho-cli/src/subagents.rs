@@ -158,7 +158,11 @@ pub async fn load(request: LoadRequest) -> (Vec<Arc<dyn Tool>>, Subagents) {
     let env = Arc::new(env);
     let tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(SpawnAgentTool::new(Arc::clone(&env))),
-        Arc::new(SpawnAgentsTool::new(env)),
+        Arc::new(SpawnAgentsTool::new(Arc::clone(&env))),
+        // A running child is addressable, so the model can redirect one instead of
+        // cancelling the lot and starting again. See SPEC-steering.
+        Arc::new(rho_tools::SteerAgentTool::new(Arc::clone(&env))),
+        Arc::new(rho_tools::CancelAgentTool::new(env)),
     ];
     (
         tools,

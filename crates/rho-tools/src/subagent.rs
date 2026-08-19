@@ -591,7 +591,7 @@ impl Tool for SpawnAgentsTool {
     }
 }
 
-fn error_result(reason: impl Into<String>) -> ToolOutput {
+pub(crate) fn error_result(reason: impl Into<String>) -> ToolOutput {
     ToolOutput {
         content: vec![rho_core::ContentBlock::Text {
             text: reason.into(),
