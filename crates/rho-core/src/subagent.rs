@@ -318,6 +318,11 @@ pub struct LiveAgent {
     pub agent: String,
     /// How deep it sits in the spawn tree.
     pub depth: u32,
+    /// Every node above this child, from the root down to its parent.
+    ///
+    /// It is what makes ownership checkable. A caller may address a child only when
+    /// its own id appears here. See decision D-a-caller-addresses-only-its-own.
+    ancestors: Vec<AgentId>,
     cancel: CancelToken,
     progress: tokio::sync::watch::Receiver<AgentProgress>,
     queue: crate::MessageQueue,
@@ -442,10 +447,13 @@ impl AgentRegistry {
         self.inner.live_total.load(Ordering::SeqCst)
     }
 
-    /// Every live child, in id order.
+    /// Every live child in the process, in id order.
     ///
-    /// A frontend renders this. A caller cancels one of these. The list holds no
-    /// transcript, so reading it costs the parent no context.
+    /// **Process-wide, and unscoped.** It is for a host that owns the process. A tool
+    /// must use [`AgentRegistry::live_under`], because a tool acts for one session and
+    /// must not see another session's children.
+    ///
+    /// The list holds no transcript, so reading it costs the parent no context.
     pub fn live(&self) -> Vec<LiveAgent> {
         let live = self
             .inner
@@ -457,7 +465,48 @@ impl AgentRegistry {
         handles
     }
 
+    /// Every live descendant of `caller`, in id order.
+    ///
+    /// **A tool uses this, never [`AgentRegistry::live`].** The registry is
+    /// process-wide, so `live` shows every session's children. A security review
+    /// proved that resolving a bare id against the whole registry let one tree
+    /// cancel another tree's child. See decision D-a-caller-addresses-only-its-own.
+    pub fn live_under(&self, caller: &AgentNode) -> Vec<LiveAgent> {
+        self.live()
+            .into_iter()
+            .filter(|handle| handle.ancestors.contains(&caller.id()))
+            .collect()
+    }
+
+    /// The handle for one live child, but only when `caller` is above it.
+    ///
+    /// It returns `None` for a child of another tree, exactly as it does for a child
+    /// that already finished. A caller cannot tell the two apart, and it does not
+    /// need to: neither is addressable.
+    pub fn descendant(&self, caller: &AgentNode, id: AgentId) -> Option<LiveAgent> {
+        self.handle(id)
+            .filter(|handle| handle.ancestors.contains(&caller.id()))
+    }
+
+    /// Cancel one descendant of `caller`, and only that one.
+    ///
+    /// It returns false when the id names no live child of this caller, including a
+    /// child that belongs to another tree.
+    pub fn cancel_descendant(&self, caller: &AgentNode, id: AgentId) -> bool {
+        match self.descendant(caller, id) {
+            Some(handle) => {
+                handle.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The handle for one live child, if it is still running.
+    ///
+    /// **Process-wide, and unscoped.** It is for a host that owns the whole process,
+    /// such as a terminal frontend rendering every session. A tool must use
+    /// [`AgentRegistry::descendant`] instead, because a tool acts for one session.
     pub fn handle(&self, id: AgentId) -> Option<LiveAgent> {
         self.inner
             .live
@@ -467,11 +516,14 @@ impl AgentRegistry {
             .cloned()
     }
 
-    /// Cancel one child, and only that child.
+    /// Cancel one child anywhere in the process, and only that child.
     ///
-    /// It returns false when no live child holds that id, which happens whenever
-    /// the child finished first. That is a result, not a fault, so a caller can
-    /// report it and carry on.
+    /// **Process-wide, and unscoped.** A tool must use
+    /// [`AgentRegistry::cancel_descendant`]. This one is for a host that owns the
+    /// process, for example to stop everything on shutdown.
+    ///
+    /// It returns false when no live child holds that id, which happens whenever the
+    /// child finished first. That is a result, not a fault.
     pub fn cancel(&self, id: AgentId) -> bool {
         match self.handle(id) {
             Some(handle) => {
@@ -586,14 +638,34 @@ impl AgentNode {
             });
         }
 
-        // Reserve the per-parent slot. Read then compare then add, under the
-        // atomic, so a check that passes cannot be undone by a racing spawn.
-        let current_children = self.children.load(Ordering::SeqCst);
-        if current_children >= limits.max_children_per_parent {
-            return Err(SubagentError::TooManyChildren {
-                limit: limits.max_children_per_parent,
-                current: current_children,
-            });
+        // Reserve the per-parent slot with a compare-and-swap loop, for the same
+        // reason as the process-wide slot below.
+        //
+        // The comment here used to claim the read and the add happened "under the
+        // atomic", and they did not: a load, then a check, then a later `fetch_add`
+        // leaves a window where two racing spawns both pass a cap of one. A review
+        // found the false comment. The loop makes the comment true rather than
+        // deleting it.
+        loop {
+            let current_children = self.children.load(Ordering::SeqCst);
+            if current_children >= limits.max_children_per_parent {
+                return Err(SubagentError::TooManyChildren {
+                    limit: limits.max_children_per_parent,
+                    current: current_children,
+                });
+            }
+            if self
+                .children
+                .compare_exchange(
+                    current_children,
+                    current_children + 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                break;
+            }
         }
 
         // Reserve the process-wide slot with a compare-and-swap loop, so two
@@ -603,6 +675,8 @@ impl AgentNode {
         loop {
             let current = live.load(Ordering::SeqCst);
             if current >= limits.max_live_total {
+                // The per-parent slot is already held, so release it before refusing.
+                self.children.fetch_sub(1, Ordering::SeqCst);
                 return Err(SubagentError::TooManyLiveAgents {
                     limit: limits.max_live_total,
                     current,
@@ -615,9 +689,6 @@ impl AgentNode {
                 break;
             }
         }
-
-        // The process-wide slot is now held. Commit the per-parent slot.
-        self.children.fetch_add(1, Ordering::SeqCst);
 
         let mut ancestors = self.ancestors.clone();
         ancestors.push(self.id);
@@ -645,6 +716,7 @@ impl AgentNode {
             id: child.id,
             agent: agent.into(),
             depth: child.depth,
+            ancestors: child.ancestors.clone(),
             cancel,
             progress: progress_rx,
             queue: queue.clone(),
@@ -734,6 +806,22 @@ impl RetryLedger {
         }
     }
 
+    /// How many distinct work keys the ledger remembers.
+    ///
+    /// The map is bounded because its key holds the whole prompt, which a model
+    /// writes. A parent that fails many distinct tasks would otherwise grow it
+    /// without limit, and this project has already shipped one unbounded buffer. See
+    /// decision D-bash-line-cap.
+    const MAX_TRACKED_WORK: usize = 256;
+
+    /// How many distinct work keys the ledger holds now.
+    pub fn tracked(&self) -> usize {
+        self.deaths
+            .lock()
+            .expect("the retry ledger lock is poisoned")
+            .len()
+    }
+
     /// Record one death for `key`.
     ///
     /// It returns the death count while the work may still retry. It returns a
@@ -744,6 +832,11 @@ impl RetryLedger {
             .deaths
             .lock()
             .expect("the retry ledger lock is poisoned");
+        // Forget the oldest tracking when the map is full. Losing a count is safe:
+        // the work simply gets its retries again. Growing without a bound is not.
+        if deaths.len() >= Self::MAX_TRACKED_WORK && !deaths.contains_key(key) {
+            deaths.clear();
+        }
         let count = deaths.entry(key.to_string()).or_insert(0);
         *count += 1;
         if *count >= self.cap {

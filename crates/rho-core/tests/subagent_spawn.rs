@@ -437,8 +437,15 @@ async fn the_tool_call_budget_stops_a_turn_that_asks_for_too_many_tools() {
     // The case a turn cap cannot see. One turn asks for five tool calls, and the
     // budget is three. A turn cap of 32 would let all five run.
     let dir = tempfile::tempdir().unwrap();
+    // A counting tool, because the outcome alone cannot show an overrun. A review
+    // mutated the check from `>=` to `>` and this test still passed, so it proved
+    // only that the run ended, never that the cap held.
+    let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let mut tools = ToolRegistry::new();
-    tools.register(Arc::new(common::RecordingTool::new("probe")));
+    tools.register(Arc::new(common::CountingTool::new(
+        "probe",
+        Arc::clone(&calls),
+    )));
 
     // One turn, five calls.
     let mut turn = vec![StreamEvent::MessageStart {
@@ -486,4 +493,37 @@ async fn the_tool_call_budget_stops_a_turn_that_asks_for_too_many_tools() {
         "spending the tool-call budget must end the run, got {:?}",
         report.outcome
     );
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "the budget is 3, so exactly 3 calls may run. A cap that is noticed after the \
+         fact is not a cap."
+    );
+}
+
+#[test]
+fn the_retry_ledger_does_not_grow_without_a_bound() {
+    // The ledger's key holds the whole prompt, which a model writes. A parent that
+    // fails many distinct tasks would grow the map for ever. A security review
+    // flagged it, and this project has already shipped one unbounded buffer.
+    let ledger = RetryLedger::new();
+    for index in 0..5_000 {
+        // Each key is distinct, so nothing is ever a repeat.
+        let _ = ledger.record_death(&format!("scout\u{1f}task number {index}"));
+    }
+    assert!(
+        ledger.tracked() <= 256,
+        "the ledger must stay bounded, tracked {}",
+        ledger.tracked()
+    );
+
+    // And the cap must not break the guarantee: the same work still hits the cap.
+    let fresh = RetryLedger::new();
+    let mut refused = false;
+    for _ in 0..MAX_CHILD_RETRIES {
+        if fresh.record_death("scout\u{1f}the poisoned task").is_err() {
+            refused = true;
+        }
+    }
+    assert!(refused, "repeated deaths of one task must still be refused");
 }

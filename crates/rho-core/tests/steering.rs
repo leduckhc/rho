@@ -272,3 +272,74 @@ async fn the_delivered_count_equals_the_drained_count() {
     let _ = Duration::from_secs(0);
     let _ = MessageQueue::new();
 }
+
+#[tokio::test]
+async fn a_queued_message_announces_itself_to_the_frontend() {
+    // `MessageQueued` was defined in rho-core and rendered by rho-tui while nothing
+    // emitted it, so the "N queued" indicator could never light. That is the same
+    // family as the three agent events, and a review caught it here. The spec also
+    // claimed the event "fires on a successful push", which was false.
+    let queue = MessageQueue::new();
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(SteeringTool {
+        queue: queue.clone(),
+        messages: vec!["first".to_string(), "second".to_string()],
+    }));
+    let session = session_with(
+        vec![
+            tool_call_turn("c1", "probe", serde_json::json!({})),
+            text_turn("done"),
+        ],
+        tools,
+    )
+    .with_queue(queue.clone());
+
+    let cancel = CancelToken::new();
+    let mut events = session.prompt(text("start"), cancel);
+    let mut positions = Vec::new();
+    let mut delivered = None;
+    while let Some(Ok(event)) = events.next().await {
+        match event {
+            AgentEvent::MessageQueued { position } => positions.push(position),
+            AgentEvent::MessageDelivered { count } => delivered = Some(count),
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        positions,
+        vec![1, 2],
+        "each push must announce its own position, counted from one"
+    );
+    assert_eq!(delivered, Some(2), "and both must then be delivered");
+}
+
+#[tokio::test]
+async fn a_queue_set_on_the_config_is_the_one_the_session_uses() {
+    // `SessionConfig::with_queue` existed with no caller, and `Session::with_config`
+    // built a fresh queue and ignored it. So a caller who set the queue there had
+    // every steering message silently dropped. A review found it. Two ways to set one
+    // thing is a trap unless both work.
+    let queue = MessageQueue::new();
+    let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::new(vec![text_turn("done")]));
+    let config = common::test_config().with_queue(queue.clone());
+    let session = Session::with_config(
+        config,
+        provider,
+        Arc::new(ToolRegistry::new()),
+        Arc::new(HookChain::new()),
+        Context::new(None, Vec::new()),
+    );
+
+    assert_eq!(
+        session.queue().len(),
+        0,
+        "the session starts with the config's queue, which is empty"
+    );
+    queue.push(text("through the config queue")).unwrap();
+    assert_eq!(
+        session.queue().len(),
+        1,
+        "a push on the config's queue must be visible to the session, or it is dropped"
+    );
+}

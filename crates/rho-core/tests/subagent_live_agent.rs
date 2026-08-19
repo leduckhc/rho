@@ -307,3 +307,93 @@ fn a_full_child_queue_is_a_typed_error_and_not_a_silent_drop() {
         "a full queue drops no earlier message"
     );
 }
+
+// --- Ownership: a caller may only address its own descendants ---
+
+#[test]
+fn one_tree_cannot_cancel_another_trees_child() {
+    // A security review proved this. `cancel` took a bare id and resolved it against
+    // the whole registry, and the registry is process-wide by design, so one session
+    // could stop another session's child. The shipped CLI happened to be safe because
+    // each run built its own registry and no child held a control tool. That is a
+    // boundary enforced by wiring, not by the contract. See D-a-caller-addresses-only-its-own.
+    let registry = registry();
+    let victim_root = registry.root();
+    let attacker_root = registry.root();
+
+    let victim = victim_root
+        .spawn_child("scout", CancelToken::new().child())
+        .unwrap();
+
+    assert!(
+        registry
+            .descendant(&attacker_root, victim.node.id())
+            .is_none(),
+        "another tree's child must not be addressable"
+    );
+    assert!(
+        !registry.cancel_descendant(&attacker_root, victim.node.id()),
+        "another tree must not cancel this child"
+    );
+    assert!(
+        !registry.live()[0].is_cancelled(),
+        "the victim must still be running"
+    );
+
+    // The owner can still do both.
+    assert!(
+        registry
+            .descendant(&victim_root, victim.node.id())
+            .is_some(),
+        "the owner must see its own child"
+    );
+    assert!(registry.cancel_descendant(&victim_root, victim.node.id()));
+}
+
+#[test]
+fn a_grandchild_is_addressable_by_its_ancestor() {
+    // Descendancy, not parenthood. A root must reach any depth below it, or a fan-out
+    // of a fan-out becomes unmanageable.
+    let registry = registry();
+    let root = registry.root();
+    let child = root
+        .spawn_child("scout", CancelToken::new().child())
+        .unwrap();
+    let grandchild = child
+        .node
+        .spawn_child("greedy", CancelToken::new().child())
+        .unwrap();
+
+    assert!(
+        registry.descendant(&root, grandchild.node.id()).is_some(),
+        "an ancestor must reach a grandchild"
+    );
+    assert!(
+        registry
+            .descendant(&grandchild.node, child.node.id())
+            .is_none(),
+        "a child must not reach upward to its own parent"
+    );
+}
+
+#[test]
+fn live_under_lists_only_the_callers_own_descendants() {
+    let registry = registry();
+    let mine = registry.root();
+    let theirs = registry.root();
+    let _a = mine
+        .spawn_child("scout", CancelToken::new().child())
+        .unwrap();
+    let _b = theirs
+        .spawn_child("greedy", CancelToken::new().child())
+        .unwrap();
+
+    let listed = registry.live_under(&mine);
+    assert_eq!(listed.len(), 1, "only my own child is listed");
+    assert_eq!(listed[0].agent, "scout");
+    assert_eq!(
+        registry.live().len(),
+        2,
+        "the process-wide list still shows both, for a host that owns the process"
+    );
+}

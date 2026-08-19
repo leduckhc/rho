@@ -53,6 +53,18 @@ pub fn looks_like_a_secret(name: &str) -> bool {
         "SESSION_TOKEN",
         "REFRESH_TOKEN",
         "BEARER",
+        // A connection string carries its password inline, so the variable name
+        // never says "password". A security review proved `DATABASE_URL`,
+        // `REDIS_URL`, and `MYSQL_PWD` all survived the scrub.
+        "_PWD",
+        "PGPASS",
+        "DATABASE_URL",
+        "DB_URL",
+        "REDIS_URL",
+        "AMQP_URL",
+        "MONGO_URL",
+        "MONGODB_URI",
+        "CONNECTION_STRING",
     ];
     if NEEDLES.iter().any(|needle| upper.contains(needle)) {
         return true;
@@ -190,6 +202,46 @@ fn drop_escape_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_connection_string_variable_is_a_secret() {
+        // A security review proved these three survived the scrub. A connection
+        // string holds its password inline, so the variable name never says
+        // "password", and a name-based denylist misses it unless it is told.
+        for name in [
+            "DATABASE_URL",
+            "REDIS_URL",
+            "MYSQL_PWD",
+            "PGPASSWORD",
+            "MONGODB_URI",
+            "AMQP_URL",
+            "SPRING_DATASOURCE_CONNECTION_STRING",
+        ] {
+            assert!(
+                super::looks_like_a_secret(name),
+                "{name} carries a credential and must be scrubbed"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_variable_is_not_a_secret() {
+        // The denylist must not swallow the environment. A scrub that hides PATH
+        // breaks every command.
+        for name in [
+            "PATH",
+            "HOME",
+            "LANG",
+            "TERM",
+            "CARGO_TARGET_DIR",
+            "RHO_MODEL",
+        ] {
+            assert!(
+                !super::looks_like_a_secret(name),
+                "{name} is not a credential and must survive"
+            );
+        }
+    }
+
     use super::*;
 
     // --- credential names -------------------------------------------------

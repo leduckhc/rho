@@ -41,6 +41,13 @@ pub struct MessageQueue {
 struct QueueInner {
     messages: Mutex<VecDeque<Vec<ContentBlock>>>,
     capacity: usize,
+    /// Where to announce a push, while a run is happening.
+    ///
+    /// The announcement lives here, not in `Session::steer`, so **every** pusher
+    /// announces. A subagent is steered through `LiveAgent::steer`, which pushes
+    /// straight into this queue, and a frontend must see that too. Putting the
+    /// announcement in one caller left `MessageQueued` unemitted for every other.
+    observer: Mutex<Option<tokio::sync::mpsc::Sender<crate::AgentEvent>>>,
 }
 
 impl std::fmt::Debug for MessageQueue {
@@ -75,6 +82,7 @@ impl MessageQueue {
             inner: Arc::new(QueueInner {
                 messages: Mutex::new(VecDeque::new()),
                 capacity,
+                observer: Mutex::new(None),
             }),
         }
     }
@@ -85,14 +93,48 @@ impl MessageQueue {
     /// drops an earlier message to make room. On success it returns the new queue
     /// length, which is the message's position counted from one.
     pub fn push(&self, message: Vec<ContentBlock>) -> Result<usize, QueueError> {
-        let mut messages = self.lock();
-        if messages.len() >= self.inner.capacity {
-            return Err(QueueError::Full {
-                capacity: self.inner.capacity,
-            });
+        let position = {
+            let mut messages = self.lock();
+            if messages.len() >= self.inner.capacity {
+                return Err(QueueError::Full {
+                    capacity: self.inner.capacity,
+                });
+            }
+            messages.push_back(message);
+            messages.len()
+        };
+        // Announce outside the lock, so a slow receiver cannot block a pusher.
+        self.announce(position);
+        Ok(position)
+    }
+
+    /// Send `MessageQueued` while a run is happening.
+    ///
+    /// A closed or full channel is not an error. The run is over, or nobody is
+    /// listening, and the message stays queued either way.
+    fn announce(&self, position: usize) {
+        if let Ok(slot) = self.inner.observer.lock()
+            && let Some(sender) = slot.as_ref()
+        {
+            let _ = sender.try_send(crate::AgentEvent::MessageQueued { position });
         }
-        messages.push_back(message);
-        Ok(messages.len())
+    }
+
+    /// Announce each push on `sender` until [`MessageQueue::unobserve`].
+    ///
+    /// A session calls this when a run starts, so a frontend sees a queued message
+    /// as pending rather than lost.
+    pub fn observe(&self, sender: tokio::sync::mpsc::Sender<crate::AgentEvent>) {
+        if let Ok(mut slot) = self.inner.observer.lock() {
+            *slot = Some(sender);
+        }
+    }
+
+    /// Stop announcing. A session calls this when a run ends.
+    pub fn unobserve(&self) {
+        if let Ok(mut slot) = self.inner.observer.lock() {
+            *slot = None;
+        }
     }
 
     /// Take every queued message in arrival order, and clear the queue.

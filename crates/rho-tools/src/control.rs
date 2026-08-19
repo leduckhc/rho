@@ -33,7 +33,9 @@ struct CancelArgs {
 
 /// Name the children that are live now, for a refusal that teaches.
 fn live_summary(env: &SpawnEnv) -> String {
-    let live = env.node.registry().live();
+    // Only this session's own descendants. The registry is process-wide, so `live`
+    // would name another session's children. See D-a-caller-addresses-only-its-own.
+    let live = env.node.registry().live_under(&env.node);
     if live.is_empty() {
         return "No subagent is running now.".to_string();
     }
@@ -93,7 +95,12 @@ impl Tool for SteerAgentTool {
         _ctx: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let args: SteerArgs = parse_args(args)?;
-        let Some(handle) = self.env.node.registry().handle(AgentId(args.id)) else {
+        let Some(handle) = self
+            .env
+            .node
+            .registry()
+            .descendant(&self.env.node, AgentId(args.id))
+        else {
             return Ok(crate::subagent::error_result(format!(
                 "no subagent with id {} is running, so it cannot be steered. It may have \
                  finished already. {}",
@@ -155,7 +162,12 @@ impl Tool for CancelAgentTool {
         _ctx: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let args: CancelArgs = parse_args(args)?;
-        if self.env.node.registry().cancel(AgentId(args.id)) {
+        if self
+            .env
+            .node
+            .registry()
+            .cancel_descendant(&self.env.node, AgentId(args.id))
+        {
             Ok(ToolOutput::text(format!(
                 "subagent {} was asked to stop. Its siblings keep running.",
                 args.id

@@ -565,3 +565,46 @@ fn install_capture() {
             .expect("the capture subscriber installs once per test binary");
     });
 }
+
+/// A tool that counts how many times it ran.
+///
+/// A budget test needs this. Asserting only the run's outcome cannot show an
+/// overrun, and a review proved that by mutating the cap check from `>=` to `>`
+/// while the test stayed green.
+pub struct CountingTool {
+    name: String,
+    calls: Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl CountingTool {
+    pub fn new(name: impl Into<String>, calls: Arc<std::sync::atomic::AtomicU32>) -> Self {
+        Self {
+            name: name.into(),
+            calls,
+        }
+    }
+}
+
+#[async_trait]
+impl rho_core::Tool for CountingTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        "counts its own calls"
+    }
+    fn kind(&self) -> ToolKind {
+        ToolKind::Read
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _ctx: rho_core::ToolContext,
+    ) -> Result<rho_core::ToolOutput, rho_core::ToolError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(rho_core::ToolOutput::text("counted"))
+    }
+}

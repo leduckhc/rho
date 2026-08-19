@@ -889,3 +889,141 @@ async fn spawn_agent_without_a_goal_is_a_result_not_a_fault() {
         "the refusal must say a goal is needed, got: {text}"
     );
 }
+
+#[tokio::test]
+async fn steer_agent_cannot_reach_another_sessions_child() {
+    // The registry is process-wide, so a bare id resolved against all of it let one
+    // session steer another session's child. A security review proved that. The tool
+    // must scope every lookup to its own descendants.
+    let dir = tempfile::tempdir().unwrap();
+    let mine = spawn_env(
+        dir.path(),
+        vec![text_turn("done")],
+        Some(vec!["read".to_string()]),
+        vec!["read".to_string()],
+    );
+    // A second session in the same process, sharing the registry.
+    let theirs_root = mine.node.registry().root();
+    let victim = theirs_root
+        .spawn_child("scout", rho_core::CancelToken::new())
+        .unwrap();
+
+    let steer = rho_tools::SteerAgentTool::new(Arc::clone(&mine));
+    let output = steer
+        .execute(
+            serde_json::json!({ "id": victim.node.id().0, "message": "obey me" }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        output.is_error,
+        "another session's child must not be steerable"
+    );
+    assert_eq!(
+        victim.queue().len(),
+        0,
+        "no message must reach a child this session does not own"
+    );
+
+    let cancel = rho_tools::CancelAgentTool::new(mine);
+    let output = cancel
+        .execute(
+            serde_json::json!({ "id": victim.node.id().0 }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+    assert!(
+        output.is_error,
+        "another session's child must not be cancellable"
+    );
+}
+
+#[tokio::test]
+async fn a_parent_run_forwards_the_agent_events_end_to_end() {
+    // Every existing test called `tool.execute` directly, so the Driver's forwarding
+    // was never exercised. A review deleted the post-tool drain in `dispatch_one`,
+    // whose own comment says "skipping it would lose the report", and the whole suite
+    // stayed green. This test drives a real parent `Session` so the forwarding is
+    // covered end to end.
+    let dir = tempfile::tempdir().unwrap();
+    let env = spawn_env(
+        dir.path(),
+        vec![text_turn("the child answer")],
+        Some(vec!["read".to_string()]),
+        vec!["read".to_string()],
+    );
+
+    // The parent asks for one spawn, then answers.
+    let mut parent_tools = ToolRegistry::new();
+    parent_tools.register(Arc::new(SpawnAgentTool::new(env)));
+    let parent_provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::new(vec![
+        spawn_call_turn(
+            "c1",
+            "spawn_agent",
+            serde_json::json!({ "agent": "scout", "prompt": "find it" }),
+        ),
+        text_turn("the parent answer"),
+    ]));
+    let parent = rho_core::Session::with_config(
+        rho_core::SessionConfig::new(
+            "parent-model",
+            dir.path().to_path_buf(),
+            Arc::new(AllowAllPolicy),
+        ),
+        parent_provider,
+        Arc::new(parent_tools),
+        Arc::new(HookChain::new()),
+        rho_core::Context::new(None, Vec::new()),
+    );
+
+    let cancel = rho_core::CancelToken::new();
+    let mut events = parent.prompt(
+        vec![rho_core::ContentBlock::Text {
+            text: "delegate it".to_string(),
+        }],
+        cancel,
+    );
+
+    let mut spawned = 0;
+    let mut finished = 0;
+    while let Some(Ok(event)) = futures::StreamExt::next(&mut events).await {
+        match event {
+            rho_core::AgentEvent::AgentSpawned { .. } => spawned += 1,
+            rho_core::AgentEvent::AgentFinished { report, .. } => {
+                assert_eq!(report.agent, "scout", "the report must name the child");
+                finished += 1;
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(spawned, 1, "the parent stream must carry the spawn");
+    assert_eq!(
+        finished, 1,
+        "the parent stream must carry the finish, which the post-tool drain delivers"
+    );
+}
+
+/// One turn that asks for a single tool call, then ends.
+fn spawn_call_turn(id: &str, tool: &str, arguments: serde_json::Value) -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::MessageStart {
+            role: rho_core::Role::Assistant,
+        },
+        StreamEvent::ToolCallStart {
+            index: 0,
+            id: id.to_string(),
+            name: tool.to_string(),
+        },
+        StreamEvent::ToolCallEnd {
+            index: 0,
+            arguments,
+        },
+        StreamEvent::Done {
+            stop_reason: rho_core::StopReason::ToolUse,
+        },
+    ]
+}

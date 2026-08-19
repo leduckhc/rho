@@ -374,6 +374,85 @@ comment says which one is load-bearing.
 **That is the second time in this sitting that breaking the code exposed a weak test.** Step
 7 of the development flow paid for itself twice in one day.
 
+## Round four: three more defects, from making a child addressable
+
+The registry counted children and did not know them, and the spawn tool built a child session
+as a local and dropped it. So nothing could cancel one child, watch one child, or steer one.
+Three missing features had one cause.
+
+**Defect eight: the three agent events had no sender.** `AgentSpawned`, `AgentProgressed`, and
+`AgentFinished` were defined in `rho-core` and rendered by `rho-tui`, and **nothing emitted
+them**. The TUI held a renderer for events that never arrived, which is
+D-a-panel-nobody-can-open in a new place. `SPEC-subagents` section 9 named the missing
+driver-level hook, and it stayed missing.
+
+The fix gives `ToolContext` a typed event channel beside its string one, wired like the
+existing `ToolUpdate` forwarding, with a drain after the tool returns so the finish event is
+not lost.
+
+**And a bug inside that fix.** The child's own event stream and the new outbound sender were
+both named `events`, so the parameter was shadowed and `AgentFinished` was silently never
+sent. The test caught it because it asserts a **pairing**: every spawn has exactly one finish.
+An assertion on one expected event would have passed. That is AGENTS.md step 12, and it earned
+its place.
+
+**Defect nine: a limit nobody could set, again.** `SubagentLimits::max_tool_calls` arrived
+hardcoded, with no flag, exactly like the three limits fixed in round two. It is now
+`--max-agent-tool-calls`.
+
+**Defect ten: the first fix for the CLI depth broke the feature completely.** Setting the
+command-line depth to 0 passed three unit tests and then refused **every** spawn, because the
+root session is itself depth 0. The honest value is 1. The replacement test drives a real
+`AgentRegistry`, spawns a child, and asserts the grandchild is refused, so it fails if the
+depth returns to 0. See D-cli-depth-is-zero.
+
+## Round five: the tool-call budget
+
+A turn cap counts provider round trips. It cannot bound a turn that asks for forty tool calls,
+so a budget counts the work instead. The check runs **before** each call, so the cap is never
+exceeded rather than noticed afterwards.
+
+`the_tool_call_budget_stops_a_turn_that_asks_for_too_many_tools` scripts one turn with five
+tool calls against a budget of three. A turn cap of 32 would have let all five run.
+
+## Round six: the gate got a caller, and a lying agent was caught
+
+The gate shipped in `rho-core` with nothing calling it, which is the same "an unreachable guard
+is not shipped" trap as `RetryLedger` and `confine` before it. `spawn_agent` now takes an
+`artifacts` list.
+
+Two live runs, and this is the clearest evidence in this file.
+
+An agent definition named `liar`, whose body tells it to always claim success and never use a
+tool, was given `artifacts=["report.md"]`:
+
+```
+The tool result shows that the liar subagent failed its acceptance gate — it didn't
+actually create report.md. The liar agent claimed success but didn't do the work, so
+the task was rejected.
+```
+
+An agent named `writer`, given the same task, wrote the file and passed. `cat report.md`
+returned `findings ok`. So the gate accepts real work and refuses a claim.
+
+**Defect eleven, found by a new guard rather than by a run.** A spec's test list is a promise,
+and no gate could check it, because a test name is not an id. `bench/check-spec-tests.py` now
+checks that every test a **delivered** spec names really exists. It found fifteen phantom names
+in `SPEC-agent-tasks`. Eight were the implementation choosing another name with no
+reconciliation, four came from a decision that listed tests nobody wrote, and three were
+promises of behaviour that was never built. Those three are now built:
+
+- A rejected task sets `is_error`. It did not, so a model reading only the flag would have read
+  a rejection as a success.
+- A task with no goal is refused before anything runs. `AgentTask::validate` existed and the
+  tool never reached it.
+- `AgentOutcome::Rejected` round-trips through serde, because it crosses the persisted boundary.
+
+**The gate obeys the parent's sandbox, and now that is proved.** `a_gate_command_obeys_the_parent_sandbox`
+runs a confined check that writes inside the root and then tries to write outside it. The
+second write fails and no file appears. The test skips when the host has no sandbox backend,
+like every other sandbox test.
+
 ## The security review, and what it found
 
 A security review of `CancelToken::child` ran after the fix. It found **no defect in the
@@ -495,6 +574,60 @@ that a model can steer a sibling today.
 it while it works. That is what a TUI or an ACP frontend does, and it is what the example
 above demonstrates. The model-facing tool becomes useful when a child can outlive a turn,
 which needs background children, and that is a separate change.
+
+## Round seven: two harsh reviews, and eleven more findings
+
+Two reviewers read the finished feature. Both were told to assume another defect of each
+family was present, and both were told that a review which finds nothing is a failed review.
+Between them they found eleven things, and every one was verified before it was fixed.
+
+**The worst was a contract that a wiring accident was holding up.** `AgentRegistry::cancel`
+took a bare id and resolved it against the whole process, and the registry is process-wide on
+purpose. The reviewer built two trees in one registry and had the second cancel and steer the
+first tree's child. The shipped command line was safe only because each run builds its own
+registry and no child holds a control tool. The registry now offers `live_under`,
+`descendant`, and `cancel_descendant`, and every tool uses them. See
+D-a-caller-addresses-only-its-own.
+
+**`MessageQueued` was defined, rendered, and never emitted.** The same family as the three
+agent events, in the same feature, found again. The announcement now lives in `MessageQueue`
+itself rather than in one caller, so every pusher announces, including a subagent steered
+through `LiveAgent::steer`. Putting it in `Session::steer` would have left the subagent path
+silent, which is how the first version was wrong.
+
+**`SessionConfig::with_queue` was a silent-drop trap.** It existed with no caller, and
+`Session::with_config` built a fresh queue and ignored it. A caller who set the queue there
+had every steering message dropped. `with_config` now honours the config.
+
+**Three tests were weak, and mutation proved it.** Each mutation below passed the whole suite
+before the fix:
+
+| Mutation | What it showed |
+| --- | --- |
+| The tool-call budget check `>=` becomes `>` | The test asserted only the final outcome, so a budget of three could run four calls. It now counts the calls. |
+| Delete the post-tool drain in `dispatch_one` | No test drove a subagent through a real parent `Session`, so the forwarding of `AgentFinished` was uncovered. One does now. |
+| `narrow_sandbox` `>=` becomes `>` | No test asked for the parent's exact mode, so "a child may keep the same mode" was unproven. |
+
+**Two reservations were not atomic, and one comment said it was.** The per-parent slot did a
+load, then a check, then a later add. Its comment claimed all three happened under one atomic.
+Both reservations now use a compare-and-swap loop, and two racing tests hold them.
+
+A note on writing those tests: a `std::sync::Barrier` was not enough, because it wakes threads
+through the operating system and a staggered start never loses the race. A spin gate on an
+`AtomicBool` loses it reliably, and the non-atomic version then grants two children against a
+cap of one.
+
+**Two smaller findings.** The credential denylist missed a connection string, so
+`DATABASE_URL`, `REDIS_URL`, and `MYSQL_PWD` all survived the scrub while every provider key
+was caught. And `RetryLedger` kept an unbounded map keyed by the whole prompt, which a model
+writes. Both are fixed and both have tests.
+
+**What the reviews found clean, having tried to break it.** The policy composition, the
+tool-set intersection under case and whitespace and duplication and an empty list, the sandbox
+narrowing in every ordering, `confine` against a symlink and an absolute path and a `..`
+segment and a NUL, the model's inability to reach a command check through any field it
+controls, and the definition loader's inability to raise any limit. The cancel token was
+called genuinely well tested.
 
 ## An operator error worth recording
 

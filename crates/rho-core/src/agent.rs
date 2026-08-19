@@ -267,6 +267,10 @@ impl Session {
         hooks: Arc<HookChain>,
         context: Context,
     ) -> Self {
+        // Take the queue from the config. Building a fresh one here ignored
+        // `SessionConfig::with_queue`, so a caller that set a queue there had every
+        // steering message silently dropped. A review found it.
+        let config_queue = config.queue.clone();
         Self {
             inner: Arc::new(SessionInner {
                 provider,
@@ -274,7 +278,7 @@ impl Session {
                 hooks,
                 context: tokio::sync::Mutex::new(context),
                 config,
-                queue: crate::MessageQueue::new(),
+                queue: config_queue,
             }),
         }
     }
@@ -292,6 +296,8 @@ impl Session {
     /// A message queued after the run ends stays queued, and the next run delivers
     /// it. No user message is dropped in silence. See `SPEC-steering` section 3.
     pub fn steer(&self, message: Vec<ContentBlock>) -> Result<usize, crate::QueueError> {
+        // The queue announces the push, so every pusher announces, including a
+        // subagent steered through `LiveAgent::steer`.
         self.inner.queue.push(message)
     }
 
@@ -322,6 +328,19 @@ impl Session {
         // bounded channel applies backpressure. A dropped receiver makes `send`
         // fail, so the driver task stops on its own.
         let (tx, rx) = tokio::sync::mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        // Let the queue announce a push for the length of this run. The driver stops
+        // it when the run ends.
+        let (queued_tx, mut queued_rx) = tokio::sync::mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        self.inner.queue.observe(queued_tx);
+        {
+            // Forward each announcement into the run's event stream.
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                while let Some(event) = queued_rx.recv().await
+                    && tx.send(Ok(event)).await.is_ok()
+                {}
+            });
+        }
         let driver = Driver {
             tool_calls: std::sync::atomic::AtomicU32::new(0),
             config: AgentConfig {
@@ -469,6 +488,9 @@ impl Driver {
         };
 
         let _ = self.emit(AgentEvent::AgentEnd { stop_reason }).await;
+        // The run is over, so a later push must not announce itself on a dead
+        // channel. It stays queued and the next run delivers it.
+        self.inner.queue.unobserve();
     }
 
     /// Run one provider turn. Forward each stream event. Build the assistant
