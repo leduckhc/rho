@@ -316,6 +316,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo build -p rho-cli --no-default-features --features minimal
+cargo test -p rho-cli --no-default-features --features minimal --no-run
 python3 bench/check-ids.py
 ```
 

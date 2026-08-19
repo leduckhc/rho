@@ -394,6 +394,7 @@ async fn run_headless(cli: &Cli, prompt: String) -> i32 {
 }
 
 /// The working directory, with the home directory shortened to `~`.
+#[cfg(feature = "tui")]
 fn display_cwd() -> String {
     let cwd = std::env::current_dir().unwrap_or_default();
     let text = cwd.to_string_lossy().to_string();
@@ -407,6 +408,7 @@ fn display_cwd() -> String {
 ///
 /// A failed command is not an error here. The banner simply omits the field, because a
 /// session outside a repository is normal.
+#[cfg(feature = "tui")]
 fn git_branch() -> String {
     std::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -421,6 +423,7 @@ fn git_branch() -> String {
 ///
 /// This is the one place the process environment is read for the interface. A test never
 /// reads the real environment, because `resolve_mouse` takes the list as data.
+#[cfg(feature = "tui")]
 fn rho_env_vars() -> Vec<(String, String)> {
     std::env::vars()
         .filter(|(name, _)| name.starts_with("RHO_"))
@@ -436,6 +439,7 @@ fn rho_env_vars() -> Vec<(String, String)> {
 ///
 /// The default flipped with `D-the-wheel-needs-capture`. rho owns the alternate screen, and
 /// that screen has no scrollback, so with capture off the wheel does nothing at all.
+#[cfg(feature = "tui")]
 fn resolve_mouse(flag: bool, no_flag: bool, env: &[(String, String)]) -> bool {
     if no_flag {
         return false;
@@ -677,7 +681,10 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+// `resolve_mouse` only exists in a build with the interface, so its tests follow it.
+// Without this the minimal test build fails to compile, and the gate does not catch that,
+// because the gate builds the minimal profile and never tests it.
+#[cfg(all(test, feature = "tui"))]
 mod mouse_tests {
     use super::resolve_mouse;
 
