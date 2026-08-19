@@ -51,17 +51,21 @@ fn drawn(text: &str, width: u16) -> Vec<String> {
 
 #[test]
 fn an_assistant_answer_keeps_its_line_breaks() {
+    // The expected text changed with `SPEC-tui-markdown` phase 1, on purpose: a list marker
+    // now draws as a bullet glyph and takes the bullet colour. The intent of this test is
+    // unchanged, and the intent is what matters: each item takes its own row instead of being
+    // flowed into its neighbour. Only the glyph moved.
     let rows = drawn("- alpha: first\n- beta: second\n- gamma: third", 70);
     assert!(
-        rows.iter().any(|r| r.trim() == "- alpha: first"),
+        rows.iter().any(|r| r.trim() == "• alpha: first"),
         "each list item takes its own row:\n{rows:#?}"
     );
     assert!(
-        rows.iter().any(|r| r.trim() == "- beta: second"),
+        rows.iter().any(|r| r.trim() == "• beta: second"),
         "the second item is not flowed into the first:\n{rows:#?}"
     );
     assert!(
-        rows.iter().any(|r| r.trim() == "- gamma: third"),
+        rows.iter().any(|r| r.trim() == "• gamma: third"),
         "and the third:\n{rows:#?}"
     );
 }

@@ -251,3 +251,48 @@ repaint. The continuous recording is clean.
 
 A screenshot tool is a measuring instrument, and this one needed calibrating before it could
 be trusted.
+
+## Markdown as colour, verified live
+
+Driven against openrouter, asking for a heading, prose, a bullet list, a quote, a rule, and a
+nested code fence. Captured through `ttyd` in a real browser.
+
+```
+Results                                     <- green, bold, no hashes
+This response demonstrates the requested formatting elements in a structured
+layout.                                     <- body text
+• Item one with example content              <- accent
+• Item two with additional detail
+┃ This is a blockquote containing relevant information.    <- dim
+────────────────────────────────────────────────────────   <- muted rule
+```rust                                      <- dim fence
+if condition {                               <- blue code
+    if nested_condition {
+        println!("nested code");
+    }
+}
+```
+```
+
+The screenshot is `shots/7-markdown-colour.png`. Nesting is right at four and eight columns,
+and no markup punctuation reaches the screen except the fence, which keeps its markers on
+purpose, as pi draws it.
+
+### Two more tests that proved nothing, and what they cost
+
+This phase went through four deliberate breaks. Two of them tripped nothing at first.
+
+**An alignment row test was too narrow.** A scanner that trimmed the outer pipes before
+testing for a rule still passed, because the test only used `|---|---|` and `| --- | --- |`.
+A one-column `|---|` catches it, and the test now includes one.
+
+**A padding test could never fail.** It counted cells whose symbol was "not empty", and an
+untouched ratatui cell holds a space, not an empty string. Rewritten to draw a long answer and
+then a short one into the same terminal, it still did not fail with the padding deleted, and
+that is the useful part: **the premise was wrong.** `Terminal::draw` resets its back buffer and
+emits a diff, so a short row already clears its own tail. Padding a row is a consistency
+convention here, not a correctness guard. The test was deleted and the claim with it, because a
+test that cannot fail is worse than none.
+
+That is the fourth and fifth vacuous test caught in this branch, all by the same method: break
+the code where the rule actually binds, and watch.

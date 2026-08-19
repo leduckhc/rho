@@ -19,13 +19,14 @@ use unicode_width::UnicodeWidthStr;
 use crate::bindings::{bindings, filter_slash_commands};
 use crate::concise::RowFold;
 use crate::duration::{duration_slot, format_duration};
+use crate::markdown::{MarkdownKind, scan_markdown};
 use crate::motion::{MotionCell, motion_cell, sweep_weight};
 use crate::sanitize::{sanitize_block, sanitize_line};
 use crate::state::{
     ActivityState, Approval, HistorySearch, Panel, Row, SlashList, ToolRowStatus, TuiState,
     filter_history,
 };
-use crate::theme::{Role, role_256};
+use crate::theme::{Role, role_16, role_256};
 
 /// The brand mark. The `ρ` renders in the accent role, so it is the first accent
 /// on screen.
@@ -63,6 +64,8 @@ const GLYPH_NOTICE: &str = "!";
 /// zero and the whole message vanished. Found by review, then measured.
 const NOTICE_MIN_TEXT: usize = 12;
 const GLYPH_SEPARATOR: &str = "·";
+/// The glyph a horizontal rule repeats.
+const GLYPH_RULE: &str = "─";
 const GLYPH_CURSOR: &str = "█";
 /// The quote bar that marks an approval's verbatim text.
 const GLYPH_QUOTE: &str = "┃";
@@ -468,9 +471,27 @@ fn push_row(
             }
         }
         Row::Assistant { text } => {
-            let wrapped = wrap_block(&sanitize_block(text), measure);
-            for line in wrapped {
-                out.push((pad(&line, width), text_style()));
+            // Markdown becomes colour, not punctuation. The scanner strips a line's markup
+            // *before* the text is wrapped, so the measure stays honest. See
+            // `D-markdown-line-level-first` and `SPEC-tui-markdown`.
+            for line in scan_markdown(&sanitize_block(text)) {
+                let style = style_for(markdown_role(line.kind));
+                if line.kind == MarkdownKind::Rule {
+                    out.push((rule_row(width), style));
+                    continue;
+                }
+                // A code line keeps its own columns, so it is never re-flowed. Prose wraps.
+                let rows = if line.kind == MarkdownKind::CodeBlock {
+                    vec![line.text]
+                } else {
+                    wrap_block(&line.text, measure)
+                };
+                if rows.is_empty() {
+                    out.push((blank(width), style));
+                }
+                for row in rows {
+                    out.push((pad(&row, width), style));
+                }
             }
         }
         Row::Thinking { text: _ } => {
@@ -1175,6 +1196,25 @@ fn pad(text: &str, width: usize) -> String {
     }
 }
 
+/// The colour role for one markdown kind. One arm per kind, so a new kind cannot be added
+/// without answering for its colour.
+fn markdown_role(kind: MarkdownKind) -> Role {
+    match kind {
+        MarkdownKind::Text => Role::Text,
+        MarkdownKind::Heading => Role::MdHeading,
+        MarkdownKind::Fence => Role::Muted,
+        MarkdownKind::CodeBlock => Role::MdCodeBlock,
+        MarkdownKind::Quote => Role::Muted,
+        MarkdownKind::Bullet => Role::Accent,
+        MarkdownKind::Rule => Role::Muted,
+    }
+}
+
+/// A horizontal rule, drawn across the text measure.
+fn rule_row(width: usize) -> String {
+    pad(&GLYPH_RULE.repeat(width.min(TEXT_MEASURE_CAP)), width)
+}
+
 /// Wrap a block of text, one source line at a time, so a line break survives.
 ///
 /// `wrap` alone re-flows across every newline, because it splits on whitespace. That turned
@@ -1279,7 +1319,12 @@ fn style_for(role: Role) -> Style {
         Some(index) => Style::default().fg(Color::Indexed(index)),
         None => Style::default(),
     };
-    if role == Role::Caution {
+    // The bold weight comes from the role table, not from a name in this function. It used to
+    // read `if role == Role::Caution`, so every new bold role needed an edit to shared code.
+    // `role_16` already states the weight for every role, and the exhaustive match there means
+    // a new role cannot forget it. This changes no existing appearance: `Caution` is the only
+    // old role the table marks bold.
+    if role_16(role).bold {
         return style.add_modifier(Modifier::BOLD);
     }
     style

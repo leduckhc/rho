@@ -15,17 +15,25 @@ pub enum Role {
     Error,
     Warn,
     Caution,
+    /// A markdown heading. Bold, and the accent colour, so a section stands out. It is its
+    /// own role only because no existing role carries the bold weight with a colour.
+    MdHeading,
+    /// A line inside a code block. Its own colour, because no existing role reads as "not
+    /// prose". A fence, a quote, and a bullet reuse `Muted` and `Accent`.
+    MdCodeBlock,
 }
 
 impl Role {
     /// Every role, so a test proves each one has all three mappings.
-    pub const ALL: [Role; 6] = [
+    pub const ALL: [Role; 8] = [
         Role::Text,
         Role::Muted,
         Role::Accent,
         Role::Error,
         Role::Warn,
         Role::Caution,
+        Role::MdHeading,
+        Role::MdCodeBlock,
     ];
 }
 
@@ -36,6 +44,7 @@ pub enum Ansi16 {
     Green,
     Red,
     Yellow,
+    Cyan,
 }
 
 /// One resolved role style, colour plus modifiers.
@@ -71,6 +80,11 @@ pub fn role_256(role: Role) -> Option<u8> {
         Role::Error => Some(203),
         Role::Warn => Some(179),
         Role::Caution => Some(173),
+        // The markdown roles. A heading borrows the accent, so the interface keeps one
+        // family. Code is a cool blue, which reads as "not prose" beside the warm accent.
+        // A fence and a bullet stay quiet, because both are punctuation.
+        Role::MdHeading => Some(78),
+        Role::MdCodeBlock => Some(110),
     }
 }
 
@@ -101,6 +115,15 @@ pub fn role_16(role: Role) -> RoleStyle {
             bold: true,
             ..RoleStyle::plain()
         },
+        Role::MdHeading => RoleStyle {
+            color: Ansi16::Green,
+            bold: true,
+            ..RoleStyle::plain()
+        },
+        Role::MdCodeBlock => RoleStyle {
+            color: Ansi16::Cyan,
+            ..RoleStyle::plain()
+        },
     }
 }
 
@@ -121,6 +144,16 @@ pub fn role_none(role: Role) -> RoleStyle {
         Role::Caution => RoleStyle {
             bold: true,
             reversed: true,
+            ..RoleStyle::plain()
+        },
+        // No colour, so a modifier carries the meaning. A heading is bold. Code and a quote
+        // are dim, which separates them from prose without a colour.
+        Role::MdHeading => RoleStyle {
+            bold: true,
+            ..RoleStyle::plain()
+        },
+        Role::MdCodeBlock => RoleStyle {
+            dim: true,
             ..RoleStyle::plain()
         },
     }
