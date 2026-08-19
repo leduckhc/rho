@@ -69,6 +69,9 @@ styling calls `plain`, so the change is mechanical for 29 of the 30 sites.
 
 ## 3a. What review requires before phase 2 starts
 
+Item 6 is new, and it comes from measuring pi and jcode side by side rather than reading them.
+See `docs/verification/notices-live.md`.
+
 The reviewer rated the first four `High` or `Medium-High`. None may be skipped.
 
 1. **State the pipeline as scan, then wrap, then pad, over runs.** The first draft of this spec
@@ -84,6 +87,12 @@ The reviewer rated the first four `High` or `Medium-High`. None may be skipped.
 4. **Fence state spans the whole message**, never the visible window. Phase 1 already does
    this, and phase 2 must keep it.
 5. **A table and a nested list degrade to verbatim.** Phase 1 does this, with a test.
+6. **A background colour is a contract question, not a detail.** jcode draws inline code as
+   RGB 140,180,255 on RGB 45,45,45, and measured beside a foreground-only change it reads more
+   clearly. `RoleStyle` has `color`, `dim`, `bold`, and `reversed`, and **no background field**.
+   So an inline code background needs the role table extended, and every role must then state a
+   background or the exhaustive match will not compile. Decide that before phase 2 starts, not
+   during it.
 
 **The parser is not a dependency.** rho reads a small, fixed subset with its own scanner. No
 `pulldown-cmark` and no `syntect`. Reasons: rho ships a binary whose size and start time are

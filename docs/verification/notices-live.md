@@ -297,35 +297,54 @@ test that cannot fail is worse than none.
 That is the fourth and fifth vacuous test caught in this branch, all by the same method: break
 the code where the rule actually binds, and watch.
 
-## Measured against pi, in a browser
+## Measured against pi and jcode, in a browser
 
-pi was run in `ttyd` beside rho, and both were given the same prompt. pi's colours were read
-from its own escape codes with `tmux capture-pane -e`, not from its source.
+All three were run in `ttyd` and given the same prompt, on the same model,
+`anthropic/claude-haiku-4.5` through openrouter. Their colours were read from their own escape
+codes with `tmux capture-pane -e`, so this is measurement and not a reading of their source.
 
-| Element | pi | rho, phase 1 |
-| --- | --- | --- |
-| heading | bold, RGB 240,198,116 | bold, accent. Equivalent |
-| inline code | RGB 138,190,183 | **not styled. The backticks show** |
-| bold, italic | modifiers | **not styled. The markers show** |
-| list marker | `-` kept, item text at body colour | `•` glyph, item text at body colour |
-| blockquote | italic, RGB 128,128,128, with a bar | dim, with a bar. No italic |
-| rule | RGB 128,128,128 | muted. Equivalent |
-| fence | RGB 128,128,128 | muted. Equivalent |
-| code body | **syntax highlighted, VS Code Dark+** | one colour |
-| table | **drawn with box borders** | verbatim pipes |
+| Element | pi | jcode | rho, phase 1 |
+| --- | --- | --- | --- |
+| heading | bold, RGB 240,198,116 | bold **and underlined**, RGB 240,190,90 | bold, accent |
+| bold | modifier `1` | modifier `1` | **markers show** |
+| italic | modifier `3` | modifier `3` | **markers show** |
+| inline code | RGB 138,190,183 | RGB 140,180,255 **on a background**, RGB 45,45,45 | **backticks show** |
+| list glyph | `-`, muted | `•`, RGB 100,100,100 | `•`, body colour |
+| list text | body colour | body colour | body colour |
+| blockquote | italic, grey, a bar | grey, a bar, plus action badges | dim, a bar |
+| rule | grey | grey | muted |
+| code block | highlighted, indented two columns | **a bordered box with a language header**, highlighted | one colour |
+| table | box borders | aligned columns, bold header, a divider | **verbatim pipes** |
 
-Two things changed because of what the comparison showed.
+The screenshots are `shots/8-pi-reference.png`, `shots/10-jcode-reference.png`, and
+`shots/9-rho-same-prompt.png`.
 
-**A list item now keeps the body colour.** rho coloured a whole item accent, and pi colours
-only the marker. Phase 1 cannot colour a glyph on its own, so the loud half was dropped and the
-glyph carries the structure. `a_list_item_keeps_the_body_colour` pins it.
+**Where rho matches both.** The heading, the rule, the fence, the list glyph, and the list
+text. The list text was the one thing the comparison changed: rho coloured a whole item with
+the accent, and both tools leave item text at the body colour. rho now does too.
 
-**One earlier claim was too kind to rho.** A note here said pi "refuses to guess a language"
-and implied rho matches it. pi refuses to guess, and it does highlight when the language is
-named, which `rust` was. So pi highlights and rho does not. The claim holds for auto-detection
-only, and the gap is real.
+**Where rho does not match either.** Inline code, bold, italic, syntax highlighting, and
+tables. The first three are phase 2, and they are the ones a reader notices, because the
+punctuation is still on screen.
 
-A model behaviour worth knowing, found in the same run. Asked for markdown, haiku wrapped its
-whole answer in a markdown fence. rho then drew all of it as code, correctly, and the answer
-looked unstyled. pi would do the same. A fence means code, and that rule holds even when a
-model wraps a whole message in one.
+**What phase 2 should take from jcode.** A background behind inline code, RGB 45,45,45 under
+RGB 140,180,255, reads more clearly than a foreground change alone. It also costs a background
+colour in the role table, which the current `RoleStyle` has no field for. That is a contract
+question for phase 2, not a detail.
+
+**A claim here was corrected.** An earlier note said pi "refuses to guess a language" and
+implied rho matches it. pi refuses to guess, and it does highlight when the language is named,
+which `rust` was. Both tools highlight. rho does not, and the gap is real.
+
+**Two things the run itself taught, neither about rendering.**
+
+Asked for markdown, haiku wrapped its whole answer in a markdown fence. rho drew all of it as
+code, correctly, and the answer looked unstyled. pi and jcode would do the same. A fence means
+code, even when a model wraps a whole message in one. The comparison had to say "do not wrap it
+in a code fence" to be fair.
+
+jcode's Bedrock default, Claude 3.5 Sonnet v2, is end of life and returns a 404 with "This
+model version has reached the end of its life". Its one-key fallback then offered 3.5 Haiku,
+which is also end of life, so the fallback ping-ponged between two dead models. Worth knowing
+before rho copies a fallback: a fallback list needs a liveness check, or it trades one dead
+model for another.
