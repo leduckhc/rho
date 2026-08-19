@@ -312,8 +312,8 @@ mod agent_status_tests {
         let registry1 = rho_core::AgentRegistry::new(rho_core::SubagentLimits::new());
         let registry2 = rho_core::AgentRegistry::new(rho_core::SubagentLimits::new());
 
-        let node1 = registry1.root();
-        let node2 = registry2.root();
+        let node1 = registry1.new_tree();
+        let node2 = registry2.new_tree();
 
         let cancel = rho_core::CancelToken::new();
         let ChildSpawn { node: child, .. } = node1

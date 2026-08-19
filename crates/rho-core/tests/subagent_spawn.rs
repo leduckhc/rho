@@ -42,7 +42,7 @@ fn a_depth_of_zero_forbids_spawning() {
         ..SubagentLimits::new()
     };
     let registry = AgentRegistry::new(limits);
-    let root = registry.root();
+    let root = registry.new_tree();
     let error = root.spawn_child("scout", CancelToken::new()).unwrap_err();
     match error {
         SubagentError::DepthExceeded { limit, attempted } => {
@@ -60,7 +60,7 @@ fn depth_beyond_the_cap_is_refused_and_the_reason_names_the_limit() {
         ..SubagentLimits::new()
     };
     let registry = AgentRegistry::new(limits);
-    let root = registry.root();
+    let root = registry.new_tree();
     let _s1 = root.spawn_child("scout", CancelToken::new()).unwrap();
     let child = &_s1.node;
     let _s2 = child.spawn_child("scout", CancelToken::new()).unwrap();
@@ -91,7 +91,7 @@ fn more_children_than_the_per_parent_cap_is_refused() {
         ..SubagentLimits::new()
     };
     let registry = AgentRegistry::new(limits);
-    let root = registry.root();
+    let root = registry.new_tree();
     let _s1 = root.spawn_child("scout", CancelToken::new()).unwrap();
     let _c1 = &_s1.node;
     let _s2 = root.spawn_child("scout", CancelToken::new()).unwrap();
@@ -121,7 +121,7 @@ fn the_process_wide_cap_is_refused_across_two_parents() {
         ..SubagentLimits::new()
     };
     let registry = AgentRegistry::new(limits);
-    let root = registry.root();
+    let root = registry.new_tree();
     // Two separate parents, each holding one live child. That is three live
     // agents once we add the two parents? No: the root does not count until it
     // is spawned. Build two sibling parents under the root, then a child of each.
@@ -155,7 +155,7 @@ fn a_finished_child_frees_its_slot() {
         ..SubagentLimits::new()
     };
     let registry = AgentRegistry::new(limits);
-    let root = registry.root();
+    let root = registry.new_tree();
     {
         let _slot = root.spawn_child("scout", CancelToken::new()).unwrap();
         let _child = &_slot.node;

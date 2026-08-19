@@ -57,8 +57,8 @@ async fn main() {
 
     // Reserve the child in the tree. This hands back the handle's queue, and the
     // child must read that same queue or a steer would vanish.
-    let spawn = registry
-        .root()
+    let tree = registry.new_tree();
+    let spawn = tree
         .spawn_child("scout", parent_cancel.child())
         .expect("the root may spawn one child");
     let child_id = spawn.node.id();
@@ -82,7 +82,7 @@ async fn main() {
     .with_queue(spawn.queue());
 
     println!("1. the child is registered and addressable");
-    let live = registry.live();
+    let live = registry.live_under(&tree);
     assert_eq!(live.len(), 1, "the child must appear in the live list");
     println!(
         "   live: id {} agent {} depth {}",
@@ -129,7 +129,7 @@ async fn main() {
     let mut waited = 0;
     loop {
         let handle = registry
-            .handle(child_id)
+            .descendant(&tree, child_id)
             .expect("the child is still registered");
         if handle.progress().turns >= 1 {
             break;
@@ -142,7 +142,7 @@ async fn main() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let handle = registry.handle(child_id).expect("still live");
+    let handle = registry.descendant(&tree, child_id).expect("still live");
     println!("   the child is on turn {}", handle.progress().turns);
     let position = handle
         .steer(vec![ContentBlock::Text {
@@ -174,7 +174,7 @@ async fn main() {
 
     println!("5. the handle leaves the live list when the child finishes");
     // The reservation drops with the task, so the handle goes with it.
-    let still_live = registry.live().len();
+    let still_live = registry.live_under(&tree).len();
     println!("   live children now: {still_live}");
 
     println!("\nEvery step held. Steering a running subagent works.");

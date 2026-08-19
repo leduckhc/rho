@@ -18,12 +18,12 @@ fn registry() -> AgentRegistry {
 #[test]
 fn a_spawned_child_is_listed_as_live() {
     let registry = registry();
-    let root = registry.root();
+    let root = registry.new_tree();
     let parent_cancel = CancelToken::new();
 
     let spawn = root.spawn_child("scout", parent_cancel.child()).unwrap();
 
-    let live = registry.live();
+    let live = registry.live_under(&root);
     assert_eq!(live.len(), 1, "a spawned child must be addressable");
     assert_eq!(live[0].agent, "scout");
     assert_eq!(live[0].id, spawn.node.id());
@@ -33,17 +33,17 @@ fn a_spawned_child_is_listed_as_live() {
 #[test]
 fn a_finished_child_is_no_longer_listed() {
     let registry = registry();
-    let root = registry.root();
+    let root = registry.new_tree();
     let cancel = CancelToken::new();
 
     {
         let _spawn = root.spawn_child("scout", cancel.child()).unwrap();
-        assert_eq!(registry.live().len(), 1);
+        assert_eq!(registry.live_under(&root).len(), 1);
     }
     // The slot dropped, so the handle goes with it. A registry that kept a dead
     // child would leak, and it would hand out a handle that cancels nothing.
     assert!(
-        registry.live().is_empty(),
+        registry.live_under(&root).is_empty(),
         "a finished child must leave the live list"
     );
 }
@@ -53,18 +53,18 @@ fn cancelling_one_child_leaves_its_sibling_running() {
     // This is the capability the whole change exists for. A fan-out runs several
     // siblings, and one of them may need to stop.
     let registry = registry();
-    let root = registry.root();
+    let root = registry.new_tree();
     let parent = CancelToken::new();
 
     let first = root.spawn_child("scout", parent.child()).unwrap();
     let second = root.spawn_child("greedy", parent.child()).unwrap();
 
     assert!(
-        registry.cancel(first.node.id()),
+        registry.cancel_descendant(&root, first.node.id()),
         "cancelling a live child must report success"
     );
 
-    let live = registry.live();
+    let live = registry.live_under(&root);
     let first_handle = live.iter().find(|h| h.id == first.node.id()).unwrap();
     let second_handle = live.iter().find(|h| h.id == second.node.id()).unwrap();
     assert!(first_handle.is_cancelled(), "the named child must stop");
@@ -83,7 +83,7 @@ fn cancelling_an_unknown_id_reports_false() {
     // A caller may name a child that already finished. That is a result, not a
     // fault, so the caller can say so and continue.
     let registry = registry();
-    let root = registry.root();
+    let root = registry.new_tree();
     let spawn = root
         .spawn_child("scout", CancelToken::new().child())
         .unwrap();
@@ -91,7 +91,7 @@ fn cancelling_an_unknown_id_reports_false() {
     drop(spawn);
 
     assert!(
-        !registry.cancel(id),
+        !registry.cancel_descendant(&root, id),
         "cancelling a child that already finished must report false"
     );
 }
@@ -100,7 +100,7 @@ fn cancelling_an_unknown_id_reports_false() {
 fn cancelling_the_parent_still_cancels_every_child() {
     // The old guarantee must survive the new one.
     let registry = registry();
-    let root = registry.root();
+    let root = registry.new_tree();
     let parent = CancelToken::new();
 
     let first = root.spawn_child("scout", parent.child()).unwrap();
@@ -109,7 +109,7 @@ fn cancelling_the_parent_still_cancels_every_child() {
     parent.cancel();
 
     assert!(
-        registry.live().iter().all(|h| h.is_cancelled()),
+        registry.live_under(&root).iter().all(|h| h.is_cancelled()),
         "a parent cancel must reach every live child"
     );
     let _ = (first, second);
@@ -119,13 +119,13 @@ fn cancelling_the_parent_still_cancels_every_child() {
 fn a_handle_reports_the_progress_its_child_publishes() {
     // A frontend needs to read a running child without touching its transcript.
     let registry = registry();
-    let root = registry.root();
+    let root = registry.new_tree();
     let spawn = root
         .spawn_child("scout", CancelToken::new().child())
         .unwrap();
 
     assert_eq!(
-        registry.live()[0].progress().turns,
+        registry.live_under(&root)[0].progress().turns,
         0,
         "a fresh child has run no turn"
     );
@@ -136,7 +136,7 @@ fn a_handle_reports_the_progress_its_child_publishes() {
     };
     spawn.publish(AgentProgress { turns: 3, usage });
 
-    let seen = registry.live()[0].progress();
+    let seen = registry.live_under(&root)[0].progress();
     assert_eq!(
         seen.turns, 3,
         "the handle must read the published turn count"
@@ -149,11 +149,11 @@ async fn a_cancelled_child_token_resolves_for_a_waiter() {
     // A per-child cancel must wake whatever awaits that child, or the child keeps
     // burning tokens after a caller asked it to stop.
     let registry = registry();
-    let root = registry.root();
+    let root = registry.new_tree();
     let spawn = root
         .spawn_child("scout", CancelToken::new().child())
         .unwrap();
-    let token = registry.live()[0].cancel_token();
+    let token = registry.live_under(&root)[0].cancel_token();
 
     let waiter = tokio::spawn(async move { token.cancelled().await });
     for _ in 0..16 {
@@ -161,7 +161,7 @@ async fn a_cancelled_child_token_resolves_for_a_waiter() {
     }
     assert!(!waiter.is_finished(), "the waiter must park first");
 
-    assert!(registry.cancel(spawn.node.id()));
+    assert!(registry.cancel_descendant(&root, spawn.node.id()));
     let woke = tokio::time::timeout(Duration::from_secs(5), waiter).await;
     assert!(
         woke.is_ok(),
@@ -225,12 +225,12 @@ fn a_handle_and_its_child_share_one_queue() {
     // The whole feature turns on this. If the handle and the child hold different
     // queues, a steer pushes into a queue nobody drains, and the message vanishes.
     let registry = registry();
-    let root = registry.root();
+    let root = registry.new_tree();
     let spawn = root
         .spawn_child("scout", CancelToken::new().child())
         .unwrap();
 
-    let handle = registry.live().into_iter().next().unwrap();
+    let handle = registry.live_under(&root).into_iter().next().unwrap();
     handle
         .steer(vec![rho_core::ContentBlock::Text {
             text: "look at parser.rs instead".to_string(),
@@ -256,12 +256,12 @@ fn a_handle_and_its_child_share_one_queue() {
 #[test]
 fn steering_one_child_does_not_reach_its_sibling() {
     let registry = registry();
-    let root = registry.root();
+    let root = registry.new_tree();
     let parent = CancelToken::new();
     let first = root.spawn_child("scout", parent.child()).unwrap();
     let second = root.spawn_child("greedy", parent.child()).unwrap();
 
-    let live = registry.live();
+    let live = registry.live_under(&root);
     let first_handle = live.iter().find(|h| h.id == first.node.id()).unwrap();
     first_handle
         .steer(vec![rho_core::ContentBlock::Text {
@@ -280,11 +280,11 @@ fn steering_one_child_does_not_reach_its_sibling() {
 #[test]
 fn a_full_child_queue_is_a_typed_error_and_not_a_silent_drop() {
     let registry = registry();
-    let root = registry.root();
+    let root = registry.new_tree();
     let spawn = root
         .spawn_child("scout", CancelToken::new().child())
         .unwrap();
-    let handle = registry.live().into_iter().next().unwrap();
+    let handle = registry.live_under(&root).into_iter().next().unwrap();
 
     let text = || {
         vec![rho_core::ContentBlock::Text {
@@ -318,8 +318,8 @@ fn one_tree_cannot_cancel_another_trees_child() {
     // each run built its own registry and no child held a control tool. That is a
     // boundary enforced by wiring, not by the contract. See D-a-caller-addresses-only-its-own.
     let registry = registry();
-    let victim_root = registry.root();
-    let attacker_root = registry.root();
+    let victim_root = registry.new_tree();
+    let attacker_root = registry.new_tree();
 
     let victim = victim_root
         .spawn_child("scout", CancelToken::new().child())
@@ -336,7 +336,7 @@ fn one_tree_cannot_cancel_another_trees_child() {
         "another tree must not cancel this child"
     );
     assert!(
-        !registry.live()[0].is_cancelled(),
+        !registry.live_under(&victim_root)[0].is_cancelled(),
         "the victim must still be running"
     );
 
@@ -355,7 +355,7 @@ fn a_grandchild_is_addressable_by_its_ancestor() {
     // Descendancy, not parenthood. A root must reach any depth below it, or a fan-out
     // of a fan-out becomes unmanageable.
     let registry = registry();
-    let root = registry.root();
+    let root = registry.new_tree();
     let child = root
         .spawn_child("scout", CancelToken::new().child())
         .unwrap();
@@ -379,8 +379,8 @@ fn a_grandchild_is_addressable_by_its_ancestor() {
 #[test]
 fn live_under_lists_only_the_callers_own_descendants() {
     let registry = registry();
-    let mine = registry.root();
-    let theirs = registry.root();
+    let mine = registry.new_tree();
+    let theirs = registry.new_tree();
     let _a = mine
         .spawn_child("scout", CancelToken::new().child())
         .unwrap();
@@ -391,11 +391,13 @@ fn live_under_lists_only_the_callers_own_descendants() {
     let listed = registry.live_under(&mine);
     assert_eq!(listed.len(), 1, "only my own child is listed");
     assert_eq!(listed[0].agent, "scout");
+    let theirs_listed = registry.live_under(&theirs);
     assert_eq!(
-        registry.live().len(),
-        2,
-        "the process-wide list still shows both, for a host that owns the process"
+        theirs_listed.len(),
+        1,
+        "and the other tree sees only its own child, never mine"
     );
+    assert_eq!(theirs_listed[0].agent, "greedy");
 }
 
 #[tokio::test]
@@ -407,11 +409,11 @@ async fn a_handle_reports_progress_while_the_child_still_runs() {
     use rho_core::{AgentProgress, Usage};
 
     let registry = registry();
-    let root = registry.root();
+    let root = registry.new_tree();
     let spawn = root
         .spawn_child("scout", CancelToken::new().child())
         .unwrap();
-    let handle = registry.live().into_iter().next().unwrap();
+    let handle = registry.live_under(&root).into_iter().next().unwrap();
 
     // Stand in for the child: publish each turn as it starts.
     for turn in 1..=3u32 {
@@ -433,7 +435,7 @@ fn a_finished_report_is_found_by_its_own_id() {
     // with the most recent sibling's report whatever id was asked for. Answering with
     // another child's work is worse than answering nothing.
     let registry = registry();
-    let root = registry.root();
+    let root = registry.new_tree();
     let first = root
         .spawn_child("scout", CancelToken::new().child())
         .unwrap();

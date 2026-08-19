@@ -256,7 +256,7 @@ fn the_process_wide_cap_holds_when_two_threads_race() {
             let granted = Arc::clone(&granted);
             let gate = Arc::clone(&gate);
             handles.push(std::thread::spawn(move || {
-                let node = registry.root();
+                let node = registry.new_tree();
                 while !gate.load(Ordering::SeqCst) {
                     std::hint::spin_loop();
                 }
@@ -294,7 +294,7 @@ fn the_per_parent_cap_holds_when_two_threads_race() {
             ..rho_core::SubagentLimits::new()
         });
         // One shared parent, so the per-parent cap is the binding one.
-        let parent = Arc::new(registry.root());
+        let parent = Arc::new(registry.new_tree());
         let granted = Arc::new(AtomicUsize::new(0));
         let gate = Arc::new(AtomicBool::new(false));
         let mut handles = Vec::new();

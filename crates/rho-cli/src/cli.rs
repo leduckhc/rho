@@ -587,7 +587,7 @@ mod tests {
 
         // Prove the shape end to end on the real registry, not on the number alone.
         let registry = rho_core::AgentRegistry::new(limits);
-        let root = registry.root();
+        let root = registry.new_tree();
         let spawn = root
             .spawn_child("scout", rho_core::CancelToken::new())
             .expect("the root must be able to spawn one child");

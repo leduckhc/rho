@@ -180,7 +180,7 @@ pub async fn load(request: LoadRequest) -> (Vec<Arc<dyn Tool>>, Subagents) {
 
 /// The root of this session's spawn tree.
 fn root_node(registry: &AgentRegistry) -> AgentNode {
-    registry.root()
+    registry.new_tree()
 }
 
 #[cfg(test)]

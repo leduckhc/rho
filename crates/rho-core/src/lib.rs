@@ -61,7 +61,5 @@ pub use tool::{
     AllowAllPolicy, ApprovalDecision, ApprovalPolicy, ReadOnlyPolicy, Tool, ToolContext, ToolError,
     ToolKind, ToolOutput, ToolRegistry, confine,
 };
-pub use transcript::{
-    TranscriptBody, TranscriptEntry, TranscriptWriter, session_transcript_dir, transcript_path,
-};
+pub use transcript::{TranscriptBody, TranscriptEntry, TranscriptWriter, session_transcript_dir};
 pub use usage::{StopReason, Usage};

@@ -131,7 +131,7 @@ fn spawn_env(
     let mut definitions = HashMap::new();
     definitions.insert(def.name.clone(), def);
     Arc::new(SpawnEnv {
-        node: registry.root(),
+        node: registry.new_tree(),
         definitions,
         parent_config: SessionConfig::new(
             "parent-model",
@@ -160,7 +160,7 @@ fn hanging_env(dir: &std::path::Path) -> Arc<SpawnEnv> {
     let mut definitions = HashMap::new();
     definitions.insert(def.name.clone(), def);
     Arc::new(SpawnEnv {
-        node: registry.root(),
+        node: registry.new_tree(),
         definitions,
         parent_config: SessionConfig::new(
             "parent-model",
@@ -409,7 +409,7 @@ fn fanout_env(dir: &std::path::Path, max_children: usize) -> Arc<SpawnEnv> {
     let mut definitions = HashMap::new();
     definitions.insert(def.name.clone(), def);
     Arc::new(SpawnEnv {
-        node: registry.root(),
+        node: registry.new_tree(),
         definitions,
         parent_config: SessionConfig::new(
             "parent-model",
@@ -826,7 +826,7 @@ async fn cancel_agent_stops_one_child_and_leaves_its_sibling() {
         .unwrap();
     assert!(!output.is_error);
 
-    let live = env.node.registry().live();
+    let live = env.node.registry().live_under(&env.node);
     let first_handle = live.iter().find(|h| h.id == first.node.id()).unwrap();
     let second_handle = live.iter().find(|h| h.id == second.node.id()).unwrap();
     assert!(first_handle.is_cancelled(), "the named child must stop");
@@ -909,7 +909,7 @@ async fn steer_agent_cannot_reach_another_sessions_child() {
         vec!["read".to_string()],
     );
     // A second session in the same process, sharing the registry.
-    let theirs_root = mine.node.registry().root();
+    let theirs_root = mine.node.registry().new_tree();
     let victim = theirs_root
         .spawn_child("scout", rho_core::CancelToken::new())
         .unwrap();

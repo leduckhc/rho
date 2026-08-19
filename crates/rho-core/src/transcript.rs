@@ -149,11 +149,6 @@ impl TranscriptWriter {
     }
 }
 
-/// Construct the standard transcript path. On Unix, this is `/tmp/rho-transcripts-{pid}/{agent-id}.jsonl`.
-pub fn transcript_path(agent_id: impl std::fmt::Display) -> PathBuf {
-    session_transcript_dir(std::process::id().to_string()).join(format!("{agent_id}.jsonl"))
-}
-
 /// The directory that holds one session's child transcripts.
 ///
 /// It is under the system temp directory, not under the session root. A transcript
@@ -193,9 +188,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn path_uses_temp_dir() {
-        let path = transcript_path("test");
+    fn a_session_directory_lives_under_the_temp_root() {
+        let path = session_transcript_dir("s1");
         assert!(path.to_string_lossy().contains("rho-transcripts"));
+        assert!(path.ends_with("tasks"), "got {path:?}");
     }
 
     #[tokio::test]

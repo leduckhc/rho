@@ -535,14 +535,13 @@ impl AgentRegistry {
         self.inner.live_total.load(Ordering::SeqCst)
     }
 
-    /// Every live child in the process, in id order.
+    /// Every live child in the process, in id order. Private on purpose.
     ///
-    /// **Process-wide, and unscoped.** It is for a host that owns the process. A tool
-    /// must use [`AgentRegistry::live_under`], because a tool acts for one session and
-    /// must not see another session's children.
-    ///
-    /// The list holds no transcript, so reading it costs the parent no context.
-    pub fn live(&self) -> Vec<LiveAgent> {
+    /// A caller acts for one tree, so it gets [`AgentRegistry::live_under`]. This view
+    /// used to be public behind a doc comment that said "a tool must use the scoped
+    /// one", and a doc comment is not a boundary: the `agent_status` tool reached for
+    /// this one first. See decision D-a-caller-addresses-only-its-own.
+    fn live(&self) -> Vec<LiveAgent> {
         let live = self
             .inner
             .live
@@ -590,36 +589,16 @@ impl AgentRegistry {
         }
     }
 
-    /// The handle for one live child, if it is still running.
+    /// The handle for one live child anywhere in the process. Private on purpose.
     ///
-    /// **Process-wide, and unscoped.** It is for a host that owns the whole process,
-    /// such as a terminal frontend rendering every session. A tool must use
-    /// [`AgentRegistry::descendant`] instead, because a tool acts for one session.
-    pub fn handle(&self, id: AgentId) -> Option<LiveAgent> {
+    /// [`AgentRegistry::descendant`] is the scoped form every caller uses.
+    fn handle(&self, id: AgentId) -> Option<LiveAgent> {
         self.inner
             .live
             .lock()
             .expect("the live agent lock is poisoned")
             .get(&id.0)
             .cloned()
-    }
-
-    /// Cancel one child anywhere in the process, and only that child.
-    ///
-    /// **Process-wide, and unscoped.** A tool must use
-    /// [`AgentRegistry::cancel_descendant`]. This one is for a host that owns the
-    /// process, for example to stop everything on shutdown.
-    ///
-    /// It returns false when no live child holds that id, which happens whenever the
-    /// child finished first. That is a result, not a fault.
-    pub fn cancel(&self, id: AgentId) -> bool {
-        match self.handle(id) {
-            Some(handle) => {
-                handle.cancel();
-                true
-            }
-            None => false,
-        }
     }
 
     /// Remember a finished child's report, so a parent can still read it.
@@ -700,8 +679,16 @@ impl AgentRegistry {
         AgentId(self.inner.next_id.fetch_add(1, Ordering::SeqCst))
     }
 
-    /// The root node of a spawn tree. Depth 0, no ancestors, no parent.
-    pub fn root(&self) -> AgentNode {
+    /// Start a new spawn tree, and return its root node.
+    ///
+    /// **Each call makes a new tree**, with a fresh id, no ancestors, and depth 0. It
+    /// is not an accessor for one shared root, and the old name `root` read as if it
+    /// were. One session calls this once and keeps the node.
+    ///
+    /// Two calls give two unrelated trees inside one registry, which is what makes a
+    /// cross-tree ownership test possible, and what
+    /// D-a-caller-addresses-only-its-own has to defend against.
+    pub fn new_tree(&self) -> AgentNode {
         AgentNode {
             id: self.allocate_id(),
             depth: 0,
