@@ -6,6 +6,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream;
@@ -42,6 +43,27 @@ impl Provider for ScriptedProvider {
     ) -> Result<ProviderStream, ProviderError> {
         let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+    }
+}
+
+/// A provider that never yields an event, so a child reaches its timeout.
+///
+/// A test needs this to cover the timeout path. An empty script fails fast
+/// instead, which is a different branch, and a test that used it passed while the
+/// cancel bug was live. See decision D-two-weak-tests.
+struct HangingProvider;
+
+#[async_trait]
+impl Provider for HangingProvider {
+    fn id(&self) -> &str {
+        "hanging"
+    }
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+        _cancel: CancelToken,
+    ) -> Result<ProviderStream, ProviderError> {
+        Ok(Box::pin(stream::pending()))
     }
 }
 
@@ -120,6 +142,33 @@ fn spawn_env(
         hooks: Arc::new(HookChain::new()),
         tools: Arc::new(FakeToolFactory {
             parent: parent_tools,
+        }),
+        transcript_dir: dir.to_path_buf(),
+    })
+}
+
+/// An env whose child hangs and whose timeout is short.
+fn hanging_env(dir: &std::path::Path) -> Arc<SpawnEnv> {
+    let limits = SubagentLimits {
+        child_timeout: Duration::from_millis(50),
+        ..SubagentLimits::new()
+    };
+    let registry = AgentRegistry::new(limits);
+    let def = definition(dir, Some(vec!["read".to_string()]));
+    let mut definitions = HashMap::new();
+    definitions.insert(def.name.clone(), def);
+    Arc::new(SpawnEnv {
+        node: registry.root(),
+        definitions,
+        parent_config: SessionConfig::new(
+            "parent-model",
+            dir.to_path_buf(),
+            Arc::new(AllowAllPolicy),
+        ),
+        provider: Arc::new(HangingProvider),
+        hooks: Arc::new(HookChain::new()),
+        tools: Arc::new(FakeToolFactory {
+            parent: vec!["read".to_string()],
         }),
         transcript_dir: dir.to_path_buf(),
     })
@@ -210,4 +259,94 @@ async fn an_unknown_agent_name_is_a_result_not_a_fault() {
         other => panic!("expected text, got {other:?}"),
     };
     assert!(text.contains("ghost"), "{text}");
+}
+
+#[tokio::test]
+async fn the_schema_offers_only_the_agents_that_loaded() {
+    // A live Bedrock run showed the model inventing three agent names, because
+    // the schema took a free-text string and named no choice. The `enum` is what
+    // stops the guess. See `docs/verification/subagents-bedrock.md`.
+    let dir = tempfile::tempdir().unwrap();
+    let env = spawn_env(
+        dir.path(),
+        vec![text_turn("ok")],
+        Some(vec!["read".to_string()]),
+        vec!["read".to_string()],
+    );
+    let tool = SpawnAgentTool::new(env);
+
+    let schema = tool.input_schema();
+    let choices = schema["properties"]["agent"]["enum"]
+        .as_array()
+        .expect("the agent property must offer an enum of the loaded names");
+    assert_eq!(
+        choices,
+        &vec![serde_json::json!("scout")],
+        "the enum must hold exactly the loaded agent names"
+    );
+}
+
+#[tokio::test]
+async fn the_description_carries_each_agent_purpose() {
+    // `SPEC-subagents` section 5 requires a `description` because "the model
+    // reads this to choose". It only reads it if the description reaches the
+    // request, and it did not before this test.
+    let dir = tempfile::tempdir().unwrap();
+    let env = spawn_env(
+        dir.path(),
+        vec![text_turn("ok")],
+        Some(vec!["read".to_string()]),
+        vec!["read".to_string()],
+    );
+    let tool = SpawnAgentTool::new(env);
+
+    let described = tool.description();
+    assert!(
+        described.contains("scout"),
+        "the description must name the agent, got: {described}"
+    );
+    assert!(
+        described.contains("recon."),
+        "the description must carry the definition's own description, got: {described}"
+    );
+}
+
+#[tokio::test]
+async fn a_timed_out_child_reports_its_outcome_and_leaves_the_parent_live() {
+    // A live run showed the worst defect of the sweep: the child shared the
+    // parent's cancel token, so a child timeout cancelled the parent session and
+    // the run ended with exit 0 and no answer. The tool also dropped
+    // `report.outcome`, so a timed-out child returned an empty string.
+    // See docs/verification/subagents-bedrock.md.
+    let dir = tempfile::tempdir().unwrap();
+    let tool = SpawnAgentTool::new(hanging_env(dir.path()));
+
+    let parent_cancel = rho_core::CancelToken::new();
+    let mut context = ctx(dir.path().to_path_buf());
+    context.cancel = parent_cancel.clone();
+
+    let output = tool
+        .execute(
+            serde_json::json!({ "agent": "scout", "prompt": "do the work" }),
+            context,
+        )
+        .await
+        .expect("a child failure is a result, not a fault");
+
+    let text = match &output.content[0] {
+        rho_core::ContentBlock::Text { text } => text.clone(),
+        other => panic!("expected text, got {other:?}"),
+    };
+    assert!(
+        !text.trim().is_empty(),
+        "a failed child must return something the model can act on, got an empty string"
+    );
+    assert!(
+        text.contains("scout"),
+        "the note must name the agent, got: {text}"
+    );
+    assert!(
+        !parent_cancel.is_cancelled(),
+        "a child ending must never cancel the parent session"
+    );
 }

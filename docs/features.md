@@ -165,7 +165,24 @@ and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
 | F-steer-command | Steer command | The client sends a steering message while the agent is running. The message delivers after the current tool calls finish. | `rho-acp` | `planned` | Same protocol extension point as F-prompt-command. |
 | F-abort-command | Abort command | The client sends a `session/cancel` notification. rho cancels the current turn and responds to `session/prompt` with `stopReason: cancelled`. | `rho-acp` | `planned` | Same protocol extension point as F-prompt-command. |
 | F-session-commands-over-acp | Session commands over ACP | The client creates new sessions, switches sessions, and forks sessions over the protocol. | `rho-acp` | `planned` | Same protocol extension point as F-prompt-command. |
-| F-extension-ui-sub-protocol | Extension UI sub-protocol | An ACP client responds to `extension_ui_request` events for select, confirm, and input dialogs from hooks. | `rho-acp` | `planned` | Clients that do not implement the sub-protocol receive a default value after a timeout. |
+| F-extension-ui-sub-protocol | Permission and dialog requests | An ACP client answers `session/request_permission` for an approval, and the dialog requests a hook raises. | `rho-acp` | `planned` | Clients that do not implement the sub-protocol receive a default value after a timeout. The JSONL frontend has its own row, F-jsonl-dialog-sub-protocol. |
+
+---
+
+## Frontends — JSONL
+
+`docs/specs/20260819-102749-SPEC-jsonl-frontend.md` owns these rows. This protocol lands before
+ACP, because it is small. ACP stays the interop target and arrives as a bridge. See
+decision D-jsonl-before-acp.
+
+| ID | Name | Outcome | Owning crate | Status | Extension point |
+|----|------|---------|--------------|--------|-----------------|
+| F-jsonl-frontend | JSONL frontend | A client drives rho headlessly over stdin and stdout, one JSON object per line. Any process that reads and writes lines can embed rho. | `rho-jsonl` | `planned` | `rho-jsonl` is an optional crate. Any language implements a client. The protocol is documented. |
+| F-jsonl-prompt | JSONL prompt command | The client sends a `prompt` command. The agent streams events. The run ends with a settled event. | `rho-jsonl` | `planned` | The protocol is the extension point. Any language can implement a client. |
+| F-jsonl-steer | JSONL steer command | The client sends a `steer` command while the agent runs. The message delivers after the current tool calls finish. | `rho-jsonl` | `planned` | Same protocol extension point as F-jsonl-prompt. |
+| F-jsonl-abort | JSONL abort command | The client sends an `abort` command. rho cancels the current turn and settles with a cancelled stop reason. | `rho-jsonl` | `planned` | Same protocol extension point as F-jsonl-prompt. |
+| F-jsonl-session-commands | JSONL session commands | The client reads state, switches models, starts a session, and lists messages and commands over the protocol. | `rho-jsonl` | `planned` | Same protocol extension point as F-jsonl-prompt. |
+| F-jsonl-dialog-sub-protocol | JSONL dialog sub-protocol | The agent asks the client for a select, a confirm, an input, or a notify. A dialog blocks until the client answers. The agent side owns the timeout. | `rho-jsonl` | `planned` | A client that answers no dialog receives the default value after the timeout. |
 
 ---
 
@@ -219,6 +236,16 @@ restates them. See `F-lifecycle-hook-points` and `F-slash-commands` above.
 | F-salvage-and-retry-cap | Salvage and retry cap | A child that dies without a report yields a failed result. A re-delegated task stops at the retry cap. | `rho-core` | `sprint-2` | A caller uses `RetryLedger`. |
 | F-agent-events | Agent events | The parent stream shows a child through three events: spawned, progressed, and finished. | `rho-core` | `sprint-2` | New `AgentEvent` variants. A frontend renders them. |
 | F-agent-definitions | Agent definitions | An agent is a markdown file with frontmatter. A project definition is withheld until the project is trusted. | `rho-skills` | `sprint-2` | Author a definition file. The loader is shared with skills. |
+
+`docs/specs/20260819-102750-SPEC-agent-tasks.md` owns the four rows below. A child carries a
+task, and rho verifies the result. See decision D-a-child-does-not-grade-itself.
+
+| ID | Name | Outcome | Owning crate | Status | Extension point |
+|----|------|---------|--------------|--------|-----------------|
+| F-agent-task | Agent task | A child carries a goal, its declared artifacts, and its acceptance checks, not a bare prompt. | `rho-core` | `sprint-2` | Build an `AgentTask`. |
+| F-artifact-spec | Artifact spec | A deliverable rho can check: a file, a command that exits zero, or a named kind. A new kind is a new variant or a registered checker. | `rho-core` | `sprint-2` | Register an `ArtifactChecker` for a named kind. |
+| F-acceptance-gate | Acceptance gate | rho verifies the artifacts and runs the checks after the child stops. A child cannot certify its own work. | `rho-core` | `sprint-2` | Implement the `Gate` trait. |
+| F-unverified-child-claims | Unverified child claims | The child reports its open questions and what it did not check. These stay separate from the gate verdict, and they are never proof. | `rho-core` | `sprint-2` | No extension point. This is a security boundary. |
 
 ## MCP client
 

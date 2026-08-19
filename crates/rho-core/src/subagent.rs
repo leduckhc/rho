@@ -229,7 +229,8 @@ pub enum AgentOutcome {
 pub enum SubagentError {
     #[error(
         "the depth limit is {limit} and this would be depth {attempted}. \
-         Do the work here, or ask the user to raise --max-agent-depth."
+         Do the work here. A subagent started from the rho command line holds no \
+         spawn tool, so it cannot delegate further."
     )]
     DepthExceeded { limit: u32, attempted: u32 },
     #[error(
@@ -645,8 +646,21 @@ fn cap_summary(mut summary: String) -> String {
 /// Write the transcript lines to disk. Return the path on success, `None` on
 /// failure. A failure to write a transcript must not fail the report, because the
 /// summary is the load-bearing result.
+///
+/// The parent directory is created first. The shipped caller writes into
+/// `<root>/.rho/agent-transcripts/`, and nothing else creates that directory, so
+/// without this every real run lost its transcript and only logged a warning.
 async fn write_transcript(path: Option<PathBuf>, lines: &[String]) -> Option<PathBuf> {
     let path = path?;
+    if let Some(parent) = path.parent()
+        && let Err(error) = tokio::fs::create_dir_all(parent).await
+    {
+        tracing::warn!(
+            path = %parent.display(),
+            "cannot create the child transcript directory: {error}"
+        );
+        return None;
+    }
     let body = lines.join("\n");
     match tokio::fs::write(&path, body).await {
         Ok(()) => Some(path),

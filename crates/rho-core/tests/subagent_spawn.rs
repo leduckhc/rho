@@ -68,7 +68,16 @@ fn depth_beyond_the_cap_is_refused_and_the_reason_names_the_limit() {
     let message = error.to_string();
     assert!(message.contains("depth limit is 2"), "{message}");
     assert!(message.contains("depth 3"), "{message}");
-    assert!(message.contains("--max-agent-depth"), "{message}");
+    // This assertion changed on purpose. It used to require the text
+    // `--max-agent-depth`, and that flag never existed, so the test pinned a
+    // refusal that sent the user after an impossible fix. A live sweep found it.
+    // See docs/verification/subagents-bedrock.md and decision D-cli-depth-is-zero.
+    // The refusal must still teach, so it now says what to do instead.
+    assert!(message.contains("Do the work here"), "{message}");
+    assert!(
+        !message.contains("--max-agent-depth"),
+        "the refusal must name no flag that cannot help: {message}"
+    );
 }
 
 #[test]
@@ -261,6 +270,46 @@ async fn a_child_transcript_never_enters_the_parent_context() {
     assert!(
         written.contains("probe"),
         "the transcript holds the tool call"
+    );
+}
+
+#[tokio::test]
+async fn a_transcript_writes_into_a_directory_that_does_not_exist_yet() {
+    // The shipped caller puts transcripts in `<root>/.rho/agent-transcripts/`, and
+    // nothing creates that directory. So every real run lost its transcript and
+    // only logged a warning. The test above passed against this bug, because a
+    // `tempdir` already exists. This test pins the real path shape.
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir
+        .path()
+        .join(".rho")
+        .join("agent-transcripts")
+        .join("agent-1.log");
+    assert!(
+        !transcript.parent().unwrap().exists(),
+        "the parent directory must be absent, or this test proves nothing"
+    );
+
+    let session = child_session(vec![text_turn("done")]);
+    let cancel = CancelToken::new();
+    let events = session.prompt(Vec::new(), cancel.clone());
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        Duration::from_secs(60),
+        Some(transcript.clone()),
+    )
+    .await;
+
+    assert_eq!(
+        report.transcript.as_deref(),
+        Some(transcript.as_path()),
+        "the report must name the transcript it wrote"
+    );
+    assert!(
+        transcript.exists(),
+        "the transcript must exist, so the missing parent directory was created"
     );
 }
 

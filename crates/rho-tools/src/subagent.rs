@@ -18,8 +18,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rho_core::AgentNode;
 use rho_core::{
-    AllowAllPolicy, ApprovalPolicy, BothPolicies, Context, HookChain, Provider, Session,
-    SessionConfig, Tool, ToolContext, ToolError, ToolKind, ToolOutput, ToolRegistry,
+    AgentOutcome, AllowAllPolicy, ApprovalPolicy, BothPolicies, Context, HookChain, Provider,
+    Session, SessionConfig, Tool, ToolContext, ToolError, ToolKind, ToolOutput, ToolRegistry,
     collect_report, narrow_sandbox,
 };
 use rho_skills::{AgentDefinition, load_agent_body};
@@ -71,12 +71,45 @@ struct SpawnArgs {
 /// The `spawn_agent` tool. It spawns a subagent and returns its summary.
 pub struct SpawnAgentTool {
     env: Arc<SpawnEnv>,
+    /// The tool description, with every agent and its purpose listed.
+    ///
+    /// Built once, because `Tool::description` returns a borrow. A definition
+    /// requires a `description` field so the model can choose an agent, and the
+    /// model can only read it if it reaches the request. See `SPEC-subagents`
+    /// section 5.
+    description: String,
+    /// The agent names, sorted. The schema offers these as an `enum`.
+    names: Vec<String>,
 }
 
 impl SpawnAgentTool {
     /// Build the tool from its environment.
     pub fn new(env: Arc<SpawnEnv>) -> Self {
-        Self { env }
+        let mut names: Vec<String> = env.definitions.keys().cloned().collect();
+        names.sort();
+
+        let mut description = String::from(
+            "Delegate a task to a subagent. The child does the work in a fresh \
+             conversation and returns only a summary, so the work stays out of your \
+             context. Choose one of these agents:",
+        );
+        for name in &names {
+            let purpose = env
+                .definitions
+                .get(name)
+                .map(|def| def.description.as_str())
+                .unwrap_or_default();
+            description.push_str("\n- ");
+            description.push_str(name);
+            description.push_str(": ");
+            description.push_str(purpose);
+        }
+
+        Self {
+            env,
+            description,
+            names,
+        }
     }
 }
 
@@ -86,9 +119,7 @@ impl Tool for SpawnAgentTool {
         "spawn_agent"
     }
     fn description(&self) -> &str {
-        "Delegate a task to a subagent. The child does the work in a fresh \
-         conversation and returns only a summary, so the work stays out of your \
-         context. Name an agent definition and give it a prompt."
+        &self.description
     }
     fn kind(&self) -> ToolKind {
         // Spawning runs code and can change state through the child's tools. It
@@ -97,10 +128,17 @@ impl Tool for SpawnAgentTool {
         ToolKind::Execute
     }
     fn input_schema(&self) -> serde_json::Value {
+        // The `enum` is the load-bearing part. Without it the model invents an
+        // agent name, and a live run proved it does: it named three agents that
+        // did not exist. See `docs/verification/subagents-bedrock.md`.
         serde_json::json!({
             "type": "object",
             "properties": {
-                "agent": { "type": "string", "description": "The agent definition name." },
+                "agent": {
+                    "type": "string",
+                    "enum": self.names,
+                    "description": "The agent definition name. Choose one of the listed values."
+                },
                 "prompt": { "type": "string", "description": "The work to delegate to the child." }
             },
             "required": ["agent", "prompt"]
@@ -178,9 +216,13 @@ impl Tool for SpawnAgentTool {
             Context::new(Some(body), Vec::new()),
         );
 
-        // The child runs under the parent's cancel token, so cancelling the
-        // parent cancels every descendant. See SPEC-subagents section 8.
-        let cancel = ctx.cancel.clone();
+        // The child runs under a **child** of the parent's token. Cancelling the
+        // parent cancels every descendant, and a child that hits its own timeout
+        // does not end its parent's run. Sharing one token gave the second
+        // behaviour: a live run showed a child timeout killing the whole session
+        // silently. See SPEC-subagents section 8 and
+        // `docs/verification/subagents-bedrock.md`.
+        let cancel = ctx.cancel.child();
         let transcript = env.transcript_dir.join(format!("{}.log", child_node.id()));
         let timeout = env.node.limits().child_timeout;
 
@@ -193,7 +235,32 @@ impl Tool for SpawnAgentTool {
 
         // The parent's context receives the summary and nothing else. A dropped
         // tool name is added as a short note, so a bad definition is visible.
-        let mut text = report.summary;
+        //
+        // The outcome is stated whenever it is not plain success. A timed-out or
+        // failed child left an empty summary, so the tool returned an empty
+        // string and the parent had nothing to act on. A failure must be a
+        // result the model can read. See decision D-measured-cost-and-cache.
+        let mut text = String::new();
+        match &report.outcome {
+            AgentOutcome::Done => {}
+            AgentOutcome::OutOfTurns => text.push_str(&format!(
+                "[the {} subagent used all {} of its turns. What follows is what it had.]\n\n",
+                report.agent, report.turns
+            )),
+            AgentOutcome::Canceled => text.push_str(&format!(
+                "[the {} subagent was cancelled, most likely by its {} second timeout, after {} \
+                 turn(s). Do the work here, or delegate a smaller piece.]\n\n",
+                report.agent,
+                timeout.as_secs(),
+                report.turns
+            )),
+            AgentOutcome::Failed { reason } => text.push_str(&format!(
+                "[the {} subagent failed after {} turn(s): {reason} Do the work here, or try a \
+                 different agent.]\n\n",
+                report.agent, report.turns
+            )),
+        }
+        text.push_str(&report.summary);
         if !intersection.dropped.is_empty() {
             text.push_str(&format!(
                 "\n\n[note: these requested tools were dropped because the parent does not hold \

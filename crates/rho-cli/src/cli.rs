@@ -77,6 +77,21 @@ pub struct Cli {
     #[arg(long = "skill", global = true, value_name = "PATH")]
     pub skills: Vec<PathBuf>,
 
+    /// How many children one agent may run at once. Defaults to 4.
+    ///
+    /// A refusal names this flag, so it has to exist.
+    #[arg(long, global = true, value_name = "COUNT")]
+    pub max_children_per_parent: Option<usize>,
+
+    /// How many agents may be live in the whole process. Defaults to 32.
+    ///
+    /// This protects the machine, where --max-children-per-parent protects one run.
+    #[arg(long, global = true, value_name = "COUNT")]
+    pub max_live_agents: Option<usize>,
+
+    /// How long a child may run before rho cancels it. Defaults to 600 seconds.
+    #[arg(long, global = true, value_name = "SECONDS")]
+    pub child_timeout_secs: Option<u64>,
     /// Do not search the skill directories. An explicit --skill still loads.
     #[arg(long, global = true)]
     pub no_skills: bool,
@@ -229,7 +244,7 @@ async fn build_session(
         provider: Arc::clone(&provider),
         hooks: Arc::clone(&hooks),
         parent_tools,
-        limits: rho_core::SubagentLimits::default(),
+        limits: subagent_limits(cli),
     })
     .await;
     if let Some(tool) = spawn_tool {
@@ -464,6 +479,35 @@ fn fail(error: anyhow::Error) -> i32 {
     EXIT_FAILURE
 }
 
+/// The subagent limits for this run, from the flags.
+///
+/// Every limit refusal in `rho-core` tells the user which flag to raise. The flags
+/// did not exist, so a refusal named something impossible. A live sweep found it.
+/// See `docs/verification/subagents-bedrock.md`.
+///
+/// `max_depth` is **not** a flag, and it is 1. `rho-cli` captures the parent tool
+/// set before `spawn_agent` joins it, so a child never holds a spawn tool and a
+/// grandchild cannot exist. Offering a depth flag would promise something the CLI
+/// cannot do. See decision D-cli-depth-is-zero.
+///
+/// It is 1 and not 0, because 0 forbids spawning altogether. The root session is
+/// depth 0, so a value of 0 refuses the very first child and the feature dies. A
+/// live run caught that after the unit tests passed.
+fn subagent_limits(cli: &Cli) -> rho_core::SubagentLimits {
+    let stated = rho_core::SubagentLimits::new();
+    rho_core::SubagentLimits {
+        max_depth: 1,
+        max_children_per_parent: cli
+            .max_children_per_parent
+            .unwrap_or(stated.max_children_per_parent),
+        max_live_total: cli.max_live_agents.unwrap_or(stated.max_live_total),
+        child_timeout: cli
+            .child_timeout_secs
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(stated.child_timeout),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,6 +516,70 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn subagent_limits_come_from_the_flags() {
+        // Every limit refusal in `rho-core` tells the user to raise a flag. Those
+        // flags did not exist, so the refusal taught something impossible. A live
+        // sweep found it. See docs/verification/subagents-bedrock.md.
+        let cli = Cli::try_parse_from([
+            "rho",
+            "--provider",
+            "openrouter",
+            "--max-children-per-parent",
+            "2",
+            "--max-live-agents",
+            "7",
+            "--child-timeout-secs",
+            "30",
+        ])
+        .unwrap();
+        let limits = subagent_limits(&cli);
+        assert_eq!(limits.max_children_per_parent, 2);
+        assert_eq!(limits.max_live_total, 7);
+        assert_eq!(limits.child_timeout, std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn subagent_limits_default_to_the_stated_values() {
+        // The defaults stay where `SubagentLimits::new` states them, so a flag that
+        // is absent changes nothing. See decision D-no-four-argument-session-new.
+        let cli = Cli::try_parse_from(["rho", "--provider", "openrouter"]).unwrap();
+        let limits = subagent_limits(&cli);
+        let stated = rho_core::SubagentLimits::new();
+        assert_eq!(
+            limits.max_children_per_parent,
+            stated.max_children_per_parent
+        );
+        assert_eq!(limits.max_live_total, stated.max_live_total);
+        assert_eq!(limits.child_timeout, stated.child_timeout);
+    }
+
+    #[test]
+    fn a_cli_allows_one_level_of_delegation_and_no_more() {
+        // The CLI depth is 1, so the root may spawn a child and the child may not
+        // spawn a grandchild. It must never be 0: the root session is itself depth 0,
+        // so 0 refuses the first child and the whole feature dies. A live run caught
+        // exactly that, after these unit tests passed. See
+        // docs/verification/subagents-bedrock.md and decision D-cli-depth-is-zero.
+        let cli = Cli::try_parse_from(["rho", "--provider", "openrouter"]).unwrap();
+        let limits = subagent_limits(&cli);
+        assert_eq!(
+            limits.max_depth, 1,
+            "the root must be able to spawn a child"
+        );
+
+        // Prove the shape end to end on the real registry, not on the number alone.
+        let registry = rho_core::AgentRegistry::new(limits);
+        let root = registry.root();
+        let (child, _slot) = root
+            .spawn_child()
+            .expect("the root must be able to spawn one child");
+        assert!(
+            child.spawn_child().is_err(),
+            "a CLI child must not spawn a grandchild"
+        );
     }
 
     #[test]

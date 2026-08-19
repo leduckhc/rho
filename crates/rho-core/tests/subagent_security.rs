@@ -184,3 +184,24 @@ fn a_child_cannot_change_the_session_root() {
         "the child root is the parent root"
     );
 }
+
+#[test]
+fn a_depth_refusal_names_no_flag_that_cannot_help() {
+    // "Refusing must teach." The old message told the user to raise
+    // `--max-agent-depth`, and no such flag exists. `rho-cli` gives a child no
+    // spawn tool, so no flag can make a grandchild. A refusal must not send the
+    // user after an impossible fix. See docs/verification/subagents-bedrock.md.
+    let refusal = rho_core::SubagentError::DepthExceeded {
+        limit: 0,
+        attempted: 1,
+    };
+    let text = refusal.to_string();
+    assert!(
+        !text.contains("--max-agent-depth"),
+        "the refusal must not name a flag that does not exist, got: {text}"
+    );
+    assert!(
+        text.contains("Do the work here"),
+        "the refusal must still say what to do instead, got: {text}"
+    );
+}
