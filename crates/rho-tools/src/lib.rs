@@ -27,7 +27,7 @@ pub use list::ListTool;
 pub use progress::{PROGRESS_PREFIX, ProgressScan, scan_line};
 pub use read::ReadTool;
 pub use sandbox::{Backend, CommandPlan, SandboxUnavailable, detect_backend, plan};
-pub use subagent::{ChildToolFactory, SpawnAgentTool, SpawnEnv};
+pub use subagent::{ChildToolFactory, SpawnAgentTool, SpawnAgentsTool, SpawnEnv};
 pub use task::{TaskCancelTool, TaskTool};
 pub use write::WriteTool;
 

@@ -19,8 +19,8 @@ use async_trait::async_trait;
 use rho_core::AgentNode;
 use rho_core::{
     AgentOutcome, AllowAllPolicy, ApprovalPolicy, BothPolicies, Context, HookChain, Provider,
-    Session, SessionConfig, Tool, ToolContext, ToolError, ToolKind, ToolOutput, ToolRegistry,
-    collect_report, narrow_sandbox,
+    RetryLedger, Session, SessionConfig, Tool, ToolContext, ToolError, ToolKind, ToolOutput,
+    ToolRegistry, collect_report, narrow_sandbox,
 };
 use rho_skills::{AgentDefinition, load_agent_body};
 use serde::Deserialize;
@@ -57,6 +57,11 @@ pub struct SpawnEnv {
     pub tools: Arc<dyn ChildToolFactory>,
     /// The directory that holds child transcripts. One file per child.
     pub transcript_dir: PathBuf,
+    /// Counts how often the same work has died, so a poisoned task stops.
+    ///
+    /// jcode's reclaim cap. Without a caller this guard does nothing, and it had
+    /// no caller until a live sweep looked for one. See `SPEC-subagents` section 8.
+    pub retries: Arc<RetryLedger>,
 }
 
 /// Arguments for the `spawn_agent` tool.
@@ -151,129 +156,306 @@ impl Tool for SpawnAgentTool {
         ctx: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let args: SpawnArgs = parse_args(args)?;
-        let env = &self.env;
-
-        // Find the definition. A missing agent is a result, not a fault.
-        let Some(def) = env.definitions.get(&args.agent) else {
-            return Ok(error_result(format!(
-                "no agent named \"{}\" is defined. Check the agent name.",
-                args.agent
-            )));
-        };
-
-        // Reserve a slot in the tree. A refusal names the limit and what to do.
-        // The slot frees when it drops at the end of this call. A failed spawn is
-        // a result, so the model can choose again. See decision D-measured-cost-and-cache.
-        let (child_node, _slot) = match env.node.spawn_child() {
-            Ok(pair) => pair,
-            Err(refusal) => return Ok(error_result(refusal.to_string())),
-        };
-
-        // The sandbox may only narrow. A weaker request is refused.
-        let sandbox = match narrow_sandbox(env.parent_config.sandbox, def.sandbox) {
-            Ok(mode) => mode,
-            Err(refusal) => return Ok(error_result(refusal.to_string())),
-        };
-
-        // Intersect the child's tool request with the parent's set. A dropped
-        // name is reported to the caller, so a bad definition is visible.
-        let parent_tools = env.tools.parent_tool_names();
-        let intersection = def.resolve_tools(&parent_tools);
-        let child_registry = env.tools.build(&intersection.allowed);
-
-        // Compose the policy. The parent is always one conjunct, so the child can
-        // only be more restrictive. The definition names no policy, so the child
-        // conjunct allows all and the parent policy binds unchanged.
-        let approval: Arc<dyn ApprovalPolicy> = Arc::new(BothPolicies::new(
-            Arc::clone(&env.parent_config.approval),
-            Arc::new(AllowAllPolicy),
-        ));
-
-        // The model may be overridden by the definition. The root is inherited
-        // and never overridable. The turn cap is capped by the parent's.
-        let model = def
-            .model
-            .clone()
-            .unwrap_or_else(|| env.parent_config.model.clone());
-        let max_turns = def
-            .max_turns
-            .map(|requested| requested.min(env.parent_config.max_turns))
-            .unwrap_or(env.parent_config.max_turns);
-
-        let child_config =
-            SessionConfig::new(model, env.parent_config.session_root.clone(), approval)
-                .with_sandbox(sandbox)
-                .with_max_turns(max_turns);
-
-        // The body is the child's system prompt. It never enters the parent.
-        let body = load_agent_body(def).await.unwrap_or_default();
-
-        let child = Session::with_config(
-            child_config,
-            Arc::clone(&env.provider),
-            Arc::new(child_registry),
-            Arc::clone(&env.hooks),
-            Context::new(Some(body), Vec::new()),
-        );
-
-        // The child runs under a **child** of the parent's token. Cancelling the
-        // parent cancels every descendant, and a child that hits its own timeout
-        // does not end its parent's run. Sharing one token gave the second
-        // behaviour: a live run showed a child timeout killing the whole session
-        // silently. See SPEC-subagents section 8 and
-        // `docs/verification/subagents-bedrock.md`.
-        let cancel = ctx.cancel.child();
-        let transcript = env.transcript_dir.join(format!("{}.log", child_node.id()));
-        let timeout = env.node.limits().child_timeout;
-
-        let events = child.prompt(
-            vec![rho_core::ContentBlock::Text { text: args.prompt }],
-            cancel.clone(),
-        );
-        let report =
-            collect_report(def.name.clone(), events, cancel, timeout, Some(transcript)).await;
-
-        // The parent's context receives the summary and nothing else. A dropped
-        // tool name is added as a short note, so a bad definition is visible.
-        //
-        // The outcome is stated whenever it is not plain success. A timed-out or
-        // failed child left an empty summary, so the tool returned an empty
-        // string and the parent had nothing to act on. A failure must be a
-        // result the model can read. See decision D-measured-cost-and-cache.
-        let mut text = String::new();
-        match &report.outcome {
-            AgentOutcome::Done => {}
-            AgentOutcome::OutOfTurns => text.push_str(&format!(
-                "[the {} subagent used all {} of its turns. What follows is what it had.]\n\n",
-                report.agent, report.turns
-            )),
-            AgentOutcome::Canceled => text.push_str(&format!(
-                "[the {} subagent was cancelled, most likely by its {} second timeout, after {} \
-                 turn(s). Do the work here, or delegate a smaller piece.]\n\n",
-                report.agent,
-                timeout.as_secs(),
-                report.turns
-            )),
-            AgentOutcome::Failed { reason } => text.push_str(&format!(
-                "[the {} subagent failed after {} turn(s): {reason} Do the work here, or try a \
-                 different agent.]\n\n",
-                report.agent, report.turns
-            )),
-        }
-        text.push_str(&report.summary);
-        if !intersection.dropped.is_empty() {
-            text.push_str(&format!(
-                "\n\n[note: these requested tools were dropped because the parent does not hold \
-                 them: {}]",
-                intersection.dropped.join(", ")
-            ));
-        }
-        Ok(ToolOutput::text(text))
+        Ok(run_one_child(&self.env, &args.agent, &args.prompt, &ctx.cancel).await)
     }
 }
 
-/// A tool result that carries a plain-text reason for the model. A subagent
-/// failure is a result, not the end of the parent's run. See decision D-measured-cost-and-cache.
+/// Run one child to completion and return the text the parent should see.
+///
+/// Shared by `spawn_agent` and `spawn_agents`, so a fan-out and a single spawn
+/// cannot drift apart. Every refusal is a returned result, never an error, so a
+/// limit or a dead child lets the parent choose again.
+async fn run_one_child(
+    env: &Arc<SpawnEnv>,
+    agent: &str,
+    prompt: &str,
+    parent_cancel: &rho_core::CancelToken,
+) -> ToolOutput {
+    // Find the definition. A missing agent is a result, not a fault.
+    let Some(def) = env.definitions.get(agent) else {
+        return error_result(format!(
+            "no agent named \"{agent}\" is defined. Check the agent name."
+        ));
+    };
+
+    // Reserve a slot in the tree. A refusal names the limit and what to do.
+    // The slot frees when it drops at the end of this call. A failed spawn is
+    // a result, so the model can choose again. See decision D-measured-cost-and-cache.
+    let (child_node, _slot) = match env.node.spawn_child() {
+        Ok(pair) => pair,
+        Err(refusal) => return error_result(refusal.to_string()),
+    };
+
+    // The sandbox may only narrow. A weaker request is refused.
+    let sandbox = match narrow_sandbox(env.parent_config.sandbox, def.sandbox) {
+        Ok(mode) => mode,
+        Err(refusal) => return error_result(refusal.to_string()),
+    };
+
+    // Intersect the child's tool request with the parent's set. A dropped
+    // name is reported to the caller, so a bad definition is visible.
+    let parent_tools = env.tools.parent_tool_names();
+    let intersection = def.resolve_tools(&parent_tools);
+    let child_registry = env.tools.build(&intersection.allowed);
+
+    // Compose the policy. The parent is always one conjunct, so the child can
+    // only be more restrictive. The definition names no policy, so the child
+    // conjunct allows all and the parent policy binds unchanged.
+    let approval: Arc<dyn ApprovalPolicy> = Arc::new(BothPolicies::new(
+        Arc::clone(&env.parent_config.approval),
+        Arc::new(AllowAllPolicy),
+    ));
+
+    // The model may be overridden by the definition. The root is inherited
+    // and never overridable. The turn cap is capped by the parent's.
+    let model = def
+        .model
+        .clone()
+        .unwrap_or_else(|| env.parent_config.model.clone());
+    let max_turns = def
+        .max_turns
+        .map(|requested| requested.min(env.parent_config.max_turns))
+        .unwrap_or(env.parent_config.max_turns);
+
+    let child_config = SessionConfig::new(model, env.parent_config.session_root.clone(), approval)
+        .with_sandbox(sandbox)
+        .with_max_turns(max_turns);
+
+    // The body is the child's system prompt. It never enters the parent.
+    let body = load_agent_body(def).await.unwrap_or_default();
+
+    let child = Session::with_config(
+        child_config,
+        Arc::clone(&env.provider),
+        Arc::new(child_registry),
+        Arc::clone(&env.hooks),
+        Context::new(Some(body), Vec::new()),
+    );
+
+    // The child runs under a **child** of the parent's token. Cancelling the
+    // parent cancels every descendant, and a child that hits its own timeout
+    // does not end its parent's run. Sharing one token gave the second
+    // behaviour: a live run showed a child timeout killing the whole session
+    // silently. See SPEC-subagents section 8 and
+    // `docs/verification/subagents-bedrock.md`.
+    let cancel = parent_cancel.child();
+    let transcript = env.transcript_dir.join(format!("{}.log", child_node.id()));
+    let timeout = env.node.limits().child_timeout;
+
+    // Keep the work text, so a death can be keyed by the work and not only by
+    // the agent name. Two different tasks for one agent must not share a count.
+    let work = prompt.to_string();
+    let events = child.prompt(
+        vec![rho_core::ContentBlock::Text {
+            text: prompt.to_string(),
+        }],
+        cancel.clone(),
+    );
+    let report = collect_report(def.name.clone(), events, cancel, timeout, Some(transcript)).await;
+
+    // The parent's context receives the summary and nothing else. A dropped
+    // tool name is added as a short note, so a bad definition is visible.
+    //
+    // The outcome is stated whenever it is not plain success. A timed-out or
+    // failed child left an empty summary, so the tool returned an empty
+    // string and the parent had nothing to act on. A failure must be a
+    // result the model can read. See decision D-measured-cost-and-cache.
+    let mut text = String::new();
+    match &report.outcome {
+        AgentOutcome::Done => {}
+        AgentOutcome::OutOfTurns => text.push_str(&format!(
+            "[the {} subagent used all {} of its turns. What follows is what it had.]\n\n",
+            report.agent, report.turns
+        )),
+        // A child that did not finish counts as a death for the retry cap.
+        // The same work dying again and again must stop, or a poisoned task
+        // burns the whole budget. The key is the agent and the work, so a
+        // different task starts from zero.
+        AgentOutcome::Canceled | AgentOutcome::Failed { .. } => {
+            let key = format!("{}\u{1f}{}", agent, work);
+            if let Err(capped) = env.retries.record_death(&key) {
+                return error_result(capped.to_string());
+            }
+            match &report.outcome {
+                AgentOutcome::Canceled => text.push_str(&format!(
+                    "[the {} subagent was cancelled, most likely by its {} second timeout, \
+                         after {} turn(s). Do the work here, or delegate a smaller piece.]\n\n",
+                    report.agent,
+                    timeout.as_secs(),
+                    report.turns
+                )),
+                AgentOutcome::Failed { reason } => text.push_str(&format!(
+                    "[the {} subagent failed after {} turn(s): {reason} Do the work here, or \
+                         try a different agent.]\n\n",
+                    report.agent, report.turns
+                )),
+                _ => unreachable!("the outer match limits this arm"),
+            }
+        }
+    }
+    text.push_str(&report.summary);
+    if !intersection.dropped.is_empty() {
+        text.push_str(&format!(
+            "\n\n[note: these requested tools were dropped because the parent does not hold \
+                 them: {}]",
+            intersection.dropped.join(", ")
+        ));
+    }
+    ToolOutput::text(text)
+}
+
+/// One task in a fan-out.
+#[derive(Debug, Deserialize)]
+struct FanOutTask {
+    /// The name of the agent definition to run.
+    agent: String,
+    /// The work to delegate to this child.
+    prompt: String,
+}
+
+/// Arguments for the `spawn_agents` tool.
+#[derive(Debug, Deserialize)]
+struct FanOutArgs {
+    tasks: Vec<FanOutTask>,
+}
+
+/// The `spawn_agents` tool. It runs several subagents at once.
+///
+/// A fan-out is one tool call, because `AgentLoop::dispatch` runs tool calls one
+/// at a time on purpose. Making dispatch concurrent would race two `edit` calls
+/// and two approval prompts. See decision D-fan-out-is-one-tool-call.
+pub struct SpawnAgentsTool {
+    env: Arc<SpawnEnv>,
+    description: String,
+    names: Vec<String>,
+}
+
+impl SpawnAgentsTool {
+    /// Build the tool from its environment.
+    pub fn new(env: Arc<SpawnEnv>) -> Self {
+        let mut names: Vec<String> = env.definitions.keys().cloned().collect();
+        names.sort();
+
+        let mut description = String::from(
+            "Delegate several tasks at once. Every child runs at the same time, in a \
+             fresh conversation, and only a summary of each comes back. Prefer this \
+             over one call per child when the tasks do not depend on each other. \
+             Choose from these agents:",
+        );
+        for name in &names {
+            let purpose = env
+                .definitions
+                .get(name)
+                .map(|def| def.description.as_str())
+                .unwrap_or_default();
+            description.push_str("\n- ");
+            description.push_str(name);
+            description.push_str(": ");
+            description.push_str(purpose);
+        }
+
+        Self {
+            env,
+            description,
+            names,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for SpawnAgentsTool {
+    fn name(&self) -> &str {
+        "spawn_agents"
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn kind(&self) -> ToolKind {
+        // Same reasoning as `spawn_agent`. A child can change state, so a
+        // read-only policy must deny this.
+        ToolKind::Execute
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "The tasks to run at the same time. One child per entry.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "agent": {
+                                "type": "string",
+                                "enum": self.names,
+                                "description": "The agent definition name. Choose one of the listed values."
+                            },
+                            "prompt": {
+                                "type": "string",
+                                "description": "The work to delegate to this child."
+                            }
+                        },
+                        "required": ["agent", "prompt"]
+                    }
+                }
+            },
+            "required": ["tasks"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let args: FanOutArgs = parse_args(args)?;
+
+        // An empty list is a model mistake. Returning an empty string would be the
+        // fail-open shape, so the refusal says what to do instead.
+        if args.tasks.is_empty() {
+            return Ok(error_result(
+                "a fan-out needs at least one task. Give one entry per child, each with an \
+                 agent and a prompt.",
+            ));
+        }
+
+        // Run every task together. `join_all` keeps the results in request order,
+        // even though execution is concurrent, so the prompt prefix stays stable
+        // and the provider cache stays warm. See decision D-measured-cost-and-cache.
+        let runs = args.tasks.iter().map(|task| {
+            let env = Arc::clone(&self.env);
+            let cancel = ctx.cancel.clone();
+            async move { run_one_child(&env, &task.agent, &task.prompt, &cancel).await }
+        });
+        let results = futures::future::join_all(runs).await;
+
+        // One section per child, named by its agent and its task, so the model can
+        // tell which answer belongs to which request.
+        let mut text = String::new();
+        let mut any_error = false;
+        for (task, result) in args.tasks.iter().zip(results.iter()) {
+            any_error |= result.is_error;
+            text.push_str(&format!("## {} — {}\n", task.agent, task.prompt));
+            for block in &result.content {
+                if let rho_core::ContentBlock::Text { text: body } = block {
+                    text.push_str(body.as_str());
+                }
+            }
+            text.push_str("\n\n");
+        }
+
+        // A refused or dead child is a per-task result, never a failed call. One
+        // bad task must not lose every good answer.
+        Ok(ToolOutput {
+            content: vec![rho_core::ContentBlock::Text {
+                text: text.trim_end().to_string(),
+            }],
+            is_error: any_error && results.iter().all(|r| r.is_error),
+        })
+    }
+}
+
 fn error_result(reason: impl Into<String>) -> ToolOutput {
     ToolOutput {
         content: vec![rho_core::ContentBlock::Text {

@@ -296,6 +296,84 @@ present and unit-tested, but a live run cannot show it refusing a child's write.
 file, a denied write, a denied spawn, and an unknown agent. It did not kill a child mid-run,
 so salvage and the retry cap remain unit-tested only.
 
+## Round three: the fan-out, and two more defects
+
+Round two showed that only the timeout could trigger. Round three made the caps reachable.
+
+### Defect six: the retry cap had no caller
+
+`RetryLedger` was exported, documented, and unit-tested, and **nothing used it**. So a
+poisoned task could be re-delegated forever. `F-salvage-and-retry-cap` claims the cap holds,
+and the first half of that row worked while the second half was decoration.
+
+This is the gap the module comment in `crates/rho-cli/src/subagents.rs` warns about in its
+own words: a tool that no session registers is not shipped. The same is true of a guard.
+
+The ledger is now wired into the spawn path, keyed by the agent **and** the work, so two
+different tasks for one agent do not share a count. Guarded by
+`a_repeatedly_dying_child_is_refused_at_the_retry_cap`, which fails when the wiring is removed.
+
+### The fan-out, and why it is one tool call
+
+`AgentLoop::dispatch` runs tool calls one at a time. Making it concurrent would apply
+concurrency to `edit`, `write`, and `bash`, race two approval prompts onto one terminal, and
+make the append-only log non-deterministic. So concurrency is confined to subagents, in a new
+`spawn_agents` tool that runs a list of tasks together inside one call. See
+`D-fan-out-is-one-tool-call`.
+
+Three children in one call, live:
+
+```sh
+rho run 'Use spawn_agents once with three tasks: scout on a.txt, scout on b.txt,
+         scout on c.txt. Report each result.' --child-timeout-secs 600
+```
+
+```
+1. a.txt: Contains "alpha"
+2. b.txt: Contains "beta"
+3. c.txt: Contains "gamma"
+```
+
+Eight seconds for three children, and three transcripts on disk.
+
+### The per-parent cap now bites, and its message is now true
+
+The same call with four tasks and a cap of two:
+
+```sh
+rho run '...four tasks...' --max-children-per-parent 2
+```
+
+```
+Succeeded (2):
+1. Task 1 (scout on a.txt): "The file contains the single word 'alpha'."
+2. Task 2 (scout on b.txt): "b.txt contains the single word 'beta'."
+
+Failed (2):
+3. Refusal: "the per-parent child limit is 2 and this parent already runs 2. Wait for a
+   child to finish, or ask the user to raise --max-children-per-parent."
+```
+
+Two things to note. The refusal names a flag that now exists. And a refused task is a
+per-task result, so the two tasks that fit still returned their work.
+
+### Defect seven: my deep-chain cancel test was weak, and the break test caught it again
+
+A security review flagged the untested path: a wake that travels up a token chain on a
+multi-thread runtime. The test written for it **passed with the ancestor wake deleted**.
+
+The cause was the fast path. The test cancelled the root immediately after spawning the
+waiter, so `cancelled()` found the flag already set and returned without ever registering a
+notify. The test never reached the code it was written for.
+
+The replacement parks the waiter first, with `yield_now` on a single-thread runtime and no
+`sleep`, and asserts the token is still live before it cancels. It now fails when the
+ancestor wake is removed, while the contention version still passes. Both are kept, and the
+comment says which one is load-bearing.
+
+**That is the second time in this sitting that breaking the code exposed a weak test.** Step
+7 of the development flow paid for itself twice in one day.
+
 ## An operator error worth recording
 
 The first credential probe used double quotes, so the **outer shell** expanded

@@ -15,7 +15,7 @@ use rho_core::{
     ToolRegistry,
 };
 use rho_skills::{AgentConfig, AgentDefinition};
-use rho_tools::{ChildToolFactory, SpawnAgentTool, SpawnEnv};
+use rho_tools::{ChildToolFactory, SpawnAgentTool, SpawnAgentsTool, SpawnEnv};
 
 /// Build a child's tool registry from the parent's set.
 ///
@@ -77,7 +77,7 @@ pub struct LoadRequest {
     pub limits: SubagentLimits,
 }
 
-pub async fn load(request: LoadRequest) -> (Option<Arc<dyn Tool>>, Subagents) {
+pub async fn load(request: LoadRequest) -> (Vec<Arc<dyn Tool>>, Subagents) {
     let LoadRequest {
         session_root,
         trust_project,
@@ -112,7 +112,7 @@ pub async fn load(request: LoadRequest) -> (Option<Arc<dyn Tool>>, Subagents) {
     if loaded == 0 {
         // No definitions, so no tool. See the note on the return type.
         return (
-            None,
+            Vec::new(),
             Subagents {
                 registry,
                 notices,
@@ -147,9 +147,19 @@ pub async fn load(request: LoadRequest) -> (Option<Arc<dyn Tool>>, Subagents) {
             tools: parent_tools,
         }),
         transcript_dir,
+        // One ledger per process, so a poisoned task stops being retried.
+        retries: Arc::new(rho_core::RetryLedger::new()),
     };
+    // Two tools, on purpose. `spawn_agent` is the common single-child case, and
+    // `spawn_agents` is a fan-out in one call, because `AgentLoop::dispatch` runs
+    // tool calls one at a time. See decision D-fan-out-is-one-tool-call.
+    let env = Arc::new(env);
+    let tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(SpawnAgentTool::new(Arc::clone(&env))),
+        Arc::new(SpawnAgentsTool::new(env)),
+    ];
     (
-        Some(Arc::new(SpawnAgentTool::new(Arc::new(env)))),
+        tools,
         Subagents {
             registry,
             notices,

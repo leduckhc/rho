@@ -235,6 +235,7 @@ restates them. See `F-lifecycle-hook-points` and `F-slash-commands` above.
 | F-cycle-guard | Cycle guard | The spawn walk carries a visited set. A cycle in the parent chain is refused rather than looped. | `rho-core` | `sprint-2` | No extension point. |
 | F-salvage-and-retry-cap | Salvage and retry cap | A child that dies without a report yields a failed result. A re-delegated task stops at the retry cap. | `rho-core` | `sprint-2` | A caller uses `RetryLedger`. |
 | F-agent-events | Agent events | The parent stream shows a child through three events: spawned, progressed, and finished. | `rho-core` | `sprint-2` | New `AgentEvent` variants. A frontend renders them. |
+| F-agent-fan-out | Agent fan-out | `spawn_agents` runs several children at once in one tool call. A refused task is a per-task result, and results report in request order. | `rho-tools` | `sprint-2` | Register a different `Tool` under the name `spawn_agents`. See decision D-fan-out-is-one-tool-call. |
 | F-agent-definitions | Agent definitions | An agent is a markdown file with frontmatter. A project definition is withheld until the project is trusted. | `rho-skills` | `sprint-2` | Author a definition file. The loader is shared with skills. |
 
 `docs/specs/20260819-102750-SPEC-agent-tasks.md` owns the four rows below. A child carries a

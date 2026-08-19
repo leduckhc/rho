@@ -16,7 +16,7 @@ use rho_core::{
     SubagentLimits, Tool, ToolContext, ToolRegistry,
 };
 use rho_skills::{AgentDefinition, SkillOrigin};
-use rho_tools::{ChildToolFactory, SpawnAgentTool, SpawnEnv};
+use rho_tools::{ChildToolFactory, SpawnAgentTool, SpawnAgentsTool, SpawnEnv};
 
 /// A provider that replays one scripted turn.
 struct ScriptedProvider {
@@ -144,6 +144,7 @@ fn spawn_env(
             parent: parent_tools,
         }),
         transcript_dir: dir.to_path_buf(),
+        retries: Arc::new(rho_core::RetryLedger::new()),
     })
 }
 
@@ -171,6 +172,7 @@ fn hanging_env(dir: &std::path::Path) -> Arc<SpawnEnv> {
             parent: vec!["read".to_string()],
         }),
         transcript_dir: dir.to_path_buf(),
+        retries: Arc::new(rho_core::RetryLedger::new()),
     })
 }
 
@@ -348,5 +350,177 @@ async fn a_timed_out_child_reports_its_outcome_and_leaves_the_parent_live() {
     assert!(
         !parent_cancel.is_cancelled(),
         "a child ending must never cancel the parent session"
+    );
+}
+
+#[tokio::test]
+async fn a_repeatedly_dying_child_is_refused_at_the_retry_cap() {
+    // `RetryLedger` existed, was exported, and was unit-tested, and **nothing
+    // used it**. So a poisoned task could be re-delegated forever and burn the
+    // budget. That is the same gap the module comment in `rho-cli` warns about:
+    // a guard that no caller reaches is not shipped. See `SPEC-subagents`
+    // section 8 and docs/verification/subagents-bedrock.md.
+    let dir = tempfile::tempdir().unwrap();
+    let tool = SpawnAgentTool::new(hanging_env(dir.path()));
+    let args = serde_json::json!({ "agent": "scout", "prompt": "the poisoned task" });
+
+    let mut refusal = None;
+    for attempt in 1..=rho_core::MAX_CHILD_RETRIES {
+        let output = tool
+            .execute(args.clone(), ctx(dir.path().to_path_buf()))
+            .await
+            .expect("a dying child is a result, not a fault");
+        let text = match &output.content[0] {
+            rho_core::ContentBlock::Text { text } => text.clone(),
+            other => panic!("expected text, got {other:?}"),
+        };
+        if text.contains("retry") {
+            refusal = Some((attempt, text));
+            break;
+        }
+    }
+
+    let (attempt, text) = refusal.expect("the same dying work must be refused at the cap");
+    assert!(
+        attempt <= rho_core::MAX_CHILD_RETRIES,
+        "the refusal must arrive by attempt {}, arrived at {attempt}",
+        rho_core::MAX_CHILD_RETRIES
+    );
+    assert!(
+        text.contains("retry"),
+        "the refusal must name the retry cap, got: {text}"
+    );
+}
+
+/// An env with several definitions and a per-parent cap, for the fan-out tests.
+fn fanout_env(dir: &std::path::Path, max_children: usize) -> Arc<SpawnEnv> {
+    let limits = SubagentLimits {
+        max_children_per_parent: max_children,
+        ..SubagentLimits::new()
+    };
+    let registry = AgentRegistry::new(limits);
+    let def = definition(dir, Some(vec!["read".to_string()]));
+    let mut definitions = HashMap::new();
+    definitions.insert(def.name.clone(), def);
+    Arc::new(SpawnEnv {
+        node: registry.root(),
+        definitions,
+        parent_config: SessionConfig::new(
+            "parent-model",
+            dir.to_path_buf(),
+            Arc::new(AllowAllPolicy),
+        ),
+        // One turn per child. Every child answers with the same text.
+        provider: Arc::new(ScriptedProvider::new(vec![
+            text_turn("child answer"),
+            text_turn("child answer"),
+            text_turn("child answer"),
+            text_turn("child answer"),
+            text_turn("child answer"),
+            text_turn("child answer"),
+        ])),
+        hooks: Arc::new(HookChain::new()),
+        tools: Arc::new(FakeToolFactory {
+            parent: vec!["read".to_string()],
+        }),
+        transcript_dir: dir.to_path_buf(),
+        retries: Arc::new(rho_core::RetryLedger::new()),
+    })
+}
+
+fn output_text(output: &rho_core::ToolOutput) -> String {
+    match &output.content[0] {
+        rho_core::ContentBlock::Text { text } => text.clone(),
+        other => panic!("expected text, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_fan_out_runs_every_task_and_reports_in_request_order() {
+    // A fan-out is one tool call, because concurrent general dispatch would race
+    // two `edit` calls and two approval prompts. See D-fan-out-is-one-tool-call.
+    let dir = tempfile::tempdir().unwrap();
+    let tool = SpawnAgentsTool::new(fanout_env(dir.path(), 4));
+
+    let output = tool
+        .execute(
+            serde_json::json!({
+                "tasks": [
+                    { "agent": "scout", "prompt": "first" },
+                    { "agent": "scout", "prompt": "second" },
+                    { "agent": "scout", "prompt": "third" }
+                ]
+            }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a fan-out is a result, not a fault");
+
+    let text = output_text(&output);
+    let first = text.find("first").expect("task 1 must be reported");
+    let second = text.find("second").expect("task 2 must be reported");
+    let third = text.find("third").expect("task 3 must be reported");
+    assert!(
+        first < second && second < third,
+        "results must appear in request order, so the prompt prefix stays stable: {text}"
+    );
+}
+
+#[tokio::test]
+async fn a_task_over_the_per_parent_cap_is_refused_and_the_others_still_run() {
+    // The cap must bite per task, never per call. A limit that fails the whole
+    // fan-out would make one bad task lose every good result.
+    let dir = tempfile::tempdir().unwrap();
+    let tool = SpawnAgentsTool::new(fanout_env(dir.path(), 2));
+
+    let output = tool
+        .execute(
+            serde_json::json!({
+                "tasks": [
+                    { "agent": "scout", "prompt": "alpha" },
+                    { "agent": "scout", "prompt": "beta" },
+                    { "agent": "scout", "prompt": "gamma" },
+                    { "agent": "scout", "prompt": "delta" }
+                ]
+            }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a refused task is a result, not a fault");
+
+    let text = output_text(&output);
+    assert!(
+        text.contains("per-parent child limit is 2"),
+        "a refusal must name the limit it hit, got: {text}"
+    );
+    assert!(
+        text.contains("child answer"),
+        "the tasks that fit must still report their work, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_fan_out_is_refused_with_a_named_reason() {
+    // An empty list is a model mistake. It must teach, not run zero children and
+    // return an empty string, which is the fail-open shape.
+    let dir = tempfile::tempdir().unwrap();
+    let tool = SpawnAgentsTool::new(fanout_env(dir.path(), 4));
+
+    let output = tool
+        .execute(
+            serde_json::json!({ "tasks": [] }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("an empty list is a result, not a fault");
+
+    let text = output_text(&output);
+    assert!(
+        !text.trim().is_empty(),
+        "an empty fan-out must say what went wrong"
+    );
+    assert!(
+        text.contains("at least one"),
+        "the refusal must say what to do instead, got: {text}"
     );
 }

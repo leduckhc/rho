@@ -236,7 +236,7 @@ async fn build_session(
             .into_iter()
             .chain(extensions.mcp_tools.iter().map(Arc::clone))
             .collect();
-    let (spawn_tool, subagents) = subagents::load(subagents::LoadRequest {
+    let (spawn_tools, subagents) = subagents::load(subagents::LoadRequest {
         session_root: config.session_root.clone(),
         trust_project: cli.trust_project,
         discover: !cli.no_skills,
@@ -247,7 +247,7 @@ async fn build_session(
         limits: subagent_limits(cli),
     })
     .await;
-    if let Some(tool) = spawn_tool {
+    for tool in spawn_tools {
         registry.register(tool);
     }
     let tools = Arc::new(registry);
