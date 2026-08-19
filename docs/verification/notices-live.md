@@ -595,7 +595,7 @@ fourth, `banner_line`, was missed and is closed here.
 It joined the directory, the branch, the model, and the provider **raw**, while every other row had a
 filter. The directory is the realistic vector: a name on a Unix filesystem may hold an escape byte, so
 running rho inside a hostile checkout would put that byte on the banner. Git rejects a control
-character in a ref name, so a branch is safer, and a model id arrives from a flag or a config file.
+character in a ref name, so a branch is safer. A model id arrives from a flag or a config file.
 
 **Nothing escaped, and that is the uncomfortable part.** ratatui drops an escape from a cell, so the
 attack did not work. The review's sharpest observation was that **rho had two filter layers and only
