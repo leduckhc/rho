@@ -1,0 +1,385 @@
+# SPEC-reasoning-across-providers — one reasoning contract, and a table instead of branches
+
+Status: draft, for review before any implementation.
+Prior art: pi and jcode, both read as source. See `docs/comparison.md`.
+
+## 0. The defects this fixes
+
+Each one is measured, and each has a named test in section 8.
+
+1. **rho shows `<thinking>` tags as the answer.** With Claude Haiku on Bedrock, rho never
+   asks for extended thinking, so the model writes `<thinking>...</thinking>` inside ordinary
+   text. rho draws that text as the answer, because to rho it is the answer.
+2. **rho reads one field name.** `rho-provider-openrouter` reads `delta.reasoning` only. A
+   model that uses `reasoning_content` or `reasoning_text` produces **no** reasoning in rho.
+   Measured against the same JSON: rho saw an empty string where pi saw the text.
+3. **rho drops a reasoning block when it builds a request.** The match arm is `_ => {}`. That
+   is silent, and `AGENTS.md` calls a silent drop a defect. It is harmless only while rho
+   never asks for thinking. It breaks a tool loop the moment rho does.
+4. **rho has no way to show the reasoning text.** The renderer holds
+   `Row::Thinking { text: _ }` and draws only `∴ thought for 2.4s`.
+
+## 1. The sides
+
+| Side | Owner | Must agree on |
+| --- | --- | --- |
+| The wire, read | each provider crate | which field names carry reasoning |
+| The wire, write | each provider crate | whether the endpoint wants it echoed back |
+| The data model | `rho-core` | the block kinds, and which one reaches a provider |
+| The persisted transcript | `rho-core` | what a session file holds, and what an old reader does |
+| The screen | `rho-tui` | how reasoning draws, and how the user turns it off |
+| The configuration | `rho-config`, `rho-cli` | the display mode, and the thinking budget |
+
+Contract kinds touched: the data model, the wire format, the persisted format, the
+configuration, and the behaviour rules.
+
+## 2. What pi does, and what jcode does
+
+Both were read as source, not recalled.
+
+**pi** keeps one `thinking` block with a `thinkingSignature`, and decides at send time in
+`transform-messages.js`. Its rule is keyed on whether the same model answers:
+
+| Case | pi |
+| --- | --- |
+| redacted, same model | keep |
+| redacted, other model | drop, because it is opaque and would error |
+| has a signature, same model | keep, even when the text is empty |
+| empty text | drop |
+| other model | convert to plain text |
+
+pi reads three field names in order, `reasoning_content`, `reasoning`, then
+`reasoning_text`, and it takes **the first non-empty one**. Its comment names the reason:
+one host returns two fields with the same content, so a naive reader doubles the text.
+
+pi also inserts a synthetic tool result for an orphaned tool call, and its comment says this
+"preserves thinking signatures and satisfies API requirements".
+
+**jcode** splits the block in two, and this is the better idea:
+
+```rust
+ContentBlock::ReasoningTrace { text }                    // history only, never sent
+ContentBlock::AnthropicThinking { thinking, signature }  // replay, sent back
+ContentBlock::Reasoning { text }                         // replay, other providers
+```
+
+A trace is for a human. A replay block is for the provider. `push_reasoning_blocks` writes
+the trace only when the replay block did not already capture the same readable text, so the
+transcript never holds it twice.
+
+jcode also proves that replay is a **per-endpoint** property, and that guessing fails in
+both directions:
+
+| Endpoint | Rule | jcode issue |
+| --- | --- | --- |
+| Moonshot Kimi coding | **requires** `reasoning_content` on an assistant tool-call message | 322 |
+| DeepSeek, direct OpenAI-compatible | **requires** the stored `reasoning_content` replayed | 815 |
+| Mistral, strict OpenAI schema | **rejects** it with 422 `Extra inputs are not permitted` | 261 |
+
+And jcode records a third lesson, from three crashes: reasoning arrives as a byte stream, and
+slicing it at a non-character boundary panics and kills the process (issues 632, 633, 635).
+
+## 3. Where rho goes further
+
+Three additions. Each answers a defect that neither reference fixes.
+
+**One. The field names are data. The structure is not, and the spec says so.**
+
+An earlier draft of this section claimed that a table makes every new endpoint a row and
+never a branch. **A review proved that false, and the proof is Gemini.** Gemini does not put
+reasoning in a named field on a choice. It marks a part with `thought: true` inside
+`candidates[].content.parts`, and it carries `thoughtSignature` **per part**. No field name
+selects that, so extraction is structural and a row cannot express it.
+
+So the claim is narrowed to what is true:
+
+- **Reading is per-provider code.** A provider is its own crate in rho, and parsing its wire
+  format is that crate's job. That is the extension point: a new provider is a **new crate**
+  behind `trait Provider`, and no shared code changes. Gemini arrives that way.
+- **The table governs the OpenAI-compatible family only**, where the variation really is
+  field names. `rho-provider-openrouter` serves many hosts through one wire format, and
+  those hosts disagree only on the name. That is the case a table fits.
+- **The replay policy is data for every provider**, because the policy is a small closed set
+  and the failures are hard in both directions.
+
+```rust
+/// How one OpenAI-compatible endpoint names its reasoning, and what it wants echoed back.
+/// A new host in this family is a row. A provider with a different structure is a new crate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReasoningWire {
+    /// The delta field names to read, in order. The first non-empty one wins, because a
+    /// host that sends two fields with the same text would otherwise double it.
+    pub read_fields: &'static [&'static str],
+    /// What the endpoint needs echoed back on the next request.
+    pub replay: ReasoningReplay,
+    /// True when the endpoint rejects a reasoning field it did not send. Mistral answers
+    /// 422 `Extra inputs are not permitted`, so rho must send nothing.
+    pub rejects_unknown_fields: bool,
+    /// True when rho must ask for thinking before the model emits a structured block.
+    /// Without the ask, Claude writes `<thinking>` tags into ordinary text.
+    pub ask_to_enable: bool,
+}
+
+/// What an endpoint needs echoed back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReasoningReplay {
+    /// Send nothing back. The trace stays in the transcript for the reader.
+    Never,
+    /// Send the signed block back while the same model answers. Anthropic requires this
+    /// inside a tool loop, and it rejects the turn without it.
+    SignedWhileSameModel,
+    /// Send the readable text back on an assistant tool-call message. The Kimi coding
+    /// endpoint rejects the message without it.
+    TextOnToolCall,
+    /// Send a signature back on the matching tool call. Gemini rejects the request with
+    /// `Function call is missing a thought_signature`, and jcode carries the same field.
+    SignatureOnToolCall,
+}
+```
+
+**Two. rho reads `<thinking>` tags.** Neither pi nor jcode does. It is the defect the owner
+reported, so rho fixes it. The rule is narrow on purpose:
+
+- rho strips a tag pair only from the **start** of an assistant message, and only when the
+  opening tag is the first non-space text. A tag in the middle of an answer is prose about
+  tags, and rho must not eat it.
+- The accepted names are `<thinking>` and `<think>`.
+- Text inside becomes `ThinkingDelta`. Text after the closing tag becomes `TextDelta`.
+- An unclosed tag ends at the end of the message, because a truncated stream must not lose
+  the answer.
+- Stripping never changes what reaches the provider. It changes what rho draws.
+
+**Three. Nothing is dropped in silence.** Every content block has an explicit arm in every
+provider's request builder. A block that must not travel is dropped in a named arm with a
+comment, never by `_ => {}`.
+
+## 4. The data model
+
+```rust
+pub enum ContentBlock {
+    Text { text: String },
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
+        /// The replay token some providers bind to this call. Gemini rejects a request with
+        /// `Function call is missing a thought_signature` when it is absent, and jcode
+        /// carries the same field for the same reason. `None` means the provider sent none.
+        thought_signature: Option<String>,
+    },
+    ToolResult { tool_call_id: String, content: Vec<ContentBlock>, is_error: bool },
+
+    /// Readable reasoning, kept for the reader. **It never reaches a provider.**
+    ReasoningTrace { text: String },
+
+    /// Reasoning the provider needs echoed back.
+    ReasoningReplay {
+        text: String,
+        /// `None` means the provider sent no signature. It is **not** an empty string.
+        ///
+        /// An earlier draft used `String` with `""` for none. A review named that a
+        /// fail-open default, because `""` cannot be told apart from a provider that sent
+        /// an empty signature, and a mis-built block would then replay unsigned in silence.
+        /// jcode uses `Option<String>` with `skip_serializing_if`, and so does rho.
+        signature: Option<String>,
+    },
+}
+```
+
+`Thinking { thinking, signature }` is replaced by these. The rename is the point: the old
+name never said which blocks travel, and that is why one was dropped in silence.
+
+### The persisted format, in both directions
+
+A session file is a contract with every other version of rho, so both directions are stated.
+
+**A new rho reads an old file.** `"type": "thinking"` maps to `ReasoningTrace`. A signature
+from an older session is stale, and replaying it would fail, so it is not carried over.
+
+**An old rho reads a new file.** This was missing, and `AGENTS.md` step 3 requires it. An old
+rho uses a tagged enum with no `reasoning_trace` variant, so it **fails the whole load**. That
+is unacceptable, so the new variants serialise under the old tag with an added field:
+
+```json
+{"type": "thinking", "thinking": "...", "signature": null, "replay": false}
+```
+
+An old rho reads the text and ignores `replay`. A new rho reads `replay` to choose between
+`ReasoningTrace` and `ReasoningReplay`. A missing `replay` key reads as `false`, which is the
+safe direction: it never replays a stale signature.
+
+**A truncated line.** A session log is append-only and line-delimited. A reader drops a final
+line that does not parse, and it says so once. A half-written reasoning block must never stop
+a session from loading.
+
+## 5. The display
+
+```rust
+/// How rho draws reasoning.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReasoningDisplay {
+    /// Draw nothing. No text, and no summary row.
+    Off,
+    /// Draw a one-row summary only, for example `∴ thought for 2.4s`.
+    #[default]
+    Summary,
+    /// Draw the reasoning text, dimmed, and keep it in the transcript.
+    Full,
+    /// Draw the reasoning text while it streams, then collapse it to the summary row.
+    Live,
+}
+```
+
+**A correction to an earlier draft.** It called these "jcode's three modes, and its default".
+That was wrong twice. jcode has `Off`, `Full`, and `Current`, and it defaults to `Off`. The
+earlier draft dropped `Off` entirely, which removed the only way to hide reasoning, and a
+review named that a capability regression. `Off` is back.
+
+rho keeps four modes and defaults to `Summary`. That is a deliberate difference from jcode: a
+turn that thought for nine seconds and says so is honest, while a turn that hides the nine
+seconds looks stalled.
+
+The reasoning text draws in `Role::Muted`, never in `Role::Text`. Dim is the whole point: it
+is the model's private work, and it must never read as the answer.
+
+**The text is always stored, in every mode.** A user who switches to `Full` in the middle of a
+session must not find the earlier reasoning empty. The cost is bounded, because the transcript
+is already held in memory and reasoning is a fraction of it. `Off` changes what draws, and
+never what is kept.
+
+**When `Live` collapses.** "The model commits an answer" is not an event, so the earlier
+wording was untestable. The rule is now stated against real events: `Live` collapses on the
+first `TextDelta` that follows the reasoning block, or on a `ToolCallStart`, whichever comes
+first. Both are observable, so a test can assert the exact frame.
+
+Config key `tui.reasoning`, values `off`, `summary`, `full`, `live`. CLI `--reasoning <mode>`.
+
+## 6. The behaviour rules
+
+1. Read the delta fields in order, and take the first non-empty one.
+2. An empty delta adds nothing and starts no block.
+3. Slice a reasoning delta only on a character boundary. jcode crashed three times here.
+4. Never send a `ReasoningTrace`. Send a `ReasoningReplay` only when `ReasoningWire` says so.
+5. An orphaned tool call gets a synthetic error result, so the signature chain stays whole.
+6. A redacted block replays only while the same model answers, and it is dropped otherwise.
+7. Strip a leading `<thinking>` or `<think>` pair, and only a leading one. The rules below
+   say how, because the stream is incremental and a message-global rule cannot be applied one
+   delta at a time.
+
+### The tag rule, stated for a stream
+
+A review found that rule 7 could not be implemented as first written. The pipeline emits a
+delta at a time, so "the first non-space text" is unknown until enough text has arrived.
+
+- rho holds a **lead buffer** until it can decide. The buffer is at most the length of the
+  longest accepted opening tag, so an opening tag split across three deltas still matches.
+- Nothing is emitted from the buffer until the decision is made. So a caller never sees text
+  that rho later reclassifies.
+- The tag name matches **without case**, so `<Thinking>` is a tag.
+- `<thinking/>` is a self-closing tag. It opens and closes an empty reasoning block, and it
+  never opens a region.
+- Once the first non-space text is known not to be a tag, the buffer flushes as text and rho
+  stops looking for the rest of the message. A tag in the middle stays text.
+- **An unclosed tag stops at the first `ToolCallStart`.** Otherwise a missing closing tag
+  would swallow the whole answer as reasoning. At the end of a message an unclosed tag also
+  stops, and the text is kept.
+- **The case rho cannot separate.** A user may ask the model to print a literal `<thinking>`
+  tag, and the answer then legitimately begins with one. rho cannot tell that from real
+  reasoning, because the bytes are identical. rho chooses the safer failure: when the model
+  emitted a structured reasoning block in the same turn, rho does **not** strip a tag from the
+  text, because the reasoning already arrived by the proper path. Tag stripping applies only
+  to a turn with no structured reasoning at all.
+
+## 7. Out of scope
+
+- **Choosing a thinking budget per model.** `ask_to_enable` says whether to ask. How many
+  tokens to ask for needs its own measurement and its own spec.
+- **A reasoning search.** The transcript holds the trace, and the terminal searches it.
+- **Google and Mistral provider crates.** rho has none yet. Mistral joins the
+  OpenAI-compatible table as a row. **Google does not**, and section 3 says why: its reasoning
+  is structural, so it arrives as a new crate behind `trait Provider`. The `SignatureOnToolCall`
+  replay policy and the `thought_signature` field exist now so that crate needs no change to
+  shared code when it lands.
+- **Token accounting for reasoning.** Anthropic reports it in
+  `output_tokens_details.thinking_tokens`, and the footer work is separate.
+
+## 8. Test cases
+
+### Reading the wire
+
+- `the_first_non_empty_reasoning_field_wins` — a delta with `reasoning_content` and
+  `reasoning` holding the same text yields the text **once**.
+- `reasoning_content_is_read` — the field pi added for llama.cpp produces a delta. rho reads
+  nothing here today.
+- `reasoning_text_is_read` — the third name produces a delta.
+- `an_empty_reasoning_delta_starts_no_block` — no `ThinkingStart` for an empty string.
+- `a_reasoning_delta_splits_on_a_character_boundary` — a multi-byte character split across
+  two deltas does not panic and does not corrupt.
+
+### The tags
+
+- `a_leading_thinking_tag_becomes_reasoning` — `<thinking>a</thinking>b` yields reasoning
+  `a` and text `b`.
+- `a_leading_think_tag_becomes_reasoning` — the short name works too.
+- `a_tag_in_the_middle_stays_text` — `here is a <thinking> tag` stays text in full. This is
+  the rule that stops rho eating an answer about tags.
+- `an_unclosed_tag_ends_at_the_message_end` — a truncated stream keeps its text.
+- `a_stripped_tag_does_not_change_the_request` — what reaches the provider is unchanged.
+
+### The replay
+
+- `a_trace_never_reaches_a_provider` — every provider's request builder omits
+  `ReasoningTrace`.
+- `a_signed_block_replays_for_the_same_model` — Anthropic gets the signature back.
+- `a_signed_block_is_dropped_for_another_model` — a model change drops it.
+- `a_rejecting_endpoint_receives_no_reasoning_field` — the strict-schema row sends nothing,
+  so no 422.
+- `a_tool_call_endpoint_receives_the_text` — the `TextOnToolCall` row attaches the text.
+- `an_orphaned_tool_call_gets_a_synthetic_result` — the chain stays whole.
+- `every_content_block_has_an_explicit_arm` — a compile-time exhaustive match, so no
+  `_ => {}` can hide a new block. This is the test that would have caught defect three.
+
+### The display
+
+- `the_summary_row_states_the_span` — `∴ thought for 2.4s`.
+- `full_mode_draws_the_text_dimmed` — the rows carry `Role::Muted`, never `Role::Text`.
+- `live_mode_collapses_when_the_answer_starts` — the text goes, the summary stays.
+- `the_default_mode_is_summary`.
+
+### The tag rule under a stream
+
+- `an_opening_tag_split_across_three_deltas_matches` — the lead buffer holds until it decides.
+- `a_mixed_case_tag_is_stripped` — `<Thinking>` matches without case.
+- `a_self_closing_tag_opens_no_region` — `<thinking/>` yields an empty reasoning block.
+- `an_unclosed_tag_stops_at_a_tool_call` — the answer is never swallowed.
+- `a_turn_with_structured_reasoning_keeps_its_tags` — the case rho cannot separate. A turn
+  that already produced a reasoning block leaves the text alone, so a model asked to print a
+  tag prints it.
+- `no_text_is_emitted_before_the_decision` — a caller never sees text rho later reclassifies.
+
+### The replay policy
+
+- `never_replay_sends_nothing` — the `Never` row sends no reasoning field.
+- `a_signature_replays_on_the_matching_tool_call` — the `SignatureOnToolCall` row attaches
+  `thought_signature`, so Gemini does not answer `Function call is missing a
+  thought_signature`.
+- `ask_to_enable_adds_the_thinking_request` — the Bedrock row asks for thinking, so the model
+  returns a structured block instead of writing tags.
+
+### The configuration
+
+- `the_reasoning_mode_parses_every_value` — `off`, `summary`, `full`, and `live`.
+- `an_unknown_reasoning_mode_is_refused` — it does not fall back in silence.
+- `the_flag_beats_the_config_and_the_environment`.
+
+### The persisted format
+
+- `an_old_thinking_block_imports_as_a_trace` — a session file from before this change loads,
+  and its stale signature is not replayed.
+- `a_new_block_is_readable_by_an_old_rho` — the new variants serialise under the old
+  `"type": "thinking"` tag, so an old reader loads the file instead of failing it.
+- `a_missing_replay_key_reads_as_false` — the safe direction, so no stale signature replays.
+- `a_truncated_final_line_does_not_stop_the_load` — a half-written block is dropped, and the
+  session still opens.
+- `the_reasoning_text_is_stored_in_every_mode` — switching to `full` mid-session shows the
+  earlier reasoning.

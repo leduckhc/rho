@@ -53,6 +53,9 @@ pub struct ConfigLayer {
     /// Whether the TUI captures the mouse. Off by default, so the terminal keeps
     /// drag-select and its own wheel. See `D-native-selection-is-the-default`.
     pub tui_mouse: Option<bool>,
+    /// How the TUI draws reasoning. It parses through `ReasoningDisplay::from_str`.
+    /// Values are `off`, `summary`, `full`, and `live`. Default is `summary`.
+    pub tui_reasoning: Option<String>,
     /// A path to the MCP server file. See section 6.
     pub mcp_config: Option<PathBuf>,
     pub subagents: Option<SubagentLimitsLayer>,
@@ -168,6 +171,8 @@ pub struct Config {
     pub discover_skills: bool,
     /// Whether the TUI captures the mouse. False by default.
     pub tui_mouse: bool,
+    /// How the TUI draws reasoning. `Summary` by default.
+    pub reasoning: rho_core::ReasoningDisplay,
     pub mcp_config: Option<PathBuf>,
     pub subagents: rho_core::SubagentLimits,
     /// Credential sources, by name. A value resolves through `resolve_credential`.
@@ -187,6 +192,7 @@ impl ConfigLayer {
         self.skill_paths = over.skill_paths.or(self.skill_paths);
         self.no_skills = over.no_skills.or(self.no_skills);
         self.tui_mouse = over.tui_mouse.or(self.tui_mouse);
+        self.tui_reasoning = over.tui_reasoning.or(self.tui_reasoning);
         self.mcp_config = over.mcp_config.or(self.mcp_config);
         self.subagents = over.subagents.or(self.subagents);
         self.credentials = over.credentials.or(self.credentials);
@@ -217,6 +223,7 @@ impl ConfigLayer {
                 }
                 "RHO_NO_SKILLS" => layer.no_skills = parse_env_bool("no-skills", value).ok(),
                 "RHO_TUI_MOUSE" => layer.tui_mouse = parse_env_bool("tui-mouse", value).ok(),
+                "RHO_TUI_REASONING" => layer.tui_reasoning = Some(value.clone()),
                 "RHO_MCP_CONFIG" => layer.mcp_config = Some(PathBuf::from(value)),
                 _ => {}
             }
@@ -454,6 +461,19 @@ fn parse_approval(layer: &ConfigLayer) -> Result<Option<ApprovalMode>, ConfigErr
     }
 }
 
+/// Parse the reasoning display mode of a merged layer, and fail closed on a bad value.
+fn parse_reasoning(layer: &ConfigLayer) -> Result<rho_core::ReasoningDisplay, ConfigError> {
+    match &layer.tui_reasoning {
+        Some(value) => {
+            rho_core::ReasoningDisplay::from_str(value).map_err(|error| ConfigError::Parse {
+                path: PathBuf::from("the merged configuration"),
+                message: format!("the tui-reasoning key value \"{value}\" is not valid: {error}"),
+            })
+        }
+        None => Ok(rho_core::ReasoningDisplay::default()),
+    }
+}
+
 fn build_subagents(layer: Option<&SubagentLimitsLayer>) -> rho_core::SubagentLimits {
     let mut limits = rho_core::SubagentLimits::default();
     if let Some(source) = layer {
@@ -533,6 +553,7 @@ impl Config {
 
         let sandbox = parse_sandbox(&merged)?;
         let approval = parse_approval(&merged)?;
+        let reasoning = parse_reasoning(&merged)?;
         let credentials = merged
             .credentials
             .unwrap_or_default()
@@ -552,6 +573,7 @@ impl Config {
             // `no-skills = true` disables discovery. The default is discovery on.
             discover_skills: !merged.no_skills.unwrap_or(false),
             tui_mouse: merged.tui_mouse.unwrap_or(false),
+            reasoning,
             mcp_config: merged.mcp_config,
             subagents: build_subagents(merged.subagents.as_ref()),
             credentials,

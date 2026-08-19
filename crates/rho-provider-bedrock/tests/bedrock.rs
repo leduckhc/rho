@@ -381,3 +381,50 @@ fn build_messages_keeps_a_single_tool_result_working() {
     assert_eq!(built.len(), 3);
     assert_eq!(built[2].role(), &ConversationRole::User);
 }
+
+#[test]
+fn every_content_block_has_an_explicit_arm() {
+    // The request builder must name every content-block kind. A `_ => {}` arm dropped a
+    // block in silence, which SPEC-reasoning-across-providers section 3 "Three" calls a
+    // defect. The match in `build_messages` is now exhaustive, so a new block kind breaks
+    // the build instead of hiding. This test proves the two non-travelling kinds are
+    // dropped in their named arms, and the travelling kinds still travel.
+    use aws_sdk_bedrockruntime::types::ContentBlock as SdkBlock;
+    use rho_core::{ContentBlock, ImageSource, Message, Role};
+
+    let conversation = vec![Message {
+        role: Role::Assistant,
+        content: vec![
+            ContentBlock::Text {
+                text: "answer".to_string(),
+            },
+            // Reasoning must not travel to Bedrock in phase 1. It is dropped in a named arm.
+            ContentBlock::Thinking {
+                thinking: "private".to_string(),
+                signature: Some("sig".to_string()),
+            },
+            // An image in an assistant message is out of scope for the request builder.
+            ContentBlock::Image {
+                source: ImageSource {
+                    data: "AAAA".to_string(),
+                    mime_type: "image/png".to_string(),
+                },
+            },
+        ],
+    }];
+
+    let built = rho_provider_bedrock::build_messages(&conversation);
+    assert_eq!(built.len(), 1, "the one assistant message survives");
+
+    let text_blocks = built[0]
+        .content()
+        .iter()
+        .filter(|block| matches!(block, SdkBlock::Text(_)))
+        .count();
+    assert_eq!(text_blocks, 1, "the text block travels");
+    assert_eq!(
+        built[0].content().len(),
+        1,
+        "only the text block travels; reasoning and image are dropped in named arms"
+    );
+}

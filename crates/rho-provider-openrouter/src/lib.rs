@@ -276,8 +276,31 @@ struct Delta {
     content: Option<String>,
     #[serde(default)]
     reasoning: Option<String>,
+    /// The name pi added for llama.cpp. Some hosts send this instead of `reasoning`.
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    /// A third name some hosts use for the same reasoning text.
+    #[serde(default)]
+    reasoning_text: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<ToolCallFragment>>,
+}
+
+impl Delta {
+    /// The reasoning text for this delta, reading the accepted field names in order and
+    /// taking the first non-empty one. One host sends two fields with the same text, so a
+    /// reader that added every field would double it. An empty field is skipped, so an
+    /// empty reasoning delta starts no block. See SPEC-reasoning-across-providers section 3.
+    fn first_reasoning(&self) -> Option<&str> {
+        [
+            self.reasoning_content.as_deref(),
+            self.reasoning.as_deref(),
+            self.reasoning_text.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|text| !text.is_empty())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -399,7 +422,7 @@ impl SseState {
                     delta: text.clone(),
                 });
             }
-            if let Some(reasoning) = &choice.delta.reasoning {
+            if let Some(reasoning) = choice.delta.first_reasoning() {
                 if !self.thinking_open {
                     events.push(StreamEvent::ThinkingStart {
                         index: Self::TEXT_INDEX,
@@ -408,7 +431,7 @@ impl SseState {
                 }
                 events.push(StreamEvent::ThinkingDelta {
                     index: Self::TEXT_INDEX,
-                    delta: reasoning.clone(),
+                    delta: reasoning.to_string(),
                 });
             }
             if let Some(fragments) = &choice.delta.tool_calls {
@@ -626,8 +649,12 @@ fn message_to_json(message: &Message) -> Value {
                     }
                 }
             }
-            // Thinking replay and image input are out of scope for sprint 1.
-            _ => {}
+            // Reasoning never travels to OpenRouter in phase 1, and image input is out of
+            // scope for sprint 1. Drop each in a named arm, never by `_ => {}`, so a new
+            // block kind breaks the build instead of vanishing in silence. See
+            // SPEC-reasoning-across-providers section 3 "Three".
+            ContentBlock::Thinking { .. } => {}
+            ContentBlock::Image { .. } => {}
         }
     }
 

@@ -113,6 +113,12 @@ impl App {
         self
     }
 
+    /// Set how the TUI draws reasoning. Default is `Summary`.
+    pub fn with_reasoning(mut self, mode: rho_core::ReasoningDisplay) -> Self {
+        self.state.reasoning_display = mode;
+        self
+    }
+
     /// The escape sequences this app writes at startup. A test reads the wiring.
     pub fn setup_sequence(&self) -> String {
         setup_sequences(self.mouse)

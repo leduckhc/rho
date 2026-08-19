@@ -66,6 +66,14 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub mouse: bool,
 
+    /// How the TUI draws reasoning: `off`, `summary`, `full`, or `live`.
+    ///
+    /// Default is `summary`, a one-row `∴ thought for 2.4s`. `full` also draws the
+    /// reasoning text, dimmed. `live` draws the text while it streams, then collapses it.
+    /// `off` hides reasoning entirely. See `SPEC-reasoning-across-providers`.
+    #[arg(long, global = true)]
+    pub reasoning: Option<String>,
+
     /// Load skills that live in this repository.
     ///
     /// A skill can instruct the model and can carry scripts, so a skill from the
@@ -412,6 +420,24 @@ fn resolve_mouse(flag: bool, env: &[(String, String)]) -> bool {
         .unwrap_or(false)
 }
 
+/// How the TUI draws reasoning. The flag wins, then the environment, then `summary`.
+///
+/// `--reasoning` and `RHO_TUI_REASONING` both reach this. An unknown name falls back to
+/// the default `summary`, because a display mode is not a security switch, and a bad
+/// value must not hide reasoning by accident.
+fn resolve_reasoning(flag: Option<&str>, env: &[(String, String)]) -> rho_core::ReasoningDisplay {
+    use std::str::FromStr;
+    if let Some(name) = flag
+        && let Ok(mode) = rho_core::ReasoningDisplay::from_str(name)
+    {
+        return mode;
+    }
+    rho_config::ConfigLayer::from_env(env)
+        .tui_reasoning
+        .and_then(|name| rho_core::ReasoningDisplay::from_str(&name).ok())
+        .unwrap_or_default()
+}
+
 /// Run the interactive TUI. Return a non-zero code on failure.
 #[cfg(feature = "tui")]
 async fn run_interactive(cli: &Cli) -> i32 {
@@ -424,6 +450,7 @@ async fn run_interactive(cli: &Cli) -> i32 {
         .unwrap_or_else(|_| String::new());
     // The interface reads one switch. The flag wins, then the environment, then off.
     let mouse = resolve_mouse(cli.mouse, &rho_env_vars());
+    let reasoning = resolve_reasoning(cli.reasoning.as_deref(), &rho_env_vars());
     // Hold `_tasks` and `_extras` for the whole run. Dropping the task registry kills
     // every background task, and dropping the MCP pool stops every server, so an early
     // drop would end work the model is still waiting on.
@@ -442,6 +469,7 @@ async fn run_interactive(cli: &Cli) -> i32 {
     let branch = git_branch();
     let mut app = rho_tui::App::new(session, model)
         .with_mouse(mouse)
+        .with_reasoning(reasoning)
         .with_context(cwd, branch, provider_name);
     match app.run().await {
         Ok(()) => 0,
@@ -643,5 +671,54 @@ mod mouse_tests {
             false,
             &env(&[("RHO_TUI_MOUSE", "yes please")])
         ));
+    }
+}
+
+#[cfg(test)]
+mod reasoning_tests {
+    use super::resolve_reasoning;
+    use rho_core::ReasoningDisplay;
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn reasoning_defaults_to_summary() {
+        assert_eq!(resolve_reasoning(None, &[]), ReasoningDisplay::Summary);
+    }
+
+    #[test]
+    fn the_flag_sets_the_mode() {
+        assert_eq!(resolve_reasoning(Some("full"), &[]), ReasoningDisplay::Full);
+    }
+
+    #[test]
+    fn the_env_var_sets_the_mode() {
+        assert_eq!(
+            resolve_reasoning(None, &env(&[("RHO_TUI_REASONING", "live")])),
+            ReasoningDisplay::Live
+        );
+    }
+
+    #[test]
+    fn the_flag_wins_over_the_env_var() {
+        assert_eq!(
+            resolve_reasoning(Some("off"), &env(&[("RHO_TUI_REASONING", "full")])),
+            ReasoningDisplay::Off
+        );
+    }
+
+    #[test]
+    fn a_bad_flag_value_falls_back_to_summary() {
+        // A display mode is not a security switch, so an unknown name reverts to the
+        // honest default rather than hiding reasoning.
+        assert_eq!(
+            resolve_reasoning(Some("loud"), &[]),
+            ReasoningDisplay::Summary
+        );
     }
 }

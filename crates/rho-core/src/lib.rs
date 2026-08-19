@@ -13,12 +13,14 @@ mod error;
 mod event;
 mod hook;
 mod provider;
+mod reasoning;
 mod retry;
 mod sandbox;
 mod secret;
 mod session;
 mod subagent;
 mod tasks;
+mod thinking;
 mod tool;
 mod usage;
 
@@ -30,6 +32,7 @@ pub use error::{Error, ProviderError};
 pub use event::StreamEvent;
 pub use hook::{Hook, HookChain, HookOutcome, ToolCallView};
 pub use provider::{CompletionRequest, Provider, ProviderStream, ToolSpec};
+pub use reasoning::ReasoningDisplay;
 pub use retry::RetryPolicy;
 pub use sandbox::SandboxMode;
 pub use secret::Secret;
@@ -48,6 +51,7 @@ pub use tasks::{
     BackgroundReason, DEFAULT_FOREGROUND_LIMIT_MS, RunMode, TaskError, TaskHandle, TaskId,
     TaskLimits, TaskProgress, TaskRegistry, TaskSnapshot, TaskState, WaitUntil, decide_run_mode,
 };
+pub use thinking::{ThinkingPiece, ThinkingSplitter};
 pub use tool::{
     AllowAllPolicy, ApprovalDecision, ApprovalPolicy, ReadOnlyPolicy, Tool, ToolContext, ToolError,
     ToolKind, ToolOutput, ToolRegistry, confine,

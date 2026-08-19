@@ -6,7 +6,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rho_core::{
-    AgentEvent, AgentStopReason, StreamEvent, TaskId, TaskProgress, TaskState, ToolKind,
+    AgentEvent, AgentStopReason, ReasoningDisplay, StreamEvent, TaskId, TaskProgress, TaskState,
+    ThinkingPiece, ThinkingSplitter, ToolKind,
 };
 
 use crate::concise::RowFold;
@@ -249,6 +250,13 @@ pub struct TuiState {
     history_pos: Option<usize>,
     /// The live draft, saved when a recall starts, so a forward recall restores it.
     history_stash: Option<String>,
+    /// How the frontend draws reasoning. It changes only what rho draws, never the
+    /// stream and never what reaches a provider. See `SPEC-reasoning-across-providers`.
+    pub reasoning_display: ReasoningDisplay,
+    /// The splitter that lifts a leading `<thinking>` tag out of the answer text. It is
+    /// reset at each text-block start, because the leading rule is per block. It is
+    /// private, so it is not part of the public state contract.
+    text_split: ThinkingSplitter,
 }
 
 /// What the app must do after a key press. The key handler is pure. It returns
@@ -343,6 +351,9 @@ impl TuiState {
     fn apply_stream(&mut self, event: &StreamEvent, now_millis: i64) {
         match event {
             StreamEvent::TextStart { .. } => {
+                // A new text block, so the tag splitter starts fresh. A leading
+                // `<thinking>` tag is stripped only from the block's start.
+                self.text_split = ThinkingSplitter::new();
                 self.push_row(
                     Row::Assistant {
                         text: String::new(),
@@ -351,9 +362,8 @@ impl TuiState {
                 );
             }
             StreamEvent::TextDelta { delta, .. } => {
-                if let Some(Row::Assistant { text }) = self.last_assistant_mut() {
-                    text.push_str(delta);
-                }
+                let pieces = self.text_split.push(delta);
+                self.route_thinking_pieces(pieces, now_millis);
             }
             StreamEvent::ThinkingStart { .. } => {
                 self.push_row(
@@ -401,11 +411,103 @@ impl TuiState {
                 }
             }
             StreamEvent::MessageStart { .. }
-            | StreamEvent::TextEnd { .. }
             | StreamEvent::ToolCallDelta { .. }
             | StreamEvent::Usage(_)
             | StreamEvent::Done { .. } => {}
+            StreamEvent::TextEnd { .. } => {
+                // Flush a held-back lead or an unclosed tag. An unclosed tag becomes
+                // reasoning, so a truncated stream loses no text.
+                let pieces = self.text_split.finish();
+                self.route_thinking_pieces(pieces, now_millis);
+                // A reasoning-only block left its thinking row open. Settle its span here,
+                // so the summary reads `thought for` and not a bare `thinking`.
+                if let Some(index) = self.open_split_thinking_index() {
+                    self.settle_duration(index, now_millis);
+                }
+            }
         }
+    }
+
+    /// Route the tag splitter's output to the right rows.
+    ///
+    /// Reasoning that leads the block goes to a thinking row, drawn dimmed. The answer
+    /// that follows goes to an assistant row. See `SPEC-reasoning-across-providers`.
+    fn route_thinking_pieces(&mut self, pieces: Vec<ThinkingPiece>, now_millis: i64) {
+        for piece in pieces {
+            match piece {
+                ThinkingPiece::Reasoning(text) => self.append_reasoning(&text, now_millis),
+                ThinkingPiece::Text(text) => self.append_answer(&text, now_millis),
+            }
+        }
+    }
+
+    /// The index of the newest live row, when it is within the live range.
+    fn newest_live_index(&self) -> Option<usize> {
+        let start = self.frozen_rows.min(self.rows.len());
+        let index = self.rows.len().checked_sub(1)?;
+        (index >= start).then_some(index)
+    }
+
+    /// Append reasoning to the open thinking row, or open one.
+    ///
+    /// Reasoning always leads a block. So the newest row is either the empty assistant
+    /// row from `TextStart`, which becomes the thinking row, or the thinking row itself.
+    fn append_reasoning(&mut self, delta: &str, now_millis: i64) {
+        match self.newest_live_index() {
+            Some(index) if matches!(self.rows[index], Row::Thinking { .. }) => {
+                if let Row::Thinking { text } = &mut self.rows[index] {
+                    text.push_str(delta);
+                }
+            }
+            Some(index) if matches!(&self.rows[index], Row::Assistant { text } if text.is_empty()) =>
+            {
+                // Reuse the empty assistant row and its start instant, so the span runs
+                // from the block start and no empty answer row is left behind.
+                self.rows[index] = Row::Thinking {
+                    text: delta.to_string(),
+                };
+            }
+            _ => self.push_row(
+                Row::Thinking {
+                    text: delta.to_string(),
+                },
+                Some(now_millis),
+            ),
+        }
+    }
+
+    /// Append answer text to the open assistant row, or open one after the reasoning.
+    fn append_answer(&mut self, delta: &str, now_millis: i64) {
+        match self.newest_live_index() {
+            Some(index) if matches!(self.rows[index], Row::Assistant { .. }) => {
+                if let Row::Assistant { text } = &mut self.rows[index] {
+                    text.push_str(delta);
+                }
+            }
+            other => {
+                // The answer begins after reasoning. Settle the reasoning span, then open
+                // the answer row, so `Live` mode collapses the reasoning at this point.
+                if let Some(index) = other
+                    && matches!(self.rows[index], Row::Thinking { .. })
+                {
+                    self.settle_duration(index, now_millis);
+                }
+                self.push_row(
+                    Row::Assistant {
+                        text: delta.to_string(),
+                    },
+                    Some(now_millis),
+                );
+            }
+        }
+    }
+
+    /// The newest live row when it is an unsettled thinking row, else `None`.
+    fn open_split_thinking_index(&self) -> Option<usize> {
+        let index = self.newest_live_index()?;
+        let is_thinking = matches!(self.rows[index], Row::Thinking { .. });
+        let unsettled = self.row_durations.get(index).copied().flatten().is_none();
+        (is_thinking && unsettled).then_some(index)
     }
 
     /// Write the span of the row at `index`, from its start instant to `now_millis`.
@@ -639,14 +741,6 @@ impl TuiState {
         if let Some(start) = self.turn_started {
             self.turn_millis = Some(now_millis - start);
         }
-    }
-
-    fn last_assistant_mut(&mut self) -> Option<&mut Row> {
-        let start = self.frozen_rows.min(self.rows.len());
-        self.rows[start..]
-            .iter_mut()
-            .rev()
-            .find(|row| matches!(row, Row::Assistant { .. }))
     }
 
     fn last_thinking_mut(&mut self) -> Option<&mut Row> {
@@ -1233,7 +1327,7 @@ pub fn row_is_final(state: &TuiState, index: usize) -> bool {
         Row::User { .. } => true,
         // Nothing updates an error row.
         Row::Error { .. } => true,
-        // `last_assistant_mut` reaches only the newest assistant row.
+        // `append_answer` writes only the newest assistant row.
         Row::Assistant { .. } => turn_ended || newer_row_of_kind(state, index, RowKind::Assistant),
         // `last_thinking_mut` reaches only the newest thinking row.
         Row::Thinking { .. } => turn_ended || newer_row_of_kind(state, index, RowKind::Thinking),

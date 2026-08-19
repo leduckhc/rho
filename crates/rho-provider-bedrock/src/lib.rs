@@ -609,8 +609,14 @@ pub fn build_messages(messages: &[Message]) -> Vec<aws_sdk_bedrockruntime::types
                         blocks.push(SdkBlock::ToolResult(result));
                     }
                 }
-                // Thinking replay and image input are out of scope for sprint 1.
-                _ => {}
+                // Reasoning never travels to Bedrock in phase 1. rho does not yet ask for
+                // extended thinking, and replaying a reasoning block needs the per-endpoint
+                // rules that are phase 2. Drop it here in a named arm, never by `_ => {}`,
+                // so the drop is stated. See SPEC-reasoning-across-providers section 3 "Three".
+                ContentBlock::Thinking { .. } => {}
+                // Image input in a request is out of scope for sprint 1. Drop it in a named
+                // arm, so a new block kind cannot hide behind a wildcard.
+                ContentBlock::Image { .. } => {}
             }
         }
         if blocks.is_empty() {

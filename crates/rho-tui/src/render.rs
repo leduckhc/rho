@@ -140,10 +140,7 @@ pub fn render(state: &TuiState, frame: &mut Frame<'_>) {
     let live: Vec<(String, Style)> = if state.rows.is_empty() && state.panel == Panel::None {
         empty_state(state, width, band.live_rows)
     } else {
-        live_window(state, area.width, band.live_rows as u16)
-            .into_iter()
-            .map(|line| (line, text_style()))
-            .collect()
+        live_window_styled(state, area.width, band.live_rows as u16)
     };
     for offset in 0..band.live_rows {
         match live.get(offset) {
@@ -350,12 +347,24 @@ pub fn banner_freeze(state: &TuiState, width: u16, frozen: bool) -> Option<Freez
 /// It keeps the newest lines when the live rows do not fit. A line that scrolls out of
 /// the live area reaches the scrollback when its row freezes.
 pub fn live_window(state: &TuiState, width: u16, rows: u16) -> Vec<String> {
+    live_window_styled(state, width, rows)
+        .into_iter()
+        .map(|(line, _style)| line)
+        .collect()
+}
+
+/// The live rows as styled lines, newest-anchored, one entry per drawn row.
+///
+/// This keeps the per-row style, so a reasoning row draws dimmed in the live band. The
+/// public `live_window` drops the style, because a frozen row reaches the scrollback as
+/// plain text that the terminal then owns.
+fn live_window_styled(state: &TuiState, width: u16, rows: u16) -> Vec<(String, Style)> {
     let rows = rows as usize;
     if rows == 0 {
         return Vec::new();
     }
     let start = state.frozen_rows.min(state.rows.len());
-    let mut lines = render_rows_plain(state, start, state.rows.len(), width as usize);
+    let mut lines = render_rows_styled(state, start, state.rows.len(), width as usize);
     // Drop any overflow from the top, so the newest row stays visible.
     if lines.len() > rows {
         lines.drain(0..lines.len() - rows);
@@ -407,20 +416,32 @@ pub fn freeze_all(state: &TuiState, width: u16) -> Option<FreezeBatch> {
 /// A blank row separates turns, and it leads the row below it. A run of tool rows stays
 /// together. So the last line is always a content line, never a blank separator.
 fn render_rows_plain(state: &TuiState, start: usize, stop: usize, width: usize) -> Vec<String> {
+    render_rows_styled(state, start, stop, width)
+        .into_iter()
+        .map(|(text, _style)| text)
+        .collect()
+}
+
+/// Render the rows from `start` to `stop` as styled lines, oldest first.
+///
+/// The style stays with each line, so the live band can draw a reasoning row dimmed. The
+/// freeze path drops the style, because the terminal owns the scrollback cells.
+fn render_rows_styled(
+    state: &TuiState,
+    start: usize,
+    stop: usize,
+    width: usize,
+) -> Vec<(String, Style)> {
     let measure = TEXT_MEASURE_CAP.min(width.saturating_sub(TEXT_MEASURE_MARGIN));
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<(String, Style)> = Vec::new();
     for index in start..stop {
         let row = &state.rows[index];
         let is_tool = matches!(row, Row::Tool { .. });
         let prev_tool = index > 0 && matches!(state.rows[index - 1], Row::Tool { .. });
         if !(is_tool && prev_tool) {
-            out.push(blank(width));
+            out.push((blank(width), text_style()));
         }
-        let mut block: Vec<(String, Style)> = Vec::new();
-        push_row(&mut block, state, index, row, width, measure);
-        for (text, _style) in block {
-            out.push(text);
-        }
+        push_row(&mut out, state, index, row, width, measure);
     }
     out
 }
@@ -452,12 +473,38 @@ fn push_row(
                 out.push((pad(&line, width), text_style()));
             }
         }
-        Row::Thinking { text: _ } => {
-            let body = match format_duration(row_duration(state, index)) {
+        Row::Thinking { text } => {
+            // Reasoning draws in `Role::Muted`, never `Role::Text`, because it is the
+            // model's private work and must not read as the answer. The mode decides how
+            // much shows. See `SPEC-reasoning-across-providers` section 5.
+            let summary = match format_duration(row_duration(state, index)) {
                 Some(span) => format!("{GLYPH_THINKING} thought for {span}"),
                 None => format!("{GLYPH_THINKING} thinking"),
             };
-            out.push((pad(&body, width), style_for(Role::Muted)));
+            match state.reasoning_display {
+                rho_core::ReasoningDisplay::Off => {}
+                rho_core::ReasoningDisplay::Summary => {
+                    out.push((pad(&summary, width), style_for(Role::Muted)));
+                }
+                rho_core::ReasoningDisplay::Full => {
+                    out.push((pad(&summary, width), style_for(Role::Muted)));
+                    for line in wrap(&sanitize_line(text), measure) {
+                        out.push((pad(&line, width), style_for(Role::Muted)));
+                    }
+                }
+                rho_core::ReasoningDisplay::Live => {
+                    // The span settles when the answer starts, so a settled span means the
+                    // reasoning collapses to the summary row. While it streams, the text
+                    // shows.
+                    if row_duration(state, index).is_some() {
+                        out.push((pad(&summary, width), style_for(Role::Muted)));
+                    } else {
+                        for line in wrap(&sanitize_line(text), measure) {
+                            out.push((pad(&line, width), style_for(Role::Muted)));
+                        }
+                    }
+                }
+            }
         }
         Row::Tool {
             name,

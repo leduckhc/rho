@@ -299,3 +299,55 @@ async fn usage_arriving_after_the_finish_chunk_is_still_reported() {
         "usage must precede Done, or a consumer that stops at Done misses it"
     );
 }
+
+// --- Reading the reasoning wire. -----------------------------------------
+//
+// SPEC-reasoning-across-providers section 3 "One": rho must read `reasoning`,
+// `reasoning_content`, and `reasoning_text`, and take the first non-empty one.
+
+/// Collect every reasoning delta as one string.
+fn reasoning_text(events: &[Result<StreamEvent, rho_core::ProviderError>]) -> String {
+    events
+        .iter()
+        .filter_map(|item| match item {
+            Ok(StreamEvent::ThinkingDelta { delta, .. }) => Some(delta.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_first_non_empty_reasoning_field_wins() {
+    let (stream, _server) = stream_body(common::sse_reasoning_two_fields_same_text()).await;
+    let events = drain(stream).await;
+    assert_eq!(
+        reasoning_text(&events),
+        "B",
+        "two fields with the same text must yield the text once, not twice"
+    );
+}
+
+#[tokio::test]
+async fn reasoning_content_is_read() {
+    let (stream, _server) = stream_body(common::sse_reasoning_content_only()).await;
+    let events = drain(stream).await;
+    assert_eq!(reasoning_text(&events), "why");
+}
+
+#[tokio::test]
+async fn reasoning_text_is_read() {
+    let (stream, _server) = stream_body(common::sse_reasoning_text_only()).await;
+    let events = drain(stream).await;
+    assert_eq!(reasoning_text(&events), "hmm");
+}
+
+#[tokio::test]
+async fn an_empty_reasoning_delta_starts_no_block() {
+    let (stream, _server) = stream_body(common::sse_reasoning_empty()).await;
+    let events = drain(stream).await;
+    let starts = events
+        .iter()
+        .filter(|item| matches!(item, Ok(StreamEvent::ThinkingStart { .. })))
+        .count();
+    assert_eq!(starts, 0, "an empty reasoning field must start no block");
+}

@@ -224,6 +224,66 @@ impl ProviderHarness for OpenRouterHarness {
     }
 }
 
+/// A stream whose one reasoning delta uses `reasoning_content` and `reasoning`, both
+/// holding the same text. A naive reader that adds every field would double it. rho must
+/// take the first non-empty field only. See SPEC-reasoning-across-providers section 3.
+pub fn sse_reasoning_two_fields_same_text() -> String {
+    let mut body = String::new();
+    body.push_str(&frame(
+        r#"{"choices":[{"index":0,"delta":{"reasoning_content":"B","reasoning":"B"}}]}"#,
+    ));
+    body.push_str(&frame(
+        r#"{"choices":[{"index":0,"delta":{"content":"answer"}}]}"#,
+    ));
+    body.push_str(&frame(
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+    ));
+    body.push_str("data: [DONE]\n\n");
+    body
+}
+
+/// A stream whose reasoning arrives only in `reasoning_content`. rho read nothing here.
+pub fn sse_reasoning_content_only() -> String {
+    let mut body = String::new();
+    body.push_str(&frame(
+        r#"{"choices":[{"index":0,"delta":{"reasoning_content":"why"}}]}"#,
+    ));
+    body.push_str(&frame(
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+    ));
+    body.push_str("data: [DONE]\n\n");
+    body
+}
+
+/// A stream whose reasoning arrives only in `reasoning_text`, the third accepted name.
+pub fn sse_reasoning_text_only() -> String {
+    let mut body = String::new();
+    body.push_str(&frame(
+        r#"{"choices":[{"index":0,"delta":{"reasoning_text":"hmm"}}]}"#,
+    ));
+    body.push_str(&frame(
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+    ));
+    body.push_str("data: [DONE]\n\n");
+    body
+}
+
+/// A stream whose reasoning field is an empty string. It must start no reasoning block.
+pub fn sse_reasoning_empty() -> String {
+    let mut body = String::new();
+    body.push_str(&frame(
+        r#"{"choices":[{"index":0,"delta":{"reasoning":""}}]}"#,
+    ));
+    body.push_str(&frame(
+        r#"{"choices":[{"index":0,"delta":{"content":"answer"}}]}"#,
+    ));
+    body.push_str(&frame(
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+    ));
+    body.push_str("data: [DONE]\n\n");
+    body
+}
+
 /// A stream whose final chunk carries the cache and cost breakdown.
 ///
 /// The shape is copied from a live probe of `POST /api/v1/chat/completions`, not from
