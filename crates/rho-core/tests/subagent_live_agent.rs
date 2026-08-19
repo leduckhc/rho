@@ -397,3 +397,79 @@ fn live_under_lists_only_the_callers_own_descendants() {
         "the process-wide list still shows both, for a host that owns the process"
     );
 }
+
+#[tokio::test]
+async fn a_handle_reports_progress_while_the_child_still_runs() {
+    // The point of a handle is to watch a child **during** its work. The tool
+    // published progress once, after the child finished, so `progress()` read zero
+    // for the whole run and then jumped to the final number. That is a post-mortem,
+    // not progress, and the event name `AgentProgressed` said otherwise.
+    use rho_core::{AgentProgress, Usage};
+
+    let registry = registry();
+    let root = registry.root();
+    let spawn = root
+        .spawn_child("scout", CancelToken::new().child())
+        .unwrap();
+    let handle = registry.live().into_iter().next().unwrap();
+
+    // Stand in for the child: publish each turn as it starts.
+    for turn in 1..=3u32 {
+        spawn.publish(AgentProgress {
+            turns: turn,
+            usage: Usage::default(),
+        });
+        assert_eq!(
+            handle.progress().turns,
+            turn,
+            "a handle must read turn {turn} while the child is still running"
+        );
+    }
+}
+
+#[test]
+fn a_finished_report_is_found_by_its_own_id() {
+    // The first version of `status` matched only the ancestor chain, so it answered
+    // with the most recent sibling's report whatever id was asked for. Answering with
+    // another child's work is worse than answering nothing.
+    let registry = registry();
+    let root = registry.root();
+    let first = root
+        .spawn_child("scout", CancelToken::new().child())
+        .unwrap();
+    let second = root
+        .spawn_child("greedy", CancelToken::new().child())
+        .unwrap();
+    let first_id = first.node.id();
+    let second_id = second.node.id();
+
+    let report_for = |agent: &str| rho_core::AgentReport {
+        agent: agent.to_string(),
+        outcome: rho_core::AgentOutcome::Done,
+        summary: format!("{agent} finished"),
+        usage: Usage::default(),
+        turns: 1,
+        gate: Default::default(),
+        claims: Default::default(),
+        transcript: None,
+    };
+    registry.record_report(&root, first_id, report_for("scout"));
+    registry.record_report(&root, second_id, report_for("greedy"));
+    drop(first);
+    drop(second);
+
+    match registry.status(&root, first_id) {
+        Some(rho_core::AgentStatus::Finished { report }) => {
+            assert_eq!(report.agent, "scout", "each id must return its own report")
+        }
+        other => panic!("expected the first child's report, got {other:?}"),
+    }
+    match registry.status(&root, second_id) {
+        Some(rho_core::AgentStatus::Finished { report }) => assert_eq!(report.agent, "greedy"),
+        other => panic!("expected the second child's report, got {other:?}"),
+    }
+    assert!(
+        registry.status(&root, rho_core::AgentId(9999)).is_none(),
+        "an unknown id must answer nothing, not somebody else's report"
+    );
+}

@@ -608,3 +608,41 @@ impl rho_core::Tool for CountingTool {
         Ok(rho_core::ToolOutput::text("counted"))
     }
 }
+
+/// A tool that never returns until its run is cancelled.
+///
+/// A timeout test needs it: the child must still be working when the deadline
+/// fires, so the transcript has lines written and not yet flushed.
+pub struct HangingTool {
+    name: String,
+}
+
+impl HangingTool {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
+#[async_trait]
+impl rho_core::Tool for HangingTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        "never finishes"
+    }
+    fn kind(&self) -> ToolKind {
+        ToolKind::Read
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        ctx: rho_core::ToolContext,
+    ) -> Result<rho_core::ToolOutput, rho_core::ToolError> {
+        ctx.cancel.cancelled().await;
+        Ok(rho_core::ToolOutput::text("cancelled"))
+    }
+}

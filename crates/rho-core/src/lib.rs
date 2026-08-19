@@ -22,6 +22,7 @@ mod session;
 mod subagent;
 mod tasks;
 mod tool;
+mod transcript;
 mod usage;
 
 pub use agent::{AgentConfig, AgentEvent, AgentEvents, AgentStopReason, Session, SessionConfig};
@@ -47,10 +48,10 @@ pub use session::{
     encode,
 };
 pub use subagent::{
-    AgentId, AgentNode, AgentOutcome, AgentProgress, AgentRegistry, AgentReport, BothPolicies,
-    ChildSlot, ChildSpawn, LiveAgent, MAX_CHILD_RETRIES, MAX_SUMMARY_CHARS, RetryLedger,
-    SubagentError, SubagentLimits, ToolIntersection, cap_tool_calls, check_no_cycle,
-    collect_report, intersect_tools, narrow_sandbox,
+    AgentId, AgentNode, AgentOutcome, AgentProgress, AgentRegistry, AgentReport, AgentStatus,
+    BothPolicies, ChildSlot, ChildSpawn, CollectOptions, LiveAgent, MAX_CHILD_RETRIES,
+    MAX_SUMMARY_CHARS, RetryLedger, SubagentError, SubagentLimits, ToolIntersection,
+    cap_tool_calls, check_no_cycle, collect_report, intersect_tools, narrow_sandbox,
 };
 pub use tasks::{
     BackgroundReason, DEFAULT_FOREGROUND_LIMIT_MS, RunMode, TaskError, TaskHandle, TaskId,
@@ -59,5 +60,8 @@ pub use tasks::{
 pub use tool::{
     AllowAllPolicy, ApprovalDecision, ApprovalPolicy, ReadOnlyPolicy, Tool, ToolContext, ToolError,
     ToolKind, ToolOutput, ToolRegistry, confine,
+};
+pub use transcript::{
+    TranscriptBody, TranscriptEntry, TranscriptWriter, session_transcript_dir, transcript_path,
 };
 pub use usage::{StopReason, Usage};

@@ -31,6 +31,19 @@ struct CancelArgs {
     id: u64,
 }
 
+/// One word for an outcome, for a status line a model reads.
+fn outcome_word(outcome: &rho_core::AgentOutcome) -> String {
+    match outcome {
+        rho_core::AgentOutcome::Done => "done".to_string(),
+        rho_core::AgentOutcome::OutOfTurns => "out of turns".to_string(),
+        rho_core::AgentOutcome::Canceled => "cancelled".to_string(),
+        rho_core::AgentOutcome::Failed { reason } => format!("failed ({reason})"),
+        rho_core::AgentOutcome::Rejected { failed } => {
+            format!("rejected ({})", failed.join(", "))
+        }
+    }
+}
+
 /// Name the children that are live now, for a refusal that teaches.
 fn live_summary(env: &SpawnEnv) -> String {
     // Only this session's own descendants. The registry is process-wide, so `live`
@@ -120,6 +133,124 @@ impl Tool for SteerAgentTool {
     }
 }
 
+/// The `agent_status` tool. It polls a running or finished subagent.
+pub struct AgentStatusTool {
+    env: Arc<SpawnEnv>,
+}
+
+impl AgentStatusTool {
+    pub fn new(env: Arc<SpawnEnv>) -> Self {
+        Self { env }
+    }
+}
+
+#[async_trait]
+impl Tool for AgentStatusTool {
+    fn name(&self) -> &str {
+        "agent_status"
+    }
+
+    fn description(&self) -> &str {
+        "Poll the status of a running or finished subagent. Returns current progress."
+    }
+
+    fn kind(&self) -> ToolKind {
+        ToolKind::Read
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": "The subagent id from spawn_agent or spawn_agents."
+                }
+            },
+            "required": ["id"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        #[derive(Deserialize)]
+        struct Args {
+            id: u64,
+        }
+        let args: Args = parse_args(args)?;
+
+        // `status` answers for a live child **and** for one that finished. A background
+        // child finishes while the parent is busy, and `ChildSlot::drop` removes the
+        // live handle, so a lookup that only knew live children would lose every
+        // result the parent asked for. jcode keeps a `latest_completion_report` for the
+        // same reason.
+        let Some(status) = self
+            .env
+            .node
+            .registry()
+            .status(&self.env.node, AgentId(args.id))
+        else {
+            return Ok(ToolOutput::text(format!(
+                "no subagent with id {} is known in this session tree. It may belong to \
+                 another session, or it finished long enough ago to be forgotten. {}",
+                args.id,
+                live_summary(&self.env)
+            )));
+        };
+
+        let text = match status {
+            rho_core::AgentStatus::Running {
+                agent,
+                progress,
+                queued,
+                ..
+            } => {
+                let tokens = progress.usage.input_tokens + progress.usage.output_tokens;
+                let steering = if queued == 0 {
+                    String::new()
+                } else {
+                    format!(", {queued} steering message(s) waiting")
+                };
+                format!(
+                    "{agent} (id {}) is running: {} turn(s), {tokens} token(s){steering}.",
+                    args.id, progress.turns
+                )
+            }
+            // A finished child reports what a blocking spawn would have returned, plus
+            // the transcript path so the parent can read the whole run if it wants to.
+            rho_core::AgentStatus::Finished { report } => {
+                let mut text = format!(
+                    "{} (id {}) finished: {}. {} turn(s), {} token(s).",
+                    report.agent,
+                    args.id,
+                    outcome_word(&report.outcome),
+                    report.turns,
+                    report.usage.input_tokens + report.usage.output_tokens
+                );
+                if !report.gate.passed() {
+                    text.push_str(&format!(
+                        " rho's checks failed: {}.",
+                        report.gate.failed_labels().join(", ")
+                    ));
+                }
+                if !report.summary.is_empty() {
+                    text.push_str("\n\n");
+                    text.push_str(&report.summary);
+                }
+                if let Some(path) = &report.transcript {
+                    text.push_str(&format!("\n\n[full transcript: {}]", path.display()));
+                }
+                text
+            }
+        };
+
+        Ok(ToolOutput::text(text))
+    }
+}
+
 /// The `cancel_agent` tool. It stops one running subagent.
 pub struct CancelAgentTool {
     env: Arc<SpawnEnv>,
@@ -180,5 +311,33 @@ impl Tool for CancelAgentTool {
                 live_summary(&self.env)
             )))
         }
+    }
+}
+
+/// Test that agent_status cannot reach another session's child.
+#[cfg(test)]
+mod agent_status_tests {
+    use rho_core::ChildSpawn;
+
+    #[tokio::test]
+    async fn agent_status_cannot_reach_another_sessions_child() {
+        // Two registries = two sessions. A child in one must not be visible from the other.
+        let registry1 = rho_core::AgentRegistry::new(rho_core::SubagentLimits::new());
+        let registry2 = rho_core::AgentRegistry::new(rho_core::SubagentLimits::new());
+
+        let node1 = registry1.root();
+        let node2 = registry2.root();
+
+        let cancel = rho_core::CancelToken::new();
+        let ChildSpawn { node: child, .. } = node1
+            .spawn_child("scout", cancel.child())
+            .expect("registry 1 has room");
+
+        // Node 2's scope must not see node 1's child.
+        let found = node2.registry().descendant(&node2, child.id());
+        assert!(
+            found.is_none(),
+            "agent_status must not see a child from another session"
+        );
     }
 }

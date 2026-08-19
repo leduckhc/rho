@@ -290,6 +290,46 @@ pub enum SubagentError {
     RetryCapReached { deaths: u32, limit: u32 },
 }
 
+// --- A finished child stays reportable (background children) ---
+
+/// What a caller learns when it asks about one child.
+///
+/// A live handle disappears when `ChildSlot` drops, so a background child that
+/// finished would otherwise vanish before the parent asked. jcode keeps a
+/// `latest_completion_report` for the same reason, and pi keeps the record until the
+/// result is consumed.
+#[derive(Clone, Debug)]
+pub enum AgentStatus {
+    /// Still working. The numbers come from the live handle.
+    Running {
+        agent: String,
+        depth: u32,
+        progress: AgentProgress,
+        queued: usize,
+    },
+    /// Finished. The report is the same one a blocking spawn would have returned.
+    Finished { report: AgentReport },
+}
+
+/// How many finished reports the registry keeps.
+///
+/// Bounded, because a report holds a summary a model wrote. An unbounded map keyed by
+/// model output is the shape that already cost this project 805 MB once. See decision
+/// D-bash-line-cap.
+const MAX_REMEMBERED_REPORTS: usize = 64;
+
+/// One finished child, kept so a parent can still ask about it.
+///
+/// `AgentReport` carries no id, so the id is kept beside it. A lookup by ancestors
+/// alone would answer with some other child's report, which is worse than answering
+/// nothing.
+#[derive(Clone, Debug)]
+struct FinishedAgent {
+    id: AgentId,
+    ancestors: Vec<AgentId>,
+    report: AgentReport,
+}
+
 // --- A live child is addressable (SPEC-subagents section 7a) ---
 
 /// What a running child has done so far.
@@ -394,6 +434,11 @@ impl ChildSpawn {
         self.queue.clone()
     }
 
+    /// The sender `collect_report` publishes through, so progress is live.
+    pub fn progress_sender(&self) -> tokio::sync::watch::Sender<AgentProgress> {
+        self.progress.clone()
+    }
+
     /// Publish the child's progress, so a frontend can render it live.
     pub fn publish(&self, progress: AgentProgress) {
         // A send fails only when every receiver is gone, and that is not an
@@ -422,6 +467,12 @@ struct RegistryInner {
     /// Every live child, by id. A count cannot be cancelled or watched, so the
     /// registry holds the handles too.
     live: Mutex<std::collections::HashMap<u64, LiveAgent>>,
+    /// The reports of children that finished, oldest first, bounded.
+    ///
+    /// A background child finishes while the parent is busy, so its outcome has to
+    /// outlive its handle. The ancestor chain is kept beside the report, because the
+    /// handle that carried it is gone and a read still has to be scoped.
+    finished: Mutex<std::collections::VecDeque<FinishedAgent>>,
 }
 
 impl AgentRegistry {
@@ -433,6 +484,7 @@ impl AgentRegistry {
                 live_total: AtomicUsize::new(0),
                 next_id: AtomicU64::new(0),
                 live: Mutex::new(std::collections::HashMap::new()),
+                finished: Mutex::new(std::collections::VecDeque::new()),
             }),
         }
     }
@@ -532,6 +584,61 @@ impl AgentRegistry {
             }
             None => false,
         }
+    }
+
+    /// Remember a finished child's report, so a parent can still read it.
+    ///
+    /// The oldest report is dropped at the cap. Losing an old report is safe, because
+    /// the parent was told the id and the transcript path when the child started.
+    pub fn record_report(&self, caller: &AgentNode, id: AgentId, report: AgentReport) {
+        let mut ancestors = self
+            .handle(id)
+            .map(|handle| handle.ancestors.clone())
+            .unwrap_or_default();
+        if ancestors.is_empty() {
+            // The handle is already gone, so trust the caller's own chain.
+            ancestors = vec![caller.id()];
+        }
+        let mut finished = self
+            .inner
+            .finished
+            .lock()
+            .expect("the finished agent lock is poisoned");
+        if finished.len() >= MAX_REMEMBERED_REPORTS {
+            finished.pop_front();
+        }
+        finished.push_back(FinishedAgent {
+            id,
+            ancestors,
+            report,
+        });
+    }
+
+    /// What one child is doing, or what it did.
+    ///
+    /// It answers for a live child and for one that finished, and only for a
+    /// descendant of `caller`. See decision D-a-caller-addresses-only-its-own.
+    pub fn status(&self, caller: &AgentNode, id: AgentId) -> Option<AgentStatus> {
+        if let Some(handle) = self.descendant(caller, id) {
+            return Some(AgentStatus::Running {
+                agent: handle.agent.clone(),
+                depth: handle.depth,
+                progress: handle.progress(),
+                queued: handle.queued(),
+            });
+        }
+        let finished = self
+            .inner
+            .finished
+            .lock()
+            .expect("the finished agent lock is poisoned");
+        finished
+            .iter()
+            .rev()
+            .find(|entry| entry.id == id && entry.ancestors.contains(&caller.id()))
+            .map(|entry| AgentStatus::Finished {
+                report: entry.report.clone(),
+            })
     }
 
     /// Register a live child. Called by `spawn_child`, which cannot forget.
@@ -868,19 +975,73 @@ impl Default for RetryLedger {
 /// reported `Canceled`. A child that ends without a report is reported `Failed`.
 /// A child failure is a result, not the end of the parent's run. See decision
 /// D-measured-cost-and-cache.
+/// What [`collect_report`] needs besides the stream.
+///
+/// A struct, not three more parameters. The argument list already carried three
+/// things, and a fourth and fifth would repeat the mistake in decision
+/// D-no-four-argument-session-new. A new need arrives as a new field with a default.
+#[derive(Default)]
+pub struct CollectOptions {
+    /// How long the child may run before it is cancelled.
+    pub timeout: Duration,
+    /// Where to write the child's full transcript, for a human.
+    pub transcript_path: Option<PathBuf>,
+    /// Where to publish progress **as the child works**.
+    ///
+    /// Without this, a handle read zero for the whole run and then jumped to the
+    /// final number. That is a post-mortem, and the event is called
+    /// `AgentProgressed`. See `SPEC-subagents` section 9.
+    pub progress: Option<tokio::sync::watch::Sender<AgentProgress>>,
+}
+
+impl CollectOptions {
+    /// The options with a timeout and nothing else.
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self {
+            timeout,
+            ..Self::default()
+        }
+    }
+
+    /// Write the transcript here.
+    pub fn transcript(mut self, path: PathBuf) -> Self {
+        self.transcript_path = Some(path);
+        self
+    }
+
+    /// Publish progress here, turn by turn.
+    pub fn publishing(mut self, sender: tokio::sync::watch::Sender<AgentProgress>) -> Self {
+        self.progress = Some(sender);
+        self
+    }
+}
+
 pub async fn collect_report(
     agent: impl Into<String>,
     mut events: AgentEvents,
     cancel: CancelToken,
-    timeout: Duration,
-    transcript_path: Option<PathBuf>,
+    options: CollectOptions,
 ) -> AgentReport {
+    let CollectOptions {
+        timeout,
+        transcript_path,
+        progress,
+    } = options;
     let agent = agent.into();
     let mut usage = Usage::default();
     let mut turns = 0u32;
     let mut current_text = String::new();
     let mut last_answer: Option<String> = None;
-    let mut transcript: Vec<String> = Vec::new();
+    // A streaming writer, not a buffer. The run a transcript is most wanted for is
+    // the one that did not finish, and a buffer loses exactly that one. A writer that
+    // cannot open is `None`: a transcript is a convenience and must never fail a run.
+    let transcript = transcript_path.clone().and_then(|path| {
+        crate::TranscriptWriter::new(&path)
+            .map_err(|error| {
+                tracing::warn!(path = %path.display(), "cannot open the child transcript: {error}");
+            })
+            .ok()
+    });
     let mut outcome: Option<AgentOutcome> = None;
 
     let sleep = tokio::time::sleep(timeout);
@@ -899,11 +1060,64 @@ pub async fn collect_report(
             item = events.next() => {
                 match item {
                     Some(Ok(event)) => {
-                        transcript.push(format!("{event:?}"));
+                        if let Some(writer) = transcript.as_ref() {
+                            // `StreamEvent::TextEnd` carries only an index, so the
+                            // text comes from what this loop already accumulated.
+                            let body = match &event {
+                                AgentEvent::TurnStart => Some(crate::TranscriptBody::TurnStart {
+                                    turn: turns + 1,
+                                }),
+                                AgentEvent::Stream(StreamEvent::TextEnd { .. })
+                                    if !current_text.is_empty() =>
+                                {
+                                    Some(crate::TranscriptBody::Text {
+                                        text: current_text.clone(),
+                                    })
+                                }
+                                AgentEvent::ToolStart { id, name, .. } => {
+                                    Some(crate::TranscriptBody::ToolStart {
+                                        id: id.clone(),
+                                        name: name.clone(),
+                                    })
+                                }
+                                AgentEvent::ToolUpdate { id, output } => {
+                                    Some(crate::TranscriptBody::ToolUpdate {
+                                        id: id.clone(),
+                                        line: output.clone(),
+                                    })
+                                }
+                                AgentEvent::ToolEnd { id, output } => {
+                                    Some(crate::TranscriptBody::ToolEnd {
+                                        id: id.clone(),
+                                        error: output.is_error,
+                                    })
+                                }
+                                AgentEvent::Stream(StreamEvent::Usage(reported)) => {
+                                    Some(crate::TranscriptBody::Usage {
+                                        input: reported.input_tokens,
+                                        output: reported.output_tokens,
+                                    })
+                                }
+                                _ => None,
+                            };
+                            if let Some(body) = body {
+                                let _ = writer
+                                    .write(&crate::TranscriptEntry::now(&agent, body))
+                                    .await;
+                            }
+                        }
                         match &event {
                             AgentEvent::TurnStart => {
                                 turns += 1;
                                 current_text.clear();
+                                // Publish as the child works, not once at the end. A
+                                // failed send means nobody is watching.
+                                if let Some(sender) = &progress {
+                                    let _ = sender.send(AgentProgress {
+                                        turns,
+                                        usage,
+                                    });
+                                }
                             }
                             AgentEvent::Stream(StreamEvent::TextDelta { delta, .. }) => {
                                 current_text.push_str(delta);
@@ -915,6 +1129,9 @@ pub async fn collect_report(
                             }
                             AgentEvent::Stream(StreamEvent::Usage(reported)) => {
                                 usage.add(reported);
+                                if let Some(sender) = &progress {
+                                    let _ = sender.send(AgentProgress { turns, usage });
+                                }
                             }
                             AgentEvent::AgentEnd { stop_reason } => {
                                 outcome = Some(outcome_from_stop(*stop_reason));
@@ -942,7 +1159,23 @@ pub async fn collect_report(
         reason: "the child ended without a report.".to_string(),
     });
     let summary = cap_summary(last_answer.unwrap_or_default());
-    let transcript = write_transcript(transcript_path, &transcript).await;
+    // One last line, naming the outcome, then hand back the path. The path is `Some`
+    // only when the file really opened, so a caller is never pointed at nothing.
+    let transcript = match transcript.as_ref() {
+        Some(writer) => {
+            let _ = writer
+                .write(&crate::TranscriptEntry::now(
+                    &agent,
+                    crate::TranscriptBody::End {
+                        outcome: outcome_wire_name(&outcome),
+                    },
+                ))
+                .await;
+            Some(writer.path.clone())
+        }
+        None => None,
+    };
+    let _ = transcript_path;
 
     AgentReport {
         agent,
@@ -957,6 +1190,21 @@ pub async fn collect_report(
         claims: crate::ChildClaims::default(),
         transcript,
     }
+}
+
+/// The wire name of an outcome, matching its serde spelling.
+///
+/// A transcript reader groups by this, so it must match `AgentOutcome`'s own wire
+/// name rather than a second spelling.
+fn outcome_wire_name(outcome: &AgentOutcome) -> String {
+    match outcome {
+        AgentOutcome::Done => "done",
+        AgentOutcome::OutOfTurns => "out_of_turns",
+        AgentOutcome::Canceled => "canceled",
+        AgentOutcome::Failed { .. } => "failed",
+        AgentOutcome::Rejected { .. } => "rejected",
+    }
+    .to_string()
 }
 
 /// Map a run's stop reason onto a child outcome.
@@ -990,32 +1238,4 @@ fn cap_summary(mut summary: String) -> String {
         .unwrap_or(summary.len());
     summary.truncate(cut);
     summary
-}
-
-/// Write the transcript lines to disk. Return the path on success, `None` on
-/// failure. A failure to write a transcript must not fail the report, because the
-/// summary is the load-bearing result.
-///
-/// The parent directory is created first. The shipped caller writes into
-/// `<root>/.rho/agent-transcripts/`, and nothing else creates that directory, so
-/// without this every real run lost its transcript and only logged a warning.
-async fn write_transcript(path: Option<PathBuf>, lines: &[String]) -> Option<PathBuf> {
-    let path = path?;
-    if let Some(parent) = path.parent()
-        && let Err(error) = tokio::fs::create_dir_all(parent).await
-    {
-        tracing::warn!(
-            path = %parent.display(),
-            "cannot create the child transcript directory: {error}"
-        );
-        return None;
-    }
-    let body = lines.join("\n");
-    match tokio::fs::write(&path, body).await {
-        Ok(()) => Some(path),
-        Err(error) => {
-            tracing::warn!(path = %path.display(), "cannot write the child transcript: {error}");
-            None
-        }
-    }
 }

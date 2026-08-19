@@ -225,7 +225,13 @@ async fn a_parent_receives_a_summary_and_the_usage() {
     let session = child_session(vec![turn]);
     let cancel = CancelToken::new();
     let events = session.prompt(Vec::new(), cancel.clone());
-    let report = collect_report("scout", events, cancel, Duration::from_secs(60), None).await;
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60)),
+    )
+    .await;
 
     assert_eq!(report.outcome, AgentOutcome::Done);
     assert_eq!(report.summary, "The bug is in parser.rs at line 42.");
@@ -241,7 +247,13 @@ async fn a_long_child_summary_is_capped() {
     let session = child_session(vec![text_turn(&long)]);
     let cancel = CancelToken::new();
     let events = session.prompt(Vec::new(), cancel.clone());
-    let report = collect_report("scout", events, cancel, Duration::from_secs(60), None).await;
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60)),
+    )
+    .await;
     assert_eq!(
         report.summary.chars().count(),
         rho_core::MAX_SUMMARY_CHARS,
@@ -269,8 +281,8 @@ async fn a_child_transcript_never_enters_the_parent_context() {
         "scout",
         events,
         cancel,
-        Duration::from_secs(60),
-        Some(transcript.clone()),
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60))
+            .transcript(transcript.clone()),
     )
     .await;
 
@@ -312,8 +324,8 @@ async fn a_transcript_writes_into_a_directory_that_does_not_exist_yet() {
         "scout",
         events,
         cancel,
-        Duration::from_secs(60),
-        Some(transcript.clone()),
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60))
+            .transcript(transcript.clone()),
     )
     .await;
 
@@ -338,7 +350,13 @@ async fn a_child_failure_returns_a_result_and_the_parent_continues() {
     let session = child_session(broken);
     let cancel = CancelToken::new();
     let events = session.prompt(Vec::new(), cancel.clone());
-    let report = collect_report("scout", events, cancel, Duration::from_secs(60), None).await;
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60)),
+    )
+    .await;
     assert!(
         matches!(report.outcome, AgentOutcome::Failed { .. }),
         "a failed child yields Failed, got {:?}",
@@ -353,7 +371,13 @@ async fn a_child_that_ends_without_reporting_is_reported_as_failed() {
     let session = child_session(vec![Vec::new()]);
     let cancel = CancelToken::new();
     let events = session.prompt(Vec::new(), cancel.clone());
-    let report = collect_report("scout", events, cancel, Duration::from_secs(60), None).await;
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60)),
+    )
+    .await;
     match report.outcome {
         AgentOutcome::Failed { reason } => assert!(!reason.is_empty()),
         other => panic!("expected Failed, got {other:?}"),
@@ -383,8 +407,7 @@ async fn a_child_past_its_timeout_is_cancelled_and_reported() {
         "scout",
         events,
         cancel.clone(),
-        Duration::from_millis(50),
-        None,
+        rho_core::CollectOptions::with_timeout(Duration::from_millis(50)),
     )
     .await;
     assert_eq!(report.outcome, AgentOutcome::Canceled);
@@ -402,7 +425,13 @@ async fn cancelling_the_parent_cancels_every_descendant() {
     let cancel = CancelToken::new();
     cancel.cancel();
     let events = session.prompt(Vec::new(), cancel.clone());
-    let report = collect_report("scout", events, cancel, Duration::from_secs(60), None).await;
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60)),
+    )
+    .await;
     assert_eq!(report.outcome, AgentOutcome::Canceled);
 }
 
@@ -428,7 +457,13 @@ async fn a_child_out_of_turns_is_reported() {
     );
     let cancel = CancelToken::new();
     let events = session.prompt(Vec::new(), cancel.clone());
-    let report = collect_report("scout", events, cancel, Duration::from_secs(60), None).await;
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60)),
+    )
+    .await;
     assert_eq!(report.outcome, AgentOutcome::OutOfTurns);
 }
 
@@ -483,7 +518,13 @@ async fn the_tool_call_budget_stops_a_turn_that_asks_for_too_many_tools() {
 
     let cancel = CancelToken::new();
     let events = session.prompt(Vec::new(), cancel.clone());
-    let report = collect_report("scout", events, cancel, Duration::from_secs(60), None).await;
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60)),
+    )
+    .await;
 
     // The budget is spent, so the child is out of room. The parent gets what it
     // had rather than nothing.
@@ -526,4 +567,86 @@ fn the_retry_ledger_does_not_grow_without_a_bound() {
         }
     }
     assert!(refused, "repeated deaths of one task must still be refused");
+}
+
+// --- The child transcript: streamed, JSONL, and readable (round eight) ---
+
+#[tokio::test]
+async fn a_transcript_is_jsonl_and_one_line_per_event() {
+    // The transcript was `format!("{event:?}")`, which no reader can parse. pi writes
+    // JSONL, one entry per message, and a parent that is handed the path needs a
+    // format it can actually read.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("child.jsonl");
+    let session = child_session(vec![text_turn("the answer")]);
+    let cancel = CancelToken::new();
+    let events = session.prompt(Vec::new(), cancel.clone());
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60)).transcript(path.clone()),
+    )
+    .await;
+
+    assert_eq!(report.transcript.as_deref(), Some(path.as_path()));
+    let body = std::fs::read_to_string(&path).unwrap();
+    assert!(!body.trim().is_empty(), "the transcript must hold entries");
+    for line in body.lines() {
+        let entry: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("every line must be JSON: {e} in {line}"));
+        assert!(
+            entry["ts"].is_string(),
+            "each entry carries a timestamp: {line}"
+        );
+        assert_eq!(
+            entry["agent"], "scout",
+            "each entry names the agent: {line}"
+        );
+        assert!(
+            entry["type"].is_string(),
+            "each entry names its kind: {line}"
+        );
+    }
+    assert!(
+        body.contains("TurnStart"),
+        "a turn must appear, got: {body}"
+    );
+    assert!(
+        body.contains("the answer"),
+        "the child's text must appear, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_timed_out_child_still_leaves_the_lines_it_wrote() {
+    // The case a transcript is most wanted for, and the one that had none. The old
+    // writer buffered every line and wrote once at the end, so a child that was
+    // cancelled or crashed left an empty file or no file at all.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("timeout.jsonl");
+
+    // A tool that never returns, so the child is still working when the timeout fires.
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(common::HangingTool::new("probe")));
+    let session = child_session_with_tools(
+        vec![tool_call_turn("c1", "probe", serde_json::json!({}))],
+        tools,
+    );
+    let cancel = CancelToken::new();
+    let events = session.prompt(Vec::new(), cancel.clone());
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_millis(50)).transcript(path.clone()),
+    )
+    .await;
+
+    assert_eq!(report.outcome, AgentOutcome::Canceled);
+    let body = std::fs::read_to_string(&path).expect("a cancelled child still leaves its file");
+    assert!(
+        body.contains("TurnStart"),
+        "the lines written before the timeout must survive, got: {body:?}"
+    );
 }

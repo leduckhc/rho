@@ -136,7 +136,10 @@ pub async fn load(request: LoadRequest) -> (Vec<Arc<dyn Tool>>, Subagents) {
         }
     ));
 
-    let transcript_dir = session_root.join(".rho").join("agent-transcripts");
+    // A temp directory, not the session root. A transcript under `.rho/` sits inside
+    // the user's repository, `.gitignore` does not cover it, and it can be committed
+    // by accident. pi writes to a per-user temp root for the same reason.
+    let transcript_dir = rho_core::session_transcript_dir(std::process::id());
     let env = SpawnEnv {
         node: root_node(&registry),
         definitions,
@@ -162,6 +165,7 @@ pub async fn load(request: LoadRequest) -> (Vec<Arc<dyn Tool>>, Subagents) {
         // A running child is addressable, so the model can redirect one instead of
         // cancelling the lot and starting again. See SPEC-steering.
         Arc::new(rho_tools::SteerAgentTool::new(Arc::clone(&env))),
+        Arc::new(rho_tools::AgentStatusTool::new(Arc::clone(&env))),
         Arc::new(rho_tools::CancelAgentTool::new(env)),
     ];
     (

@@ -28,7 +28,7 @@ pub use progress::{PROGRESS_PREFIX, ProgressScan, scan_line};
 pub use read::ReadTool;
 pub use sandbox::{Backend, CommandPlan, SandboxUnavailable, detect_backend, plan};
 pub mod control;
-pub use control::{CancelAgentTool, SteerAgentTool};
+pub use control::{AgentStatusTool, CancelAgentTool, SteerAgentTool};
 pub mod gate;
 pub use gate::{SandboxedRunner, TaskArgs};
 pub use subagent::{ChildToolFactory, SpawnAgentTool, SpawnAgentsTool, SpawnEnv};

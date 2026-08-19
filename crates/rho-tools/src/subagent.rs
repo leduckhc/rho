@@ -80,6 +80,13 @@ struct SpawnArgs {
     /// the command that judges it. See decision D-an-acceptance-check-has-a-trusted-author.
     #[serde(default)]
     artifacts: Vec<String>,
+    /// Run the child in the background and return at once.
+    ///
+    /// A foreground spawn blocks until the child finishes, so the parent can never
+    /// poll one. With this the parent gets the id straight away and asks
+    /// `agent_status` when it wants to know.
+    #[serde(default)]
+    background: bool,
 }
 
 /// The `spawn_agent` tool. It spawns a subagent and returns its summary.
@@ -161,6 +168,13 @@ impl Tool for SpawnAgentTool {
                         "Files the child must deliver, relative to the session root. rho checks \
                          each one after the child stops, and reports the task rejected when one \
                          is missing or empty. Declare a file only when the child must write it."
+                },
+                "background": {
+                    "type": "boolean",
+                    "description":
+                        "Return at once instead of waiting. Use it for long work you want to \
+                         carry on beside. Poll it with agent_status, redirect it with \
+                         steer_agent, and stop it with cancel_agent."
                 }
             },
             "required": ["agent", "prompt"]
@@ -173,15 +187,55 @@ impl Tool for SpawnAgentTool {
         ctx: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let args: SpawnArgs = parse_args(args)?;
-        Ok(run_one_child(
-            &self.env,
-            &args.agent,
-            &args.prompt,
-            &args.artifacts,
-            &ctx.cancel,
-            &ctx.agent_events,
-        )
-        .await)
+        if !args.background {
+            return Ok(run_one_child(
+                &self.env,
+                &args.agent,
+                &args.prompt,
+                &args.artifacts,
+                &ctx.cancel,
+                &ctx.agent_events,
+            )
+            .await);
+        }
+
+        // A background child runs in its own task, so this call returns at once. The
+        // reservation lives in that task, so the slot frees when the child ends, and
+        // the report is recorded so the parent can still read it afterwards.
+        let env = Arc::clone(&self.env);
+        let cancel = ctx.cancel.clone();
+        let events = ctx.agent_events.clone();
+        let name = args.agent.clone();
+        let (id_tx, id_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let started = start_background_child(
+                &env,
+                &args.agent,
+                &args.prompt,
+                &args.artifacts,
+                &cancel,
+                &events,
+                id_tx,
+            )
+            .await;
+            if let Err(refusal) = started {
+                tracing::warn!("a background subagent could not start: {refusal}");
+            }
+        });
+
+        // Wait only for the id, never for the work.
+        match id_rx.await {
+            Ok(Ok(id)) => Ok(ToolOutput::text(format!(
+                "started {} in the background as id {}. Poll it with agent_status, \
+                 redirect it with steer_agent, or stop it with cancel_agent.",
+                name, id.0
+            ))),
+            // A refusal before the child began, for example a limit.
+            Ok(Err(refusal)) => Ok(error_result(refusal)),
+            Err(_) => Ok(error_result(
+                "the background subagent task ended before it reported an id.".to_string(),
+            )),
+        }
     }
 }
 
@@ -190,6 +244,52 @@ impl Tool for SpawnAgentTool {
 /// Shared by `spawn_agent` and `spawn_agents`, so a fan-out and a single spawn
 /// cannot drift apart. Every refusal is a returned result, never an error, so a
 /// limit or a dead child lets the parent choose again.
+/// Start a child in the background, report its id, then run it to completion.
+///
+/// It sends the id as soon as the reservation is held, so the caller can return while
+/// the work goes on. The report is recorded in the registry, because
+/// `ChildSlot::drop` removes the live handle and a parent that polls afterwards would
+/// otherwise find nothing.
+async fn start_background_child(
+    env: &Arc<SpawnEnv>,
+    agent: &str,
+    prompt: &str,
+    artifacts: &[String],
+    parent_cancel: &rho_core::CancelToken,
+    events: &tokio::sync::mpsc::Sender<rho_core::AgentEvent>,
+    id_tx: tokio::sync::oneshot::Sender<Result<rho_core::AgentId, String>>,
+) -> Result<(), String> {
+    // Check what cannot be undone before reserving anything. A reservation taken and
+    // then abandoned would count against the caps for nothing.
+    if let Err(refusal) = rho_core::AgentTask::new(agent, prompt).validate() {
+        let _ = id_tx.send(Err(refusal.to_string()));
+        return Err(refusal.to_string());
+    }
+    if !env.definitions.contains_key(agent) {
+        let refusal = format!("no agent named \"{agent}\" is defined. Check the agent name.");
+        let _ = id_tx.send(Err(refusal.clone()));
+        return Err(refusal);
+    }
+
+    let cancel = parent_cancel.child();
+    let spawn = match env.node.spawn_child(agent, cancel.clone()) {
+        Ok(spawn) => spawn,
+        Err(refusal) => {
+            let _ = id_tx.send(Err(refusal.to_string()));
+            return Err(refusal.to_string());
+        }
+    };
+    let id = spawn.node.id();
+    let _ = id_tx.send(Ok(id));
+
+    let finished = finish_child(env, agent, prompt, artifacts, cancel, events, spawn).await;
+    // Remember the outcome, so a later poll answers rather than finding nothing.
+    env.node
+        .registry()
+        .record_report(&env.node, id, finished.report);
+    Ok(())
+}
+
 async fn run_one_child(
     env: &Arc<SpawnEnv>,
     agent: &str,
@@ -205,7 +305,8 @@ async fn run_one_child(
     }
 
     // Find the definition. A missing agent is a result, not a fault.
-    let Some(def) = env.definitions.get(agent) else {
+    // Checked here so a refusal costs no reservation. `finish_child` looks it up again.
+    let Some(_def) = env.definitions.get(agent) else {
         return error_result(format!(
             "no agent named \"{agent}\" is defined. Check the agent name."
         ));
@@ -229,6 +330,58 @@ async fn run_one_child(
         Ok(spawn) => spawn,
         Err(refusal) => return error_result(refusal.to_string()),
     };
+
+    finish_child(env, agent, prompt, artifacts, cancel, events, spawn)
+        .await
+        .output
+}
+
+/// What a finished child produced: the text for the parent, and the report.
+///
+/// The background path needs the report to record it, and the foreground path needs
+/// only the text. One struct, so the two paths cannot drift.
+struct ChildOutput {
+    output: ToolOutput,
+    report: rho_core::AgentReport,
+}
+
+/// A refusal that happened after the reservation, as a `ChildOutput`.
+///
+/// `finish_child` must always hand back a report, because the background path records
+/// one. A refusal is reported as a failed child rather than as a missing report.
+fn refused_child(agent: &str, reason: String) -> ChildOutput {
+    ChildOutput {
+        output: error_result(reason.clone()),
+        report: rho_core::AgentReport {
+            agent: agent.to_string(),
+            outcome: AgentOutcome::Failed { reason },
+            summary: String::new(),
+            usage: Default::default(),
+            turns: 0,
+            gate: Default::default(),
+            claims: Default::default(),
+            transcript: None,
+        },
+    }
+}
+
+/// Run a child that already holds its reservation, and build the parent's result.
+///
+/// Shared by the foreground and the background path, so a fan-out, a blocking spawn,
+/// and a background spawn cannot drift apart.
+async fn finish_child(
+    env: &Arc<SpawnEnv>,
+    agent: &str,
+    prompt: &str,
+    artifacts: &[String],
+    cancel: rho_core::CancelToken,
+    events: &tokio::sync::mpsc::Sender<rho_core::AgentEvent>,
+    spawn: rho_core::ChildSpawn,
+) -> ChildOutput {
+    let def = env
+        .definitions
+        .get(agent)
+        .expect("the caller checked the definition before it reserved a slot");
     let child_node = &spawn.node;
 
     // The frontend learns about the child now, not when it finishes. A send that
@@ -244,7 +397,7 @@ async fn run_one_child(
     // The sandbox may only narrow. A weaker request is refused.
     let sandbox = match narrow_sandbox(env.parent_config.sandbox, def.sandbox) {
         Ok(mode) => mode,
-        Err(refusal) => return error_result(refusal.to_string()),
+        Err(refusal) => return refused_child(agent, refusal.to_string()),
     };
 
     // Intersect the child's tool request with the parent's set. A dropped
@@ -299,7 +452,10 @@ async fn run_one_child(
     )
     .with_queue(spawn.queue());
 
-    let transcript = env.transcript_dir.join(format!("{}.log", child_node.id()));
+    // JSONL content, so a JSONL extension. A reader should not have to guess.
+    let transcript = env
+        .transcript_dir
+        .join(format!("{}.jsonl", child_node.id()));
     let timeout = env.node.limits().child_timeout;
 
     // Keep the work text, so a death can be keyed by the work and not only by
@@ -317,12 +473,16 @@ async fn run_one_child(
     );
     // The gate needs a token too, and `collect_report` consumes one.
     let cancel_for_gate = cancel.clone();
+    // Hand `collect_report` the progress sender, so a handle sees each turn as the
+    // child works. Publishing once at the end made `progress()` read zero for the
+    // whole run, which is a post-mortem and not progress.
     let report = collect_report(
         def.name.clone(),
         child_events,
         cancel,
-        timeout,
-        Some(transcript),
+        rho_core::CollectOptions::with_timeout(timeout)
+            .transcript(transcript)
+            .publishing(spawn.progress_sender()),
     )
     .await;
 
@@ -362,7 +522,7 @@ async fn run_one_child(
         }
     }
 
-    // Publish the final progress, so a handle read after the run sees the truth.
+    // The last word, so a handle read after the run matches the report exactly.
     spawn.publish(rho_core::AgentProgress {
         turns: report.turns,
         usage: report.usage,
@@ -411,7 +571,7 @@ async fn run_one_child(
         AgentOutcome::Canceled | AgentOutcome::Failed { .. } => {
             let key = format!("{}\u{1f}{}", agent, work);
             if let Err(capped) = env.retries.record_death(&key) {
-                return error_result(capped.to_string());
+                return refused_child(agent, capped.to_string());
             }
             match &report.outcome {
                 AgentOutcome::Canceled => text.push_str(&format!(
@@ -431,9 +591,27 @@ async fn run_one_child(
         }
     }
     text.push_str(&report.summary);
-    // A rejected task is a failure. A model that reads only `is_error` must still
-    // learn the work was not accepted, so a rejection never looks like a success.
-    let rejected = matches!(report.outcome, AgentOutcome::Rejected { .. });
+
+    // Point the parent at the full transcript, as pi does with its `.output` footer.
+    // The summary stays the default and the file is there when the parent wants more,
+    // so the choice to spend context belongs to the parent rather than to rho.
+    if let Some(path) = &report.transcript {
+        text.push_str(&format!("\n\n[full transcript: {}]", path.display()));
+    }
+    // Every outcome that is not plain success sets `is_error`. A parent that reads
+    // only the flag must never read a failure as a success.
+    //
+    // `Rejected` was fixed first and its three siblings were missed, in this same
+    // function, a few lines apart. That is the fail-open family again, so the match
+    // is exhaustive on purpose: a new outcome variant now forces a decision here
+    // rather than defaulting to success.
+    let failed = match report.outcome {
+        AgentOutcome::Done => false,
+        AgentOutcome::OutOfTurns
+        | AgentOutcome::Canceled
+        | AgentOutcome::Failed { .. }
+        | AgentOutcome::Rejected { .. } => true,
+    };
     if !intersection.dropped.is_empty() {
         text.push_str(&format!(
             "\n\n[note: these requested tools were dropped because the parent does not hold \
@@ -441,10 +619,12 @@ async fn run_one_child(
             intersection.dropped.join(", ")
         ));
     }
-    if rejected {
-        return error_result(text);
-    }
-    ToolOutput::text(text)
+    let output = if failed {
+        error_result(text)
+    } else {
+        ToolOutput::text(text)
+    };
+    ChildOutput { output, report }
 }
 
 /// One task in a fan-out.

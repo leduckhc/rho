@@ -211,7 +211,9 @@ async fn a_parent_receives_only_the_child_summary() {
         ContentBlock::Text { text } => text.clone(),
         other => panic!("expected text, got {other:?}"),
     };
-    assert_eq!(text, "the bug is at parser.rs:42");
+    // Not an exact match: the result now also points at the transcript, on purpose.
+    // The load-bearing claim is that the child's intermediate work never appears.
+    assert!(text.contains("the bug is at parser.rs:42"), "got: {text}");
     assert!(!output.is_error);
 }
 
@@ -684,7 +686,11 @@ async fn a_task_with_no_declared_artifact_behaves_as_before() {
         .await
         .unwrap();
 
-    assert_eq!(output_text(&output), "the bug is at parser.rs:42");
+    let text = output_text(&output);
+    assert!(
+        text.contains("the bug is at parser.rs:42"),
+        "the summary must reach the parent, got: {text}"
+    );
 }
 
 #[tokio::test]
@@ -1026,4 +1032,170 @@ fn spawn_call_turn(id: &str, tool: &str, arguments: serde_json::Value) -> Vec<St
             stop_reason: rho_core::StopReason::ToolUse,
         },
     ]
+}
+
+#[tokio::test]
+async fn every_failing_outcome_sets_is_error() {
+    // A parent that reads only `is_error` must never read a failure as a success.
+    // `Rejected` was fixed and its three siblings were missed, in the same function,
+    // a few lines apart. That is the fail-open family, found for the fourth time in
+    // this feature.
+    //
+    // A hanging provider makes the child time out, which reports `Canceled`.
+    let dir = tempfile::tempdir().unwrap();
+    let tool = SpawnAgentTool::new(hanging_env(dir.path()));
+
+    let output = tool
+        .execute(
+            serde_json::json!({ "agent": "scout", "prompt": "work that never finishes" }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a timed-out child is a result, not a fault");
+
+    let text = output_text(&output);
+    assert!(
+        output.is_error,
+        "a cancelled child must set is_error, got text: {text}"
+    );
+    assert!(
+        text.contains("scout"),
+        "and the note must still name the agent, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn the_tool_result_points_the_parent_at_the_transcript() {
+    // The summary is the default, and the full transcript is one line away. rho wrote
+    // the file and told nobody, so the parent could not choose to read it.
+    let dir = tempfile::tempdir().unwrap();
+    let env = spawn_env(
+        dir.path(),
+        vec![text_turn("the child answer")],
+        Some(vec!["read".to_string()]),
+        vec!["read".to_string()],
+    );
+    let tool = SpawnAgentTool::new(env);
+
+    let output = tool
+        .execute(
+            serde_json::json!({ "agent": "scout", "prompt": "find it" }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+
+    let text = output_text(&output);
+    assert!(
+        text.contains("full transcript:"),
+        "the parent must be told where the transcript is, got: {text}"
+    );
+    let path = text
+        .split("full transcript: ")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .expect("the note carries a path");
+    assert!(
+        std::path::Path::new(path).exists(),
+        "the path must name a file that exists: {path}"
+    );
+    let body = std::fs::read_to_string(path).unwrap();
+    assert!(
+        body.contains("the child answer"),
+        "and the file must hold the child's work, got: {body}"
+    );
+}
+
+// --- Background children (round nine) ---
+
+#[tokio::test]
+async fn a_background_spawn_returns_at_once_and_names_the_child() {
+    // The must-have. `spawn_agent` blocked until the child finished, so a parent could
+    // never poll one: by the time it got a turn, the child was gone. A background
+    // spawn returns the id straight away and the child keeps working.
+    let dir = tempfile::tempdir().unwrap();
+    let tool = SpawnAgentTool::new(hanging_env(dir.path()));
+
+    let output = tool
+        .execute(
+            serde_json::json!({
+                "agent": "scout",
+                "prompt": "take your time",
+                "background": true
+            }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a background spawn is a result");
+
+    let text = output_text(&output);
+    assert!(!output.is_error, "starting a child is not an error: {text}");
+    assert!(
+        text.contains("id"),
+        "the parent must be told the id so it can poll, got: {text}"
+    );
+    assert!(
+        !text.contains("full transcript"),
+        "a child that has not finished has no final transcript line yet, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn agent_status_reports_a_finished_background_child() {
+    // Polling is useless if a finished child vanishes. `ChildSlot::drop` removes the
+    // live handle, so the outcome has to be kept somewhere the parent can still read.
+    let dir = tempfile::tempdir().unwrap();
+    let env = spawn_env(
+        dir.path(),
+        vec![text_turn("the background answer")],
+        Some(vec!["read".to_string()]),
+        vec!["read".to_string()],
+    );
+    let spawn = SpawnAgentTool::new(Arc::clone(&env));
+
+    let started = spawn
+        .execute(
+            serde_json::json!({ "agent": "scout", "prompt": "do it", "background": true }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+    let id: u64 = output_text(&started)
+        .split("id ")
+        .nth(1)
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|digits| digits.parse().ok())
+        .unwrap_or_else(|| {
+            panic!(
+                "the result must name a numeric id: {}",
+                output_text(&started)
+            )
+        });
+
+    // Wait for it to finish, without a sleep: poll the status the parent would poll.
+    let status = rho_tools::AgentStatusTool::new(Arc::clone(&env));
+    let mut text = String::new();
+    for _ in 0..200 {
+        let out = status
+            .execute(
+                serde_json::json!({ "id": id }),
+                ctx(dir.path().to_path_buf()),
+            )
+            .await
+            .unwrap();
+        text = output_text(&out);
+        if text.contains("done") || text.contains("finished") {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert!(
+        text.contains("done") || text.contains("finished"),
+        "a finished background child must still be reportable, got: {text}"
+    );
+    assert!(
+        text.contains("the background answer") || text.contains("transcript"),
+        "and the parent must be able to reach its work, got: {text}"
+    );
 }
