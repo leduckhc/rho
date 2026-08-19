@@ -37,10 +37,23 @@ fn a_notice_becomes_a_transcript_row() {
 fn a_notice_is_not_an_error() {
     // A default model and an unloaded skill are worth saying, and neither one failed.
     // Reusing the error row would have told the user that rho broke.
+    //
+    // This test was vacuous when first written. It only asserted that the first row was not
+    // an error, so it also passed when `push_notice` pushed nothing at all. It now proves
+    // the notice exists, that it is the only row, and that no error row appeared.
     let mut state = TuiState::default();
     state.push_notice("a project skill stays unloaded");
+    assert_eq!(state.rows.len(), 1, "exactly one row: {:?}", state.rows);
     assert!(
-        !matches!(state.rows.first(), Some(Row::Error { .. })),
+        matches!(state.rows.first(), Some(Row::Notice { message }) if message == "a project skill stays unloaded"),
+        "the row is a notice carrying the text: {:?}",
+        state.rows
+    );
+    assert!(
+        !state
+            .rows
+            .iter()
+            .any(|row| matches!(row, Row::Error { .. })),
         "a notice must not claim an error"
     );
 }
@@ -207,6 +220,29 @@ fn a_long_notice_keeps_its_tail() {
         flat.contains(&want),
         "the notice must wrap and keep every word.\nwant: {want}\ngot:  {flat}"
     );
+}
+
+#[test]
+fn a_notice_survives_a_narrow_screen() {
+    // Found by review, then measured. Every render test used width 100, so nothing covered a
+    // split pane or a phone over ssh. The wrap width was `measure - head`, and `measure` is
+    // `min(80, width - 10)`, so at width 24 or less the wrap width reached zero. `wrap`
+    // returns one empty line at zero, so the whole message vanished and only the label drew.
+    //
+    // That is the very defect this file exists to close, reappearing at a narrower size.
+    let notice = "1 project skill not loaded. Pass --trust-project to load them.";
+    for width in 20..=120u16 {
+        let mut state = TuiState::default();
+        state.push_notice(notice);
+        let drawn = render_rows(&state, width).join(" ");
+        let flat = drawn.split_whitespace().collect::<Vec<_>>().join(" ");
+        for word in notice.split_whitespace() {
+            assert!(
+                flat.contains(word),
+                "at width {width} the notice lost the word {word:?}:\n{flat}"
+            );
+        }
+    }
 }
 
 /// The rendered text of a state, one string per row.

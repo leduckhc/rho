@@ -98,10 +98,55 @@ to `/tmp` first, never restored with `git checkout`.
 | The splash folds notices in with no fit check | `many_notices_stay_reachable_instead_of_truncated` | 40 notices reported no scrollable rows |
 | A notice pads to one line instead of wrapping | `a_long_notice_keeps_its_tail` | the tail was missing from the drawn rows |
 
-One test was wrong when first written. `a_long_notice_keeps_its_tail` asserted one exact
-phrase, and a wrap legitimately split it across two rows. The assertion now rejoins the drawn
-rows and compares the whole notice, so a clip anywhere fails. That is a stronger test, not a
-weaker one.
+Two tests were wrong when first written.
+
+`a_long_notice_keeps_its_tail` asserted one exact phrase, and a wrap legitimately split it
+across two rows. The assertion now rejoins the drawn rows and compares the whole notice, so a
+clip anywhere fails. That is a stronger test, not a weaker one.
+
+`a_notice_is_not_an_error` only asserted that the first row was **not** an error. So it also
+passed when `push_notice` pushed nothing at all. A review found it. It now proves the notice
+exists, that it is the only row, and that no error row appeared.
+
+## The review, and the defect it found
+
+A reviewer read the commit and asked one question this project has learned to ask: does
+another defect of the same family exist? It did.
+
+**Every render test used width 100.** The wrap width was `measure - head`, where `measure` is
+`min(80, width - 10)` and the label `! notice · ` is 11 columns. So at width 24 or less the
+wrap width reached zero, `wrap` returned one empty line, and **the whole message vanished**.
+Only the label drew. That is the defect this file exists to close, at a narrower size, and a
+split pane or a phone over ssh reaches it.
+
+Measured before the fix, asking whether the action `--trust-project` survived:
+
+```
+width= 16 keeps the action: false
+width= 20 keeps the action: false
+width= 21 keeps the action: false
+width= 22 keeps the action: false
+width= 24 keeps the action: false
+width= 30 keeps the action: true
+```
+
+The reviewer estimated the bound at 21. Measuring put it at 24, so the estimate was optimistic
+and the measurement decided. `NOTICE_MIN_TEXT` now sets a floor of 12 columns for the text. Below
+it the label takes its own row and the text takes the whole measure, because the text is the part
+that matters. At width 24:
+
+```
+|! notice ·              |
+|1 project               |
+|skill not               |
+|loaded. Pass            |
+|--trust-project         |
+|to load them.           |
+```
+
+After the fix, every width from 16 to 120 keeps every word. `a_notice_survives_a_narrow_screen`
+sweeps widths 20 to 120 and asserts no word is lost. Setting `NOTICE_MIN_TEXT` back to 0
+restores the defect, and that test fails.
 
 ## The gate
 
@@ -120,3 +165,27 @@ The test count was 815 before this work and 827 after, so twelve tests are new.
 `F-optional-mouse` left nine dangling references in two older specs and in the progress
 ledger. The guard found every one. The rows now stay as `superseded`, each naming its
 replacement, because a dangling reference is worse than a history note.
+
+## The layout tests, and the one that was vacuous
+
+`plan_screen` is public and had no direct test. Ten tests now cover it, in
+`crates/rho-tui/tests/layout.rs`. Each was run against a deliberate break.
+
+| The break | Tests that failed |
+| --- | --- |
+| `height < STARTUP_MIN_ROWS - 1`, an off-by-one on the minimum | 3 |
+| `MAX_DRAFT_ROWS` raised from 10 to 12 | 2 |
+| `let banner = true`, so the banner draws without paying a row | 4 |
+| `let floor = 0 * panel_floor`, so the panel floor is gone | **0, at first** |
+
+The fourth break passed every test. `a_panel_floor_survives_a_tall_draft` asked for 20 rows,
+and at 20 rows the panel gets its whole want of 6, so the floor decides nothing there. The
+test was vacuous, and it would have passed for the life of the project.
+
+A probe printed the panel height for every terminal height from 4 to 29. The floor only binds
+between 8 and 16 rows, where the ten-row draft would otherwise squeeze the panel out. The test
+now sweeps that band and asserts the panel holds exactly its floor. It then fails against the
+fourth break, as it always should have.
+
+This is the third time in this project that a test passed against the bug it was written for.
+The lesson holds: a test is not evidence until the break has been watched.

@@ -56,6 +56,12 @@ const GLYPH_ACTIVITY: &str = "◈";
 const GLYPH_APPROVAL: &str = "!";
 /// A notice is not a failure, so it must not borrow the error glyph.
 const GLYPH_NOTICE: &str = "!";
+/// The narrowest text column a notice label may leave behind it.
+///
+/// Below it the label takes its own row, and the text takes the whole measure. The label
+/// used to keep its column at every width, so at width 24 or less the text column reached
+/// zero and the whole message vanished. Found by review, then measured.
+const NOTICE_MIN_TEXT: usize = 12;
 const GLYPH_SEPARATOR: &str = "·";
 const GLYPH_CURSOR: &str = "█";
 /// The quote bar that marks an approval's verbatim text.
@@ -515,18 +521,25 @@ fn push_row(
             // A notice wraps. The real skill notice ends with its action, "Pass
             // --trust-project to load them", and a padded single line clipped exactly that.
             let head = format!("{GLYPH_NOTICE} notice {GLYPH_SEPARATOR} ");
-            let wrapped = wrap(
-                &sanitize_line(message),
-                measure.saturating_sub(head.width()),
-            );
             let style = style_for(Role::Warn);
-            for (line_index, line) in wrapped.iter().enumerate() {
-                let text = if line_index == 0 {
-                    format!("{head}{line}")
-                } else {
-                    format!("{}{line}", " ".repeat(head.width()))
-                };
-                out.push((pad(&text, width), style));
+            let text = sanitize_line(message);
+            let indented = measure.saturating_sub(head.width());
+            if indented >= NOTICE_MIN_TEXT {
+                for (line_index, line) in wrap(&text, indented).iter().enumerate() {
+                    let row = if line_index == 0 {
+                        format!("{head}{line}")
+                    } else {
+                        format!("{}{line}", " ".repeat(head.width()))
+                    };
+                    out.push((pad(&row, width), style));
+                }
+            } else {
+                // Too narrow to keep a label column. The label takes its own row, and the
+                // text takes the whole measure, because the text is the part that matters.
+                out.push((pad(head.trim_end(), width), style));
+                for line in wrap(&text, measure.max(1)) {
+                    out.push((pad(&line, width), style));
+                }
             }
         }
         Row::Agent { name, outcome, .. } => {

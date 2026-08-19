@@ -311,6 +311,9 @@ screen and a print is right there.
 - A notice draws with the `!` glyph and the `Warn` role. It never draws as an error.
 - A notice wraps. The skill notice ends with `Pass --trust-project to load them`, and a
   padded single line clipped exactly that.
+- The label keeps a text column of at least `NOTICE_MIN_TEXT`, which is 12. Below it the
+  label takes its own row and the text takes the whole measure. Without that floor the wrap
+  width reached zero at width 24 or less, and the whole message vanished.
 - The splash draws while **every** row is a notice, because a notice is chrome and not
   conversation. The notices draw under the starters.
 - When the notices do not fit under the splash, rho falls back to the scrollable transcript.
@@ -423,11 +426,27 @@ Each test names the assertion it proves.
 
 ### The layout
 
-- `the_transcript_takes_the_rows_the_composer_leaves`.
-- `the_composer_keeps_its_ten_row_cap` — unchanged from `D-ledger-wins-the-band`.
+These live in `crates/rho-tui/tests/layout.rs`. `plan_screen` is public and had no direct
+test before, and neither did `STARTUP_MIN_ROWS` or `TooSmall`.
+
+- `the_transcript_takes_the_rows_the_composer_leaves` — a sweep over every height from the
+  minimum to 60, four draft heights, and four panel shapes. The regions must sum to the
+  height exactly. A row unaccounted for draws twice or not at all.
+- `the_composer_keeps_its_ten_row_cap` — unchanged from `D-ledger-wins-the-band`. A 500 row
+  draft still takes ten rows, and a draft under ten takes what it asks.
 - `an_approval_states_its_session_root` — unchanged, and it must stay passing.
-- `a_terminal_too_short_reports_and_does_not_draw` — a two-row terminal returns
-  `TooSmall`.
+- `a_panel_floor_survives_a_tall_draft` — the floor holds in the tight band, heights 8 to 16.
+  A ten-row draft would otherwise squeeze the panel out.
+- `the_transcript_shrinks_when_the_composer_grows` — the direction of the trade. The footer
+  never yields.
+- `the_banner_yields_before_the_transcript_starves`.
+- `a_terminal_too_short_reports_and_does_not_draw` — a two-row terminal returns `TooSmall`.
+  It draws no panel, no banner, and no rules, and it keeps the draft row.
+- `the_too_small_boundary_is_exactly_the_startup_minimum` — every height below the minimum
+  reports, and every height at or above it draws.
+- `a_small_screen_never_hides_the_draft_row`.
+- `a_zero_row_terminal_plans_nothing_and_does_not_panic` — a resize storm reaches zero.
+- `the_too_small_error_states_both_numbers` — the message says the size and the requirement.
 
 ### The notices
 
@@ -439,6 +458,7 @@ Each test names the assertion it proves.
 - `an_app_with_no_notice_shows_no_notice_row` — a quiet startup stays quiet.
 - `a_notice_row_draws_its_text_and_says_notice`.
 - `a_long_notice_keeps_its_tail` — the notice wraps, and no word is lost.
+- `a_notice_survives_a_narrow_screen` — widths 20 to 120, and no word is lost at any of them.
 - `the_splash_survives_a_few_notices`.
 - `many_notices_stay_reachable_instead_of_truncated` — 40 notices report more rows than
   fit, so the wheel reaches them.
