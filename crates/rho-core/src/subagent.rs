@@ -165,6 +165,11 @@ pub struct SubagentLimits {
     pub max_live_total: usize,
     /// How long a child may run before it is cancelled.
     pub child_timeout: Duration,
+    /// How many tool calls one child may make.
+    ///
+    /// A turn cap counts provider round trips, so it does not bound a child that
+    /// makes forty tool calls inside one turn. This does.
+    pub max_tool_calls: u32,
 }
 
 impl SubagentLimits {
@@ -178,6 +183,7 @@ impl SubagentLimits {
             max_children_per_parent: 4,
             max_live_total: 32,
             child_timeout: Duration::from_secs(600),
+            max_tool_calls: 64,
         }
     }
 }
@@ -284,6 +290,85 @@ pub enum SubagentError {
     RetryCapReached { deaths: u32, limit: u32 },
 }
 
+// --- A live child is addressable (SPEC-subagents section 7a) ---
+
+/// What a running child has done so far.
+///
+/// A frontend reads this to render a live child. It carries no transcript, so
+/// watching a child costs the parent no context.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AgentProgress {
+    /// Turns the child has started.
+    pub turns: u32,
+    /// The child's usage, summed so far.
+    pub usage: Usage,
+}
+
+/// A live, addressable child.
+///
+/// The registry used to count children without knowing them, so nothing could
+/// address a single child. Cancelling one child, steering one child, and watching
+/// one child were three missing features with one cause. This is that missing
+/// contract.
+#[derive(Clone, Debug)]
+pub struct LiveAgent {
+    /// The child's id.
+    pub id: AgentId,
+    /// The agent definition it runs.
+    pub agent: String,
+    /// How deep it sits in the spawn tree.
+    pub depth: u32,
+    cancel: CancelToken,
+    progress: tokio::sync::watch::Receiver<AgentProgress>,
+}
+
+impl LiveAgent {
+    /// Stop this child, and only this child.
+    ///
+    /// The token is derived from the parent's, so it cancels downward and never
+    /// upward. A sibling is untouched. See [`CancelToken::child`].
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+
+    /// Whether this child is cancelled, including by an ancestor.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    /// The child's own token, for a caller that needs to await it.
+    pub fn cancel_token(&self) -> CancelToken {
+        self.cancel.clone()
+    }
+
+    /// What the child has done so far.
+    pub fn progress(&self) -> AgentProgress {
+        self.progress.borrow().clone()
+    }
+}
+
+/// Everything a caller gets when it spawns a child.
+///
+/// A named struct, not a tuple, because it already carries three things and a
+/// tuple would grow silently. See decision D-no-four-argument-session-new.
+#[derive(Debug)]
+pub struct ChildSpawn {
+    /// The child's place in the tree.
+    pub node: AgentNode,
+    /// The reservation. Dropping it frees the slot and deregisters the handle.
+    pub slot: ChildSlot,
+    progress: tokio::sync::watch::Sender<AgentProgress>,
+}
+
+impl ChildSpawn {
+    /// Publish the child's progress, so a frontend can render it live.
+    pub fn publish(&self, progress: AgentProgress) {
+        // A send fails only when every receiver is gone, and that is not an
+        // error: it means nobody is watching.
+        let _ = self.progress.send(progress);
+    }
+}
+
 // --- The spawn tree and its guards ---
 
 /// Process-wide subagent state, shared by every session in one process.
@@ -301,6 +386,9 @@ struct RegistryInner {
     limits: SubagentLimits,
     live_total: AtomicUsize,
     next_id: AtomicU64,
+    /// Every live child, by id. A count cannot be cancelled or watched, so the
+    /// registry holds the handles too.
+    live: Mutex<std::collections::HashMap<u64, LiveAgent>>,
 }
 
 impl AgentRegistry {
@@ -311,6 +399,7 @@ impl AgentRegistry {
                 limits,
                 live_total: AtomicUsize::new(0),
                 next_id: AtomicU64::new(0),
+                live: Mutex::new(std::collections::HashMap::new()),
             }),
         }
     }
@@ -323,6 +412,64 @@ impl AgentRegistry {
     /// The number of agents live in the whole process now.
     pub fn live_total(&self) -> usize {
         self.inner.live_total.load(Ordering::SeqCst)
+    }
+
+    /// Every live child, in id order.
+    ///
+    /// A frontend renders this. A caller cancels one of these. The list holds no
+    /// transcript, so reading it costs the parent no context.
+    pub fn live(&self) -> Vec<LiveAgent> {
+        let live = self
+            .inner
+            .live
+            .lock()
+            .expect("the live agent lock is poisoned");
+        let mut handles: Vec<LiveAgent> = live.values().cloned().collect();
+        handles.sort_by_key(|handle| handle.id.0);
+        handles
+    }
+
+    /// The handle for one live child, if it is still running.
+    pub fn handle(&self, id: AgentId) -> Option<LiveAgent> {
+        self.inner
+            .live
+            .lock()
+            .expect("the live agent lock is poisoned")
+            .get(&id.0)
+            .cloned()
+    }
+
+    /// Cancel one child, and only that child.
+    ///
+    /// It returns false when no live child holds that id, which happens whenever
+    /// the child finished first. That is a result, not a fault, so a caller can
+    /// report it and carry on.
+    pub fn cancel(&self, id: AgentId) -> bool {
+        match self.handle(id) {
+            Some(handle) => {
+                handle.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Register a live child. Called by `spawn_child`, which cannot forget.
+    fn register(&self, handle: LiveAgent) {
+        self.inner
+            .live
+            .lock()
+            .expect("the live agent lock is poisoned")
+            .insert(handle.id.0, handle);
+    }
+
+    /// Deregister a child. Called by `ChildSlot::drop`, which cannot forget.
+    fn deregister(&self, id: AgentId) {
+        self.inner
+            .live
+            .lock()
+            .expect("the live agent lock is poisoned")
+            .remove(&id.0);
     }
 
     /// Allocate a fresh, unique agent id.
@@ -385,7 +532,15 @@ impl AgentNode {
     /// child node and a guard. The guard holds both reserved counts and frees
     /// them on drop. So a child that finishes, fails, or is cancelled always
     /// frees its slot.
-    pub fn spawn_child(&self) -> Result<(AgentNode, ChildSlot), SubagentError> {
+    /// `agent` names the definition, and `cancel` is the child's own token. Both
+    /// are required, because a handle without them can be neither rendered nor
+    /// stopped. Derive the token with [`CancelToken::child`], so cancelling the
+    /// child never cancels the parent.
+    pub fn spawn_child(
+        &self,
+        agent: impl Into<String>,
+        cancel: CancelToken,
+    ) -> Result<ChildSpawn, SubagentError> {
         let limits = self.registry.limits();
         let child_depth = self.depth + 1;
         if child_depth > limits.max_depth {
@@ -446,11 +601,27 @@ impl AgentNode {
             registry: self.registry.clone(),
             children: Arc::new(AtomicUsize::new(0)),
         };
+        // Register here, and deregister in `ChildSlot::drop`. Both sides live in
+        // this file, so a caller cannot forget either one.
+        let (progress_tx, progress_rx) = tokio::sync::watch::channel(AgentProgress::default());
+        self.registry.register(LiveAgent {
+            id: child.id,
+            agent: agent.into(),
+            depth: child.depth,
+            cancel,
+            progress: progress_rx,
+        });
+
         let slot = ChildSlot {
             parent_children: Arc::clone(&self.children),
             registry: self.registry.clone(),
+            id: child.id,
         };
-        Ok((child, slot))
+        Ok(ChildSpawn {
+            node: child,
+            slot,
+            progress: progress_tx,
+        })
     }
 }
 
@@ -460,6 +631,8 @@ impl AgentNode {
 pub struct ChildSlot {
     parent_children: Arc<AtomicUsize>,
     registry: AgentRegistry,
+    /// The child this slot holds, so dropping the slot drops the handle too.
+    id: AgentId,
 }
 
 impl Drop for ChildSlot {
@@ -469,6 +642,9 @@ impl Drop for ChildSlot {
             .inner
             .live_total
             .fetch_sub(1, Ordering::SeqCst);
+        // The handle goes with the slot. A registry that kept a finished child
+        // would leak, and it would hand out a handle that cancels nothing.
+        self.registry.deregister(self.id);
     }
 }
 
@@ -486,6 +662,18 @@ pub fn check_no_cycle(ancestors: &[AgentId]) -> Result<(), SubagentError> {
         }
     }
     Ok(())
+}
+
+/// Cap a child's tool-call budget by its parent's.
+///
+/// A definition may ask for less. It may never ask for more, exactly like the turn
+/// cap. Otherwise a definition file could raise its own budget, and a budget a
+/// child can raise is not a budget. See `SPEC-subagents` section 4.
+pub fn cap_tool_calls(parent: u32, requested: Option<u32>) -> u32 {
+    match requested {
+        Some(asked) => asked.min(parent),
+        None => parent,
+    }
 }
 
 /// Tracks how many times a unit of work has died, keyed by a work key.
@@ -644,6 +832,9 @@ fn outcome_from_stop(stop_reason: AgentStopReason) -> AgentOutcome {
     match stop_reason {
         AgentStopReason::EndTurn => AgentOutcome::Done,
         AgentStopReason::MaxTurnRequests => AgentOutcome::OutOfTurns,
+        // The child spent its tool-call budget. It is out of room, like a child
+        // out of turns, so the parent gets what it had rather than nothing.
+        AgentStopReason::MaxToolCalls => AgentOutcome::OutOfTurns,
         AgentStopReason::Canceled => AgentOutcome::Canceled,
         AgentStopReason::MaxTokens => AgentOutcome::Failed {
             reason: "the child hit the token limit.".to_string(),

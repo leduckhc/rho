@@ -156,7 +156,14 @@ impl Tool for SpawnAgentTool {
         ctx: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let args: SpawnArgs = parse_args(args)?;
-        Ok(run_one_child(&self.env, &args.agent, &args.prompt, &ctx.cancel).await)
+        Ok(run_one_child(
+            &self.env,
+            &args.agent,
+            &args.prompt,
+            &ctx.cancel,
+            &ctx.agent_events,
+        )
+        .await)
     }
 }
 
@@ -170,6 +177,7 @@ async fn run_one_child(
     agent: &str,
     prompt: &str,
     parent_cancel: &rho_core::CancelToken,
+    events: &tokio::sync::mpsc::Sender<rho_core::AgentEvent>,
 ) -> ToolOutput {
     // Find the definition. A missing agent is a result, not a fault.
     let Some(def) = env.definitions.get(agent) else {
@@ -178,13 +186,35 @@ async fn run_one_child(
         ));
     };
 
+    // The child runs under a **child** of the parent's token. Cancelling the parent
+    // cancels every descendant, and a child that hits its own timeout does not end
+    // its parent's run. Sharing one token gave the second behaviour: a live run
+    // showed a child timeout killing the whole session silently. See
+    // `SPEC-subagents` section 8 and `docs/verification/subagents-bedrock.md`.
+    //
+    // The token is derived here, before the spawn, because the registry stores it
+    // on the handle so a caller can cancel this one child.
+    let cancel = parent_cancel.child();
+
     // Reserve a slot in the tree. A refusal names the limit and what to do.
-    // The slot frees when it drops at the end of this call. A failed spawn is
-    // a result, so the model can choose again. See decision D-measured-cost-and-cache.
-    let (child_node, _slot) = match env.node.spawn_child() {
-        Ok(pair) => pair,
+    // The slot frees when it drops at the end of this call, and the handle goes
+    // with it. A failed spawn is a result, so the model can choose again. See
+    // decision D-measured-cost-and-cache.
+    let spawn = match env.node.spawn_child(agent, cancel.clone()) {
+        Ok(spawn) => spawn,
         Err(refusal) => return error_result(refusal.to_string()),
     };
+    let child_node = &spawn.node;
+
+    // The frontend learns about the child now, not when it finishes. A send that
+    // fails means nobody is listening, which is not an error.
+    let _ = events
+        .send(rho_core::AgentEvent::AgentSpawned {
+            id: child_node.id(),
+            agent: agent.to_string(),
+            depth: child_node.depth(),
+        })
+        .await;
 
     // The sandbox may only narrow. A weaker request is refused.
     let sandbox = match narrow_sandbox(env.parent_config.sandbox, def.sandbox) {
@@ -217,9 +247,18 @@ async fn run_one_child(
         .map(|requested| requested.min(env.parent_config.max_turns))
         .unwrap_or(env.parent_config.max_turns);
 
+    // The child's tool-call budget is the parent's, capped by the subagent limit.
+    // A turn cap counts provider round trips, so it cannot bound a child that makes
+    // forty tool calls inside one turn.
+    let max_tool_calls = rho_core::cap_tool_calls(
+        env.parent_config.max_tool_calls,
+        Some(env.node.limits().max_tool_calls),
+    );
+
     let child_config = SessionConfig::new(model, env.parent_config.session_root.clone(), approval)
         .with_sandbox(sandbox)
-        .with_max_turns(max_turns);
+        .with_max_turns(max_turns)
+        .with_max_tool_calls(max_tool_calls);
 
     // The body is the child's system prompt. It never enters the parent.
     let body = load_agent_body(def).await.unwrap_or_default();
@@ -232,26 +271,49 @@ async fn run_one_child(
         Context::new(Some(body), Vec::new()),
     );
 
-    // The child runs under a **child** of the parent's token. Cancelling the
-    // parent cancels every descendant, and a child that hits its own timeout
-    // does not end its parent's run. Sharing one token gave the second
-    // behaviour: a live run showed a child timeout killing the whole session
-    // silently. See SPEC-subagents section 8 and
-    // `docs/verification/subagents-bedrock.md`.
-    let cancel = parent_cancel.child();
     let transcript = env.transcript_dir.join(format!("{}.log", child_node.id()));
     let timeout = env.node.limits().child_timeout;
 
     // Keep the work text, so a death can be keyed by the work and not only by
     // the agent name. Two different tasks for one agent must not share a count.
     let work = prompt.to_string();
-    let events = child.prompt(
+    // Named `child_events` on purpose. The parameter `events` carries this child's
+    // progress **up** to the parent's frontend, and this stream carries the child's
+    // own turns. Calling both `events` shadowed the parameter, and the finish event
+    // was silently never sent.
+    let child_events = child.prompt(
         vec![rho_core::ContentBlock::Text {
             text: prompt.to_string(),
         }],
         cancel.clone(),
     );
-    let report = collect_report(def.name.clone(), events, cancel, timeout, Some(transcript)).await;
+    let report = collect_report(
+        def.name.clone(),
+        child_events,
+        cancel,
+        timeout,
+        Some(transcript),
+    )
+    .await;
+
+    // Publish the final progress, so a handle read after the run sees the truth.
+    spawn.publish(rho_core::AgentProgress {
+        turns: report.turns,
+        usage: report.usage,
+    });
+    let _ = events
+        .send(rho_core::AgentEvent::AgentProgressed {
+            id: child_node.id(),
+            turns: report.turns,
+            usage: report.usage,
+        })
+        .await;
+    let _ = events
+        .send(rho_core::AgentEvent::AgentFinished {
+            id: child_node.id(),
+            report: report.clone(),
+        })
+        .await;
 
     // The parent's context receives the summary and nothing else. A dropped
     // tool name is added as a short note, so a bad definition is visible.
@@ -435,7 +497,8 @@ impl Tool for SpawnAgentsTool {
         let runs = args.tasks.iter().map(|task| {
             let env = Arc::clone(&self.env);
             let cancel = ctx.cancel.clone();
-            async move { run_one_child(&env, &task.agent, &task.prompt, &cancel).await }
+            let events = ctx.agent_events.clone();
+            async move { run_one_child(&env, &task.agent, &task.prompt, &cancel, &events).await }
         });
         let results = futures::future::join_all(runs).await;
 

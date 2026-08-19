@@ -178,10 +178,12 @@ fn hanging_env(dir: &std::path::Path) -> Arc<SpawnEnv> {
 
 fn ctx(root: PathBuf) -> ToolContext {
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(16);
     ToolContext {
         session_root: root,
         cancel: CancelToken::new(),
         updates: tx,
+        agent_events: agent_tx,
     }
 }
 
@@ -522,5 +524,62 @@ async fn an_empty_fan_out_is_refused_with_a_named_reason() {
     assert!(
         text.contains("at least one"),
         "the refusal must say what to do instead, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn a_spawn_emits_the_agent_events_into_the_parent_stream() {
+    // `AgentSpawned`, `AgentProgressed`, and `AgentFinished` were defined in
+    // `rho-core` and consumed by `rho-tui`, and **nothing emitted them**. So the
+    // TUI held a renderer for events that never arrived. That is
+    // D-a-panel-nobody-can-open, and `SPEC-subagents` section 9 admitted the
+    // wiring was missing.
+    let dir = tempfile::tempdir().unwrap();
+    let env = spawn_env(
+        dir.path(),
+        vec![text_turn("the child answer")],
+        Some(vec!["read".to_string()]),
+        vec!["read".to_string()],
+    );
+    let tool = SpawnAgentTool::new(env);
+
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(64);
+    let mut context = ctx(dir.path().to_path_buf());
+    context.agent_events = events_tx;
+
+    tool.execute(
+        serde_json::json!({ "agent": "scout", "prompt": "do the work" }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    let mut seen = Vec::new();
+    while let Ok(event) = events_rx.try_recv() {
+        seen.push(event);
+    }
+
+    assert!(
+        matches!(seen.first(), Some(rho_core::AgentEvent::AgentSpawned { agent, depth, .. }) if agent == "scout" && *depth == 1),
+        "the first event must be AgentSpawned, naming the agent and its depth, got: {seen:?}"
+    );
+    assert!(
+        matches!(seen.last(), Some(rho_core::AgentEvent::AgentFinished { report, .. }) if report.agent == "scout"),
+        "the last event must be AgentFinished, carrying the report, got: {seen:?}"
+    );
+    // A frontend must be able to pair every spawn with its finish. Assert the
+    // pairing, not one expected event. See AGENTS.md step 12.
+    let spawned: Vec<_> = seen
+        .iter()
+        .filter(|e| matches!(e, rho_core::AgentEvent::AgentSpawned { .. }))
+        .collect();
+    let finished: Vec<_> = seen
+        .iter()
+        .filter(|e| matches!(e, rho_core::AgentEvent::AgentFinished { .. }))
+        .collect();
+    assert_eq!(
+        spawned.len(),
+        finished.len(),
+        "every spawn must have exactly one finish, got: {seen:?}"
     );
 }

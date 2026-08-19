@@ -35,6 +35,11 @@ pub enum AgentStopReason {
     EndTurn,
     /// A turn hit the token limit.
     MaxTokens,
+    /// The run hit its tool-call budget.
+    ///
+    /// A turn cap counts provider round trips. It does not bound a run that makes
+    /// forty tool calls inside one turn, so the budget counts the work instead.
+    MaxToolCalls,
     /// The loop hit its per-run turn cap. See section 9.
     MaxTurnRequests,
     /// The model refused, or a content filter stopped the output.
@@ -110,11 +115,18 @@ pub enum AgentEvent {
 pub struct AgentConfig {
     /// The per-run turn cap. The loop stops with `MaxTurnRequests` at the cap.
     pub max_turns: u32,
+    /// The per-run tool-call budget. The loop stops with `MaxToolCalls` at the cap.
+    pub max_tool_calls: u32,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        Self { max_turns: 32 }
+        Self {
+            max_turns: 32,
+            // Sixteen turns of four calls each. High enough that ordinary work
+            // never notices, low enough that a loop cannot run all night.
+            max_tool_calls: 64,
+        }
     }
 }
 
@@ -158,6 +170,8 @@ pub struct SessionConfig {
     pub approval: Arc<dyn ApprovalPolicy>,
     /// The per-run turn cap. The loop stops with `MaxTurnRequests` at the cap.
     pub max_turns: u32,
+    /// The per-run tool-call budget. The loop stops with `MaxToolCalls` at the cap.
+    pub max_tool_calls: u32,
     /// The `bash` confinement mode. `SessionConfig::new` sets `Off`, so the
     /// default is stated here, not hidden. Use `with_sandbox` to change it. See
     /// `SPEC-bash-sandbox` and decision D-bash-os-sandbox.
@@ -177,6 +191,7 @@ impl SessionConfig {
             session_root: session_root.into(),
             approval,
             max_turns: AgentConfig::default().max_turns,
+            max_tool_calls: AgentConfig::default().max_tool_calls,
             // State the default out loud. `Off` runs `bash` unconfined, which is
             // today's behaviour. A caller opts in with `with_sandbox`.
             sandbox: SandboxMode::Off,
@@ -196,6 +211,12 @@ impl SessionConfig {
     /// Override the per-run turn cap.
     pub fn with_max_turns(mut self, max_turns: u32) -> Self {
         self.max_turns = max_turns;
+        self
+    }
+
+    /// Set the per-run tool-call budget.
+    pub fn with_max_tool_calls(mut self, max_tool_calls: u32) -> Self {
+        self.max_tool_calls = max_tool_calls;
         self
     }
 
@@ -251,8 +272,10 @@ impl Session {
         // fail, so the driver task stops on its own.
         let (tx, rx) = tokio::sync::mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let driver = Driver {
+            tool_calls: std::sync::atomic::AtomicU32::new(0),
             config: AgentConfig {
                 max_turns: self.inner.config.max_turns,
+                max_tool_calls: self.inner.config.max_tool_calls,
             },
             inner: Arc::clone(&self.inner),
             tx,
@@ -300,6 +323,8 @@ struct Driver {
     tx: tokio::sync::mpsc::Sender<Result<AgentEvent, Error>>,
     cancel: CancelToken,
     config: AgentConfig,
+    /// Tool calls made in this run, against `AgentConfig::max_tool_calls`.
+    tool_calls: std::sync::atomic::AtomicU32,
 }
 
 impl Driver {
@@ -343,6 +368,7 @@ impl Driver {
                 TurnOutcome::Canceled => break AgentStopReason::Canceled,
                 TurnOutcome::Failed | TurnOutcome::Closed => return,
                 TurnOutcome::ToolCalls(calls) => match self.dispatch(calls).await {
+                    DispatchOutcome::BudgetSpent => break AgentStopReason::MaxToolCalls,
                     DispatchOutcome::Continue => continue,
                     DispatchOutcome::Canceled => {
                         if self
@@ -507,8 +533,20 @@ impl Driver {
     }
 
     /// Run every requested tool call, one at a time, in call order.
+    ///
+    /// It stops at the tool-call budget. The turn cap counts provider round trips,
+    /// so it cannot bound a turn that asks for forty tools at once. The budget
+    /// counts the work, and it is checked **before** each call, so the cap is never
+    /// exceeded rather than merely noticed afterwards.
     async fn dispatch(&self, calls: Vec<PendingToolCall>) -> DispatchOutcome {
         for call in calls {
+            if self.tool_calls.load(std::sync::atomic::Ordering::SeqCst)
+                >= self.config.max_tool_calls
+            {
+                return DispatchOutcome::BudgetSpent;
+            }
+            self.tool_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match self.dispatch_one(call).await {
                 DispatchOutcome::Continue => continue,
                 other => return other,
@@ -587,10 +625,15 @@ impl Driver {
         // `ToolUpdate` while the tool runs.
         let (updates_tx, mut updates_rx) =
             tokio::sync::mpsc::channel::<String>(EVENT_CHANNEL_CAPACITY);
+        // A tool that runs a subagent sends typed events here. Forward each one
+        // unchanged, so a frontend sees the child while it runs.
+        let (agent_tx, mut agent_rx) =
+            tokio::sync::mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
         let context = ToolContext {
             session_root: self.inner.config.session_root.clone(),
             cancel: self.cancel.clone(),
             updates: updates_tx,
+            agent_events: agent_tx,
         };
         let execute = tool.execute(arguments, context);
         tokio::pin!(execute);
@@ -612,9 +655,24 @@ impl Driver {
                         return DispatchOutcome::Closed;
                     }
                 }
+                event = agent_rx.recv() => {
+                    if let Some(event) = event
+                        && self.emit(event).await.is_err()
+                    {
+                        return DispatchOutcome::Closed;
+                    }
+                }
                 done = &mut execute => break done,
             }
         };
+
+        // Drain any agent event the tool sent just before it returned. This is the
+        // arm that carries `AgentFinished`, so skipping it would lose the report.
+        while let Ok(event) = agent_rx.try_recv() {
+            if self.emit(event).await.is_err() {
+                return DispatchOutcome::Closed;
+            }
+        }
 
         // Drain any output line the tool sent just before it returned.
         while let Ok(line) = updates_rx.try_recv() {
@@ -710,6 +768,8 @@ impl Driver {
 enum DispatchOutcome {
     /// The loop may run the next turn.
     Continue,
+    /// The run spent its tool-call budget. The loop stops.
+    BudgetSpent,
     /// The caller cancelled the run.
     Canceled,
     /// The caller dropped the event stream.

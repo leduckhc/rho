@@ -1270,6 +1270,7 @@ fn stop_reason_label(reason: AgentStopReason) -> &'static str {
     match reason {
         AgentStopReason::EndTurn => "end turn",
         AgentStopReason::MaxTokens => "max tokens",
+        AgentStopReason::MaxToolCalls => "max tool calls",
         AgentStopReason::MaxTurnRequests => "max turns",
         AgentStopReason::Refusal => "refusal",
         AgentStopReason::Canceled => "canceled",

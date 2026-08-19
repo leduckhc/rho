@@ -22,6 +22,10 @@ fn ctx(root: &std::path::Path) -> (ToolContext, tokio::sync::mpsc::Receiver<Stri
             session_root: root.to_path_buf(),
             cancel: CancelToken::new(),
             updates: tx,
+            agent_events: {
+                let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(16);
+                agent_tx
+            },
         },
         rx,
     )

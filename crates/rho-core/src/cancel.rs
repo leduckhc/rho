@@ -12,12 +12,12 @@ use tokio::sync::Notify;
 /// A clone shares one state. A **child**, from [`CancelToken::child`], is a
 /// separate signal that follows its parent one way: cancelling the parent cancels
 /// the child, and cancelling the child leaves the parent alone.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CancelToken {
     inner: Arc<CancelInner>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct CancelInner {
     flag: AtomicBool,
     notify: Notify,

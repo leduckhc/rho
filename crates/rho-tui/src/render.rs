@@ -1024,6 +1024,7 @@ fn stop_word(reason: rho_core::AgentStopReason) -> &'static str {
     match reason {
         EndTurn => "end turn",
         MaxTokens => "max tokens",
+        MaxToolCalls => "max tool calls",
         MaxTurnRequests => "max turns",
         Refusal => "refusal",
         Canceled => "canceled",

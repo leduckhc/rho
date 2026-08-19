@@ -45,9 +45,10 @@ pub use session::{
     encode,
 };
 pub use subagent::{
-    AgentId, AgentNode, AgentOutcome, AgentRegistry, AgentReport, BothPolicies, ChildSlot,
-    MAX_CHILD_RETRIES, MAX_SUMMARY_CHARS, RetryLedger, SubagentError, SubagentLimits,
-    ToolIntersection, check_no_cycle, collect_report, intersect_tools, narrow_sandbox,
+    AgentId, AgentNode, AgentOutcome, AgentProgress, AgentRegistry, AgentReport, BothPolicies,
+    ChildSlot, ChildSpawn, LiveAgent, MAX_CHILD_RETRIES, MAX_SUMMARY_CHARS, RetryLedger,
+    SubagentError, SubagentLimits, ToolIntersection, cap_tool_calls, check_no_cycle,
+    collect_report, intersect_tools, narrow_sandbox,
 };
 pub use tasks::{
     BackgroundReason, DEFAULT_FOREGROUND_LIMIT_MS, RunMode, TaskError, TaskHandle, TaskId,

@@ -92,6 +92,13 @@ pub struct Cli {
     /// How long a child may run before rho cancels it. Defaults to 600 seconds.
     #[arg(long, global = true, value_name = "SECONDS")]
     pub child_timeout_secs: Option<u64>,
+
+    /// How many tool calls one subagent may make. Defaults to 64.
+    ///
+    /// A turn cap counts provider round trips. It does not bound a child that makes
+    /// forty tool calls inside one turn. This does.
+    #[arg(long, global = true, value_name = "COUNT")]
+    pub max_agent_tool_calls: Option<u32>,
     /// Do not search the skill directories. An explicit --skill still loads.
     #[arg(long, global = true)]
     pub no_skills: bool,
@@ -501,6 +508,7 @@ fn subagent_limits(cli: &Cli) -> rho_core::SubagentLimits {
             .max_children_per_parent
             .unwrap_or(stated.max_children_per_parent),
         max_live_total: cli.max_live_agents.unwrap_or(stated.max_live_total),
+        max_tool_calls: cli.max_agent_tool_calls.unwrap_or(stated.max_tool_calls),
         child_timeout: cli
             .child_timeout_secs
             .map(std::time::Duration::from_secs)
@@ -533,12 +541,18 @@ mod tests {
             "7",
             "--child-timeout-secs",
             "30",
+            "--max-agent-tool-calls",
+            "9",
         ])
         .unwrap();
         let limits = subagent_limits(&cli);
         assert_eq!(limits.max_children_per_parent, 2);
         assert_eq!(limits.max_live_total, 7);
         assert_eq!(limits.child_timeout, std::time::Duration::from_secs(30));
+        assert_eq!(
+            limits.max_tool_calls, 9,
+            "a tool-call budget nobody can set is not a budget"
+        );
     }
 
     #[test]
@@ -554,6 +568,7 @@ mod tests {
         );
         assert_eq!(limits.max_live_total, stated.max_live_total);
         assert_eq!(limits.child_timeout, stated.child_timeout);
+        assert_eq!(limits.max_tool_calls, stated.max_tool_calls);
     }
 
     #[test]
@@ -573,11 +588,14 @@ mod tests {
         // Prove the shape end to end on the real registry, not on the number alone.
         let registry = rho_core::AgentRegistry::new(limits);
         let root = registry.root();
-        let (child, _slot) = root
-            .spawn_child()
+        let spawn = root
+            .spawn_child("scout", rho_core::CancelToken::new())
             .expect("the root must be able to spawn one child");
         assert!(
-            child.spawn_child().is_err(),
+            spawn
+                .node
+                .spawn_child("scout", rho_core::CancelToken::new())
+                .is_err(),
             "a CLI child must not spawn a grandchild"
         );
     }

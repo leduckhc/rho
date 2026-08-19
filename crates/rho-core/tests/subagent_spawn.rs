@@ -43,7 +43,7 @@ fn a_depth_of_zero_forbids_spawning() {
     };
     let registry = AgentRegistry::new(limits);
     let root = registry.root();
-    let error = root.spawn_child().unwrap_err();
+    let error = root.spawn_child("scout", CancelToken::new()).unwrap_err();
     match error {
         SubagentError::DepthExceeded { limit, attempted } => {
             assert_eq!(limit, 0);
@@ -61,10 +61,14 @@ fn depth_beyond_the_cap_is_refused_and_the_reason_names_the_limit() {
     };
     let registry = AgentRegistry::new(limits);
     let root = registry.root();
-    let (child, _s1) = root.spawn_child().unwrap();
-    let (grandchild, _s2) = child.spawn_child().unwrap();
+    let _s1 = root.spawn_child("scout", CancelToken::new()).unwrap();
+    let child = &_s1.node;
+    let _s2 = child.spawn_child("scout", CancelToken::new()).unwrap();
+    let grandchild = &_s2.node;
     // The great-grandchild would be depth 3, past the cap of 2.
-    let error = grandchild.spawn_child().unwrap_err();
+    let error = grandchild
+        .spawn_child("scout", CancelToken::new())
+        .unwrap_err();
     let message = error.to_string();
     assert!(message.contains("depth limit is 2"), "{message}");
     assert!(message.contains("depth 3"), "{message}");
@@ -88,9 +92,11 @@ fn more_children_than_the_per_parent_cap_is_refused() {
     };
     let registry = AgentRegistry::new(limits);
     let root = registry.root();
-    let (_c1, _s1) = root.spawn_child().unwrap();
-    let (_c2, _s2) = root.spawn_child().unwrap();
-    let error = root.spawn_child().unwrap_err();
+    let _s1 = root.spawn_child("scout", CancelToken::new()).unwrap();
+    let _c1 = &_s1.node;
+    let _s2 = root.spawn_child("scout", CancelToken::new()).unwrap();
+    let _c2 = &_s2.node;
+    let error = root.spawn_child("scout", CancelToken::new()).unwrap_err();
     match error {
         SubagentError::TooManyChildren { limit, current } => {
             assert_eq!(limit, 2);
@@ -119,11 +125,16 @@ fn the_process_wide_cap_is_refused_across_two_parents() {
     // Two separate parents, each holding one live child. That is three live
     // agents once we add the two parents? No: the root does not count until it
     // is spawned. Build two sibling parents under the root, then a child of each.
-    let (parent_a, _sa) = root.spawn_child().unwrap(); // live total 1
-    let (parent_b, _sb) = root.spawn_child().unwrap(); // live total 2
-    let (_child_a, _sca) = parent_a.spawn_child().unwrap(); // live total 3
+    let _sa = root.spawn_child("scout", CancelToken::new()).unwrap();
+    let parent_a = &_sa.node; // live total 1
+    let _sb = root.spawn_child("scout", CancelToken::new()).unwrap();
+    let parent_b = &_sb.node; // live total 2
+    let _sca = parent_a.spawn_child("scout", CancelToken::new()).unwrap();
+    let _child_a = &_sca.node; // live total 3
     // The process-wide cap of 3 is now reached. Parent B cannot spawn.
-    let error = parent_b.spawn_child().unwrap_err();
+    let error = parent_b
+        .spawn_child("scout", CancelToken::new())
+        .unwrap_err();
     match error {
         SubagentError::TooManyLiveAgents { limit, current } => {
             assert_eq!(limit, 3);
@@ -146,13 +157,17 @@ fn a_finished_child_frees_its_slot() {
     let registry = AgentRegistry::new(limits);
     let root = registry.root();
     {
-        let (_child, _slot) = root.spawn_child().unwrap();
+        let _slot = root.spawn_child("scout", CancelToken::new()).unwrap();
+        let _child = &_slot.node;
         assert_eq!(registry.live_total(), 1);
     }
     // The slot dropped, so the counts are free again.
     assert_eq!(registry.live_total(), 0);
     assert_eq!(root.live_children(), 0);
-    let (_child, _slot) = root.spawn_child().expect("a freed slot allows a new child");
+    let _slot = root
+        .spawn_child("scout", CancelToken::new())
+        .expect("a freed slot allows a new child");
+    let _child = &_slot.node;
 }
 
 // --- The cycle guard ---
@@ -415,4 +430,60 @@ async fn a_child_out_of_turns_is_reported() {
     let events = session.prompt(Vec::new(), cancel.clone());
     let report = collect_report("scout", events, cancel, Duration::from_secs(60), None).await;
     assert_eq!(report.outcome, AgentOutcome::OutOfTurns);
+}
+
+#[tokio::test]
+async fn the_tool_call_budget_stops_a_turn_that_asks_for_too_many_tools() {
+    // The case a turn cap cannot see. One turn asks for five tool calls, and the
+    // budget is three. A turn cap of 32 would let all five run.
+    let dir = tempfile::tempdir().unwrap();
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(common::RecordingTool::new("probe")));
+
+    // One turn, five calls.
+    let mut turn = vec![StreamEvent::MessageStart {
+        role: rho_core::Role::Assistant,
+    }];
+    for index in 0..5u32 {
+        turn.push(StreamEvent::ToolCallStart {
+            index,
+            id: format!("c{index}"),
+            name: "probe".to_string(),
+        });
+        turn.push(StreamEvent::ToolCallEnd {
+            index,
+            arguments: serde_json::json!({}),
+        });
+    }
+    turn.push(StreamEvent::Done {
+        stop_reason: rho_core::StopReason::ToolUse,
+    });
+
+    let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::new(vec![turn]));
+    let config = rho_core::SessionConfig::new(
+        "child-model",
+        dir.path().to_path_buf(),
+        Arc::new(rho_core::AllowAllPolicy),
+    )
+    .with_max_tool_calls(3);
+    let session = Session::with_config(
+        config,
+        provider,
+        Arc::new(tools),
+        Arc::new(rho_core::HookChain::new()),
+        rho_core::Context::new(None, Vec::new()),
+    );
+
+    let cancel = CancelToken::new();
+    let events = session.prompt(Vec::new(), cancel.clone());
+    let report = collect_report("scout", events, cancel, Duration::from_secs(60), None).await;
+
+    // The budget is spent, so the child is out of room. The parent gets what it
+    // had rather than nothing.
+    assert_eq!(
+        report.outcome,
+        rho_core::AgentOutcome::OutOfTurns,
+        "spending the tool-call budget must end the run, got {:?}",
+        report.outcome
+    );
 }
