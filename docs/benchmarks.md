@@ -595,9 +595,9 @@ rather than claiming there is none.
 | Measure | Sprint 3 | Sprint 4 | Change |
 | --- | --- | --- | --- |
 | Frame time, 50th percentile | 58 us | 73 us | +26 percent |
-| Frame time, 99th percentile | 70 us | 100 us | +43 percent |
-| Allocations per frame | 300 | 504 | +68 percent |
-| Bytes per frame | not recorded | 32.5 kB | new |
+| Frame time, 99th percentile | 70 us | 100 us, median of three | +43 percent |
+| Allocations per frame | 300 | 508 | +69 percent |
+| Bytes per frame | not recorded | 32.6 kB | new |
 
 ```sh
 cargo build --release -p rho-tui --example frame_bench
@@ -615,14 +615,22 @@ The first version of this work reported **107 us and 2562 allocations**, on a be
 that contains no markdown at all. `SPEC-tui-markdown` section 5 budgets no extra allocation for a row
 with no markup, so the implementation was breaking its own spec.
 
-Two changes recovered most of it:
+**One change recovered most of it.** A line with no `*`, backtick, or backslash has exactly one run,
+so it takes the cheap `&str` wrap instead of the per-character run wrap. `has_inline_markup` decides,
+and `the_fast_path_draws_exactly_what_the_run_path_draws` holds that the shortcut is invisible.
 
-- **A fast path.** A line with no `*`, backtick, or backslash has exactly one run, so it takes the
-  cheap `&str` wrap instead of the per-character run wrap. `has_inline_markup` decides, and
-  `the_fast_path_draws_exactly_what_the_run_path_draws` holds that the shortcut is invisible.
-- **A borrowed line.** `MarkdownLine::text` is a `Cow`, so a line the scanner did not change borrows
-  instead of allocating. This did not move the count on this benchmark, and it cut the 99th
-  percentile from 192 us to about 100 us.
+**A correction, recorded rather than quietly fixed.** An earlier version of this section credited a
+second change: `MarkdownLine::text` as a `Cow`, so a line the scanner did not change would borrow
+instead of allocate. **That change is not in the code.** It was written and it never reached a commit:
+a review subagent restored its own backup of `markdown.rs` while the edit was uncommitted, and the
+controller then credited it in this file and in a commit message without checking the signature
+afterwards. The numbers here were measured on the shipped code and are unaffected, because the `Cow`
+never moved the allocation count. Only the attribution was wrong.
+
+Measured again on the shipped code, three runs: 73.3, 71.1, and 75.2 microseconds at the 50th
+percentile, and 508 allocations for 32.6 kB. The table above rounds to 73 and 504, and the count is
+508. The 99th percentile is noisier than the rest of this file admits: the same three runs gave 126,
+84, and 93 microseconds, so 100 is a median and not a ceiling.
 
 ### A quadratic scan, found by a security review
 

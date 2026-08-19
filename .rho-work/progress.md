@@ -643,9 +643,33 @@ never reopened prose went unnoticed. Both are fixed, and both mutations now fail
 
 None of the four measured performance. The frame benchmark reported **107 us and 2562 allocations**
 against a documented 58 us and 300, on a transcript with no markdown at all, so the implementation was
-breaking its own spec's cost budget. A fast path for a line with no marker and a borrowed line
-recovered most of it, to 73 us and 504.
+breaking its own spec's cost budget. A fast path for a line with no marker recovered most of it, to
+73 us and 508.
 
 15. **Run the benchmark the spec cites, not only the test suite.** A cost budget in a spec is a claim,
    and a claim with no measurement behind it is a slogan. Four reviewers read this code and none of
    them ran it for speed.
+
+### A false claim the controller made, and how it was caught
+
+The commit for the critic panel and `docs/benchmarks.md` both credited a `Cow` on `MarkdownLine::text`
+for part of the performance recovery. **That change is not in the code and never was committed.**
+
+It was written, it compiled, the suite passed, and it was measured. While it sat uncommitted, the
+test-quality subagent restored its own backup of `markdown.rs`, which it had snapshotted before the
+edit and restored honestly at the end of its run. The controller then wrote the claim into a commit
+message and a benchmark table without re-reading the signature.
+
+It surfaced three commits later, while gathering exact type signatures for a summary. `grep` showed
+`pub text: String` where the claim said `Cow`.
+
+The measured numbers were not affected, because the `Cow` never moved the allocation count. Only the
+attribution was wrong, and both places are corrected.
+
+16. **A subagent that restores files can undo your uncommitted work.** The brief told it to restore,
+   and it did exactly that, and it reported honestly that it had. The controller's edit was
+   uncommitted in the same file at the same time. Commit before spawning an agent that touches source,
+   or expect to lose the edit.
+17. **Verify a claim against the code, not against your memory of writing it.** Three commits and two
+   documents carried a change that no longer existed. One `grep` for the type would have caught it at
+   the time.
