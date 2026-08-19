@@ -235,6 +235,8 @@ restates them. See `F-lifecycle-hook-points` and `F-slash-commands` above.
 | F-cycle-guard | Cycle guard | The spawn walk carries a visited set. A cycle in the parent chain is refused rather than looped. | `rho-core` | `sprint-2` | No extension point. |
 | F-salvage-and-retry-cap | Salvage and retry cap | A child that dies without a report yields a failed result. A re-delegated task stops at the retry cap. | `rho-core` | `sprint-2` | A caller uses `RetryLedger`. |
 | F-agent-events | Agent events | The parent stream shows a child through three events: spawned, progressed, and finished. | `rho-core` | `sprint-2` | New `AgentEvent` variants. A frontend renders them. |
+| F-live-agent-handle | Live agent handle | A running child is addressable. A caller lists live children, reads one child's progress, and cancels one child without touching its siblings. | `rho-core` | `built` | `AgentRegistry::live`, `handle`, and `cancel`. A frontend renders the list. |
+| F-agent-tool-call-budget | Agent tool-call budget | A run stops at a tool-call budget. A turn cap counts provider round trips, so it cannot bound a turn that asks for forty tools. | `rho-core` | `built` | `--max-agent-tool-calls`, or `SessionConfig::with_max_tool_calls`. |
 | F-agent-fan-out | Agent fan-out | `spawn_agents` runs several children at once in one tool call. A refused task is a per-task result, and results report in request order. | `rho-tools` | `sprint-2` | Register a different `Tool` under the name `spawn_agents`. See decision D-fan-out-is-one-tool-call. |
 | F-agent-definitions | Agent definitions | An agent is a markdown file with frontmatter. A project definition is withheld until the project is trusted. | `rho-skills` | `sprint-2` | Author a definition file. The loader is shared with skills. |
 
@@ -243,9 +245,9 @@ task, and rho verifies the result. See decision D-a-child-does-not-grade-itself.
 
 | ID | Name | Outcome | Owning crate | Status | Extension point |
 |----|------|---------|--------------|--------|-----------------|
-| F-agent-task | Agent task | A child carries a goal, its declared artifacts, and its acceptance checks, not a bare prompt. | `rho-core` | `built` | Build an `AgentTask`. |
+| F-agent-task | Agent task | A child carries a goal, its declared artifacts, and its acceptance checks, not a bare prompt. The `spawn_agent` tool takes `artifacts`. | `rho-core` | `built` | Build an `AgentTask`, or pass `artifacts` to `spawn_agent`. |
 | F-artifact-spec | Artifact spec | A deliverable rho can check: a file, a command that exits zero, or a named kind. A new kind is a new variant or a registered checker. A file path obeys `confine`. | `rho-core` | `built` | Register an `ArtifactChecker` for a named kind. |
-| F-acceptance-gate | Acceptance gate | rho verifies the artifacts and runs the checks after the child stops. A child cannot certify its own work, because no public constructor builds a verdict. | `rho-core` | `built` | Implement the `Gate` trait. |
+| F-acceptance-gate | Acceptance gate | rho verifies the artifacts and runs the checks after the child stops. A child cannot certify its own work, because no public constructor builds a verdict. A failed gate reports `Rejected`, never `Done`. | `rho-core` | `built` | Implement the `Gate` trait. A `CommandRunner` supplies the sandbox. |
 | F-unverified-child-claims | Unverified child claims | The child reports its open questions and what it did not check. These stay separate from the gate verdict, and they are never proof. | `rho-core` | `built` | No extension point. This is a security boundary. |
 
 ## MCP client

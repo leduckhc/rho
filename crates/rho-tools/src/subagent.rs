@@ -18,7 +18,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rho_core::AgentNode;
 use rho_core::{
-    AgentOutcome, AllowAllPolicy, ApprovalPolicy, BothPolicies, Context, HookChain, Provider,
+    AgentOutcome, AllowAllPolicy, ApprovalPolicy, BothPolicies, Context, Gate, HookChain, Provider,
     RetryLedger, Session, SessionConfig, Tool, ToolContext, ToolError, ToolKind, ToolOutput,
     ToolRegistry, collect_report, narrow_sandbox,
 };
@@ -57,6 +57,9 @@ pub struct SpawnEnv {
     pub tools: Arc<dyn ChildToolFactory>,
     /// The directory that holds child transcripts. One file per child.
     pub transcript_dir: PathBuf,
+    /// Runs a gate command under the parent's sandbox. `rho-core` holds no
+    /// sandbox, so the tool crate supplies it.
+    pub runner: Arc<dyn rho_core::CommandRunner>,
     /// Counts how often the same work has died, so a poisoned task stops.
     ///
     /// jcode's reclaim cap. Without a caller this guard does nothing, and it had
@@ -71,6 +74,12 @@ struct SpawnArgs {
     agent: String,
     /// The prompt for the child. This is the work to delegate.
     prompt: String,
+    /// Files the child must deliver. rho checks each one after the child stops.
+    ///
+    /// Only file names. A command check would let a prompt-injected child choose
+    /// the command that judges it. See decision D-an-acceptance-check-has-a-trusted-author.
+    #[serde(default)]
+    artifacts: Vec<String>,
 }
 
 /// The `spawn_agent` tool. It spawns a subagent and returns its summary.
@@ -144,7 +153,15 @@ impl Tool for SpawnAgentTool {
                     "enum": self.names,
                     "description": "The agent definition name. Choose one of the listed values."
                 },
-                "prompt": { "type": "string", "description": "The work to delegate to the child." }
+                "prompt": { "type": "string", "description": "The work to delegate to the child." },
+                "artifacts": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description":
+                        "Files the child must deliver, relative to the session root. rho checks \
+                         each one after the child stops, and reports the task rejected when one \
+                         is missing or empty. Declare a file only when the child must write it."
+                }
             },
             "required": ["agent", "prompt"]
         })
@@ -160,6 +177,7 @@ impl Tool for SpawnAgentTool {
             &self.env,
             &args.agent,
             &args.prompt,
+            &args.artifacts,
             &ctx.cancel,
             &ctx.agent_events,
         )
@@ -176,6 +194,7 @@ async fn run_one_child(
     env: &Arc<SpawnEnv>,
     agent: &str,
     prompt: &str,
+    artifacts: &[String],
     parent_cancel: &rho_core::CancelToken,
     events: &tokio::sync::mpsc::Sender<rho_core::AgentEvent>,
 ) -> ToolOutput {
@@ -287,6 +306,8 @@ async fn run_one_child(
         }],
         cancel.clone(),
     );
+    // The gate needs a token too, and `collect_report` consumes one.
+    let cancel_for_gate = cancel.clone();
     let report = collect_report(
         def.name.clone(),
         child_events,
@@ -295,6 +316,42 @@ async fn run_one_child(
         Some(transcript),
     )
     .await;
+
+    // rho verifies the work. The child never verifies itself, and no type here
+    // lets it: only a gate builds a `CheckResult`. See `SPEC-agent-tasks` and
+    // decision D-a-child-does-not-grade-itself.
+    let mut report = report;
+    if !artifacts.is_empty() {
+        let task = rho_core::AgentTask::new(agent, prompt).with_artifacts(
+            artifacts
+                .iter()
+                .map(|path| rho_core::ArtifactSpec::File { path: path.into() })
+                .collect(),
+        );
+        let gate_ctx = rho_core::GateContext {
+            session_root: env.parent_config.session_root.clone(),
+            cancel: cancel_for_gate,
+            runner: Arc::clone(&env.runner),
+        };
+        match rho_core::DefaultGate::new().verify(&task, &gate_ctx).await {
+            Ok(gate) => {
+                // A failed gate is never `Done`. A reader that trusts only the
+                // outcome must still see the failure.
+                if !gate.passed() {
+                    report.outcome = rho_core::AgentOutcome::Rejected {
+                        failed: gate.failed_labels(),
+                    };
+                }
+                report.gate = gate;
+            }
+            // A gate that cannot run has proved nothing, so it fails closed.
+            Err(refusal) => {
+                report.outcome = rho_core::AgentOutcome::Rejected {
+                    failed: vec![refusal.to_string()],
+                };
+            }
+        }
+    }
 
     // Publish the final progress, so a handle read after the run sees the truth.
     spawn.publish(rho_core::AgentProgress {
@@ -494,12 +551,15 @@ impl Tool for SpawnAgentsTool {
         // Run every task together. `join_all` keeps the results in request order,
         // even though execution is concurrent, so the prompt prefix stays stable
         // and the provider cache stays warm. See decision D-measured-cost-and-cache.
-        let runs = args.tasks.iter().map(|task| {
-            let env = Arc::clone(&self.env);
-            let cancel = ctx.cancel.clone();
-            let events = ctx.agent_events.clone();
-            async move { run_one_child(&env, &task.agent, &task.prompt, &cancel, &events).await }
-        });
+        let runs =
+            args.tasks.iter().map(|task| {
+                let env = Arc::clone(&self.env);
+                let cancel = ctx.cancel.clone();
+                let events = ctx.agent_events.clone();
+                async move {
+                    run_one_child(&env, &task.agent, &task.prompt, &[], &cancel, &events).await
+                }
+            });
         let results = futures::future::join_all(runs).await;
 
         // One section per child, named by its agent and its task, so the model can

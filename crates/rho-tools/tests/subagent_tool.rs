@@ -144,6 +144,7 @@ fn spawn_env(
             parent: parent_tools,
         }),
         transcript_dir: dir.to_path_buf(),
+        runner: Arc::new(rho_tools::SandboxedRunner::new(rho_core::SandboxMode::Off)),
         retries: Arc::new(rho_core::RetryLedger::new()),
     })
 }
@@ -172,6 +173,7 @@ fn hanging_env(dir: &std::path::Path) -> Arc<SpawnEnv> {
             parent: vec!["read".to_string()],
         }),
         transcript_dir: dir.to_path_buf(),
+        runner: Arc::new(rho_tools::SandboxedRunner::new(rho_core::SandboxMode::Off)),
         retries: Arc::new(rho_core::RetryLedger::new()),
     })
 }
@@ -426,6 +428,7 @@ fn fanout_env(dir: &std::path::Path, max_children: usize) -> Arc<SpawnEnv> {
             parent: vec!["read".to_string()],
         }),
         transcript_dir: dir.to_path_buf(),
+        runner: Arc::new(rho_tools::SandboxedRunner::new(rho_core::SandboxMode::Off)),
         retries: Arc::new(rho_core::RetryLedger::new()),
     })
 }
@@ -582,4 +585,144 @@ async fn a_spawn_emits_the_agent_events_into_the_parent_stream() {
         finished.len(),
         "every spawn must have exactly one finish, got: {seen:?}"
     );
+}
+
+// --- The gate has a caller (SPEC-agent-tasks) ---
+
+#[tokio::test]
+async fn a_child_that_skips_its_declared_artifact_is_rejected() {
+    // The gate existed in `rho-core` with no caller, which is the "an unreachable
+    // guard is not shipped" trap this project has hit three times. This is the
+    // caller. See SPEC-agent-tasks and D-a-child-does-not-grade-itself.
+    let dir = tempfile::tempdir().unwrap();
+    let env = spawn_env(
+        dir.path(),
+        // The child claims success and writes nothing.
+        vec![text_turn("I wrote the report, it is excellent")],
+        Some(vec!["read".to_string()]),
+        vec!["read".to_string()],
+    );
+    let tool = SpawnAgentTool::new(env);
+
+    let output = tool
+        .execute(
+            serde_json::json!({
+                "agent": "scout",
+                "prompt": "write report.md",
+                "artifacts": ["report.md"]
+            }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a rejected task is a result, not a fault");
+
+    let text = output_text(&output);
+    assert!(
+        text.contains("checks failed") || text.contains("not accepted"),
+        "the parent must be told the work was rejected, got: {text}"
+    );
+    assert!(
+        text.contains("report.md"),
+        "the refusal must name the missing artifact, got: {text}"
+    );
+    assert!(
+        !text.contains("excellent") || text.contains("checks failed"),
+        "a child's own praise must never stand in for a verdict, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn a_child_that_delivers_its_artifact_passes_the_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("report.md"), "the findings").unwrap();
+    let env = spawn_env(
+        dir.path(),
+        vec![text_turn("done")],
+        Some(vec!["read".to_string()]),
+        vec!["read".to_string()],
+    );
+    let tool = SpawnAgentTool::new(env);
+
+    let output = tool
+        .execute(
+            serde_json::json!({
+                "agent": "scout",
+                "prompt": "write report.md",
+                "artifacts": ["report.md"]
+            }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+
+    let text = output_text(&output);
+    assert!(
+        !text.contains("checks failed"),
+        "a delivered artifact must pass, got: {text}"
+    );
+    assert!(text.contains("done"), "the summary must reach the parent");
+}
+
+#[tokio::test]
+async fn a_task_with_no_declared_artifact_behaves_as_before() {
+    // The gate must not change the common case. A spawn with no artifacts is the
+    // old behaviour exactly.
+    let dir = tempfile::tempdir().unwrap();
+    let env = spawn_env(
+        dir.path(),
+        vec![text_turn("the bug is at parser.rs:42")],
+        Some(vec!["read".to_string()]),
+        vec!["read".to_string()],
+    );
+    let tool = SpawnAgentTool::new(env);
+
+    let output = tool
+        .execute(
+            serde_json::json!({ "agent": "scout", "prompt": "find the bug" }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output_text(&output), "the bug is at parser.rs:42");
+}
+
+#[tokio::test]
+async fn the_model_cannot_declare_a_command_check() {
+    // A model-authored gate command is an injection surface: a prompt-injected
+    // child could choose the command that judges it. The schema takes file names
+    // only, so an extra field is ignored rather than executed. See decision
+    // D-an-acceptance-check-has-a-trusted-author.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("report.md"), "ok").unwrap();
+    let marker = dir.path().join("PWNED");
+    let env = spawn_env(
+        dir.path(),
+        vec![text_turn("done")],
+        Some(vec!["read".to_string()]),
+        vec!["read".to_string()],
+    );
+    let tool = SpawnAgentTool::new(env);
+
+    let output = tool
+        .execute(
+            serde_json::json!({
+                "agent": "scout",
+                "prompt": "write report.md",
+                "artifacts": ["report.md"],
+                "acceptance": [{ "label": "pwn", "check": {
+                    "kind": "command",
+                    "run": format!("touch {}", marker.display())
+                }}]
+            }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        !marker.exists(),
+        "a model-supplied command must never run as a gate check"
+    );
+    let _ = output;
 }

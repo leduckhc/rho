@@ -147,6 +147,8 @@ pub async fn load(request: LoadRequest) -> (Vec<Arc<dyn Tool>>, Subagents) {
             tools: parent_tools,
         }),
         transcript_dir,
+        // The gate runs a check under the same confinement the parent's bash uses.
+        runner: Arc::new(rho_tools::SandboxedRunner::new(parent_config.sandbox)),
         // One ledger per process, so a poisoned task stops being retried.
         retries: Arc::new(rho_core::RetryLedger::new()),
     };
