@@ -324,23 +324,15 @@ fn fence_state_spans_the_whole_message_not_the_visible_window() {
     }
 }
 
-#[test]
-fn a_table_degrades_to_verbatim_text() {
-    // The review flagged tables as load-bearing, because an LLM emits them constantly. rho
-    // does not render a table, so it must leave one completely alone. Half-styling would be
-    // worse than not styling at all.
-    let table = "| crate | role |\n|-------|------|\n| rho-tui | the interface |";
-    let scanned = scan_markdown(table);
-    for line in &scanned {
-        assert_eq!(
-            line.kind,
-            MarkdownKind::Text,
-            "a table row is plain: {line:?}"
-        );
-    }
-    let drawn_texts: Vec<String> = scanned.into_iter().map(|l| l.text).collect();
-    assert_eq!(drawn_texts, table.split('\n').collect::<Vec<_>>());
-}
+// `a_table_degrades_to_verbatim_text` lived here and is deliberately gone.
+//
+// It asserted that every table row stays plain text. That was right while rho drew no tables:
+// the contract review warned that half a table styled is worse than none. rho now draws them,
+// because a model emits a table in most answers, so the assertion contradicts the feature.
+//
+// The review's concern is still guarded, and by two tests in `tables.rs` rather than by not
+// having the feature: `a_table_without_a_rule_row_stays_verbatim` and
+// `a_table_inside_a_fence_stays_code`. A table only draws when it is unambiguous.
 
 #[test]
 fn an_alignment_row_is_not_mistaken_for_a_rule() {

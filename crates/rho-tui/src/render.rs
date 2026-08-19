@@ -474,12 +474,22 @@ fn push_row(
                     out.push(one((rule_row(width), base)));
                     continue;
                 }
+                // A table row is already aligned, so it is drawn as it stands. Wrapping it
+                // would stack the columns into nonsense, and `put` cuts it at the screen edge.
+                if matches!(
+                    line.kind,
+                    MarkdownKind::TableHead | MarkdownKind::TableRule | MarkdownKind::TableRow
+                ) {
+                    out.push(one((pad(&line.text, width), base)));
+                    continue;
+                }
                 // A code line is verbatim: never inline-scanned, never re-wrapped.
                 if line.kind == MarkdownKind::CodeBlock {
                     out.push(one((pad(&line.text, width), base)));
                     continue;
                 }
-                let runs = inline_runs(&line.text, base);
+                let plain_base = markdown_role(line.kind) == Role::Text;
+                let runs = inline_runs(&line.text, base, plain_base);
                 let wrapped = wrap_runs(&runs, measure);
                 if wrapped.is_empty() {
                     out.push(one((blank(width), base)));
@@ -1221,13 +1231,25 @@ fn pad(text: &str, width: usize) -> String {
 /// it, and a code span takes the code role instead, because a colour reads more clearly than a
 /// third modifier. Measured against pi, which colours inline code and leaves emphasis as
 /// modifiers.
-fn inline_runs(text: &str, base: Style) -> StyledLine {
+fn inline_runs(text: &str, base: Style, plain_base: bool) -> StyledLine {
     let code = style_for(Role::MdCode);
     scan_inline(text)
         .into_iter()
         .filter(|run| !run.text.is_empty())
         .map(|run| {
-            let mut style = if run.code { code } else { base };
+            // Emphasis takes a colour as well as a modifier, because a terminal may draw no
+            // italic at all and may draw bold at the same weight. Only inside body text: a
+            // heading and a quote carry their own colour, and repainting a word inside one
+            // would look like a defect. So there the modifier carries it alone.
+            let mut style = if run.code {
+                code
+            } else if plain_base && run.bold {
+                style_for(Role::MdBold)
+            } else if plain_base && run.italic {
+                style_for(Role::MdItalic)
+            } else {
+                base
+            };
             if run.bold {
                 style = style.add_modifier(Modifier::BOLD);
             }
@@ -1349,6 +1371,11 @@ fn markdown_role(kind: MarkdownKind) -> Role {
         // the prior art and harder to read, and phase 1 cannot colour a glyph alone.
         MarkdownKind::Bullet => Role::Text,
         MarkdownKind::Rule => Role::Muted,
+        // A table's header is bold and bright, its rule is quiet, and its data reads as body
+        // text. Measured against jcode, which does the same.
+        MarkdownKind::TableHead => Role::MdBold,
+        MarkdownKind::TableRule => Role::Muted,
+        MarkdownKind::TableRow => Role::Text,
     }
 }
 

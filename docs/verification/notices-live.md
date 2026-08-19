@@ -415,3 +415,77 @@ predicted before any code existed.
 That is defence in depth rather than a hole, but it took three attempts to establish which, and
 the difference matters: a break that trips nothing is either a weak test or a redundant rule,
 and only tracing it says which.
+
+## Tables and coloured emphasis, verified live
+
+The owner asked for two more things: emphasis visible by colour and not only by a modifier, and
+tables, "since an LLM very often outputs tables".
+
+Both are in. Drawn by the release binary against openrouter, at 156 columns:
+
+```
+Rust Ecosystem Overview
+
+Here is a comprehensive guide using the tokio runtime for async operations.
+             ^^^^^^^^^^^^^^^^^^^        ^^^^^
+             emphasis, coloured         code colour
+
+Crate │ Purpose                       │ Status  │ Downloads
+──────┼───────────────────────────────┼─────────┼──────────
+tokio │ Async runtime and utilities   │ Active  │     1.2M+
+serde │ Serialization framework       │ Stable  │     v1.0+
+axum  │ Web framework                 │ Growing │      500K+
+```
+
+The screenshot is `shots/12-tables-and-inline.png`. No pipe, star, or backtick reaches the
+screen. The `Downloads` column is right aligned, from the model's own `---:` marker.
+
+**Emphasis now carries a colour as well as a modifier.** A modifier alone is not enough: many
+terminals draw no italic at all, and some draw bold at the same weight, so the emphasis would
+vanish. Bold reads brighter and italic reads warmer, so the two are told apart. Inside a heading
+or a quote the modifier carries it alone, because those rows already own a colour and repainting
+a word inside one looks like a defect.
+
+**A cell's markers come off before its width is measured.** Measuring `**bold**` and removing the
+stars later would shift every column to its right. The cost is stated rather than hidden:
+emphasis inside a cell is dropped, not styled, because a row here is one string and cannot carry
+runs per cell.
+
+### One test was superseded, on purpose
+
+`a_table_degrades_to_verbatim_text` asserted that every table row stays plain text. That was
+right while rho drew no tables, and it came from the contract review's warning that half a table
+drawn is worse than none. rho draws them now, so the assertion contradicts the feature.
+
+The warning still holds, and it is now guarded by two tests instead of by not having the feature:
+`a_table_without_a_rule_row_stays_verbatim` and `a_table_inside_a_fence_stays_code`. A table
+draws only when it is unambiguous.
+
+### The breaks, and two more weak tests caught
+
+| The break | Result |
+| --- | --- |
+| Accept any two pipe lines as a table | 1 test fails |
+| Drop a ragged row's missing cells | 1 test fails |
+| Measure a cell's width with its markers still in | **nothing failed at first** |
+| Ignore the alignment markers | **nothing failed at first** |
+
+Neither of those two was exercised. The table in the tests had no inline markup in any cell, so
+the third break changed nothing at all. And the fourth was masked by a `trim_end`: with the text
+trimmed, a left aligned `7` and a right aligned `7` both end the row, so the assertion held
+either way.
+
+Both tests were rewritten. One table now carries `**bold**` and `` `code` `` in its cells and
+asserts the columns still line up. The alignment test now compares display columns, and checks
+both that a right aligned cell sits at the far edge and that a left aligned one sits one pad
+after the divider. Both breaks then fail.
+
+That is the sixth and seventh weak test caught on this branch by the same method. The method is
+cheap and it keeps paying: write the break that the rule must catch, and watch.
+
+### A byte offset is not a column
+
+`the_columns_align_across_every_row` failed against correct code, because it measured alignment
+with `str::find`, which returns a byte offset. A rule glyph is three bytes, so the rule row
+reported 27 where the header reported 9. Alignment is a display property and is now measured in
+display columns. The same mistake was made once before on this project, in the frame fixtures.

@@ -20,6 +20,8 @@
 //! **Every rule below requires a separator.** A coding agent's prose is full of `--no-mouse`,
 //! `#[derive(Debug)]`, `1.2.3`, and `>out.txt`. A marker with no space after it is text.
 
+use unicode_width::UnicodeWidthStr;
+
 /// What one row of a block is, for colour only.
 ///
 /// A new kind is a new variant plus one arm in `role_for`, and the exhaustive match makes the
@@ -40,6 +42,12 @@ pub enum MarkdownKind {
     Bullet,
     /// A horizontal rule. The renderer draws it full width.
     Rule,
+    /// A table's header row, already aligned. Drawn bold.
+    TableHead,
+    /// The rule under a table's header, already drawn with rule glyphs.
+    TableRule,
+    /// A table's body row, already aligned.
+    TableRow,
 }
 
 /// One row of a block: the text to draw, and what it is.
@@ -54,6 +62,14 @@ pub struct MarkdownLine {
 const BULLET: &str = "•";
 /// The glyph that marks a quoted line.
 const QUOTE_BAR: &str = "┃";
+/// The column divider inside a drawn table.
+const TABLE_COLUMN: char = '\u{2502}';
+/// The horizontal glyph of a table's rule row.
+const TABLE_DASH: char = '\u{2500}';
+/// Where a table's rule row crosses a column divider.
+const TABLE_CROSS: char = '\u{253c}';
+/// The gap either side of a table's column divider.
+const TABLE_PAD: usize = 1;
 /// The fewest markers a horizontal rule needs.
 const RULE_MIN: usize = 3;
 /// The most hashes a heading may carry.
@@ -64,9 +80,12 @@ const HEADING_MAX: usize = 6;
 /// The text must already be sanitised. This never adds an escape and never inspects one: it
 /// reads only a line's leading punctuation.
 pub fn scan_markdown(text: &str) -> Vec<MarkdownLine> {
+    let lines: Vec<&str> = text.split('\n').collect();
     let mut out = Vec::new();
     let mut in_fence = false;
-    for raw in text.split('\n') {
+    let mut index = 0usize;
+    while index < lines.len() {
+        let raw = lines[index];
         let trimmed = raw.trim_start_matches(' ');
         let indent_len = raw.len() - trimmed.len();
         let indent = &raw[..indent_len];
@@ -79,6 +98,7 @@ pub fn scan_markdown(text: &str) -> Vec<MarkdownLine> {
                 text: raw.to_string(),
                 kind: MarkdownKind::Fence,
             });
+            index += 1;
             continue;
         }
         if in_fence {
@@ -86,6 +106,16 @@ pub fn scan_markdown(text: &str) -> Vec<MarkdownLine> {
                 text: raw.to_string(),
                 kind: MarkdownKind::CodeBlock,
             });
+            index += 1;
+            continue;
+        }
+
+        // A table spans several lines, so it is recognised here and not per line. It needs a
+        // header and an alignment rule under it, or it is not a table and stays verbatim.
+        if let Some(table) = scan_table(&lines[index..]) {
+            let consumed = table.consumed;
+            out.extend(table.rows);
+            index += consumed;
             continue;
         }
 
@@ -94,6 +124,7 @@ pub fn scan_markdown(text: &str) -> Vec<MarkdownLine> {
                 text: rest.to_string(),
                 kind: MarkdownKind::Heading,
             });
+            index += 1;
             continue;
         }
         if is_rule(trimmed) {
@@ -101,6 +132,7 @@ pub fn scan_markdown(text: &str) -> Vec<MarkdownLine> {
                 text: String::new(),
                 kind: MarkdownKind::Rule,
             });
+            index += 1;
             continue;
         }
         if let Some(rest) = bullet_body(trimmed) {
@@ -108,6 +140,7 @@ pub fn scan_markdown(text: &str) -> Vec<MarkdownLine> {
                 text: format!("{indent}{BULLET} {rest}"),
                 kind: MarkdownKind::Bullet,
             });
+            index += 1;
             continue;
         }
         if let Some(rest) = numbered_body(trimmed) {
@@ -115,6 +148,7 @@ pub fn scan_markdown(text: &str) -> Vec<MarkdownLine> {
                 text: format!("{indent}{rest}"),
                 kind: MarkdownKind::Bullet,
             });
+            index += 1;
             continue;
         }
         if let Some(rest) = quote_body(trimmed) {
@@ -122,14 +156,181 @@ pub fn scan_markdown(text: &str) -> Vec<MarkdownLine> {
                 text: format!("{indent}{QUOTE_BAR} {rest}"),
                 kind: MarkdownKind::Quote,
             });
+            index += 1;
             continue;
         }
         out.push(MarkdownLine {
             text: raw.to_string(),
             kind: MarkdownKind::Text,
         });
+        index += 1;
     }
     out
+}
+
+/// How a column's text sits in its width.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Align {
+    Left,
+    Centre,
+    Right,
+}
+
+/// A drawn table, and how many source lines it used.
+struct Table {
+    rows: Vec<MarkdownLine>,
+    consumed: usize,
+}
+
+/// Recognise a table at the start of `lines`, and draw it.
+///
+/// A table needs a header row and an alignment rule under it. Without the rule it is not a
+/// table, and every line stays verbatim, because half a table drawn is worse than none. That
+/// rule came from the contract review.
+fn scan_table(lines: &[&str]) -> Option<Table> {
+    if lines.len() < 2 {
+        return None;
+    }
+    let header = split_cells(lines[0])?;
+    let aligns = parse_aligns(lines[1], header.len())?;
+    let mut body: Vec<Vec<String>> = Vec::new();
+    let mut consumed = 2usize;
+    while let Some(row) = lines.get(consumed).and_then(|line| split_cells(line)) {
+        body.push(row);
+        consumed += 1;
+    }
+
+    // Column widths come from the widest cell, header included.
+    let columns = header.len();
+    let mut widths: Vec<usize> = header.iter().map(|cell| cell.width()).collect();
+    for row in &body {
+        for (index, cell) in row.iter().take(columns).enumerate() {
+            widths[index] = widths[index].max(cell.width());
+        }
+    }
+
+    let mut rows = Vec::with_capacity(body.len() + 2);
+    rows.push(MarkdownLine {
+        text: draw_row(&header, &widths, &aligns),
+        kind: MarkdownKind::TableHead,
+    });
+    rows.push(MarkdownLine {
+        text: draw_rule(&widths),
+        kind: MarkdownKind::TableRule,
+    });
+    for row in &body {
+        rows.push(MarkdownLine {
+            text: draw_row(row, &widths, &aligns),
+            kind: MarkdownKind::TableRow,
+        });
+    }
+    Some(Table { rows, consumed })
+}
+
+/// The cells of one table line, or `None` when the line is not one.
+///
+/// A line needs at least two cells. The outer pipes are optional, because a model often leaves
+/// them off.
+fn split_cells(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim();
+    if !trimmed.contains('|') {
+        return None;
+    }
+    let inner = trimmed.trim_start_matches('|').trim_end_matches('|');
+    let cells: Vec<String> = inner
+        .split('|')
+        .map(|cell| visible_text(cell.trim()))
+        .collect();
+    if cells.len() < 2 {
+        return None;
+    }
+    Some(cells)
+}
+
+/// A cell's text with its inline markers removed.
+///
+/// The width of a column is measured on what the reader sees. Leaving `**` in the measurement
+/// and removing it later would shift every column to its right, so the markers come off first.
+/// The cost is that emphasis inside a cell is dropped rather than styled: a cell would have to
+/// carry runs for that, and a row here is one string. Stated in `SPEC-tui-markdown` section 3b.
+fn visible_text(cell: &str) -> String {
+    scan_inline(cell).into_iter().map(|run| run.text).collect()
+}
+
+/// The alignment of each column, from a rule row such as `|:---|---:|`.
+///
+/// Returns `None` when the row is not an alignment rule, which is what keeps two ordinary pipe
+/// lines verbatim.
+fn parse_aligns(line: &str, columns: usize) -> Option<Vec<Align>> {
+    let cells = split_cells(line)?;
+    if cells.len() != columns {
+        return None;
+    }
+    let mut aligns = Vec::with_capacity(columns);
+    for cell in &cells {
+        let body = cell.trim();
+        let left = body.starts_with(':');
+        let right = body.ends_with(':');
+        let dashes = body.trim_matches(':');
+        if dashes.len() < 3 || !dashes.chars().all(|ch| ch == '-') {
+            return None;
+        }
+        aligns.push(match (left, right) {
+            (true, true) => Align::Centre,
+            (false, true) => Align::Right,
+            _ => Align::Left,
+        });
+    }
+    Some(aligns)
+}
+
+/// One drawn row: each cell placed in its column, divided by a column glyph.
+fn draw_row(cells: &[String], widths: &[usize], aligns: &[Align]) -> String {
+    let pad = " ".repeat(TABLE_PAD);
+    let divider = format!("{pad}{TABLE_COLUMN}{pad}");
+    let mut parts: Vec<String> = Vec::with_capacity(widths.len());
+    for (index, width) in widths.iter().enumerate() {
+        // A ragged row is padded, never dropped, or data would disappear.
+        let cell = cells.get(index).map(String::as_str).unwrap_or("");
+        let align = aligns.get(index).copied().unwrap_or(Align::Left);
+        parts.push(place(cell, *width, align));
+    }
+    parts.join(&divider).trim_end().to_string()
+}
+
+/// The rule row. It is drawn with rule glyphs, so it reads as a divider with no styling at all.
+///
+/// Each segment covers its column plus the one pad column before the divider, and a cross lands
+/// exactly under every divider.
+fn draw_rule(widths: &[usize]) -> String {
+    let mut out = String::new();
+    for (index, width) in widths.iter().enumerate() {
+        if index > 0 {
+            out.push(TABLE_CROSS);
+        }
+        let span = if index == 0 || index == widths.len() - 1 {
+            width + TABLE_PAD
+        } else {
+            width + TABLE_PAD * 2
+        };
+        for _ in 0..span {
+            out.push(TABLE_DASH);
+        }
+    }
+    out
+}
+
+/// Place `text` in `width` columns, by its alignment.
+fn place(text: &str, width: usize, align: Align) -> String {
+    let room = width.saturating_sub(text.width());
+    match align {
+        Align::Left => format!("{text}{}", " ".repeat(room)),
+        Align::Right => format!("{}{text}", " ".repeat(room)),
+        Align::Centre => {
+            let left = room / 2;
+            format!("{}{text}{}", " ".repeat(left), " ".repeat(room - left))
+        }
+    }
 }
 
 /// The text of a heading, if the line is one. A heading needs a space after its hashes, so

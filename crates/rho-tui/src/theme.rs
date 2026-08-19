@@ -21,6 +21,13 @@ pub enum Role {
     /// A line inside a code block. Its own colour, because no existing role reads as "not
     /// prose". A fence, a quote, and a bullet reuse `Muted` and `Accent`.
     MdCodeBlock,
+    /// Inline bold. Bold also takes a colour, because a terminal may draw no distinct bold
+    /// weight and the emphasis would then vanish. Used only inside body text: a heading keeps
+    /// its own colour, so emphasis there is the modifier alone.
+    MdBold,
+    /// Inline italic. Coloured for the same reason, and more urgently: many terminals draw no
+    /// italic at all.
+    MdItalic,
     /// An inline code span. Measured against pi, which gives it RGB 138,190,183, and jcode,
     /// which adds a background. rho takes the foreground only, because `RoleStyle` has no
     /// background field and adding one is a contract change. See `SPEC-tui-markdown` 3a item 6.
@@ -29,7 +36,7 @@ pub enum Role {
 
 impl Role {
     /// Every role, so a test proves each one has all three mappings.
-    pub const ALL: [Role; 9] = [
+    pub const ALL: [Role; 11] = [
         Role::Text,
         Role::Muted,
         Role::Accent,
@@ -39,6 +46,8 @@ impl Role {
         Role::MdHeading,
         Role::MdCodeBlock,
         Role::MdCode,
+        Role::MdBold,
+        Role::MdItalic,
     ];
 }
 
@@ -91,6 +100,9 @@ pub fn role_256(role: Role) -> Option<u8> {
         Role::MdHeading => Some(78),
         Role::MdCodeBlock => Some(110),
         Role::MdCode => Some(115),
+        // Bold reads brighter than body text. Italic reads warmer, so the two never blur.
+        Role::MdBold => Some(231),
+        Role::MdItalic => Some(180),
     }
 }
 
@@ -130,6 +142,14 @@ pub fn role_16(role: Role) -> RoleStyle {
             color: Ansi16::Cyan,
             ..RoleStyle::plain()
         },
+        Role::MdBold => RoleStyle {
+            bold: true,
+            ..RoleStyle::plain()
+        },
+        Role::MdItalic => RoleStyle {
+            color: Ansi16::Yellow,
+            ..RoleStyle::plain()
+        },
     }
 }
 
@@ -160,6 +180,14 @@ pub fn role_none(role: Role) -> RoleStyle {
         },
         Role::MdCodeBlock | Role::MdCode => RoleStyle {
             dim: true,
+            ..RoleStyle::plain()
+        },
+        Role::MdBold => RoleStyle {
+            bold: true,
+            ..RoleStyle::plain()
+        },
+        Role::MdItalic => RoleStyle {
+            reversed: true,
             ..RoleStyle::plain()
         },
     }

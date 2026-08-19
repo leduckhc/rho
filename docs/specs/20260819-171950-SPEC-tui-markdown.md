@@ -1,6 +1,6 @@
 # SPEC-tui-markdown — colour the markup, and keep the row a grid
 
-Status: **phase 1 and phase 2 both shipped.** Tables and syntax highlighting stay out of scope.
+Status: **phase 1, phase 2, and tables all shipped.** Syntax highlighting stays out of scope.
 
 The contract went to review before either side was written. It came back `REVISE`, and this
 spec now carries the revisions. Phase 1, the line-level subset, is built and tested, because it
@@ -147,10 +147,37 @@ match already forces every role to state.
   that is already safe. Markup styling never re-admits an escape.
 - **A user row is not markdown.** rho draws what the user typed, verbatim.
 
+## 3b. Tables
+
+A model emits a table in most answers, so this is not an edge case. rho follows jcode: aligned
+columns, a bold header, a rule row, and a box-drawing divider. pi draws full box borders, which
+is heavier than the rest of this interface.
+
+A table is the one construct that spans several lines, so it is recognised in `scan_markdown`,
+which already reads a whole message.
+
+**The rules.**
+
+- A table needs a header row **and** an alignment rule under it. Two pipe lines alone are not a
+  table and stay verbatim. Half a table drawn is worse than none.
+- The outer pipes are optional, because a model often leaves them off.
+- A column's width is the widest cell, header included.
+- `:---` is left, `---:` is right, `:---:` is centred. A number column reads wrong left aligned.
+- **A cell's inline markers come off before its width is measured.** Measuring `**bold**` and
+  removing the stars later would shift every column to its right. The cost is that emphasis in a
+  cell is dropped rather than styled, because a row here is one string and cannot carry runs.
+- A ragged row is padded, never dropped, or data disappears.
+- A table row is never wrapped. It is already aligned, and wrapping would stack the columns into
+  nonsense. `put` cuts it at the screen edge.
+- A table inside a fence is code.
+
+Three kinds carry it: `TableHead`, `TableRule`, and `TableRow`. The header takes `MdBold`, the
+rule takes `Muted`, and a row takes `Text`.
+
 ## 4. Out of scope
 
-Tables. Nested lists deeper than one level. Footnotes. Reference links. HTML blocks. Latex.
-Mermaid. Syntax highlighting. Images. Strikethrough. A per-language theme. Incremental
+Nested lists deeper than one level. Footnotes. Reference links. HTML blocks. Latex.
+Mermaid. Syntax highlighting. Images. Strikethrough. Emphasis inside a table cell. A per-language theme. Incremental
 reparsing: the row is re-scanned each frame, and section 5 bounds that cost.
 
 ## 5. The cost budget

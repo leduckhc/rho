@@ -310,3 +310,45 @@ fn a_code_block_line_is_never_inline_scanned() {
         "code keeps its stars: {joined:?}"
     );
 }
+
+// ---- Emphasis must be visible by colour, not only by a modifier. ----------------
+
+#[test]
+fn bold_and_italic_carry_a_colour_as_well_as_a_modifier() {
+    // A modifier alone is not enough. Plenty of terminals draw no italic at all, and some draw
+    // bold as the same weight, so emphasis would vanish. Each also takes a colour, so the
+    // meaning survives a terminal that ignores the modifier.
+    let rows = drawn("plain **strong** and *slanted* here", 60);
+    let plain = style_at(&rows, "plain");
+    let bold = style_at(&rows, "strong");
+    let italic = style_at(&rows, "slanted");
+
+    assert!(bold.add_modifier.contains(Modifier::BOLD), "bold modifier");
+    assert!(
+        italic.add_modifier.contains(Modifier::ITALIC),
+        "italic modifier"
+    );
+    assert_ne!(bold.fg, plain.fg, "bold is visible without its modifier");
+    assert_ne!(
+        italic.fg, plain.fg,
+        "italic is visible without its modifier"
+    );
+    assert_ne!(bold.fg, italic.fg, "bold and italic are told apart");
+}
+
+#[test]
+fn emphasis_inside_a_heading_keeps_the_heading_colour() {
+    // A heading already carries a colour. A bold word inside it must not repaint itself with
+    // the prose bold colour, or the heading would look broken in the middle.
+    let rows = drawn("## A **strong** heading\nplain line", 60);
+    let heading_word = style_at(&rows, "A ");
+    let bold_word = style_at(&rows, "strong");
+    assert_eq!(
+        bold_word.fg, heading_word.fg,
+        "the heading's colour wins inside a heading"
+    );
+    assert!(
+        bold_word.add_modifier.contains(Modifier::BOLD),
+        "and the bold modifier still applies"
+    );
+}

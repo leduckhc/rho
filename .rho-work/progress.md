@@ -550,3 +550,10 @@ anything. It passed on a developer machine only because `TERM` was set there and
 11. **Building a feature profile does not compile its tests.** A `#[cfg]` on a helper left its
    test module behind, and `cargo build --features minimal` stayed green while the minimal test
    build broke. The gate and CI now run `--no-run` on that profile.
+
+## Aug 19, 2026 — Phase 3 (tables + inline styling), BLOCKED
+
+Inline bold/italic/code delivered (`a0c40af`), all markers gone, **colour required** (not optional modifiers). Rendering passes 885 tests. User requested tables.
+
+**BLOCKER:** Table cell alignment measurement fails. Test expects width 9 ("`crate`" column), gets 27 (entire line). Root cause: `measure_cell()` must strip alignment markers (`:-` → padding) BEFORE measuring width, else padding overshoots. Commit not ready: tables.rs tests written but hanging on assertion. **Next: debug cell width under ratatui's counted-glyph semantics before shipping phase 2.**
+
