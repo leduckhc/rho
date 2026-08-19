@@ -54,4 +54,4 @@ pub use motion::{
     MotionCell, MotionInputs, SWEEP_PERIOD_TICKS, motion_cell, motion_enabled, sweep_frame,
     sweep_weight,
 };
-pub use theme::{Ansi16, Role, RoleStyle, role_16, role_256, role_none};
+pub use theme::{Ansi16, Role, RoleStyle, role_16, role_256, role_bg_256, role_none};

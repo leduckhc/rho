@@ -27,7 +27,7 @@ use crate::state::{
     filter_history,
 };
 use crate::styled::{StyledLine, one};
-use crate::theme::{Role, role_16, role_256};
+use crate::theme::{Role, role_16, role_256, role_bg_256};
 
 /// The brand mark. The `ρ` renders in the accent role, so it is the first accent
 /// on screen.
@@ -458,6 +458,11 @@ fn push_row(
 ) {
     match row {
         Row::User { text } => {
+            // A submitted prompt sits on a band, so the eye finds where each turn began. Both
+            // Claude Code and pi mark it the same way. The row is padded to the full width, so the
+            // band reaches the frame edge instead of stopping at the last word. See
+            // `D-a-submitted-prompt-sits-on-a-band`.
+            let band = style_for(Role::UserBand);
             let wrapped = wrap_block(&sanitize_block(text), measure.saturating_sub(2));
             for (line_index, line) in wrapped.iter().enumerate() {
                 let body = if line_index == 0 {
@@ -465,7 +470,11 @@ fn push_row(
                 } else {
                     format!("  {line}")
                 };
-                out.push(one((pad(&body, width), text_style())));
+                // Deliberately not padded here. `put` fills the tail of a row with the row's own
+                // style, so the band reaches the frame edge through one mechanism instead of two.
+                // Padding here as well would leave that fill untested, and untested code is where
+                // this project's defects have lived.
+                out.push(one((body, band)));
             }
         }
         Row::Assistant { text } => {
@@ -1170,12 +1179,15 @@ fn put(frame: &mut Frame<'_>, y: usize, width: usize, line: &StyledLine) {
         column += text.width().min(room);
     }
     if column < width {
+        // The tail carries the row's own style, not the default. A banded row whose text ends early
+        // would otherwise draw a ragged stripe that stops at the last word.
+        let fill = line.last().map(|(_, style)| *style).unwrap_or_default();
         frame.buffer_mut().set_stringn(
             area.x + column as u16,
             row,
             blank(width - column),
             width - column,
-            Style::default(),
+            fill,
         );
     }
 }
@@ -1500,6 +1512,9 @@ fn style_for(role: Role) -> Style {
         Some(index) => Style::default().fg(Color::Indexed(index)),
         None => Style::default(),
     };
+    if let Some(index) = role_bg_256(role) {
+        style = style.bg(Color::Indexed(index));
+    }
     // The bold weight comes from the role table, not from a name in this function. It used to
     // read `if role == Role::Caution`, so every new bold role needed an edit to shared code.
     // `role_16` already states the weight for every role, and the exhaustive match there means

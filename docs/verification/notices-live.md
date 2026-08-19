@@ -540,3 +540,49 @@ Two of the four new tests failed on their first run, against correct code, becau
 **every** row including the composer rules and the footer. Those are chrome and fill the frame by
 design, so one reported a widest row of 156 and one failed on a full-width divider. Both now filter
 to the transcript rows they are about.
+
+## A submitted prompt sits on a band
+
+The owner asked for a full-width background behind an already-submitted user message, and sent
+screenshots of Claude Code and pi doing it. Verified live on Bedrock, at 156 columns, with one short
+prompt and one that wraps:
+
+```
+❯ Say only: first answer                                      <- banded, full width, bold
+first answer                                                  <- no band
+
+❯ Now write a longer prompt that will wrap across more than one line so I can see whether the
+  only: second answer                                         <- both rows banded
+second answer                                                 <- no band
+```
+
+The screenshot is `shots/18-user-band.png`. The band reaches the frame edge on every row, a wrapped
+prompt bands all of its rows, and no answer is banded.
+
+**A background is a fourth theme mapping.** `RoleStyle` describes the 16-colour and no-colour modes,
+and neither can carry a quiet background: there is no subtle grey in 16 colours and no colour at all
+in the third mode. So `role_bg_256` is its own mapping, one role uses it, and the theme test now
+fails if a second role takes a background.
+
+**One mechanism carries the band to the edge.** The producer does not pad the row. `put` fills a
+row's tail with the row's own style, and that is what makes the band full width. Padding at the
+producer as well would have worked and would have left that fill untested.
+
+### A break that did not trip, and what it changed
+
+Three breaks were run. Turning the band off failed three tests, and giving a second role a
+background failed the theme test. **Filling the tail with the default style failed nothing.** The producer was padding the row to the
+width as well, so the fill in `put` never ran for a banded row. Two mechanisms, one of them dead.
+
+The producer's padding was removed rather than the fill, so the band now depends on the fill and the
+break fails two tests. That is the better shape: one path, exercised.
+
+### The weight was a side effect, and is now a decision
+
+The banded text also drew bold. `style_for` reads modifiers from the 16-colour table whatever the
+colour depth, so the `bold` meant as the 16-colour fallback also applied beside the band in 256
+colours. It was noticed in the live screenshot, not in a test.
+
+It reads well and the words are the user's own, so it was kept and pinned by
+`a_submitted_prompt_is_bold_in_every_colour_mode`. A side effect that is kept without a test is a
+side effect waiting to be deleted by someone tidying up.

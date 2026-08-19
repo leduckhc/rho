@@ -28,6 +28,10 @@ pub enum Role {
     /// Inline italic. Coloured for the same reason, and more urgently: many terminals draw no
     /// italic at all.
     MdItalic,
+    /// A submitted prompt. The only role that paints a background: the band marks where a turn
+    /// began, and both Claude Code and pi mark it the same way. A background is loud, so it is
+    /// spent once. See `D-a-submitted-prompt-sits-on-a-band`.
+    UserBand,
     /// A quoted line and its bar. Quiet and leaning: a quote is someone else's voice. It is its
     /// own role again because no existing role carries dim with a lean.
     MdQuote,
@@ -39,7 +43,7 @@ pub enum Role {
 
 impl Role {
     /// Every role, so a test proves each one has all three mappings.
-    pub const ALL: [Role; 12] = [
+    pub const ALL: [Role; 13] = [
         Role::Text,
         Role::Muted,
         Role::Accent,
@@ -52,6 +56,7 @@ impl Role {
         Role::MdBold,
         Role::MdItalic,
         Role::MdQuote,
+        Role::UserBand,
     ];
 }
 
@@ -112,6 +117,38 @@ pub fn role_256(role: Role) -> Option<u8> {
         Role::MdBold => Some(231),
         Role::MdItalic => Some(180),
         Role::MdQuote => Some(245),
+        // The band keeps the body foreground: only the background changes, so the text reads the
+        // same as the answer below it.
+        Role::UserBand => None,
+    }
+}
+
+/// The 256-colour **background** for a role, or `None` for the terminal's own.
+///
+/// A background is a fourth mapping and not a field on `RoleStyle`, because only this mode can
+/// carry a quiet one. A 16-colour terminal has no subtle grey, and the no-colour mode has no
+/// colour at all, so both mark a submitted prompt with a modifier instead.
+///
+/// **Exactly one role paints a background.** A background is loud, and spending it more than once
+/// turns the screen into a patchwork that marks nothing. `only_the_user_band_paints_a_background`
+/// holds that.
+pub fn role_bg_256(role: Role) -> Option<u8> {
+    match role {
+        // Two steps above the usual terminal black: enough to read as a band, not enough to fight
+        // the text on it.
+        Role::UserBand => Some(236),
+        Role::Text
+        | Role::Muted
+        | Role::Accent
+        | Role::Error
+        | Role::Warn
+        | Role::Caution
+        | Role::MdHeading
+        | Role::MdCodeBlock
+        | Role::MdCode
+        | Role::MdBold
+        | Role::MdItalic
+        | Role::MdQuote => None,
     }
 }
 
@@ -165,6 +202,14 @@ pub fn role_16(role: Role) -> RoleStyle {
             italic: true,
             ..RoleStyle::plain()
         },
+        // A submitted prompt is bold in **every** mode, not only as a fallback here. `style_for`
+        // reads modifiers from this table whatever the colour depth, so the weight applies beside
+        // the band as well as instead of it. That is intended: the words are the user's own, and a
+        // 16-colour terminal has no subtle grey to band with.
+        Role::UserBand => RoleStyle {
+            bold: true,
+            ..RoleStyle::plain()
+        },
     }
 }
 
@@ -209,6 +254,11 @@ pub fn role_none(role: Role) -> RoleStyle {
         Role::MdQuote => RoleStyle {
             dim: true,
             italic: true,
+            ..RoleStyle::plain()
+        },
+        // With no colour, reversing the row is the band.
+        Role::UserBand => RoleStyle {
+            reversed: true,
             ..RoleStyle::plain()
         },
     }
