@@ -24,7 +24,7 @@ use crate::render::{STARTUP_MIN_ROWS, composer_text_width, render, transcript_me
 use crate::screen::ScreenGuard;
 use crate::scroll::WHEEL_ROWS;
 use crate::slash_row_index;
-use crate::state::{KeyAction, TuiState};
+use crate::state::{KeyAction, Row, TuiState};
 
 /// A terminal backed by standard output.
 type Term = Terminal<CrosstermBackend<Stdout>>;
@@ -110,6 +110,28 @@ impl App {
     pub fn with_mouse(mut self, enabled: bool) -> Self {
         self.mouse = enabled;
         self
+    }
+
+    /// Seed the startup notices into the transcript, in the order the caller gives them.
+    ///
+    /// The caller used to print a notice to the terminal, and rho then opened the
+    /// alternate screen over it. So the user never read a single one, including the line
+    /// that says a project skill stays unloaded until the user trusts it. A notice belongs
+    /// on the screen the user is about to look at. See `D-a-notice-reaches-the-transcript`.
+    pub fn with_notices<I, S>(mut self, notices: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for notice in notices {
+            self.state.push_notice(notice);
+        }
+        self
+    }
+
+    /// The transcript rows the user sees. A frontend or a test reads what rho drew.
+    pub fn live_rows(&self) -> &[Row] {
+        self.state.live_rows()
     }
 
     /// The escape sequences this app writes at startup. A test reads the wiring.

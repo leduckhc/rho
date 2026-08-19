@@ -54,6 +54,8 @@ const GLYPH_THINKING: &str = "∴";
 const GLYPH_ERROR: &str = "✗";
 const GLYPH_ACTIVITY: &str = "◈";
 const GLYPH_APPROVAL: &str = "!";
+/// A notice is not a failure, so it must not borrow the error glyph.
+const GLYPH_NOTICE: &str = "!";
 const GLYPH_SEPARATOR: &str = "·";
 const GLYPH_CURSOR: &str = "█";
 /// The quote bar that marks an approval's verbatim text.
@@ -275,8 +277,10 @@ fn transcript_window(
     if visible == 0 {
         return (Vec::new(), 0);
     }
-    if state.rows.is_empty() && state.panel == Panel::None {
-        let block = empty_state(state, width, visible);
+    if state.panel == Panel::None
+        && conversation_is_empty(state)
+        && let Some(block) = empty_state(state, width, visible)
+    {
         return (block, visible);
     }
     let lines = transcript_lines(state, width);
@@ -334,7 +338,16 @@ pub fn transcript_metrics(state: &TuiState, width: u16, height: u16) -> (usize, 
     };
     let layout = plan_screen(height, input_rows, panel_want, panel_floor);
     let visible = layout.transcript_rows;
-    if visible == 0 || (state.rows.is_empty() && state.panel == Panel::None) {
+    if visible == 0 {
+        return (0, visible);
+    }
+    // The empty state fills the window itself, so it reports no scrollable rows. The
+    // condition must match `transcript_window` exactly, or a scroll key would clamp
+    // against geometry the renderer never drew.
+    if state.panel == Panel::None
+        && conversation_is_empty(state)
+        && empty_state(state, width, visible).is_some()
+    {
         return (0, visible);
     }
     let total = transcript_lines(state, width).len();
@@ -498,6 +511,24 @@ fn push_row(
                 ));
             }
         }
+        Row::Notice { message } => {
+            // A notice wraps. The real skill notice ends with its action, "Pass
+            // --trust-project to load them", and a padded single line clipped exactly that.
+            let head = format!("{GLYPH_NOTICE} notice {GLYPH_SEPARATOR} ");
+            let wrapped = wrap(
+                &sanitize_line(message),
+                measure.saturating_sub(head.width()),
+            );
+            let style = style_for(Role::Warn);
+            for (line_index, line) in wrapped.iter().enumerate() {
+                let text = if line_index == 0 {
+                    format!("{head}{line}")
+                } else {
+                    format!("{}{line}", " ".repeat(head.width()))
+                };
+                out.push((pad(&text, width), style));
+            }
+        }
         Row::Agent { name, outcome, .. } => {
             out.push((
                 pad(
@@ -577,7 +608,31 @@ const STARTER_BLOCK_WIDTH: usize = 32;
 
 /// The first-launch frame: a centred block over the transcript area. It returns
 /// exactly `rows` lines, so the caller places it with no further arithmetic.
-fn empty_state(state: &TuiState, width: usize, rows: usize) -> Vec<(String, Style)> {
+/// True when the transcript holds no conversation. A notice is chrome, not conversation,
+/// so it must not empty the splash. Every startup in a repository with skills raises a
+/// notice, so gating the splash on `rows.is_empty()` would have retired it for good. See
+/// `D-a-notice-reaches-the-transcript`.
+fn conversation_is_empty(state: &TuiState) -> bool {
+    state
+        .rows
+        .iter()
+        .all(|row| matches!(row, Row::Notice { .. }))
+}
+
+/// The notice rows as display lines, in order, styled the same way the transcript styles
+/// them. One source for the style, so the splash and the transcript cannot drift.
+fn notice_lines(state: &TuiState, width: usize) -> Vec<(String, Style)> {
+    let measure = TEXT_MEASURE_CAP.min(width.saturating_sub(TEXT_MEASURE_MARGIN));
+    let mut out: Vec<(String, Style)> = Vec::new();
+    for (index, row) in state.rows.iter().enumerate() {
+        if matches!(row, Row::Notice { .. }) {
+            push_row(&mut out, state, index, row, width, measure);
+        }
+    }
+    out
+}
+
+fn empty_state(state: &TuiState, width: usize, rows: usize) -> Option<Vec<(String, Style)>> {
     let accent = style_for(Role::Accent);
     let muted = style_for(Role::Muted);
     let art_indent = width.saturating_sub(4) / 2;
@@ -604,6 +659,18 @@ fn empty_state(state: &TuiState, width: usize, rows: usize) -> Vec<(String, Styl
         block.push((pad(&line, width), text_style()));
     }
 
+    // A notice draws under the starters, because the user reads the screen top down and a
+    // notice is the thing rho wants read. When the notices cannot fit, the caller falls
+    // back to the scrollable transcript, so a notice is never truncated away.
+    let notices = notice_lines(state, width);
+    if !notices.is_empty() {
+        block.push((blank(width), text_style()));
+        block.extend(notices);
+    }
+    if block.len() > rows {
+        return None;
+    }
+
     // Centre the block vertically, biased one row up when the gap is odd, matching
     // the design frame.
     let top = rows.saturating_sub(block.len()).div_ceil(2);
@@ -616,7 +683,7 @@ fn empty_state(state: &TuiState, width: usize, rows: usize) -> Vec<(String, Styl
         out.push((blank(width), text_style()));
     }
     out.truncate(rows);
-    out
+    Some(out)
 }
 
 /// Centre `text` in `width` columns, floor-biased to the left, matching the design.

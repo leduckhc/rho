@@ -68,6 +68,13 @@ pub enum Row {
         /// The verbatim detail lines, indented under the message.
         detail: Vec<String>,
     },
+    /// A startup notice. rho used to print these to the terminal and then open the
+    /// alternate screen, which hid every one of them. A notice is not an error, so it
+    /// carries its own row and the `Warn` role. See `D-a-notice-reaches-the-transcript`.
+    Notice {
+        /// The one-line notice, shown after the `!` glyph.
+        message: String,
+    },
 }
 
 /// The status of one tool row.
@@ -1171,6 +1178,21 @@ impl TuiState {
         let mut list = list.clone();
         list.selected = index;
         self.run_selected_command(&list)
+    }
+
+    /// Push a one-line notice row. The transcript is the only channel the user reads.
+    ///
+    /// A notice is not an error. A default model and an unloaded skill are both worth
+    /// saying, and neither one failed. rho printed these to the terminal and then opened
+    /// the alternate screen, so the user never read them. See
+    /// `D-a-notice-reaches-the-transcript`.
+    pub fn push_notice(&mut self, message: impl Into<String>) {
+        self.push_row(
+            Row::Notice {
+                message: crate::sanitize_line(&message.into()),
+            },
+            None,
+        );
     }
 
     /// Push a one-line error row. The transcript is the only channel the user reads,

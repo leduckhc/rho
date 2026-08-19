@@ -134,8 +134,27 @@ pub enum Command {
     },
 }
 
-/// Build a `SessionConfig` from the parsed arguments. State every choice.
+/// Build a `SessionConfig` from the parsed arguments, and print any notice.
+///
+/// This is the wrapper the non-interactive paths use, where a print is the right channel.
+/// The interactive path calls `build_config_with_notices`, because a print there lands on
+/// the primary screen and rho then opens the alternate screen over it.
 fn build_config(cli: &Cli) -> anyhow::Result<SessionConfig> {
+    let mut notices = Vec::new();
+    let config = build_config_with_notices(cli, &mut notices)?;
+    for notice in notices {
+        eprintln!("rho: {notice}");
+    }
+    Ok(config)
+}
+
+/// Build a `SessionConfig`, and collect every notice instead of printing it. State every
+/// choice. A notice is data here, so a frontend can draw it where the user is looking.
+/// See `D-a-notice-reaches-the-transcript`.
+fn build_config_with_notices(
+    cli: &Cli,
+    notices: &mut Vec<String>,
+) -> anyhow::Result<SessionConfig> {
     // A model comes from the flag, then the environment, then the provider's default.
     //
     // The default is a convenience, not a security choice. Decision D-no-four-argument-session-new removed hidden
@@ -148,10 +167,10 @@ fn build_config(cli: &Cli) -> anyhow::Result<SessionConfig> {
         Some(model) => model,
         None => match provider::default_model(&provider_name) {
             Some(model) => {
-                eprintln!(
-                    "rho: no model given, so using the default for {provider_name}: {model}. \
+                notices.push(format!(
+                    "no model given, so using the default for {provider_name}: {model}. \
                      Set --model or {MODEL_ENV} to choose another."
-                );
+                ));
                 model.to_string()
             }
             None => {
@@ -432,7 +451,10 @@ fn resolve_mouse(flag: bool, no_flag: bool, env: &[(String, String)]) -> bool {
 /// Run the interactive TUI. Return a non-zero code on failure.
 #[cfg(feature = "tui")]
 async fn run_interactive(cli: &Cli) -> i32 {
-    let config = match build_config(cli) {
+    // Collect the notices instead of printing them. A print here lands on the primary
+    // screen, and rho opens the alternate screen over it a few milliseconds later.
+    let mut notices: Vec<String> = Vec::new();
+    let config = match build_config_with_notices(cli, &mut notices) {
         Ok(config) => config,
         Err(error) => return fail(error),
     };
@@ -448,9 +470,11 @@ async fn run_interactive(cli: &Cli) -> i32 {
         Ok(triple) => triple,
         Err(error) => return fail(error),
     };
-    for notice in &extras.notices {
-        eprintln!("rho: {notice}");
-    }
+    // The notices go to the interface, not to stderr. rho used to print them here and then
+    // open the alternate screen over them, so the user never read one. One of them says a
+    // project skill stays unloaded until the user trusts it, which is a security notice.
+    // See `D-a-notice-reaches-the-transcript`.
+    notices.extend(extras.notices.iter().cloned());
     let _extras = extras;
 
     // The banner names where this session runs. Without it the banner drew separators
@@ -459,7 +483,8 @@ async fn run_interactive(cli: &Cli) -> i32 {
     let branch = git_branch();
     let mut app = rho_tui::App::new(session, model)
         .with_mouse(mouse)
-        .with_context(cwd, branch, provider_name);
+        .with_context(cwd, branch, provider_name)
+        .with_notices(notices);
     match app.run().await {
         Ok(()) => 0,
         Err(error) => fail(anyhow::anyhow!(error)),
@@ -489,6 +514,31 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn the_default_model_notice_is_data_and_not_a_print() {
+        // The notice used to reach the user only through `eprintln!`, so the interactive
+        // path printed it to the terminal and then opened the alternate screen over it.
+        // A notice the interface can draw has to be a value the caller can carry.
+        // See `D-a-notice-reaches-the-transcript`.
+        let cli = Cli::try_parse_from(["rho", "--provider", "openrouter"]).unwrap();
+        let mut notices = Vec::new();
+        let config = build_config_with_notices(&cli, &mut notices).expect("a default model");
+        assert_eq!(config.model, "anthropic/claude-haiku-4.5");
+        assert!(
+            notices.iter().any(|line| line.contains("no model given")),
+            "the default-model choice must arrive as data: {notices:?}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_model_raises_no_notice() {
+        // rho must not narrate a choice the user already made.
+        let cli = Cli::try_parse_from(["rho", "--model", "openai/gpt-4o"]).unwrap();
+        let mut notices = Vec::new();
+        build_config_with_notices(&cli, &mut notices).expect("an explicit model");
+        assert!(notices.is_empty(), "no notice was needed: {notices:?}");
     }
 
     #[test]

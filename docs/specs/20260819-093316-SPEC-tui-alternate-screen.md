@@ -261,6 +261,64 @@ text with no style. There is no dump, so that code goes too.
 
 A test must pin the repair: `a_late_event_reaches_an_old_row`.
 
+## 6c. A startup notice reaches the screen, because it did not before
+
+rho printed its startup notices to the terminal, and then opened the alternate screen over
+them. Measured on the release binary: the notices wrote at byte 5 and byte 320, and the
+alternate screen opened at byte 535. So each one was visible for a few milliseconds, on a
+buffer the user never looks at again.
+
+One hidden line says a project skill stays unloaded until the user trusts it. That is a
+security notice.
+
+**No test could catch this**, because the fault was an ordering rule between two crates.
+`rho-cli` owned the notices, and `rho-tui` owned the screen. Neither side was wrong alone.
+
+The contract that joins them:
+
+```rust
+/// One rendered transcript row.
+pub enum Row {
+    // ... the existing variants ...
+    /// A startup notice. Not an error: a default model and an unloaded skill both
+    /// deserve a line, and neither one failed.
+    Notice { message: String },
+}
+
+impl TuiState {
+    /// Push a one-line notice row. The text is sanitised, and it wraps when drawn.
+    pub fn push_notice(&mut self, message: impl Into<String>);
+}
+
+impl App {
+    /// Seed the startup notices, in the order the caller gives them.
+    pub fn with_notices<I, S>(self, notices: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>;
+
+    /// The transcript rows the user sees. A frontend or a test reads what rho drew.
+    pub fn live_rows(&self) -> &[Row];
+}
+```
+
+On the `rho-cli` side, `build_config_with_notices` collects a notice instead of printing it.
+`build_config` keeps its old signature and prints, because the non-interactive paths have no
+screen and a print is right there.
+
+**The rules.**
+
+- A notice draws with the `!` glyph and the `Warn` role. It never draws as an error.
+- A notice wraps. The skill notice ends with `Pass --trust-project to load them`, and a
+  padded single line clipped exactly that.
+- The splash draws while **every** row is a notice, because a notice is chrome and not
+  conversation. The notices draw under the starters.
+- When the notices do not fit under the splash, rho falls back to the scrollable transcript.
+  Truncating them inside the splash block would rebuild the defect in a new place.
+- An error raised before the screen opens still goes to stderr. There is no screen yet.
+
+See `D-a-notice-reaches-the-transcript`.
+
 ## 7. The error set
 
 ```rust
@@ -370,6 +428,22 @@ Each test names the assertion it proves.
 - `an_approval_states_its_session_root` — unchanged, and it must stay passing.
 - `a_terminal_too_short_reports_and_does_not_draw` — a two-row terminal returns
   `TooSmall`.
+
+### The notices
+
+- `a_notice_becomes_a_transcript_row`.
+- `a_notice_is_not_an_error` — the row is not `Row::Error`.
+- `a_notice_row_is_sanitised` — an escape and a bell do not survive.
+- `every_notice_reaches_the_transcript_in_order` — the pairing is complete, and ordered.
+- `the_app_seeds_its_notices_into_the_transcript` — the wiring that was missing.
+- `an_app_with_no_notice_shows_no_notice_row` — a quiet startup stays quiet.
+- `a_notice_row_draws_its_text_and_says_notice`.
+- `a_long_notice_keeps_its_tail` — the notice wraps, and no word is lost.
+- `the_splash_survives_a_few_notices`.
+- `many_notices_stay_reachable_instead_of_truncated` — 40 notices report more rows than
+  fit, so the wheel reaches them.
+- `the_default_model_notice_is_data_and_not_a_print`, in `rho-cli`.
+- `an_explicit_model_raises_no_notice`, in `rho-cli`.
 
 ## 10. Out of scope
 
