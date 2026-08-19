@@ -369,35 +369,80 @@ fn refused_child(agent: &str, reason: String) -> ChildOutput {
 ///
 /// Shared by the foreground and the background path, so a fan-out, a blocking spawn,
 /// and a background spawn cannot drift apart.
-async fn finish_child(
+/// The text the parent reads, and whether it counts as a failure.
+///
+/// A pure function of the report, so it needs no provider and no session to test. It
+/// was eighty lines in the middle of a two-hundred-line procedure, which is why the
+/// `is_error` bug for three of five outcomes sat there unseen.
+///
+/// The retry ledger is **not** consulted here. Counting a death is a side effect and
+/// this function has none, so the caller records it.
+fn parent_note(
+    report: &rho_core::AgentReport,
+    dropped: &[String],
+    timeout: std::time::Duration,
+) -> (String, bool) {
+    let mut text = String::new();
+    match &report.outcome {
+        AgentOutcome::Done => {}
+        AgentOutcome::OutOfTurns => text.push_str(&format!(
+            "[the {} subagent used all {} of its turns. What follows is what it had.]\n\n",
+            report.agent, report.turns
+        )),
+        AgentOutcome::Rejected { failed } => text.push_str(&format!(
+            "[the {} subagent finished, and rho's checks failed: {}. The work is not \
+             accepted. Fix it here, or delegate again with a clearer goal.]\n\n",
+            report.agent,
+            failed.join(", ")
+        )),
+        AgentOutcome::Canceled => text.push_str(&format!(
+            "[the {} subagent was cancelled, most likely by its {} second timeout, after {} \
+             turn(s). Do the work here, or delegate a smaller piece.]\n\n",
+            report.agent,
+            timeout.as_secs(),
+            report.turns
+        )),
+        AgentOutcome::Failed { reason } => text.push_str(&format!(
+            "[the {} subagent failed after {} turn(s): {reason} Do the work here, or try a \
+             different agent.]\n\n",
+            report.agent, report.turns
+        )),
+    }
+    text.push_str(&report.summary);
+
+    // Point the parent at the full transcript, as pi does with its `.output` footer.
+    // The summary stays the default and the file is there when the parent wants more.
+    if let Some(path) = &report.transcript {
+        text.push_str(&format!("\n\n[full transcript: {}]", path.display()));
+    }
+    if !dropped.is_empty() {
+        text.push_str(&format!(
+            "\n\n[note: these requested tools were dropped because the parent does not hold \
+             them: {}]",
+            dropped.join(", ")
+        ));
+    }
+    // One place decides what counts as a failure, and it is the type.
+    (text, report.outcome.is_failure())
+}
+
+/// Build the child session a definition describes.
+///
+/// Every confinement rule lives here and nowhere else: the sandbox may only narrow,
+/// the tool set is an intersection, the policy is composed with the parent's, and the
+/// root is inherited. Keeping them together means a reader checks confinement in one
+/// place instead of scanning a two-hundred-line procedure for it.
+///
+/// It returns the intersection too, because the caller reports a dropped tool name.
+async fn build_child(
     env: &Arc<SpawnEnv>,
-    agent: &str,
-    prompt: &str,
-    artifacts: &[String],
-    cancel: rho_core::CancelToken,
-    events: &tokio::sync::mpsc::Sender<rho_core::AgentEvent>,
-    spawn: rho_core::ChildSpawn,
-) -> ChildOutput {
-    let def = env
-        .definitions
-        .get(agent)
-        .expect("the caller checked the definition before it reserved a slot");
-    let child_node = &spawn.node;
-
-    // The frontend learns about the child now, not when it finishes. A send that
-    // fails means nobody is listening, which is not an error.
-    let _ = events
-        .send(rho_core::AgentEvent::AgentSpawned {
-            id: child_node.id(),
-            agent: agent.to_string(),
-            depth: child_node.depth(),
-        })
-        .await;
-
+    def: &AgentDefinition,
+    queue: rho_core::MessageQueue,
+) -> Result<(Session, rho_core::ToolIntersection), rho_core::SubagentError> {
     // The sandbox may only narrow. A weaker request is refused.
     let sandbox = match narrow_sandbox(env.parent_config.sandbox, def.sandbox) {
         Ok(mode) => mode,
-        Err(refusal) => return refused_child(agent, refusal.to_string()),
+        Err(refusal) => return Err(refusal),
     };
 
     // Intersect the child's tool request with the parent's set. A dropped
@@ -450,7 +495,87 @@ async fn finish_child(
         Arc::clone(&env.hooks),
         Context::new(Some(body), Vec::new()),
     )
-    .with_queue(spawn.queue());
+    .with_queue(queue);
+    Ok((child, intersection))
+}
+
+/// Verify a finished child's work, and fold the verdict into its report.
+///
+/// rho verifies. The child never does, and no type here lets it: only a gate builds a
+/// `CheckResult`. A failed gate rewrites the outcome to `Rejected`, so a reader that
+/// trusts only the outcome still sees the failure. A gate that cannot run has proved
+/// nothing, so it fails closed. See `SPEC-agent-tasks` and decision
+/// D-a-child-does-not-grade-itself.
+async fn verify_work(
+    env: &Arc<SpawnEnv>,
+    agent: &str,
+    prompt: &str,
+    artifacts: &[String],
+    cancel: rho_core::CancelToken,
+    mut report: rho_core::AgentReport,
+) -> rho_core::AgentReport {
+    if artifacts.is_empty() {
+        return report;
+    }
+    let task = rho_core::AgentTask::new(agent, prompt).with_artifacts(
+        artifacts
+            .iter()
+            .map(|path| rho_core::ArtifactSpec::File { path: path.into() })
+            .collect(),
+    );
+    let ctx = rho_core::GateContext {
+        session_root: env.parent_config.session_root.clone(),
+        cancel,
+        runner: Arc::clone(&env.runner),
+    };
+    match rho_core::DefaultGate::new().verify(&task, &ctx).await {
+        Ok(gate) => {
+            if !gate.passed() {
+                report.outcome = rho_core::AgentOutcome::Rejected {
+                    failed: gate.failed_labels(),
+                };
+            }
+            report.gate = gate;
+        }
+        Err(refusal) => {
+            report.outcome = rho_core::AgentOutcome::Rejected {
+                failed: vec![refusal.to_string()],
+            };
+        }
+    }
+    report
+}
+
+async fn finish_child(
+    env: &Arc<SpawnEnv>,
+    agent: &str,
+    prompt: &str,
+    artifacts: &[String],
+    cancel: rho_core::CancelToken,
+    events: &tokio::sync::mpsc::Sender<rho_core::AgentEvent>,
+    spawn: rho_core::ChildSpawn,
+) -> ChildOutput {
+    let def = env
+        .definitions
+        .get(agent)
+        .expect("the caller checked the definition before it reserved a slot");
+    let child_node = &spawn.node;
+
+    // The frontend learns about the child now, not when it finishes. A send that
+    // fails means nobody is listening, which is not an error.
+    let _ = events
+        .send(rho_core::AgentEvent::AgentSpawned {
+            id: child_node.id(),
+            agent: agent.to_string(),
+            depth: child_node.depth(),
+        })
+        .await;
+
+    // Confinement lives in `build_child`, so this function reads as a sequence.
+    let (child, intersection) = match build_child(env, def, spawn.queue()).await {
+        Ok(pair) => pair,
+        Err(refusal) => return refused_child(agent, refusal.to_string()),
+    };
 
     // JSONL content, so a JSONL extension. A reader should not have to guess.
     let transcript = env
@@ -486,41 +611,7 @@ async fn finish_child(
     )
     .await;
 
-    // rho verifies the work. The child never verifies itself, and no type here
-    // lets it: only a gate builds a `CheckResult`. See `SPEC-agent-tasks` and
-    // decision D-a-child-does-not-grade-itself.
-    let mut report = report;
-    if !artifacts.is_empty() {
-        let task = rho_core::AgentTask::new(agent, prompt).with_artifacts(
-            artifacts
-                .iter()
-                .map(|path| rho_core::ArtifactSpec::File { path: path.into() })
-                .collect(),
-        );
-        let gate_ctx = rho_core::GateContext {
-            session_root: env.parent_config.session_root.clone(),
-            cancel: cancel_for_gate,
-            runner: Arc::clone(&env.runner),
-        };
-        match rho_core::DefaultGate::new().verify(&task, &gate_ctx).await {
-            Ok(gate) => {
-                // A failed gate is never `Done`. A reader that trusts only the
-                // outcome must still see the failure.
-                if !gate.passed() {
-                    report.outcome = rho_core::AgentOutcome::Rejected {
-                        failed: gate.failed_labels(),
-                    };
-                }
-                report.gate = gate;
-            }
-            // A gate that cannot run has proved nothing, so it fails closed.
-            Err(refusal) => {
-                report.outcome = rho_core::AgentOutcome::Rejected {
-                    failed: vec![refusal.to_string()],
-                };
-            }
-        }
-    }
+    let report = verify_work(env, agent, prompt, artifacts, cancel_for_gate, report).await;
 
     // The last word, so a handle read after the run matches the report exactly.
     spawn.publish(rho_core::AgentProgress {
@@ -548,66 +639,20 @@ async fn finish_child(
     // failed child left an empty summary, so the tool returned an empty
     // string and the parent had nothing to act on. A failure must be a
     // result the model can read. See decision D-measured-cost-and-cache.
-    let mut text = String::new();
-    match &report.outcome {
-        AgentOutcome::Done => {}
-        AgentOutcome::OutOfTurns => text.push_str(&format!(
-            "[the {} subagent used all {} of its turns. What follows is what it had.]\n\n",
-            report.agent, report.turns
-        )),
-        // The gate refused the work. This is not a death, so it does not count
-        // toward the retry cap: the child ran and produced something wrong, and a
-        // retry with a clearer goal is the right next move.
-        AgentOutcome::Rejected { failed } => text.push_str(&format!(
-            "[the {} subagent finished, and rho's checks failed: {}. The work is not accepted. \
-             Fix it here, or delegate again with a clearer goal.]\n\n",
-            report.agent,
-            failed.join(", ")
-        )),
-        // A child that did not finish counts as a death for the retry cap.
-        // The same work dying again and again must stop, or a poisoned task
-        // burns the whole budget. The key is the agent and the work, so a
-        // different task starts from zero.
-        AgentOutcome::Canceled | AgentOutcome::Failed { .. } => {
-            let key = format!("{}\u{1f}{}", agent, work);
-            if let Err(capped) = env.retries.record_death(&key) {
-                return refused_child(agent, capped.to_string());
-            }
-            match &report.outcome {
-                AgentOutcome::Canceled => text.push_str(&format!(
-                    "[the {} subagent was cancelled, most likely by its {} second timeout, \
-                         after {} turn(s). Do the work here, or delegate a smaller piece.]\n\n",
-                    report.agent,
-                    timeout.as_secs(),
-                    report.turns
-                )),
-                AgentOutcome::Failed { reason } => text.push_str(&format!(
-                    "[the {} subagent failed after {} turn(s): {reason} Do the work here, or \
-                         try a different agent.]\n\n",
-                    report.agent, report.turns
-                )),
-                _ => unreachable!("the outer match limits this arm"),
-            }
+    // A child that did not finish counts as a death for the retry cap. The same work
+    // dying again and again must stop, or a poisoned task burns the whole budget. The
+    // key is the agent and the work, so a different task starts from zero.
+    if matches!(
+        report.outcome,
+        AgentOutcome::Canceled | AgentOutcome::Failed { .. }
+    ) {
+        let key = format!("{}\u{1f}{}", agent, work);
+        if let Err(capped) = env.retries.record_death(&key) {
+            return refused_child(agent, capped.to_string());
         }
     }
-    text.push_str(&report.summary);
 
-    // Point the parent at the full transcript, as pi does with its `.output` footer.
-    // The summary stays the default and the file is there when the parent wants more,
-    // so the choice to spend context belongs to the parent rather than to rho.
-    if let Some(path) = &report.transcript {
-        text.push_str(&format!("\n\n[full transcript: {}]", path.display()));
-    }
-    // One place decides what counts as a failure, and it is the type. Four sites used
-    // to answer this in their own words, and the newest one defaulted to success.
-    let failed = report.outcome.is_failure();
-    if !intersection.dropped.is_empty() {
-        text.push_str(&format!(
-            "\n\n[note: these requested tools were dropped because the parent does not hold \
-                 them: {}]",
-            intersection.dropped.join(", ")
-        ));
-    }
+    let (text, failed) = parent_note(&report, &intersection.dropped, timeout);
     let output = if failed {
         error_result(text)
     } else {
