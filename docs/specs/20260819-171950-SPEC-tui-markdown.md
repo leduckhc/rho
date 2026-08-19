@@ -102,8 +102,8 @@ what it rules out.
 | `` `code` `` | the text, no backticks | `MdCode` |
 | a fenced block | each line, verbatim, never re-wrapped | `MdCodeBlock` |
 | the fence line itself | the fence and its language | `Muted` |
-| `- item`, `* item`, `+ item` | `•` then the text | `Accent` |
-| `1. item` | the number kept, then the text | `Accent` |
+| `- item`, `* item`, `+ item` | `•` then the text | `Text` |
+| `1. item` | the number kept, then the text | `Text` |
 | `> quote` | `┃` then the text | `Muted` |
 | `---`, `***`, `___` | a full-width rule | `Muted` |
 
@@ -112,8 +112,8 @@ vocabulary pollution: a role couples one feature to a shared enum, and every rol
 to `Role`, `Role::ALL`, and three mapping functions.
 
 Shipped: `MdHeading`, because no role carries a colour with the bold weight, and `MdCodeBlock`,
-because no role reads as "not prose". A fence and a quote reuse `Muted`. A bullet reuses
-`Accent`. Phase 2 adds `MdCode` only if `MdCodeBlock` proves wrong for an inline span.
+because no role reads as "not prose". A fence and a quote reuse `Muted`. A list item reuses `Text`,
+matching pi, which leaves item text at the body colour. Phase 2 adds `MdCode` only if `MdCodeBlock` proves wrong for an inline span.
 
 `style_for` also stopped naming a role. It read `if role == Role::Caution`, so every bold role
 needed an edit to shared code. It now reads the weight from `role_16`, which the exhaustive

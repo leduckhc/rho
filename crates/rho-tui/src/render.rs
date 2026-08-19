@@ -1205,7 +1205,10 @@ fn markdown_role(kind: MarkdownKind) -> Role {
         MarkdownKind::Fence => Role::Muted,
         MarkdownKind::CodeBlock => Role::MdCodeBlock,
         MarkdownKind::Quote => Role::Muted,
-        MarkdownKind::Bullet => Role::Accent,
+        // The item text keeps the body colour. Measured against pi, which colours only the
+        // marker and leaves the text default: colouring a whole item accent was louder than
+        // the prior art and harder to read, and phase 1 cannot colour a glyph alone.
+        MarkdownKind::Bullet => Role::Text,
         MarkdownKind::Rule => Role::Muted,
     }
 }

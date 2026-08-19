@@ -424,3 +424,24 @@ fn the_scanner_only_deletes_and_inserts_known_glyphs() {
         }
     }
 }
+
+#[test]
+fn a_list_item_keeps_the_body_colour() {
+    // Measured against pi, captured from a live run: pi colours the list marker and leaves the
+    // item's text at the body colour. rho first coloured the whole item accent, which read as
+    // louder than the prior art. Phase 1 cannot colour a glyph on its own, so the item takes
+    // the body colour and the glyph carries the structure. See `D-markdown-line-level-first`.
+    let rows = drawn("- an item\nplain prose", 60);
+    let item = rows
+        .iter()
+        .find(|(text, _)| text.trim().starts_with('\u{2022}'))
+        .expect("the item draws");
+    let prose = rows
+        .iter()
+        .find(|(text, _)| text.trim() == "plain prose")
+        .expect("the prose draws");
+    assert_eq!(
+        item.1.fg, prose.1.fg,
+        "a list item reads as body text, not as an accent"
+    );
+}

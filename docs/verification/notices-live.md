@@ -296,3 +296,36 @@ test that cannot fail is worse than none.
 
 That is the fourth and fifth vacuous test caught in this branch, all by the same method: break
 the code where the rule actually binds, and watch.
+
+## Measured against pi, in a browser
+
+pi was run in `ttyd` beside rho, and both were given the same prompt. pi's colours were read
+from its own escape codes with `tmux capture-pane -e`, not from its source.
+
+| Element | pi | rho, phase 1 |
+| --- | --- | --- |
+| heading | bold, RGB 240,198,116 | bold, accent. Equivalent |
+| inline code | RGB 138,190,183 | **not styled. The backticks show** |
+| bold, italic | modifiers | **not styled. The markers show** |
+| list marker | `-` kept, item text at body colour | `•` glyph, item text at body colour |
+| blockquote | italic, RGB 128,128,128, with a bar | dim, with a bar. No italic |
+| rule | RGB 128,128,128 | muted. Equivalent |
+| fence | RGB 128,128,128 | muted. Equivalent |
+| code body | **syntax highlighted, VS Code Dark+** | one colour |
+| table | **drawn with box borders** | verbatim pipes |
+
+Two things changed because of what the comparison showed.
+
+**A list item now keeps the body colour.** rho coloured a whole item accent, and pi colours
+only the marker. Phase 1 cannot colour a glyph on its own, so the loud half was dropped and the
+glyph carries the structure. `a_list_item_keeps_the_body_colour` pins it.
+
+**One earlier claim was too kind to rho.** A note here said pi "refuses to guess a language"
+and implied rho matches it. pi refuses to guess, and it does highlight when the language is
+named, which `rust` was. So pi highlights and rho does not. The claim holds for auto-detection
+only, and the gap is real.
+
+A model behaviour worth knowing, found in the same run. Asked for markdown, haiku wrapped its
+whole answer in a markdown fence. rho then drew all of it as code, correctly, and the answer
+looked unstyled. pi would do the same. A fence means code, and that rule holds even when a
+model wraps a whole message in one.
