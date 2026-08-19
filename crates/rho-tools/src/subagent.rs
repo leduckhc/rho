@@ -198,6 +198,12 @@ async fn run_one_child(
     parent_cancel: &rho_core::CancelToken,
     events: &tokio::sync::mpsc::Sender<rho_core::AgentEvent>,
 ) -> ToolOutput {
+    // A task rho cannot act on is refused first, and the refusal teaches. A goal is
+    // required, because the goal is the child's prompt. See `SPEC-agent-tasks`.
+    if let Err(refusal) = rho_core::AgentTask::new(agent, prompt).validate() {
+        return error_result(refusal.to_string());
+    }
+
     // Find the definition. A missing agent is a result, not a fault.
     let Some(def) = env.definitions.get(agent) else {
         return error_result(format!(
@@ -425,12 +431,18 @@ async fn run_one_child(
         }
     }
     text.push_str(&report.summary);
+    // A rejected task is a failure. A model that reads only `is_error` must still
+    // learn the work was not accepted, so a rejection never looks like a success.
+    let rejected = matches!(report.outcome, AgentOutcome::Rejected { .. });
     if !intersection.dropped.is_empty() {
         text.push_str(&format!(
             "\n\n[note: these requested tools were dropped because the parent does not hold \
                  them: {}]",
             intersection.dropped.join(", ")
         ));
+    }
+    if rejected {
+        return error_result(text);
     }
     ToolOutput::text(text)
 }

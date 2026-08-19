@@ -827,3 +827,65 @@ async fn cancel_agent_stops_one_child_and_leaves_its_sibling() {
     assert!(!second_handle.is_cancelled(), "a sibling must keep running");
     assert!(!parent.is_cancelled(), "the parent must keep running");
 }
+
+#[tokio::test]
+async fn spawn_agent_reports_a_rejected_task_as_an_error_result() {
+    // `SPEC-agent-tasks` promised this and no test proved it. A rejected task must
+    // set `is_error`, so a model that reads only the flag still learns the work was
+    // not accepted. A rejection that looks like a success is the fail-open shape.
+    let dir = tempfile::tempdir().unwrap();
+    let env = spawn_env(
+        dir.path(),
+        vec![text_turn("I finished, honestly")],
+        Some(vec!["read".to_string()]),
+        vec!["read".to_string()],
+    );
+    let tool = SpawnAgentTool::new(env);
+
+    let output = tool
+        .execute(
+            serde_json::json!({
+                "agent": "scout",
+                "prompt": "write report.md",
+                "artifacts": ["report.md"]
+            }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        output.is_error,
+        "a failed gate must set is_error, got: {}",
+        output_text(&output)
+    );
+}
+
+#[tokio::test]
+async fn spawn_agent_without_a_goal_is_a_result_not_a_fault() {
+    // A task rho cannot act on is refused, and the refusal teaches. `AgentTask`
+    // already validates this; the tool has to reach the check.
+    let dir = tempfile::tempdir().unwrap();
+    let env = spawn_env(
+        dir.path(),
+        vec![text_turn("unused")],
+        Some(vec!["read".to_string()]),
+        vec!["read".to_string()],
+    );
+    let tool = SpawnAgentTool::new(env);
+
+    let output = tool
+        .execute(
+            serde_json::json!({ "agent": "scout", "prompt": "   " }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("an empty goal is a result, not a fault");
+
+    let text = output_text(&output);
+    assert!(output.is_error, "an empty goal must be an error result");
+    assert!(
+        text.contains("goal"),
+        "the refusal must say a goal is needed, got: {text}"
+    );
+}

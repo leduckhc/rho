@@ -389,3 +389,25 @@ async fn an_old_record_without_a_gate_field_reads_as_an_empty_report() {
     assert!(report.gate.artifacts.is_empty());
     assert!(report.claims.open_questions.is_empty());
 }
+
+#[tokio::test]
+async fn a_rejected_outcome_round_trips() {
+    // `AgentOutcome` crosses the persisted boundary, so a new variant must survive a
+    // write and a read. `SPEC-agent-tasks` promised this test and it did not exist.
+    let outcome = rho_core::AgentOutcome::Rejected {
+        failed: vec!["file report.md".to_string(), "the suite passes".to_string()],
+    };
+    let json = serde_json::to_string(&outcome).expect("it serialises");
+    assert!(
+        json.contains("rejected"),
+        "the wire name must be snake_case, got: {json}"
+    );
+    let back: rho_core::AgentOutcome = serde_json::from_str(&json).expect("it reads back");
+    assert_eq!(
+        back, outcome,
+        "a rejected outcome must survive a round trip"
+    );
+
+    // And it must never read back as done, whatever a careless reader does.
+    assert_ne!(back, rho_core::AgentOutcome::Done);
+}
