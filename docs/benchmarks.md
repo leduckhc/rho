@@ -580,3 +580,81 @@ and then this section must run again.
 - Motion cost inside the render. The renderer does not call the motion yet.
 - First frame on Windows. Neither the script nor CI covers it.
 - Frame time on Linux. The example builds there, but this run was macOS only.
+
+## Sprint 4: what markdown rendering costs
+
+Date: 20260819. Machine: macOS on Apple Silicon (aarch64), rustc 1.95.0. Release builds. Each number
+is one process, and the frame numbers are the median of three runs of 5000 frames.
+
+The interface gained markdown rendering: coloured headings, code blocks, quotes, bullets, rules,
+tables, and inline bold, italic, and code. That work is not free, and this section states the price
+rather than claiming there is none.
+
+### Frame time and allocation
+
+| Measure | Sprint 3 | Sprint 4 | Change |
+| --- | --- | --- | --- |
+| Frame time, 50th percentile | 58 us | 73 us | +26 percent |
+| Frame time, 99th percentile | 70 us | 100 us | +43 percent |
+| Allocations per frame | 300 | 504 | +68 percent |
+| Bytes per frame | not recorded | 32.5 kB | new |
+
+```sh
+cargo build --release -p rho-tui --example frame_bench
+target/release/examples/frame_bench
+```
+
+At a 100 ms tick a 73 us frame is under one part in a thousand of the budget. The renderer is still
+not the bottleneck. The allocation count is the honest cost of the runs contract: a row is now
+a list of styled runs rather than one string, which is what makes an inline style expressible, and
+that is one `Vec` per drawn row.
+
+### A regression that was caught by measuring, and mostly undone
+
+The first version of this work reported **107 us and 2562 allocations**, on a benchmark transcript
+that contains no markdown at all. `SPEC-tui-markdown` section 5 budgets no extra allocation for a row
+with no markup, so the implementation was breaking its own spec.
+
+Two changes recovered most of it:
+
+- **A fast path.** A line with no `*`, backtick, or backslash has exactly one run, so it takes the
+  cheap `&str` wrap instead of the per-character run wrap. `has_inline_markup` decides, and
+  `the_fast_path_draws_exactly_what_the_run_path_draws` holds that the shortcut is invisible.
+- **A borrowed line.** `MarkdownLine::text` is a `Cow`, so a line the scanner did not change borrows
+  instead of allocating. This did not move the count on this benchmark, and it cut the 99th
+  percentile from 192 us to about 100 us.
+
+### A quadratic scan, found by a security review
+
+`scan_inline` retried at every character of a marker run, so a line carrying many backticks cost
+O(n squared). Measured, one frame:
+
+| Backticks on one line | Before | After |
+| --- | --- | --- |
+| 1000 | 0.31 ms | 0.16 ms |
+| 2000 | 0.93 ms | 0.17 ms |
+| 4000 | 2.80 ms | 0.24 ms |
+
+The fix skips a whole marker run when it cannot open a span, which is also what CommonMark says: the
+opener is the whole run and not a prefix of it. The shape is linear now.
+
+### The known limit: a very large answer is re-scanned every frame
+
+`transcript_lines` builds every row of the transcript on every frame and then windows it, so cost
+grows with the history and not with the screen. Measured at 156 by 40:
+
+| Transcript | Frame time |
+| --- | --- |
+| 50 ordinary rows | 0.49 ms |
+| 200 ordinary rows | 0.50 ms |
+| 800 ordinary rows | 1.04 ms |
+| One answer of about 1 MB | 17.6 ms |
+
+An ordinary session is fine. A single very large answer is not: 17.6 ms a frame is about 57 frames a
+second of pure layout, and a model can be prompted into emitting one.
+
+**This is recorded and not fixed.** The fix is to memoise a row's wrapped lines and invalidate on
+change, or to scan only the visible window, and the second needs the total line count that drives the
+scroll, so it is not a small change. A security review measured this at 258 ms in a debug build and called it a
+denial of service. In release it is 17.6 ms. So the shape of the finding is right, and the build
+overstated the severity. Both numbers are stated here, so the next reader can tell them apart.

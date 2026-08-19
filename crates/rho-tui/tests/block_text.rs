@@ -104,7 +104,12 @@ fn a_blank_line_between_paragraphs_survives() {
 
 #[test]
 fn a_long_line_inside_a_block_still_wraps() {
-    // Keeping newlines must not stop wrapping. A model can send one very long line.
+    // Keeping newlines must not stop wrapping.
+    //
+    // This test claimed to cover "one very long line" and did not: sixty spaced four-letter words
+    // never produce a word wider than the row, so it passed while a long **word** lost its tail.
+    // A correctness review found the defect this test was supposed to hold. The long-word case now
+    // lives in `long_words.rs`, and this one keeps the many-words case it actually tests.
     let long = "word ".repeat(60);
     let rows = drawn(&long, 40);
     let filled: Vec<&String> = rows.iter().filter(|r| !r.trim().is_empty()).collect();

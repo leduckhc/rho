@@ -97,6 +97,29 @@ fn arithmetic_is_not_italic() {
 }
 
 #[test]
+fn a_closing_marker_preceded_by_a_space_does_not_close() {
+    // A mutation audit dropped the closing half of the flanking rule and **no test failed**, because
+    // no corpus entry had a closing marker with a space before it. The opening rule stopped
+    // arithmetic on its own, so the closing rule rode for free and half the contract was unpinned.
+    //
+    // `*a b *c*` is the case. The second `*` has a space before it, so it cannot close the first;
+    // the third can, because a `c` precedes it. So the emphasis spans `a b *c` and the middle star
+    // stays literal, which is what CommonMark says too.
+    //
+    // The first version of this test expected `*a b c`, and rho was right and the test was wrong.
+    assert_eq!(visible("*a b *c*"), "a b *c");
+    // Nothing closes here at all, so every marker is literal.
+    assert_eq!(visible("a *b *c"), "a *b *c");
+    // This is the case that isolates the closing rule. The middle marker has a space on **both**
+    // sides, so the intraword rule cannot reject it and only the closing-space rule can. Two earlier
+    // attempts at this test used a marker followed by a letter, where the intraword rule rejected it
+    // first, so dropping the closing rule changed nothing and the mutation survived twice.
+    assert_eq!(visible("*a b * c*"), "a b * c");
+    // And the ordinary case still closes.
+    assert_eq!(visible("*abc*"), "abc");
+}
+
+#[test]
 fn an_underscore_inside_a_word_is_not_italic() {
     // `wrap_block`, `snake_case`, and `__init__` are identifiers, not emphasis.
     for text in [
@@ -219,6 +242,23 @@ fn drawn(text: &str, width: u16) -> Vec<(String, Vec<ratatui::style::Style>)> {
             (line, styles)
         })
         .collect()
+}
+
+/// Drop the space ratatui writes into the continuation cell of a two-column glyph.
+fn collapse_wide(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut skip = false;
+    for ch in line.chars() {
+        if skip {
+            skip = false;
+            continue;
+        }
+        out.push(ch);
+        if unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) == 2 {
+            skip = true;
+        }
+    }
+    out
 }
 
 /// The style of the first cell of `needle` in the drawn rows.
@@ -351,4 +391,91 @@ fn emphasis_inside_a_heading_keeps_the_heading_colour() {
         bold_word.add_modifier.contains(Modifier::BOLD),
         "and the bold modifier still applies"
     );
+}
+
+// ---- The fast path must be invisible. -------------------------------------------
+
+#[test]
+fn the_fast_path_draws_exactly_what_the_run_path_draws() {
+    // A line with no inline marker skips the per-character run wrap, because prose is the common
+    // case and the run wrap costs about eight times the allocations for no gain on it. The
+    // shortcut is only safe if it is invisible, so this compares the two paths.
+    //
+    // `has_inline_markup` decides. A marker-free line has exactly one run, so the two paths must
+    // agree character for character and style for style. If they ever diverge, the fast path is a
+    // second renderer and this test is the only thing that would say so.
+    let corpus = [
+        "plain prose with no markup at all",
+        "a line with under_scores and --flags and 1.2.3 and #hash",
+        "a very long line that has to wrap several times because it keeps going and going and going and going",
+        "unicode: caf\u{e9} na\u{ef}ve \u{4e2d}\u{6587} \u{1f600} done",
+        "",
+        "   leading spaces kept",
+        "trailing spaces kept   ",
+    ];
+    for text in corpus {
+        assert!(
+            !rho_tui::has_inline_markup(text),
+            "the corpus must exercise the fast path: {text:?}"
+        );
+        // One run is what the general scanner produces for a marker-free line.
+        let runs = scan_inline(text);
+        assert_eq!(
+            runs.len(),
+            1,
+            "a marker-free line is one run, so the shortcut is sound: {text:?}"
+        );
+        assert_eq!(runs[0].text, text, "and the run is the line: {text:?}");
+        assert!(!runs[0].bold && !runs[0].italic && !runs[0].code);
+
+        // And the drawn result keeps every word, at several widths.
+        //
+        // The read has to be width aware. ratatui stores a two-column glyph in one cell and puts
+        // a SPACE in the continuation cell, so a plain cell-by-cell read splits a CJK word and the
+        // assertion fails against correct output. A terminal skips that cell. This test found it,
+        // and it is the same mistake as measuring alignment in bytes: the wrong instrument.
+        for width in [30u16, 60, 100] {
+            let drawn_rows = drawn(text, width);
+            let joined: String = drawn_rows
+                .iter()
+                .map(|(line, _)| collapse_wide(line).trim_end().to_string())
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            for word in text.split_whitespace() {
+                assert!(
+                    joined.contains(word),
+                    "at width {width} the fast path kept {word:?} from {text:?}: {joined}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn has_inline_markup_agrees_with_the_scanner() {
+    // The fast path is only sound while these two agree. A line the check calls marker-free must
+    // scan to one plain run, and a line it flags must be worth scanning.
+    let marked = [
+        "a **bold** word",
+        "a *slant*",
+        "a `code` span",
+        r"an escaped \* star",
+        "2*3*4",
+        "``double``",
+    ];
+    for text in marked {
+        assert!(
+            rho_tui::has_inline_markup(text),
+            "must take the run path: {text:?}"
+        );
+    }
+    let clean = ["nothing here", "under_score", "1.2.3", "# hash", "> quote"];
+    for text in clean {
+        assert!(
+            !rho_tui::has_inline_markup(text),
+            "must take the fast path: {text:?}"
+        );
+        assert_eq!(scan_inline(text).len(), 1, "one run: {text:?}");
+    }
 }

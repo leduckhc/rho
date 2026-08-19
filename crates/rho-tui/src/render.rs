@@ -14,12 +14,12 @@
 
 use ratatui::Frame;
 use ratatui::style::{Color, Modifier, Style};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::bindings::{bindings, filter_slash_commands};
 use crate::concise::RowFold;
 use crate::duration::{duration_slot, format_duration};
-use crate::markdown::{MarkdownKind, scan_inline, scan_markdown};
+use crate::markdown::{MarkdownKind, has_inline_markup, scan_inline, scan_markdown};
 use crate::motion::{MotionCell, motion_cell, sweep_weight};
 use crate::sanitize::{sanitize_block, sanitize_line};
 use crate::state::{
@@ -501,6 +501,21 @@ fn push_row(
                     out.push(one((pad(&line.text, width), base)));
                     continue;
                 }
+                // The fast path. A line with no inline marker has exactly one run, so it takes
+                // the cheap `&str` wrap and one styled row. Prose is the common case, and the
+                // per-character run wrap costs about eight times the allocations for no gain on
+                // it. Measured: the frame benchmark went from 300 allocations to 2562 without
+                // this, on a transcript with no markup at all. See `SPEC-tui-markdown` section 5.
+                if !has_inline_markup(&line.text) {
+                    let rows = wrap_block(&line.text, measure);
+                    if rows.is_empty() {
+                        out.push(one((blank(width), base)));
+                    }
+                    for row in rows {
+                        out.push(one((row, base)));
+                    }
+                    continue;
+                }
                 let plain_base = markdown_role(line.kind) == Role::Text;
                 let runs = inline_runs(&line.text, base, plain_base);
                 let wrapped = wrap_runs(&runs, measure);
@@ -557,31 +572,34 @@ fn push_row(
             }
         }
         Row::Notice { message } => {
-            // A notice wraps. The real skill notice ends with its action, "Pass
-            // --trust-project to load them", and a padded single line clipped exactly that.
+            // A notice wraps. The real skill notice ends with its action, "Pass --trust-project to
+            // load them", and a padded single line clipped exactly that.
             let head = format!("{GLYPH_NOTICE} notice {GLYPH_SEPARATOR} ");
             let style = style_for(Role::Warn);
-            let text = sanitize_line(message);
+            let text = sanitize_block(message);
             let indented = measure.saturating_sub(head.width());
-            if indented >= NOTICE_MIN_TEXT {
+            let longest = text
+                .split_whitespace()
+                .map(UnicodeWidthStr::width)
+                .max()
+                .unwrap_or(0);
+            // The label keeps its own column only when the text still reads well beside it: wide
+            // enough, and wide enough for the longest word. `wrap` breaks a word that cannot fit,
+            // and breaking `--trust-project` at column 12 when the frame has 24 would split a word
+            // that had room. So a notice whose longest word does not fit the indented column gives
+            // the label its own row and takes the whole measure.
+            if indented >= NOTICE_MIN_TEXT && longest <= indented {
                 for (line_index, line) in wrap(&text, indented).iter().enumerate() {
-                    // `wrap` cannot break a word longer than its width, so a long word arrives on
-                    // a line of its own and the label indent can then push it past the frame. A
-                    // word that fits the frame must never be cut, so such a line drops the indent.
-                    // Found by `a_notice_survives_a_narrow_screen` when the measure widened.
-                    let overflows = head.width() + line.width() > width;
                     let row = if line_index == 0 {
                         format!("{head}{line}")
-                    } else if overflows {
-                        line.to_string()
                     } else {
                         format!("{}{line}", " ".repeat(head.width()))
                     };
                     out.push(one((pad(&row, width), style)));
                 }
             } else {
-                // Too narrow to keep a label column. The label takes its own row, and the
-                // text takes the whole measure, because the text is the part that matters.
+                // Too narrow to keep a label column. The label takes its own row, and the text
+                // takes the whole measure, because the text is the part that matters.
                 out.push(one((pad(head.trim_end(), width), style)));
                 for line in wrap(&text, measure.max(1)) {
                     out.push(one((pad(&line, width), style)));
@@ -1255,7 +1273,7 @@ fn pad(text: &str, width: usize) -> String {
 /// third modifier. Measured against pi, which colours inline code and leaves emphasis as
 /// modifiers.
 fn inline_runs(text: &str, base: Style, plain_base: bool) -> StyledLine {
-    let code = style_for(Role::MdCode);
+    let code = style_for(Role::MdCodeBlock);
     scan_inline(text)
         .into_iter()
         .filter(|run| !run.text.is_empty())
@@ -1345,18 +1363,22 @@ fn wrap_runs(runs: &StyledLine, width: usize) -> Vec<StyledLine> {
             }
             continue;
         }
-        word.push((ch, style));
-        word_width += cw;
-        // A single word longer than the row must break, or it would never fit.
-        if word_width > width {
+        // A word longer than the row must break. The break happens **before** the character that
+        // would tip it over, so no row is ever wider than the frame. Appending first made a row up
+        // to two columns too wide, and a wide glyph at that edge was then dropped by `put`.
+        if word_width + cw > width {
             if row_width > 0 {
                 flush_row(&mut row, &mut rows);
                 row_width = 0;
             }
-            row.append(&mut word);
-            flush_row(&mut row, &mut rows);
-            word_width = 0;
+            if !word.is_empty() {
+                row.append(&mut word);
+                flush_row(&mut row, &mut rows);
+                word_width = 0;
+            }
         }
+        word.push((ch, style));
+        word_width += cw;
     }
     if row_width + word_width > width && row_width > 0 {
         flush_row(&mut row, &mut rows);
@@ -1444,6 +1466,13 @@ fn wrap_block(text: &str, width: usize) -> Vec<String> {
 }
 
 /// Greedy word wrap to `width` display columns. A single space joins words.
+///
+/// **A word wider than the row is broken**, by display column, instead of being emitted whole. It
+/// used to be emitted whole and the renderer then clipped it to the frame, dropping the tail with
+/// no marker. A URL, a path, a hash, and a stack-trace line are all one long word, and so is a
+/// whole CJK or Thai paragraph, because those scripts put no spaces between words. Measured before
+/// the fix: 30 characters at width 10 drew 10, and a 60 glyph CJK paragraph at width 80 drew 40.
+/// See `D-a-long-word-breaks`.
 fn wrap(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![String::new()];
@@ -1451,6 +1480,25 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
     for word in text.split_whitespace() {
+        if word.width() > width {
+            // The word cannot fit any row, so break it. Whatever is on the current row goes first.
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            let mut chunk = String::new();
+            let mut chunk_width = 0usize;
+            for ch in word.chars() {
+                let cell = ch.width().unwrap_or(0);
+                if chunk_width + cell > width && !chunk.is_empty() {
+                    lines.push(std::mem::take(&mut chunk));
+                    chunk_width = 0;
+                }
+                chunk.push(ch);
+                chunk_width += cell;
+            }
+            current = chunk;
+            continue;
+        }
         if current.is_empty() {
             current = word.to_string();
         } else if current.width() + 1 + word.width() <= width {

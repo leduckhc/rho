@@ -65,6 +65,38 @@ pub fn looks_like_a_secret(name: &str) -> bool {
 /// The character that replaces a stray control byte.
 const REPLACEMENT: char = '\u{fffd}';
 
+/// True for a character that is invisible or that reorders what follows it.
+///
+/// `char::is_control` is **false** for every one of these, so an earlier version of this filter let
+/// them through. The guarantee said "no control character", which was true and was not the point.
+///
+/// Two families matter, and a security review proved both survive the older filter:
+///
+/// - **Bidirectional overrides and isolates**, `U+202A` to `U+202E` and `U+2066` to `U+2069`. These
+///   are the Trojan Source trick: they reorder a line visually while the bytes say something else,
+///   so a reviewer reads one thing and the machine runs another.
+/// - **Zero-width and invisible marks**, including the byte order mark. Text can be hidden between
+///   visible characters, so two lines that look identical are not.
+///
+/// `U+2028` and `U+2029` are line and paragraph separators. They are one column wide, so they reach
+/// a terminal cell, and some terminals treat them as a line break and shift the grid.
+///
+/// Every one is replaced rather than dropped, so nothing goes silently missing.
+fn is_invisible_or_reordering(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{061c}'                  // arabic letter mark
+            | '\u{180e}'            // mongolian vowel separator
+            | '\u{200b}'..='\u{200f}' // zero width space, joiners, LRM, RLM
+            | '\u{202a}'..='\u{202e}' // bidi embedding and override
+            | '\u{2060}'..='\u{2064}' // word joiner, invisible operators
+            | '\u{2066}'..='\u{2069}' // bidi isolates
+            | '\u{2028}'            // line separator
+            | '\u{2029}'            // paragraph separator
+            | '\u{feff}'            // byte order mark
+    )
+}
+
 /// Make untrusted text safe to print to a terminal.
 ///
 /// Tool output, a progress message, and an MCP response are all untrusted, because a
@@ -80,8 +112,10 @@ const REPLACEMENT: char = '\u{fffd}';
 /// 2. Any other control character is replaced, so nothing invisible survives. A tab
 ///    and a newline are kept, because a caller may want the shape of the text.
 ///
-/// The guarantee to rely on: the result contains no escape character, and no control
-/// character other than `\t` and `\n`.
+/// The guarantee to rely on: the result contains no escape character, no control character other
+/// than `\t` and `\n`, and **no invisible or reordering character**. The last clause was added after
+/// a security review proved that a bidirectional override and a line separator both survived the
+/// first two. See `is_invisible_or_reordering`.
 pub fn sanitize_text(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -93,7 +127,7 @@ pub fn sanitize_text(input: &str) -> String {
         }
         if ch == '\t' || ch == '\n' {
             out.push(ch);
-        } else if ch.is_control() {
+        } else if ch.is_control() || is_invisible_or_reordering(ch) {
             out.push(REPLACEMENT);
         } else {
             out.push(ch);
@@ -300,5 +334,73 @@ mod tests {
         assert_eq!(sanitize_text("日本語"), "日本語");
         assert_eq!(sanitize_text("café"), "café");
         assert_eq!(sanitize_text("🙂"), "🙂");
+    }
+}
+
+#[cfg(test)]
+mod invisible_tests {
+    use super::{sanitize_line, sanitize_text};
+
+    /// Found by a security review. `char::is_control` is false for all of these, so the filter let
+    /// them through while its guarantee said "no control character". True, and not the point.
+    #[test]
+    fn a_bidi_override_never_survives() {
+        // The Trojan Source trick: reorder a line visually while the bytes say something else.
+        for ch in [
+            '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}',
+        ] {
+            let text = format!("safe{ch}hidden");
+            let clean = sanitize_text(&text);
+            assert!(
+                !clean.contains(ch),
+                "{ch:?} (U+{:04X}) survived: {clean:?}",
+                ch as u32
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_width_character_never_survives() {
+        // Hidden text between visible characters makes two identical-looking lines differ.
+        for ch in [
+            '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{feff}', '\u{2060}',
+            '\u{061c}', '\u{180e}',
+        ] {
+            let clean = sanitize_text(&format!("a{ch}b"));
+            assert!(
+                !clean.contains(ch),
+                "{ch:?} (U+{:04X}) survived: {clean:?}",
+                ch as u32
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_separator_never_survives() {
+        // U+2028 and U+2029 are one column wide, so they reach a terminal cell, and some terminals
+        // treat them as a line break and shift the grid.
+        for ch in ['\u{2028}', '\u{2029}'] {
+            let clean = sanitize_text(&format!("AAA{ch}BBB"));
+            assert!(!clean.contains(ch), "{ch:?} survived: {clean:?}");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_character_is_untouched() {
+        // The filter must not become a blunt instrument. Accents, CJK, emoji, and a combining mark
+        // all stay, because a model writes them for a reason.
+        let text = "caf\u{e9} na\u{ef}ve \u{4e2d}\u{6587} \u{1f600} e\u{301} tab\there";
+        assert_eq!(sanitize_text(text), text);
+    }
+
+    #[test]
+    fn the_replacement_marks_the_removal() {
+        // Replaced, not dropped, so nothing goes silently missing.
+        let clean = sanitize_line("a\u{202e}b");
+        assert!(
+            clean.contains('\u{fffd}'),
+            "the removal is marked: {clean:?}"
+        );
     }
 }

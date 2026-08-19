@@ -647,7 +647,12 @@ impl TuiState {
         self.push_row(
             Row::Tool {
                 id: id.to_string(),
-                name: name.to_string(),
+                // An MCP server chooses its own tool names, so a name is untrusted like any other
+                // text from another process. A security review found this one raw while the agent
+                // name two hundred lines above was already filtered. Nothing escaped today, because
+                // ratatui drops an escape from a cell, but the invariant is that one filter guards
+                // the terminal and every path uses it.
+                name: crate::sanitize_line(name),
                 kind,
                 status: ToolRowStatus::Running,
                 preview: String::new(),

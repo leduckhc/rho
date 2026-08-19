@@ -35,15 +35,11 @@ pub enum Role {
     /// A quoted line and its bar. Quiet and leaning: a quote is someone else's voice. It is its
     /// own role again because no existing role carries dim with a lean.
     MdQuote,
-    /// An inline code span. Measured against pi, which gives it RGB 138,190,183, and jcode,
-    /// which adds a background. rho takes the foreground only, because `RoleStyle` has no
-    /// background field and adding one is a contract change. See `SPEC-tui-markdown` 3a item 6.
-    MdCode,
 }
 
 impl Role {
     /// Every role, so a test proves each one has all three mappings.
-    pub const ALL: [Role; 13] = [
+    pub const ALL: [Role; 12] = [
         Role::Text,
         Role::Muted,
         Role::Accent,
@@ -52,7 +48,6 @@ impl Role {
         Role::Caution,
         Role::MdHeading,
         Role::MdCodeBlock,
-        Role::MdCode,
         Role::MdBold,
         Role::MdItalic,
         Role::MdQuote,
@@ -111,11 +106,19 @@ pub fn role_256(role: Role) -> Option<u8> {
         // family. Code is a cool blue, which reads as "not prose" beside the warm accent.
         // A fence and a bullet stay quiet, because both are punctuation.
         Role::MdHeading => Some(78),
+        // One colour means code, inline or in a block. Index 115 used to mark an inline span and
+        // a design review measured it at 1.07x against the heading green 78: the same colour to the
+        // eye, and identical to a deuteranope. Unifying on the blue 110 also spends one hue instead
+        // of two. See `D-one-hue-means-code`.
         Role::MdCodeBlock => Some(110),
-        Role::MdCode => Some(115),
-        // Bold reads brighter than body text. Italic reads warmer, so the two never blur.
+        // Bold reads brighter than body text. On a terminal whose default foreground is already
+        // pure white the colour adds nothing and the weight carries it; measured at 1.16x against
+        // #eeeeee and 1.82x against #c0c0c0.
         Role::MdBold => Some(231),
-        Role::MdItalic => Some(180),
+        // Italic is a lavender, deliberately outside the amber status family. Index 180 was measured
+        // at 1.02x against warn 179 and 1.38x against caution 173, so emphasis inside an answer read
+        // as a warning. 146 shifts the hue rather than the luminance. See `D-one-hue-means-code`.
+        Role::MdItalic => Some(146),
         Role::MdQuote => Some(245),
         // The band keeps the body foreground: only the background changes, so the text reads the
         // same as the answer below it.
@@ -145,7 +148,6 @@ pub fn role_bg_256(role: Role) -> Option<u8> {
         | Role::Caution
         | Role::MdHeading
         | Role::MdCodeBlock
-        | Role::MdCode
         | Role::MdBold
         | Role::MdItalic
         | Role::MdQuote => None,
@@ -184,7 +186,7 @@ pub fn role_16(role: Role) -> RoleStyle {
             bold: true,
             ..RoleStyle::plain()
         },
-        Role::MdCodeBlock | Role::MdCode => RoleStyle {
+        Role::MdCodeBlock => RoleStyle {
             color: Ansi16::Cyan,
             ..RoleStyle::plain()
         },
@@ -192,9 +194,10 @@ pub fn role_16(role: Role) -> RoleStyle {
             bold: true,
             ..RoleStyle::plain()
         },
+        // Not yellow. Yellow is `Warn`, and sixteen colours have no lavender, so the lean carries
+        // the meaning here on its own.
         Role::MdItalic => RoleStyle {
             italic: true,
-            color: Ansi16::Yellow,
             ..RoleStyle::plain()
         },
         Role::MdQuote => RoleStyle {
@@ -238,7 +241,7 @@ pub fn role_none(role: Role) -> RoleStyle {
             bold: true,
             ..RoleStyle::plain()
         },
-        Role::MdCodeBlock | Role::MdCode => RoleStyle {
+        Role::MdCodeBlock => RoleStyle {
             dim: true,
             ..RoleStyle::plain()
         },

@@ -24,7 +24,9 @@ mod theme;
 pub use app::{App, TuiError, edit_draft, restore_sequences, setup_sequences};
 pub use duration::{DURATION_SLOT_COLUMNS, duration_slot, format_duration, live_duration_is_amber};
 pub use editor::{editor_argv, editor_command};
-pub use markdown::{InlineRun, MarkdownKind, MarkdownLine, scan_inline, scan_markdown};
+pub use markdown::{
+    InlineRun, MarkdownKind, MarkdownLine, has_inline_markup, scan_inline, scan_markdown,
+};
 pub use paste::{
     AttachOutcome, BurstKey, COMPOSER_MAX_TEXT_ROWS, Composer, IMAGE_MAX_BYTES, ImageChip,
     LARGE_PASTE_CHARS, PasteChip, RoutedInput, Unit, attach_image, image_chip_label,
@@ -41,7 +43,7 @@ pub use state::{
     ActivityState, Approval, HistorySearch, KeyAction, Panel, Row, SlashList, ToolRowStatus,
     TuiState, filter_history,
 };
-pub use styled::{StyledLine, styled_text, styled_width};
+pub use styled::StyledLine;
 
 pub use bindings::{
     Binding, SlashCommand, SlashOutcome, bindings, filter_slash_commands, help_rows,

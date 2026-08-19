@@ -50,3 +50,55 @@ fn only_the_user_band_paints_a_background() {
         }
     }
 }
+
+#[test]
+fn emphasis_never_borrows_a_status_colour() {
+    // A design review measured italic 180 at 1.02x against warn 179 and 1.38x against caution 173,
+    // all three in the same amber family. So emphasis inside an answer read as a warning, on a screen
+    // that already carries amber notices. Italic is now a lavender: a hue shift, not a luminance one.
+    let italic = role_256(Role::MdItalic).expect("italic has a colour");
+    for status in [Role::Warn, Role::Caution, Role::Error] {
+        let other = role_256(status).expect("a status colour");
+        assert_ne!(
+            italic, other,
+            "italic must not share {status:?}'s colour index"
+        );
+    }
+    // And it must not sit in the amber ramp at all: red and green high, blue low.
+    let (r, g, b) = xterm_rgb(italic);
+    assert!(
+        b >= g,
+        "italic must not be an amber: index {italic} is rgb({r},{g},{b})"
+    );
+}
+
+#[test]
+fn one_colour_means_code() {
+    // Inline code used index 115 and a heading uses 78. Measured contrast between them: 1.07x, the
+    // same colour to the eye and identical to a deuteranope. Code now takes one colour, inline or in
+    // a block, which also spends one hue instead of two.
+    let code = role_256(Role::MdCodeBlock).expect("code has a colour");
+    let heading = role_256(Role::MdHeading).expect("a heading has a colour");
+    assert_ne!(code, heading, "code and a heading are different colours");
+    let (cr, cg, cb) = xterm_rgb(code);
+    let (hr, hg, hb) = xterm_rgb(heading);
+    // Code is blue-leaning and a heading is green-leaning, so the two differ in hue and not only in
+    // brightness. Two greens of similar luminance are what the review caught.
+    assert!(cb > cg, "code leans blue: rgb({cr},{cg},{cb})");
+    assert!(hg > hb, "a heading leans green: rgb({hr},{hg},{hb})");
+}
+
+/// The rgb an xterm 256-colour index resolves to, for a contrast assertion.
+fn xterm_rgb(index: u8) -> (u32, u32, u32) {
+    const LEVELS: [u32; 6] = [0, 95, 135, 175, 215, 255];
+    if index >= 232 {
+        let grey = 8 + (u32::from(index) - 232) * 10;
+        return (grey, grey, grey);
+    }
+    let i = u32::from(index) - 16;
+    (
+        LEVELS[(i / 36) as usize],
+        LEVELS[((i / 6) % 6) as usize],
+        LEVELS[(i % 6) as usize],
+    )
+}

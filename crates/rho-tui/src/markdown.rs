@@ -406,6 +406,15 @@ pub struct InlineRun {
     pub code: bool,
 }
 
+/// True when a line holds a character that could open inline emphasis.
+///
+/// The renderer uses this as a fast path. A line with none of these has exactly one run, so it can
+/// take the cheap `&str` wrap instead of the per-character run wrap. Prose is the common case, and
+/// `SPEC-tui-markdown` section 5 budgets no extra allocation for it.
+pub fn has_inline_markup(text: &str) -> bool {
+    text.bytes().any(|b| b == b'*' || b == b'`' || b == b'\\')
+}
+
 /// Split a line into runs, removing the emphasis markers.
 ///
 /// **Every rule here exists to avoid a false positive on code-heavy prose.** A naive "a pair on
@@ -474,8 +483,14 @@ pub fn scan_inline(text: &str) -> Vec<InlineRun> {
                 i = end + fence;
                 continue;
             }
-            buf.push(ch);
-            i += 1;
+            // No close of this length, so the whole run is literal text. Skipping the **whole run**
+            // matters: retrying at each character of a long run made the scan quadratic, and a
+            // hostile answer with a few thousand backticks then cost milliseconds per frame. It is
+            // also what CommonMark says, because the opener is the whole run and not a prefix of it.
+            for _ in 0..fence {
+                buf.push(ch);
+            }
+            i += fence;
             continue;
         }
 
@@ -506,8 +521,11 @@ pub fn scan_inline(text: &str) -> Vec<InlineRun> {
                 i = end + count;
                 continue;
             }
-            buf.push(ch);
-            i += 1;
+            // Same reasoning as the code fence above: the whole run is literal, so skip it whole.
+            for _ in 0..count {
+                buf.push(ch);
+            }
+            i += count;
             continue;
         }
 

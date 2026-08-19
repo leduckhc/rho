@@ -465,3 +465,107 @@ fn a_quote_draws_italic_and_quiet() {
         "and a quote stays quieter than the answer"
     );
 }
+
+// ---- Gaps a test-quality audit found by mutating the code. ----------------------
+
+#[test]
+fn prose_after_a_closed_fence_is_prose_again() {
+    // A mutation audit changed `in_fence = !in_fence` to `in_fence = true` and **no test failed**,
+    // because every fence test in this file stopped at the closing marker. A fence that never
+    // reopened would colour the rest of an answer as code, and nothing would have said so.
+    let block =
+        "intro\n```rust\nfn main() {}\n```\nafter the fence\n# a real heading\n- a real bullet";
+    assert_eq!(
+        kinds(block),
+        vec![
+            MarkdownKind::Text,
+            MarkdownKind::Fence,
+            MarkdownKind::CodeBlock,
+            MarkdownKind::Fence,
+            MarkdownKind::Text,
+            MarkdownKind::Heading,
+            MarkdownKind::Bullet,
+        ],
+        "the fence closes, and markup works again after it"
+    );
+}
+
+#[test]
+fn two_fenced_blocks_do_not_merge() {
+    // The other half of the same mutation: the prose between two blocks must stay prose.
+    let block = "```\nfirst\n```\nbetween\n```\nsecond\n```";
+    assert_eq!(
+        kinds(block),
+        vec![
+            MarkdownKind::Fence,
+            MarkdownKind::CodeBlock,
+            MarkdownKind::Fence,
+            MarkdownKind::Text,
+            MarkdownKind::Fence,
+            MarkdownKind::CodeBlock,
+            MarkdownKind::Fence,
+        ]
+    );
+}
+
+/// The drawn rows of a state, trimmed, at one width.
+fn rows_of(state: &TuiState, width: u16) -> Vec<String> {
+    let backend = TestBackend::new(width, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| render(state, frame))
+        .expect("draw frame");
+    let buffer = terminal.backend().buffer().clone();
+    (0..20)
+        .map(|y| {
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn the_notice_text_column_has_a_floor_at_a_known_width() {
+    // A mutation audit set `NOTICE_MIN_TEXT` from 12 to 1 and **no test failed**, because the tests
+    // only asserted that no word was lost. The constant's real contract is a layout one: a notice
+    // never squeezes its text into a sliver beside the label. Below the floor the label takes its
+    // own row and the text takes the whole width.
+    //
+    // A floor is a boundary, so the test pins both sides of it. The label column is eleven columns,
+    // and the floor is twelve, so the switch happens between width 23 and width 24.
+    let mut state = TuiState::default();
+    state.push_notice("alpha beta gamma delta epsilon zeta eta theta");
+
+    // Above the floor the label keeps its own column, and the text sits beside it.
+    let wide = rows_of(&state, 24);
+    let label = wide
+        .iter()
+        .find(|row| row.contains("notice"))
+        .expect("the label draws at 24");
+    assert!(
+        label.contains("alpha"),
+        "at the floor the text sits beside the label: {label:?}"
+    );
+
+    // Below it the label takes its own row, and the text starts at column 0.
+    let narrow = rows_of(&state, 22);
+    let label = narrow
+        .iter()
+        .find(|row| row.contains("notice"))
+        .expect("the label draws at 22");
+    assert!(
+        !label.contains("alpha"),
+        "below the floor the label keeps its own row: {label:?}"
+    );
+    let text = narrow
+        .iter()
+        .find(|row| row.contains("alpha"))
+        .expect("the text draws at 22");
+    assert!(
+        text.starts_with("alpha"),
+        "and the text takes the whole width: {text:?}"
+    );
+}

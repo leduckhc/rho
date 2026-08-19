@@ -594,3 +594,58 @@ Two lessons, and the second is the sharper one:
 14. **A blocker report written from someone else's in-flight state is a guess.** It named a
    function that does not exist and a cause that was not the cause. A failing test is evidence;
    an observed failing test explained by a third party is not.
+
+## Aug 19, 2026 — the critic panel on markdown rendering
+
+Four harsh critics ran in parallel on the feature: correctness, security, test quality, and design.
+Every finding below was verified by the controller before it was fixed, and three of the four reports
+had at least one claim that measurement changed.
+
+| Critic | Finding | Severity | Outcome |
+| --- | --- | --- | --- |
+| correctness | a word wider than the row lost its tail | critical | fixed, `long_words.rs` |
+| correctness | `wrap_runs` emitted rows wider than the frame | warning | fixed |
+| correctness | `styled_text` and `styled_width` had no caller anywhere | warning | deleted |
+| correctness | the long-line test used spaced words, so it never had a long word | warning | corrected in place |
+| security | the whole transcript is re-scanned every frame | high | measured and recorded, not fixed |
+| security | `scan_inline` was quadratic on a marker run | medium | fixed, 4000 backticks from 2.80 ms to 0.24 ms |
+| security | bidi overrides and `U+2028` survived the filter | medium | fixed in `rho-redact` |
+| security | a tool name reached the screen unsanitised | low | fixed |
+| test quality | four mutations survived the suite | high | all four now caught |
+| test quality | `role_none` and two `RoleStyle` fields are read by nothing | medium | claim corrected |
+| design | inline code 115 against heading 78 measured 1.07x | must fix | one hue means code |
+| design | italic 180 against warn 179 measured 1.02x | must fix | italic moved to a lavender |
+| design | no syntax highlighting, no context telemetry | must fix | recorded, owner's call |
+
+### Where measurement changed a critic's claim
+
+**The security review called the transcript re-scan a denial of service at 258 ms a frame.** In a
+release build it is 17.6 ms. The shape of the finding is right and the number came from a debug
+build, so the severity was overstated. Both numbers are in `docs/benchmarks.md`, because the next
+reader needs to know which they are looking at.
+
+**Two of the review's three flanking mutations could not be reproduced as written.** Each single rule
+is covered by another, so removing one leaves the other standing. Only a case with a space on both
+sides of the marker isolates the closing rule, and it took two attempts to build one.
+
+**The design review asked for a narrower measure and one column of side padding.** The owner had
+asked for the full width and had explicitly retracted the padding. The owner's decision stands, and
+the disagreement is recorded rather than silently resolved either way.
+
+### Two more of the controller's own tests proved nothing
+
+The count on this branch is now nine. `a_notice_survives_a_narrow_screen` passed with
+`NOTICE_MIN_TEXT` set to 1, because it asserted only that no word was lost and never asserted the
+layout the constant exists for. No test rendered a line after a **closed** fence, so a mutation that
+never reopened prose went unnoticed. Both are fixed, and both mutations now fail.
+
+### The controller found the regression the critics did not
+
+None of the four measured performance. The frame benchmark reported **107 us and 2562 allocations**
+against a documented 58 us and 300, on a transcript with no markdown at all, so the implementation was
+breaking its own spec's cost budget. A fast path for a line with no marker and a borrowed line
+recovered most of it, to 73 us and 504.
+
+15. **Run the benchmark the spec cites, not only the test suite.** A cost budget in a spec is a claim,
+   and a claim with no measurement behind it is a slogan. Four reviewers read this code and none of
+   them ran it for speed.
