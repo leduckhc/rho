@@ -326,3 +326,45 @@ fn a_header_draws_bold_and_the_rule_draws_muted() {
     );
     assert_ne!(rule.fg, body.fg, "the rule is quieter than the data");
 }
+
+// ---- Findings from a second-opinion review. -------------------------------------
+
+#[test]
+fn a_row_with_more_cells_than_the_header_stays_verbatim() {
+    // Found by a second-opinion review. `| a | b |` with a body row of three cells drew as a two
+    // column table and **silently dropped the third cell**. GitHub's markdown drops it too, and this
+    // project's own rule is the stronger one: a ragged row is padded, never dropped, or data
+    // disappears. So an over-wide row means the block is not an unambiguous table, and it stays
+    // verbatim, which loses nothing.
+    let ragged = "| a | b |\n|---|---|\n| one | two | LOST |";
+    let scanned = scan_markdown(ragged);
+    for line in &scanned {
+        assert_eq!(
+            line.kind,
+            MarkdownKind::Text,
+            "an over-wide row makes the block verbatim: {line:?}"
+        );
+    }
+    let joined: String = scanned
+        .iter()
+        .map(|line| line.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("LOST"), "no cell is lost:\n{joined}");
+}
+
+#[test]
+fn a_row_with_fewer_cells_is_still_padded_and_drawn() {
+    // The other direction is unchanged: a short row is padded, because nothing is lost by padding.
+    let short = "| a | b | c |\n|---|---|---|\n| 1 | 2 |";
+    let kinds: Vec<MarkdownKind> = scan_markdown(short).into_iter().map(|l| l.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            MarkdownKind::TableHead,
+            MarkdownKind::TableRule,
+            MarkdownKind::TableRow
+        ],
+        "a short row still draws"
+    );
+}

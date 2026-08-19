@@ -656,10 +656,14 @@ fn tool_header(
     // No fold caret. A caret promises `ctrl-o`, and no key folds a row in this build. A
     // promise on screen that no key answers is `D-a-panel-nobody-can-open`. The caret
     // comes back with the fold keys, and `fold_caret` stays for that stage.
+    // The name is filtered here, at the boundary, and not only where a row is stored. A
+    // second-opinion review found a **second** construction site for `Row::Tool` that stored a raw
+    // name, and `Row` is a public enum, so another frontend can build one directly. Filtering the
+    // payload and trusting the name was the shape of the mistake.
     let left = format!(
         "  {} {}  {}",
         status_glyph(status),
-        name,
+        sanitize_line(name),
         sanitize_line(payload)
     );
     let right = duration_slot(row_duration(state, index));

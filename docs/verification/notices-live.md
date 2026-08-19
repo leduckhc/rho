@@ -669,3 +669,65 @@ Two fixes, so the local gate matches CI:
   runs, which is how it stayed missing.
 
 Checked both ways: a file with a 27 word sentence now exits 1, and the repository's own docs exit 0.
+
+## A second opinion from Codex, and the regression it caught
+
+After the four critics, Codex CLI reviewed the same diff read-only and was asked to verify nine claims
+rather than to browse. It refuted five of them. Three refutations were right, one was right in
+substance, and one did not reproduce.
+
+| Claim | Codex | Controller's check |
+| --- | --- | --- |
+| no marker reaches the screen | refuted | **right.** A fence keeps its markers on purpose, so the claim was overstated |
+| a long word keeps every character | refuted | **right in substance.** The joiner half was a real regression, below. A two-column glyph at a two-column terminal did not reproduce |
+| the scanner inserts two fixed glyphs | refuted | **right.** A table also inserts a divider, a cross, and a dash. Five, not two |
+| one role paints a background | verified | agreed |
+| every row path is filtered | refuted | **right.** A second `Row::Tool` site stored a raw name |
+| a malformed table stays verbatim | refuted | **right.** An over-wide row drew and lost its extra cells |
+| `put` owns the width invariant | verified | agreed |
+| fence state spans the message | verified | agreed |
+| the benchmark numbers are honest | verified | it re-ran them: p50 71.0, 72.3, 69.6 us, 508 allocations |
+
+### The regression, and it was the controller's own
+
+**The Trojan Source fix corrupted ordinary text.** Closing that hole took `U+200B` to `U+200F` as one
+range, which swept in the zero width non-joiner and joiner. Those two are not spoofing tools, they are
+spelling:
+
+```
+family emoji  👨‍👩‍👧   5 chars in, 5 out, and changed: every joiner replaced
+Persian word  می‌خواهم        changed: the non-joiner replaced
+```
+
+An emoji family fell apart into separate people, and Persian, Arabic and several Indic scripts render
+wrongly without `U+200C`. Neither character is a Trojan Source vector; the vectors are the bidi
+overrides and isolates, which are still rejected.
+
+**The test that let it through was the controller's.** `an_ordinary_character_is_untouched` used a
+single emoji, which has no joiner, so it passed while a family emoji was being broken. Two tests now
+cover both sides, so neither behaviour can drift alone.
+
+### The other three, fixed
+
+**An over-wide table row lost cells.** `| a | b |` with a three-cell body row drew as a two column
+table and dropped the third cell. GitHub's markdown drops it too; this project's rule is the stronger
+one, that a ragged row is padded and never dropped. An over-wide row now makes the block verbatim, so
+nothing is lost.
+
+**A tool name reached the screen raw from a second construction site.** The first was fixed after the
+security review; Codex found another, and `Row` is a public enum so a frontend can build one directly.
+The filter moved to `tool_header`, at the boundary, where every path meets it.
+
+**The property test claimed two inserted glyphs and there are five.** Its corpus never formed a table,
+so the table branch was never reached. The corpus now includes two tables, and the test still fails
+when the scanner is made to invent a character.
+
+### What Codex got wrong, and what it independently confirmed
+
+Its width-2 finding did not reproduce: rendering a two-column glyph at a two-column terminal draws the
+glyph. Measured, not argued.
+
+It also reached the test-quality critic's conclusion about `put`'s clip on its own, from a different
+starting point: ratatui clips at the buffer edge, so no test can prove rho's clip. Two independent
+reviews agreeing raised confidence in the recorded answer, which is that the clip stays as defence in
+depth and the code says so rather than implying a test backs it.

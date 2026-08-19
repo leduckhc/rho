@@ -78,6 +78,13 @@ const REPLACEMENT: char = '\u{fffd}';
 /// - **Zero-width and invisible marks**, including the byte order mark. Text can be hidden between
 ///   visible characters, so two lines that look identical are not.
 ///
+/// **The two joiners are deliberately absent, and that is a correction.** `U+200C` and `U+200D` sit
+/// inside the same numeric range and were swept in by the first version of this filter. They are not
+/// spoofing tools, they are spelling: an emoji family is joined by `U+200D`, and Persian, Arabic and
+/// several Indic scripts need `U+200C` to render a word correctly. Replacing them corrupted ordinary
+/// text, and a second-opinion review caught it. Neither is a Trojan Source vector, which is the bidi
+/// overrides and isolates below.
+///
 /// `U+2028` and `U+2029` are line and paragraph separators. They are one column wide, so they reach
 /// a terminal cell, and some terminals treat them as a line break and shift the grid.
 ///
@@ -87,7 +94,9 @@ fn is_invisible_or_reordering(ch: char) -> bool {
         ch,
         '\u{061c}'                  // arabic letter mark
             | '\u{180e}'            // mongolian vowel separator
-            | '\u{200b}'..='\u{200f}' // zero width space, joiners, LRM, RLM
+            | '\u{200b}'              // zero width space
+            | '\u{200e}'              // left to right mark
+            | '\u{200f}'              // right to left mark
             | '\u{202a}'..='\u{202e}' // bidi embedding and override
             | '\u{2060}'..='\u{2064}' // word joiner, invisible operators
             | '\u{2066}'..='\u{2069}' // bidi isolates
@@ -363,9 +372,14 @@ mod invisible_tests {
     #[test]
     fn a_zero_width_character_never_survives() {
         // Hidden text between visible characters makes two identical-looking lines differ.
+        //
+        // `U+200C` and `U+200D` were in this list and are deliberately gone. They are the zero width
+        // non-joiner and joiner, and they are spelling rather than spoofing: an emoji family is joined
+        // by `U+200D`, and Persian, Arabic and several Indic scripts need `U+200C`. Rejecting them
+        // corrupted ordinary text. `a_zero_width_joiner_survives_because_it_is_spelling` covers the
+        // other side, so neither behaviour can drift without a test failing.
         for ch in [
-            '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{feff}', '\u{2060}',
-            '\u{061c}', '\u{180e}',
+            '\u{200b}', '\u{200e}', '\u{200f}', '\u{feff}', '\u{2060}', '\u{061c}', '\u{180e}',
         ] {
             let clean = sanitize_text(&format!("a{ch}b"));
             assert!(
@@ -402,5 +416,54 @@ mod invisible_tests {
             clean.contains('\u{fffd}'),
             "the removal is marked: {clean:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod joiner_tests {
+    use super::sanitize_text;
+
+    /// A regression the controller introduced and a second-opinion review caught.
+    ///
+    /// The filter that closed the Trojan Source hole took `U+200B` to `U+200F` as one range, which
+    /// swept in the zero width joiner and non-joiner. Those two are not spoofing tools, they are
+    /// **spelling**: an emoji family is joined by `U+200D`, and Persian, Arabic, and several Indic
+    /// scripts need `U+200C` to render words correctly.
+    ///
+    /// The first version of this test used a single emoji, which has no joiner, so it passed while a
+    /// family emoji and a Persian word were being corrupted.
+    #[test]
+    fn a_zero_width_joiner_survives_because_it_is_spelling() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        assert_eq!(
+            sanitize_text(family),
+            family,
+            "an emoji family keeps its joiners"
+        );
+        let persian = "\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645}";
+        assert_eq!(
+            sanitize_text(persian),
+            persian,
+            "a Persian word keeps its non-joiner"
+        );
+    }
+
+    /// The hole the joiners were swept up by is still closed.
+    #[test]
+    fn the_spoofing_characters_are_still_rejected() {
+        // A bidirectional override or isolate reorders a line visually. A zero width space hides
+        // between characters. A directional mark flips a run. None of these is spelling.
+        for ch in [
+            '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}', '\u{200b}', '\u{200e}', '\u{200f}', '\u{feff}', '\u{2028}',
+            '\u{2029}',
+        ] {
+            let text = format!("a{ch}b");
+            assert!(
+                !sanitize_text(&text).contains(ch),
+                "U+{:04X} must not survive",
+                ch as u32
+            );
+        }
     }
 }

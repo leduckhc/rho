@@ -144,6 +144,9 @@ match already forces every role to state.
   the reason, and rho has no `syntect`.
 - **No link rewriting.** A URL stays visible. No OSC 8 hyperlink, because a link that hides
   its target is a phishing surface in a terminal.
+- **A fence keeps its markers, on purpose.** The claim "no marker reaches the screen" is wrong as
+  stated, and a second-opinion review said so: the ``` line and its language are drawn, muted, exactly
+  as pi draws them. Every other marker is removed.
 - **The escape filter is untouched.** `sanitize_block` still runs first, so this styles text
   that is already safe. Markup styling never re-admits an escape.
 - **A user row is not markdown.** rho draws what the user typed, verbatim.

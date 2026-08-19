@@ -369,7 +369,10 @@ fn the_scanner_only_deletes_and_inserts_known_glyphs() {
     // The corpus is deliberately hostile and includes raw escapes. In the product,
     // `sanitize_block` runs first, so the scanner never sees one. Feeding them here proves the
     // scanner is not the layer that would let one through.
-    const INSERTED: [char; 2] = ['\u{2022}', '\u{2503}'];
+    // Five, not two. A second-opinion review refuted the earlier claim of two: a drawn table also
+    // inserts a column divider, a cross, and a dash. The old corpus passed only because no two of its
+    // lines ever formed a table, so the table branch was never reached.
+    const INSERTED: [char; 5] = ['\u{2022}', '\u{2503}', '\u{2502}', '\u{253c}', '\u{2500}'];
     let corpus = [
         "# heading",
         "###### six",
@@ -401,6 +404,10 @@ fn the_scanner_only_deletes_and_inserts_known_glyphs() {
         "# \u{1b}[31mred heading",
         "```\n# code not heading\n- code not bullet\n```",
         "# one\n\n- two\n> three\n---\n```\nfour\n```\nfive",
+        // A real table, so the branch that inserts a divider, a cross, and a dash is exercised. Its
+        // absence is what let the earlier claim of two glyphs stand.
+        "| a | b |\n|---|---|\n| 1 | 2 |",
+        "| x | y |\n|:--|--:|\n| **bold** | `code` |",
     ];
     for input in corpus {
         let input_chars: std::collections::HashSet<char> = input.chars().collect();
@@ -409,7 +416,7 @@ fn the_scanner_only_deletes_and_inserts_known_glyphs() {
                 assert!(
                     input_chars.contains(&ch) || INSERTED.contains(&ch),
                     "the scanner invented {ch:?} from input {input:?} (row {:?}). It may only \
-                     drop markup, keep text, and insert a bullet or a quote bar.",
+                     drop markup, keep text, and insert one of the five known glyphs.",
                     line.text
                 );
             }
@@ -568,4 +575,35 @@ fn the_notice_text_column_has_a_floor_at_a_known_width() {
         text.starts_with("alpha"),
         "and the text takes the whole width: {text:?}"
     );
+}
+
+#[test]
+fn a_tool_name_is_filtered_at_the_boundary() {
+    // A second-opinion review found a second construction site for `Row::Tool` that stored a raw
+    // name, after the first had been fixed. `Row` is a public enum, so another frontend can build one
+    // directly and skip both. The filter belongs at the boundary, where every path meets it.
+    //
+    // An MCP server chooses its own tool names, so a name is text from another process.
+    let mut state = TuiState::default();
+    state.rows.push(Row::Tool {
+        id: "1".to_string(),
+        name: "\u{1b}]0;pwned\u{7}evil".to_string(),
+        kind: rho_core::ToolKind::Other,
+        status: rho_tui::ToolRowStatus::Ok,
+        preview: String::new(),
+    });
+    let backend = TestBackend::new(70, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| render(&state, frame))
+        .expect("draw frame");
+    let buffer = terminal.backend().buffer().clone();
+    let all: String = (0..20)
+        .flat_map(|y| (0..70).map(move |x| (x, y)))
+        .map(|(x, y)| buffer[(x, y)].symbol().to_string())
+        .collect();
+    assert!(!all.contains('\u{1b}'), "no escape reaches a cell: {all:?}");
+    assert!(!all.contains("]0;"), "and no OSC payload: {all:?}");
+    assert!(!all.contains('\u{7}'), "and no bell: {all:?}");
+    assert!(all.contains("evil"), "the readable name survives");
 }

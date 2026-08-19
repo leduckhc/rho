@@ -196,6 +196,15 @@ fn scan_table(lines: &[&str]) -> Option<Table> {
     let mut body: Vec<Vec<String>> = Vec::new();
     let mut consumed = 2usize;
     while let Some(row) = lines.get(consumed).and_then(|line| split_cells(line)) {
+        // A row with **more** cells than the header is not an unambiguous table, so the whole block
+        // stays verbatim. Drawing it dropped the extra cells silently, which a second-opinion review
+        // caught. GitHub's markdown drops them too; this project's own rule is the stronger one, that
+        // a ragged row is padded and never dropped, so nothing is lost here either.
+        //
+        // A row with fewer cells is still fine, because padding loses nothing.
+        if row.len() > header.len() {
+            return None;
+        }
         body.push(row);
         consumed += 1;
     }
