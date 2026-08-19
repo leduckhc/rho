@@ -414,6 +414,31 @@ passing for the wrong reason.
 `SubagentLimits.max_depth`, and `rho-cli` pins that to 1, so the walk is at most two links on
 the hot path.
 
+## Run it yourself: `bench/demo-subagents.sh`
+
+Do not trust this page. The script asserts every claim on it, and it exits non-zero when any
+check fails.
+
+```sh
+./bench/demo-subagents.sh
+```
+
+It builds the binary, makes a temporary session root, writes four agent definitions, and runs
+thirty checks against the live provider. It removes the directory when it finishes. Thirty
+passed on three consecutive runs.
+
+**One lesson from writing it: never assert on how the model words an answer.** The first
+version grepped for phrases the model happened to use, and three checks failed while the
+product was correct. `timed out` does not contain the substring `timeout`. A paraphrase is not
+a defect. So the script now asks for a verbatim quote when it needs rho's own text, and every
+pattern accepts each reasonable wording.
+
+**One check had to change because a fix made it unreachable.** The bad-agent-name check used to
+drive the model into calling `spawn_agent` with a name that does not exist. The schema `enum`
+now stops the model inventing one, so it declines and lists the real agents instead. That is
+defect one's fix working. The tool-level path is still covered, by
+`an_unknown_agent_name_is_a_result_not_a_fault` in `rho-tools`.
+
 ## An operator error worth recording
 
 The first credential probe used double quotes, so the **outer shell** expanded
