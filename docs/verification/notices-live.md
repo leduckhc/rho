@@ -189,3 +189,65 @@ fourth break, as it always should have.
 
 This is the third time in this project that a test passed against the bug it was written for.
 The lesson holds: a test is not evidence until the break has been watched.
+
+## Block text, and why the sanitiser stayed
+
+The owner said the line sanitiser is wrong for a coding agent and asked to remove it. The
+fault was real. The removal would have been too wide.
+
+Measured before the fix, with a fixture that matches what a model sends:
+
+```text
+model sent:  Intro paragraph.\n\n- alpha: first\n- beta: second\n\n```rust\nfn main() {}\n```
+rho drew:    Intro paragraph. - alpha: first - beta: second ```rust fn main() {} ``` Done.
+```
+
+`rho_redact::sanitize_text` already keeps `\n` and `\t` and already drops every escape. The
+whole defect was `sanitize_line`, a four line wrapper that folds a newline into a space. So
+block text now calls `sanitize_block`, and single-line rows keep the wrapper.
+
+Two deliberate breaks, and each failed the tests it should:
+
+| The break | Tests that failed | Why |
+| --- | --- | --- |
+| Block text back on `sanitize_line` | 4 | the structure collapses again |
+| **No sanitiser at all**, as first asked | 2 | `\x1b[2J` and an OSC 52 clipboard write reach a terminal cell |
+
+The second row is the reason the filter stayed. A cell holding an escape is written to the
+terminal and the terminal obeys it, so untrusted model output could clear the screen, move
+the cursor to draw a fake approval prompt, or write the user's clipboard.
+
+Verified live afterwards, against openrouter, asking for a list and a nested code fence:
+
+```
+- Item one
+- Item two
+
+```rust
+fn main() {
+    println!("hello");
+    if true {
+        if true {
+            println!("nested");
+        }
+    }
+}
+```
+```
+
+The bullets take their own rows, and the indent is right at four, eight, and twelve columns.
+
+## The screenshots, and a tool that lied
+
+`ttyd` served the interface over HTTP, and a real browser rendered it. Input came from
+`tmux send-keys`, so every keystroke was deterministic, and each frame was checked against
+`tmux capture-pane` before it was captured. No screen-recording permission was needed.
+
+`vhs` was tried first, and its `Screenshot` command produced two frames that showed defects
+that do not exist: a chopped logo over the help panel, and a slash list that appeared not to
+open. Both were reproduced at vhs's exact terminal size, 50 by 143, measured with `stty` and
+not guessed. rho was correct in both. The command grabs a frame that can precede the
+repaint. The continuous recording is clean.
+
+A screenshot tool is a measuring instrument, and this one needed calibrating before it could
+be trusted.

@@ -20,7 +20,7 @@ use crate::bindings::{bindings, filter_slash_commands};
 use crate::concise::RowFold;
 use crate::duration::{duration_slot, format_duration};
 use crate::motion::{MotionCell, motion_cell, sweep_weight};
-use crate::sanitize::sanitize_line;
+use crate::sanitize::{sanitize_block, sanitize_line};
 use crate::state::{
     ActivityState, Approval, HistorySearch, Panel, Row, SlashList, ToolRowStatus, TuiState,
     filter_history,
@@ -457,7 +457,7 @@ fn push_row(
 ) {
     match row {
         Row::User { text } => {
-            let wrapped = wrap(&sanitize_line(text), measure.saturating_sub(2));
+            let wrapped = wrap_block(&sanitize_block(text), measure.saturating_sub(2));
             for (line_index, line) in wrapped.iter().enumerate() {
                 let body = if line_index == 0 {
                     format!("{GLYPH_USER} {line}")
@@ -468,7 +468,7 @@ fn push_row(
             }
         }
         Row::Assistant { text } => {
-            let wrapped = wrap(&sanitize_line(text), measure);
+            let wrapped = wrap_block(&sanitize_block(text), measure);
             for line in wrapped {
                 out.push((pad(&line, width), text_style()));
             }
@@ -1173,6 +1173,41 @@ fn pad(text: &str, width: usize) -> String {
         }
         out
     }
+}
+
+/// Wrap a block of text, one source line at a time, so a line break survives.
+///
+/// `wrap` alone re-flows across every newline, because it splits on whitespace. That turned
+/// a markdown list and a fenced code block into one paragraph. This keeps each source line,
+/// keeps a blank line between paragraphs, and still wraps a line too long for the width.
+///
+/// **The indent is kept.** `wrap` drops leading spaces, so a nested code line came out flat.
+/// A continuation row is indented to match its source line, so wrapped code stays legible.
+/// A trailing blank line is dropped, because a model answer usually ends with a newline and
+/// a gap above the composer looks like a defect. See `D-block-text-keeps-its-shape`.
+fn wrap_block(text: &str, width: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for source in text.split('\n') {
+        let body = source.trim_start_matches(' ');
+        let indent_cols = source.len() - body.len();
+        if body.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        if indent_cols + body.width() <= width {
+            out.push(source.to_string());
+            continue;
+        }
+        let room = width.saturating_sub(indent_cols).max(1);
+        let indent = " ".repeat(indent_cols);
+        for piece in wrap(body, room) {
+            out.push(format!("{indent}{piece}"));
+        }
+    }
+    while out.last().is_some_and(String::is_empty) {
+        out.pop();
+    }
+    out
 }
 
 /// Greedy word wrap to `width` display columns. A single space joins words.

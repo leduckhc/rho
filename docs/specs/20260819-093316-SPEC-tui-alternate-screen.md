@@ -322,6 +322,39 @@ screen and a print is right there.
 
 See `D-a-notice-reaches-the-transcript`.
 
+## 6d. Block text keeps its shape
+
+rho drew every assistant answer as one flowed paragraph, because `sanitize_line` folded each
+newline into a space and `wrap` then re-split on whitespace. A markdown list, a paragraph
+break, and a fenced code block all became prose. rho is a coding agent, so a mangled code
+block is the serious half.
+
+The repair is narrow. `rho_redact::sanitize_text` already keeps `\n` and `\t` and already
+drops every escape sequence, so only the single-line wrapper had to go from block text.
+
+```rust
+/// Sanitise a block of untrusted text, and keep its line breaks. A tab becomes spaces,
+/// because a tab has no defined width in a terminal cell.
+pub fn sanitize_block(input: &str) -> String;
+```
+
+**The rules.**
+
+- A newline survives. A blank line between two paragraphs survives as one blank row.
+- The leading indent of a source line survives, and a wrapped continuation matches it.
+- A line longer than the measure still wraps.
+- A trailing blank line is dropped, because a model answer usually ends with a newline.
+- A tab becomes four spaces.
+- **Every escape sequence is still dropped.** Model output and tool output are untrusted. An
+  escape can clear the screen, move the cursor to draw a fake approval prompt, or write the
+  clipboard through OSC 52. Measured: with no sanitiser, `\x1b[2J` and an OSC 52 write reach
+  a terminal cell.
+- A single-line row keeps `sanitize_line`. A notice, an error headline, a tool header, and
+  the banner each own one row, so a newline there would break the layout.
+
+rho does not render markdown and does not highlight syntax. It draws the text as the model
+wrote it. See `D-block-text-keeps-its-shape`.
+
 ## 7. The error set
 
 ```rust
@@ -464,6 +497,19 @@ test before, and neither did `STARTUP_MIN_ROWS` or `TooSmall`.
   fit, so the wheel reaches them.
 - `the_default_model_notice_is_data_and_not_a_print`, in `rho-cli`.
 - `an_explicit_model_raises_no_notice`, in `rho-cli`.
+
+### The block text
+
+These live in `crates/rho-tui/tests/block_text.rs`.
+
+- `an_assistant_answer_keeps_its_line_breaks` — three list items take three rows.
+- `a_code_fence_keeps_its_own_lines_and_its_indent` — the nested line keeps its spaces.
+- `a_blank_line_between_paragraphs_survives` — exactly one blank row.
+- `a_long_line_inside_a_block_still_wraps` — keeping newlines must not stop wrapping.
+- `an_escape_sequence_is_still_dropped_from_block_text` — the security guard. It covers
+  `\x1b[2J`, a colour sequence, and an OSC 52 clipboard write.
+- `a_stray_control_character_is_still_replaced`.
+- `a_tab_becomes_spaces_so_the_grid_holds`.
 
 ## 10. Out of scope
 
