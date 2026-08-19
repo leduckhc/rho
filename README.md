@@ -120,7 +120,9 @@ refusal names the missing file.
 | `--max-agent-tool-calls` | How many tool calls one child may make. Default 64. |
 | `--child-timeout-secs` | How long a child may run. Default 600. |
 
-See [docs/specs/20260818-000223-SPEC-subagents.md](docs/specs/20260818-000223-SPEC-subagents.md).
+Every contract this feature exposes is in one page:
+[docs/contracts-subagents.md](docs/contracts-subagents.md). The reasoning behind each one is in
+[docs/specs/20260818-000223-SPEC-subagents.md](docs/specs/20260818-000223-SPEC-subagents.md).
 
 ## Extending
 
