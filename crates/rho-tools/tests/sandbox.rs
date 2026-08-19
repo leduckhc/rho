@@ -11,7 +11,7 @@
 mod common;
 
 use common::Harness;
-use rho_core::{SandboxMode, Tool};
+use rho_core::{CommandRunner, SandboxMode, Tool};
 use rho_tools::BashTool;
 
 fn text_of(output: &rho_core::ToolOutput) -> String {
@@ -213,5 +213,71 @@ async fn strict_refuses_a_network_call() {
         strict.is_error,
         "strict must refuse a network call: {}",
         text_of(&strict)
+    );
+}
+
+#[tokio::test]
+async fn a_gate_command_obeys_the_parent_sandbox() {
+    // `SPEC-agent-tasks` and decision D-an-acceptance-check-has-a-trusted-author both
+    // say a gate check runs under the parent's confinement. The spec named this test
+    // and the test did not exist, so the claim was unproven. It is proven here.
+    //
+    // The gate runner reuses the same `build_command` path as `bash`, so a check
+    // cannot escape through a second, drifting code path.
+    if !sandbox_ready("a_gate_command_obeys_the_parent_sandbox") {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let outside = std::env::temp_dir().join("rho-gate-escape.txt");
+    let _ = std::fs::remove_file(&outside);
+
+    let runner = rho_tools::SandboxedRunner::new(SandboxMode::Confined);
+    let cancel = rho_core::CancelToken::new();
+
+    // A write inside the root is allowed, so the runner really runs a command.
+    let inside = runner
+        .run("echo hi > inside.txt", root.path(), &cancel)
+        .await
+        .expect("a confined command still runs");
+    assert_eq!(inside, 0, "a write inside the root must succeed");
+    assert!(
+        root.path().join("inside.txt").exists(),
+        "the command must really have run"
+    );
+
+    // A write outside the root must fail, so a check cannot escape confinement.
+    let escaped = runner
+        .run(
+            &format!("echo pwned > {}", outside.display()),
+            root.path(),
+            &cancel,
+        )
+        .await
+        .expect("the command runs and reports its own exit code");
+    assert_ne!(
+        escaped, 0,
+        "a gate command must not write outside the session root"
+    );
+    assert!(
+        !outside.exists(),
+        "nothing must appear outside the root, found {}",
+        outside.display()
+    );
+    let _ = std::fs::remove_file(&outside);
+}
+
+#[tokio::test]
+async fn a_cancelled_gate_command_stops() {
+    // A gate check must stop with its parent, or a cancelled run leaves a test
+    // suite running.
+    let root = tempfile::tempdir().unwrap();
+    let runner = rho_tools::SandboxedRunner::new(SandboxMode::Off);
+    let cancel = rho_core::CancelToken::new();
+    cancel.cancel();
+
+    let result = runner.run("sleep 30", root.path(), &cancel).await;
+    assert!(
+        result.is_err(),
+        "a cancelled gate check must not report a passing exit code"
     );
 }
