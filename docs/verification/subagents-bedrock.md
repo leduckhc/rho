@@ -439,6 +439,63 @@ now stops the model inventing one, so it declines and lists the real agents inst
 defect one's fix working. The tool-level path is still covered, by
 `an_unknown_agent_name_is_a_result_not_a_fault` in `rho-tools`.
 
+## Steering, and the mode it cannot reach
+
+Steering a running child works, and it is proved by a runnable example rather than by a
+claim:
+
+```sh
+unset AWS_PROFILE
+cargo run --release -p rho-cli --example steer_subagent
+```
+
+Real output, identical on three consecutive runs:
+
+```
+1. the child is registered and addressable
+   live: id 1 agent scout depth 1
+2. waiting for the child to start a turn, then steering it
+   the child is on turn 1
+   steered at queue position 1
+3. the child read the steering message
+   delivered 1 message(s) at turn 1
+4. the child changed course
+   final answer: "I'll start by reading a.txt.STEERED"
+   it ran 2 turn(s), so it stopped early rather than reading all three files
+5. the handle leaves the live list when the child finishes
+   live children now: 0
+```
+
+The child was told to read three files, one per turn. It read the first, received the
+steering message at the turn boundary, and stopped. So the message reached the model and
+changed its course.
+
+### `steer_agent` cannot reach a live child from `rho run`, and that is a mode limit
+
+This is the honest part. `AgentLoop::dispatch` runs tool calls one at a time, and the spawn
+tool blocks until the child finishes. So inside a single `rho run` turn a child never
+outlives the parent's tool call. By the time the model could call `steer_agent`, there is no
+live child.
+
+A live probe shows exactly that:
+
+```sh
+rho run 'Use steer_agent with id=42 and message="hello". Quote the tool result verbatim.'
+```
+
+```
+no subagent with id 42 is running, so it cannot be steered. It may have finished already.
+No subagent is running now.
+```
+
+The refusal is correct and it teaches. But nobody should read the registered tool as proof
+that a model can steer a sibling today.
+
+**The real caller is a host.** A host owns the registry, so it can watch a child and redirect
+it while it works. That is what a TUI or an ACP frontend does, and it is what the example
+above demonstrates. The model-facing tool becomes useful when a child can outlive a turn,
+which needs background children, and that is a separate change.
+
 ## An operator error worth recording
 
 The first credential probe used double quotes, so the **outer shell** expanded
