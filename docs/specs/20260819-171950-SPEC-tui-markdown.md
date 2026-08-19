@@ -173,7 +173,11 @@ whole line. `bench/tui_frame.py` must show no regression beyond noise, and the n
   visible width, so wrapping cannot drift.
 - `every_role_has_all_three_mappings` — unchanged, and it must stay passing with the new
   roles.
-- `an_escape_never_survives_markdown_styling` — the security guard, extended to this path.
+- `an_escape_never_survives_markdown_styling` — the security guard, on one hostile string.
+- `the_scanner_only_deletes_and_inserts_known_glyphs` — the same guard as a property, which
+  the review asked for. Over a hostile corpus, every character the scanner emits is either in
+  its input or one of two fixed glyphs. So the scanner cannot synthesise an escape at all,
+  which is a stronger statement than any single example.
 - `a_user_row_is_drawn_verbatim`
 
 ### The frames

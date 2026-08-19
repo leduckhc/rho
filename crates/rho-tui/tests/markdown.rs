@@ -365,3 +365,62 @@ fn an_alignment_row_is_not_mistaken_for_a_rule() {
 // and this file no longer claims otherwise. The width drift the review really warned about is
 // the ordering bug, and `stripping_happens_before_wrapping_so_the_measure_stays_honest`
 // covers that one.
+
+#[test]
+fn the_scanner_only_deletes_and_inserts_known_glyphs() {
+    // The contract review asked for this, and it is the right shape: pin the property, not an
+    // example. `an_escape_never_survives_markdown_styling` proves one hostile string is safe.
+    // This proves *why* the whole path is safe, which is that the scanner never synthesises a
+    // character. It only drops a line's markup, keeps the rest, and inserts one of two fixed
+    // glyphs. So it cannot introduce an escape, a control byte, or anything else.
+    //
+    // The corpus is deliberately hostile and includes raw escapes. In the product,
+    // `sanitize_block` runs first, so the scanner never sees one. Feeding them here proves the
+    // scanner is not the layer that would let one through.
+    const INSERTED: [char; 2] = ['\u{2022}', '\u{2503}'];
+    let corpus = [
+        "# heading",
+        "###### six",
+        "#[derive(Debug)]",
+        "- bullet",
+        "* star bullet",
+        "+ plus bullet",
+        "  - nested bullet",
+        "1. numbered",
+        "12. numbered again",
+        "1.2.3 version",
+        "> quote",
+        ">out.txt",
+        "---",
+        "***",
+        "___",
+        "|---|",
+        "| a | b |",
+        "```rust",
+        "```",
+        "plain prose",
+        "",
+        "\u{1b}[2J escape",
+        "\u{1b}]52;c;aGk=\u{7}",
+        "text\u{7}with\u{1}controls",
+        "2 * 3 * 4",
+        "wrap_block and snake_case",
+        "--no-mouse",
+        "# \u{1b}[31mred heading",
+        "```\n# code not heading\n- code not bullet\n```",
+        "# one\n\n- two\n> three\n---\n```\nfour\n```\nfive",
+    ];
+    for input in corpus {
+        let input_chars: std::collections::HashSet<char> = input.chars().collect();
+        for line in scan_markdown(input) {
+            for ch in line.text.chars() {
+                assert!(
+                    input_chars.contains(&ch) || INSERTED.contains(&ch),
+                    "the scanner invented {ch:?} from input {input:?} (row {:?}). It may only \
+                     drop markup, keep text, and insert a bullet or a quote bar.",
+                    line.text
+                );
+            }
+        }
+    }
+}
