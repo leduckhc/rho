@@ -185,7 +185,11 @@ expect "and it names the agents that really exist instead" "scout" "$OUT"
 OUT="$(run 'Use spawn_agent with agent="scout" and prompt="Read does-not-exist.txt and report the contents.". Then say CONTINUED.' --trust-project)"
 expect "an absent file is a result, and the run continues" "CONTINUED" "$OUT"
 
-OUT="$(run 'Use spawn_agent with agent="slowpoke" and prompt="Run exactly: sleep 30 && echo DONE_SLEEPING". Then say in one sentence what the tool reported.' --trust-project --child-timeout-secs 3)"
+# Not `sleep`. `matches_long_running` puts a sleep in the background on purpose, so
+# the child returned at once and never reached its timeout. This check was green about
+# one run in three, which is worse than red: it reported a timeout path that never ran.
+# A python block waits just as long and matches no denylist entry.
+OUT="$(run 'Use spawn_agent with agent="slowpoke" and prompt="Run exactly this bash command: python3 -c \"import time; time.sleep(30)\"". Then say in one sentence what the tool reported.' --trust-project --child-timeout-secs 3)"
 expect "a child timeout is reported to the parent" "cancel\|timeout\|timed out" "$OUT"
 expect "the refusal names the limit that fired" "3 second\|3-second\|3s" "$OUT"
 expect "the parent survives the timeout and answers rather than dying" "slowpoke" "$OUT"
@@ -205,18 +209,41 @@ expect "a refused task does not lose the work of the tasks that fit" "alpha\|bet
 
 # --- 8. The transcript ---
 
-section "8. Every child leaves a transcript a human can read"
-COUNT="$(find "$ROOT/.rho/agent-transcripts" -name '*.log' 2>/dev/null | wc -l | tr -d ' ')"
-if [ "$COUNT" -gt 0 ]; then
-  pass "child transcripts on disk: $COUNT file(s) in .rho/agent-transcripts/"
+section "8. Every child leaves a transcript, and the parent is told where"
+# The path comes from the tool result, not from a directory this script guesses.
+# The first version hardcoded "$ROOT/.rho/agent-transcripts", and when transcripts
+# moved to a per-user temp directory it kept asserting the old place. The second
+# guessed /tmp/rho-transcripts-$$, which is this shell's pid and never rho's.
+# Reading the path the parent was actually handed cannot drift either way.
+OUT="$(run 'Use spawn_agent with agent="scout" and prompt="What is in a.txt?". Quote the whole tool result verbatim.' --trust-project)"
+TRANSCRIPT="$(printf '%s' "$OUT" | sed -n 's/.*full transcript: \([^]]*\)].*/\1/p' | head -1)"
+
+if [ -n "$TRANSCRIPT" ]; then
+  pass "the parent is told the transcript path"
 else
-  fail "child transcripts are written" "at least one .log file" "none found"
+  fail "the parent is told the transcript path" "a [full transcript: ...] note" "$OUT"
 fi
-if grep -qE 'ToolStart|TurnStart' "$ROOT/.rho/agent-transcripts/"*.log 2>/dev/null; then
-  pass "a transcript holds the child's own tool calls, which never reached the parent"
+
+if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
+  pass "and that path names a real file"
 else
-  fail "a transcript holds the child's tool calls" "ToolStart or TurnStart" "$(head -c 200 "$ROOT/.rho/agent-transcripts/"*.log 2>/dev/null)"
+  fail "the transcript path names a real file" "an existing file" "${TRANSCRIPT:-<none>}"
 fi
+
+if [ -n "$TRANSCRIPT" ] && grep -qE '"type":"(ToolStart|TurnStart)"' "$TRANSCRIPT" 2>/dev/null; then
+  pass "it is JSONL holding the child's own tool calls, which never reached the parent"
+else
+  fail "the transcript is JSONL with the child's tool calls" '"type":"ToolStart"' "$(head -c 200 "${TRANSCRIPT:-/dev/null}" 2>/dev/null)"
+fi
+
+if [ -z "$TRANSCRIPT" ]; then
+  :
+elif [ "${TRANSCRIPT#"$ROOT"}" != "$TRANSCRIPT" ]; then
+  fail "the transcript stays out of the session root" "a path outside $ROOT" "$TRANSCRIPT"
+else
+  pass "it lives outside the session root, so it cannot be committed by accident"
+fi
+
 
 # --- Result ---
 
