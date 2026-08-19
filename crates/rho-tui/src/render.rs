@@ -425,16 +425,23 @@ pub fn slash_row_index(state: &TuiState, width: u16, height: u16, row: u16) -> O
 pub fn banner_line(state: &TuiState, width: usize) -> String {
     // An empty field draws no separator. The banner once read `ρ rho   ·  · model ·`,
     // because the renderer joined four fields and nothing filled three of them.
+    // Every field is filtered. A security review found this row joining four of them raw while every
+    // other row had a filter. The directory is the realistic vector: a name on a Unix filesystem may
+    // hold an escape byte, so running rho inside a hostile checkout would put it on the banner. Git
+    // rejects a control character in a ref name, and a model id comes from a flag or a config file.
+    //
+    // Nothing escaped today, because ratatui drops an escape from a cell. That is a second filter and
+    // it is not rho's, so the invariant holds here instead of resting on a dependency.
     let parts = [
-        state.cwd.as_str(),
-        state.branch.as_str(),
-        state.model.as_str(),
-        state.provider.as_str(),
+        sanitize_line(&state.cwd),
+        sanitize_line(&state.branch),
+        sanitize_line(&state.model),
+        sanitize_line(&state.provider),
     ];
     let joined = parts
         .iter()
         .filter(|part| !part.trim().is_empty())
-        .copied()
+        .map(String::as_str)
         .collect::<Vec<&str>>()
         .join(&format!(" {GLYPH_SEPARATOR} "));
     let text = if joined.is_empty() {

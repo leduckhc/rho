@@ -253,3 +253,39 @@ fn test_session() -> rho_core::Session {
     let context = rho_core::Context::new(None, tools.specs());
     rho_core::Session::with_config(config, provider, tools, hooks, context)
 }
+
+// ---- The banner is untrusted text too. ------------------------------------------
+
+#[test]
+fn the_banner_sanitises_every_field_it_joins() {
+    // A security review found `banner_line` joining the directory, the branch, the model, and the
+    // provider with no filter, while every other row had one.
+    //
+    // The directory is the realistic vector: a name on a Unix filesystem may hold an escape byte, so
+    // cloning a hostile archive and running rho inside it would put that byte on the banner. Git
+    // rejects a control character in a ref name, so a branch is safer, and a model id comes from a
+    // flag or a config file.
+    //
+    // Nothing escaped today, because ratatui drops an escape from a cell. That is a second filter and
+    // not rho's, and the invariant is that one filter of rho's own guards the terminal on every path.
+    let mut state = TuiState::default();
+    state.set_context("/tmp/\u{1b}[2Jevil", "main\u{7}bell", "prov\u{202e}ider");
+    state.model = "model\u{1b}[31m".to_string();
+    let banner = banner_line(&state, 120);
+    assert!(
+        !banner.contains('\u{1b}'),
+        "no escape reaches the banner: {banner:?}"
+    );
+    assert!(
+        !banner.contains("[2J"),
+        "and a dropped sequence takes its parameters: {banner:?}"
+    );
+    assert!(!banner.contains('\u{7}'), "no bell either: {banner:?}");
+    assert!(
+        !banner.contains('\u{202e}'),
+        "and no bidi override: {banner:?}"
+    );
+    // The readable parts survive, so the filter is not a blunt instrument.
+    assert!(banner.contains("evil"), "the real text stays: {banner:?}");
+    assert!(banner.contains("main"), "and the branch: {banner:?}");
+}

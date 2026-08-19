@@ -586,3 +586,23 @@ colours. It was noticed in the live screenshot, not in a test.
 It reads well and the words are the user's own, so it was kept and pinned by
 `a_submitted_prompt_is_bold_in_every_colour_mode`. A side effect that is kept without a test is a
 side effect waiting to be deleted by someone tidying up.
+
+## The last security finding: the banner was the one row with no filter
+
+A security review listed four paths and the controller closed three in the critic-panel commit. The
+fourth, `banner_line`, was missed and is closed here.
+
+It joined the directory, the branch, the model, and the provider **raw**, while every other row had a
+filter. The directory is the realistic vector: a name on a Unix filesystem may hold an escape byte, so
+running rho inside a hostile checkout would put that byte on the banner. Git rejects a control
+character in a ref name, so a branch is safer, and a model id arrives from a flag or a config file.
+
+**Nothing escaped, and that is the uncomfortable part.** ratatui drops an escape from a cell, so the
+attack did not work. The review's sharpest observation was that **rho had two filter layers and only
+one of them was rho's**. A defence that rests on a dependency's behaviour is a defence that changes
+when the dependency does, and it does not travel: banner text that is logged, copied through OSC 52,
+or written by a different backend would carry the escape.
+
+Every field is filtered now. `the_banner_sanitises_every_field_it_joins` covers an escape sequence, a
+bell, and a bidirectional override, and asserts the readable text survives so the filter is not a
+blunt instrument. Removing the filter from the directory alone makes it fail.
