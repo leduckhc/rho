@@ -5,17 +5,76 @@
 use rho_tui::{Ansi16, Role, role_16, role_256, role_bg_256, role_none};
 
 #[test]
-fn theme_resolves_every_role() {
-    // Each role maps to a 256-colour, a 16-colour, and a no-colour style. A missing
-    // mapping fails here, because each resolver runs for each role. It never falls
-    // back silently.
+fn every_role_is_distinguishable_from_body_text_in_every_mode() {
+    // This test used to be `theme_resolves_every_role`, and it was a tautology: it called each
+    // resolver and discarded the result with `let _ =`. The matches are exhaustive, so they cannot
+    // panic, which made it a compile check wearing a test's clothes. A mutation audit named it.
+    //
+    // The real invariant is the one the three tables exist for: **a role has to look different from
+    // body text, in whichever mode the terminal gives us.** A role that resolves to plain in a mode
+    // is invisible in that mode, and the reader loses the meaning it carried.
+    //
+    // `Text` is body text, so it is the one role that must resolve to plain.
     for role in Role::ALL {
-        // A `None` from `role_256` is a valid mapping: the terminal default
-        // foreground. The call resolving without a panic is the mapping.
-        let _ = role_256(role);
-        let _ = role_bg_256(role);
-        let _ = role_16(role);
-        let _ = role_none(role);
+        let sixteen = role_16(role);
+        let none = role_none(role);
+        let colour = role_256(role);
+        let background = role_bg_256(role);
+
+        if role == Role::Text {
+            assert_eq!(colour, None, "body text keeps the terminal foreground");
+            assert_eq!(background, None, "and its background");
+            assert!(
+                !sixteen.bold && !sixteen.italic && !sixteen.dim && !sixteen.reversed,
+                "body text carries no modifier in sixteen colours: {sixteen:?}"
+            );
+            assert!(
+                !none.bold && !none.italic && !none.dim && !none.reversed,
+                "nor with no colour: {none:?}"
+            );
+            continue;
+        }
+
+        // In 256 colours a role differs by a foreground or a background.
+        assert!(
+            colour.is_some() || background.is_some(),
+            "role {role:?} is invisible in 256 colours: no foreground and no background"
+        );
+        // In 16 colours, by a colour or a modifier.
+        let sixteen_differs = sixteen.color != Ansi16::Default
+            || sixteen.bold
+            || sixteen.italic
+            || sixteen.dim
+            || sixteen.reversed;
+        assert!(
+            sixteen_differs,
+            "role {role:?} is invisible in sixteen colours: {sixteen:?}"
+        );
+        // With no colour, only a modifier is left, so there must be one.
+        let none_differs = none.bold || none.italic || none.dim || none.reversed;
+        assert!(
+            none_differs,
+            "role {role:?} is invisible with no colour: {none:?}"
+        );
+    }
+}
+
+#[test]
+fn a_256_colour_index_is_in_the_usable_range() {
+    // Indices 0 to 15 are the terminal's own sixteen, which a user theme redefines, so rho never
+    // names one: a role that did would change meaning per terminal.
+    for role in Role::ALL {
+        for (what, index) in [
+            ("foreground", role_256(role)),
+            ("background", role_bg_256(role)),
+        ] {
+            if let Some(index) = index {
+                assert!(
+                    index >= 16,
+                    "role {role:?} names {what} index {index}, which a user theme may redefine"
+                );
+            }
+        }
     }
 }
 

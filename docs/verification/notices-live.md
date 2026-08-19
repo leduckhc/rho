@@ -606,3 +606,40 @@ or written by a different backend would carry the escape.
 Every field is filtered now. `the_banner_sanitises_every_field_it_joins` covers an escape sequence, a
 bell, and a bidirectional override, and asserts the readable text survives so the filter is not a
 blunt instrument. Removing the filter from the directory alone makes it fail.
+
+## The last two test-quality findings
+
+A test-quality audit ran seventeen mutations and named four survivors and one tautology. Three
+survivors were closed in the critic-panel commit. These are the last two.
+
+### A test that asserted nothing
+
+`theme_resolves_every_role` called each of the three resolvers and threw the result away with
+`let _ =`. The matches are exhaustive, so they cannot panic: it was a compile check wearing a test's
+clothes, and it would have passed against any body that returned something.
+
+It is replaced by the invariant the three tables exist for. **A role has to look different from body
+text, in whichever mode the terminal gives us.** In 256 colours that means a foreground or a
+background. In sixteen it means a colour or a modifier. With no colour only a modifier is left, so
+there has to be one. `Text` is body text and is the one role that must resolve to plain.
+
+A second test now holds that no role names an index below 16, because those are the terminal's own
+sixteen and a user theme redefines them, so a role that named one would change meaning per terminal.
+
+Both were checked by breaking them: removing the dim from the code role in the no-colour mode reports
+`role MdCodeBlock is invisible with no colour`, and moving a heading to index 10 fails the range test.
+
+### A clip two reviews disagreed about
+
+The audit called the run clip in `put` dead code: `set_stringn` clamps to the buffer edge by itself,
+so no mutation of the clip changes an observable cell, and no test can pin it. By the audit's own
+rule, untested code should go.
+
+The security review found the opposite failure the same day, in `banner_line`: rho was leaning on
+ratatui to drop an escape and calling that a defence. A guarantee that lives in a dependency changes
+when the dependency changes, and it does not travel to a log, a clipboard write, or another backend.
+
+**The clip stays, for the second reason, and the code now says so.** It costs one comparison per run
+and it makes `put`'s promise true in rho's own code. The comment states plainly that this is defence
+in depth and not a tested guarantee, because the one honest thing to avoid here is a claim that a test
+backs it.

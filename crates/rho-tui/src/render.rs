@@ -1186,10 +1186,27 @@ fn put(frame: &mut Frame<'_>, y: usize, width: usize, line: &StyledLine) {
     // inline viewport anchors to the cursor row, so `Frame::area()` carries the origin.
     // A write at an absolute (0, 0) panics there, and every fullscreen fixture missed it.
     //
-    // **This is where the row's width invariant is enforced**, and it is the only place. A
-    // run that would cross the right edge is clipped, and a row short of the width is padded
-    // to it. So no producer can overflow the row, and none has to remember to pad. See
+    // **This is where the row's width invariant is enforced**, and it is the only place. A run that
+    // would cross the right edge is clipped, and a row short of the width is padded to it. So no
+    // producer can overflow the row, and none has to remember to pad. See
     // `crates/rho-tui/src/styled.rs`.
+    //
+    // Two reviews reached opposite conclusions about the clip, and the disagreement is recorded here
+    // rather than settled by picking the cheaper one.
+    //
+    // A test-quality audit called it dead: `set_stringn` clamps to the buffer edge on its own, so no
+    // mutation of `room` changes an observable cell, and it could not be pinned by a test. By its
+    // rule, untested code should go.
+    //
+    // A security review, on the same day, found the opposite failure in `banner_line`: rho was
+    // leaning on ratatui to drop an escape and calling that a defence. A guarantee that lives in a
+    // dependency changes when the dependency changes, and it does not travel to a log, a clipboard
+    // write, or another backend.
+    //
+    // The clip stays for the second reason. It costs one comparison per run, it makes `put`'s promise
+    // true in rho's own code, and `a_table_wider_than_the_screen_is_cut_not_wrapped` exercises the
+    // path even though it cannot distinguish rho's clip from ratatui's. That last clause is the
+    // honest part: this is defence in depth, not a tested guarantee.
     let area = frame.area();
     let row = area.y + y as u16;
     let mut column = 0usize;
