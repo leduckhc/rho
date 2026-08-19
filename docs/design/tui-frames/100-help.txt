@@ -1,6 +1,5 @@
 ```
-Done. Every tool row now carries a duration, and 214 tests pass.                                    
-  keys  1-8 of 22                                                                    ↓ 14 more below
+ρ rho  ~/Work/Vibe/rho · main · sonnet-4.5 · openrouter                                             
   enter          send the draft                                                                     
   shift+enter    insert a newline, where the terminal reports the key                               
   ctrl-j         insert a newline, in every terminal                                                
@@ -9,8 +8,19 @@ Done. Every tool row now carries a duration, and 214 tests pass.
   ctrl-d         quit while the draft is empty                                                      
   ctrl-r         search the history                                                                 
   ctrl-x ctrl-e  edit the draft in the editor                                                       
+  ctrl-g         edit the draft in the editor                                                       
+  ctrl-a         move to the line start                                                             
+  ctrl-e         move to the line end                                                               
+  ctrl-k         cut to the line end                                                                
+  ctrl-u         cut to the line start                                                              
+  ctrl-w         cut the word to the left                                                           
+  ctrl-y         paste the last cut                                                                 
+  alt-b          move one word left                                                                 
+  alt-f          move one word right                                                                
+  /              open the command list · tab completes · enter runs                                 
+  ?              open this help                                                                     
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ❯ █                                                                                                 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-  ready                                                  ↑ ↓ scroll · esc close · / lists commands  
+  ready                                                               esc close · / lists commands  
 ```

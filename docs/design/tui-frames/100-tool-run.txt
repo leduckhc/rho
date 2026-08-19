@@ -1,4 +1,14 @@
 ```
+ρ rho  ~/Work/Vibe/rho · main · sonnet-4.5 · openrouter                                             
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+❯ run the workspace tests and fix what breaks                                                       
                                                                                                     
 Running the whole suite first, so the failures name themselves.                                     
                                                                                                     

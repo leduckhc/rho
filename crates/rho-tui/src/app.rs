@@ -5,9 +5,9 @@
 //! `tokio::select!` over a `crossterm` event stream and the `rho_core`
 //! `AgentEvents` stream. See `SPEC-tui` section 5.
 //!
-//! rho draws an inline band and never enters the alternate screen. Each final row
-//! leaves the band for the terminal's scrollback through `Terminal::insert_before`.
-//! See `SPEC-tui-inline-and-composer` and `D-inline-viewport-not-alternate-screen`.
+//! rho owns the whole terminal in the alternate screen. The transcript scrolls inside
+//! rho, and rho can repaint any row. There is no freeze and no `insert_before`. See
+//! `SPEC-tui-alternate-screen` and `D-alternate-screen-after-all`.
 
 use std::io::{self, Stdout};
 use std::process::Command;
@@ -15,18 +15,14 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{Event, EventStream, KeyEventKind, MouseButton, MouseEventKind};
 use futures::StreamExt;
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::buffer::Buffer;
-use ratatui::style::Style;
-use ratatui::{Terminal, TerminalOptions, Viewport};
 use rho_core::{AgentEvent, AgentEvents, CancelToken, ContentBlock, Session};
 
 use crate::editor::{editor_argv, editor_command};
-use crate::render::{
-    FreezeBatch, band_rows, banner_freeze, composer_text_width, freeze_all, help_visible_rows,
-    next_freeze, render,
-};
+use crate::render::{STARTUP_MIN_ROWS, composer_text_width, render, transcript_metrics};
 use crate::screen::ScreenGuard;
+use crate::scroll::WHEEL_ROWS;
 use crate::slash_row_index;
 use crate::state::{KeyAction, TuiState};
 
@@ -39,20 +35,26 @@ pub enum TuiError {
     /// A terminal input or output fault. The message states the cause.
     #[error("terminal io error: {0}")]
     Io(String),
+    /// The terminal cannot hold the composer's draft row and the footer at startup.
+    ///
+    /// `need` is `COMPOSER_MIN_ROWS + FOOTER_ROWS`, which is four. This is fatal, and only
+    /// at startup. A resize that makes the terminal too small never ends the session,
+    /// because dragging a window narrow and wide again is ordinary. See
+    /// `SPEC-tui-alternate-screen` section 7.
+    #[error("the terminal is {rows} rows, and rho needs at least {need}")]
+    TooSmall { rows: u16, need: u16 },
 }
 
 /// The escape sequences that start the interface. `mouse` adds mouse capture.
 ///
-/// The sequences are data, so a test reads them with no terminal. rho now enters the
-/// alternate screen at startup, so this delegates to the screen guard. See
+/// The sequences are data, so a test reads them with no terminal. rho enters the alternate
+/// screen at startup, so this delegates to the screen guard. See
 /// `D-alternate-screen-after-all`.
 pub fn setup_sequences(mouse: bool) -> String {
     crate::screen::enter_sequences(mouse)
 }
 
 /// The sequences that give the terminal back. It mirrors `setup_sequences`.
-///
-/// It delegates to the screen guard, so the setup and the restore never drift apart.
 pub fn restore_sequences(mouse: bool) -> String {
     crate::screen::restore_sequences(mouse)
 }
@@ -63,7 +65,8 @@ pub struct App {
     session: Session,
     cancel: Option<CancelToken>,
     events: Option<AgentEvents>,
-    /// Whether the app captures the mouse. Off by default, so native selection works.
+    /// Whether the app captures the mouse. On by default, because in the alternate screen
+    /// the wheel is the only way to scroll. See `SPEC-tui-alternate-screen` section 8.
     mouse: bool,
     /// The session start, which is the clock the reducer folds with. The reducer reads no
     /// clock itself, so time arrives as data. See `D-the-reducer-owns-the-row-metadata`.
@@ -72,6 +75,10 @@ pub struct App {
 
 impl App {
     /// Build an app for a session. The model id shows on the banner.
+    ///
+    /// The mouse is on by default, because the wheel is the only way to scroll the
+    /// transcript in the alternate screen. A user whose terminal loses selection passes
+    /// `--no-mouse`. See `SPEC-tui-alternate-screen` section 8.
     pub fn new(session: Session, model: impl Into<String>) -> Self {
         let mut state = TuiState::default();
         state.model = model.into();
@@ -81,7 +88,7 @@ impl App {
             session,
             cancel: None,
             events: None,
-            mouse: false,
+            mouse: true,
             started: Instant::now(),
         }
     }
@@ -98,8 +105,8 @@ impl App {
         self
     }
 
-    /// Turn mouse capture on. Off by default. On, rho gets the wheel and the clickable
-    /// slash list, and the user loses drag-select.
+    /// Turn mouse capture on or off. On by default. Off, the user keeps drag-select but
+    /// loses the wheel, which is the only way to scroll.
     pub fn with_mouse(mut self, enabled: bool) -> Self {
         self.mouse = enabled;
         self
@@ -113,9 +120,19 @@ impl App {
     /// Run the UI until the user exits. Owns the terminal for its lifetime.
     ///
     /// The screen guard restores the terminal on every exit path: a clean return, an error,
-    /// a panic that unwinds through here, and a fatal signal. See
-    /// `D-alternate-screen-after-all`.
+    /// a panic that unwinds through here, and a fatal signal. A terminal too small to hold
+    /// the composer and the footer is fatal here, at startup, and only here. See
+    /// `D-alternate-screen-after-all` and section 7.
     pub async fn run(&mut self) -> Result<(), TuiError> {
+        // Fatal only at startup. A later resize below the minimum draws what fits.
+        let (_, height) =
+            crossterm::terminal::size().map_err(|error| TuiError::Io(error.to_string()))?;
+        if height < STARTUP_MIN_ROWS {
+            return Err(TuiError::TooSmall {
+                rows: height,
+                need: STARTUP_MIN_ROWS,
+            });
+        }
         let mut guard = ScreenGuard::enter(self.mouse)?;
         // Restore the terminal on SIGTERM, SIGHUP, or SIGINT. The task ends when run does.
         let signals = crate::screen::spawn_signal_restore(self.mouse);
@@ -143,12 +160,7 @@ impl App {
             ..
         } = self;
 
-        // Freeze the banner once, above the band, then draw the first frame.
-        let width = frame_width(terminal)?;
-        if let Some(banner) = banner_freeze(state, width, false) {
-            insert_batch(terminal, &banner)?;
-        }
-        freeze_and_draw(terminal, state)?;
+        draw_frame(terminal, state)?;
 
         loop {
             tokio::select! {
@@ -172,39 +184,51 @@ impl App {
                                     }
                                 }
                                 KeyAction::Exit => {
-                                    exit_freeze(terminal, state, cancel)?;
                                     break;
                                 }
                                 // Edit the draft in the editor, then replace it with the
-                                // result. The band leaves the screen for the editor, and it
-                                // returns after. A failed run keeps the draft.
+                                // result. The screen leaves for the editor and returns.
                                 KeyAction::EditDraft(text) => {
                                     run_editor(terminal, guard, state, &text)?;
                                 }
                             }
-                            freeze_and_draw(terminal, state)?;
+                            draw_frame(terminal, state)?;
                         }
-                        // A resize must redraw. This arm used to fall into the catch-all
-                        // below, so the frame kept the old width until the next key.
+                        // A resize must redraw at the new size. A resize below the minimum
+                        // draws what fits and never ends the session. See section 7.
                         Some(Ok(Event::Resize(_, _))) => {
-                            freeze_and_draw(terminal, state)?;
+                            update_metrics(terminal, state)?;
+                            state.scroll_on_resize();
+                            draw(terminal, state)?;
                         }
-                        // A click on a slash row runs that command, so the list the
-                        // renderer draws is selectable by mouse as well as by arrow.
+                        // The wheel scrolls the transcript, one row per event. A horizontal
+                        // wheel event is ignored by name: a measured session sent 537 of
+                        // them from trackpad drift. See section 5 and the spike.
                         Some(Ok(Event::Mouse(mouse))) => {
-                            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                                let size = terminal
-                                    .size()
-                                    .map_err(|error| TuiError::Io(error.to_string()))?;
-                                if let Some(index) =
-                                    slash_row_index(state, size.width, size.height, mouse.row)
-                                {
-                                    if state.click_slash_row(index) == KeyAction::Exit {
-                                        exit_freeze(terminal, state, cancel)?;
-                                        break;
-                                    }
-                                    freeze_and_draw(terminal, state)?;
+                            match mouse.kind {
+                                MouseEventKind::ScrollUp => {
+                                    state.scroll_up(WHEEL_ROWS);
+                                    draw_frame(terminal, state)?;
                                 }
+                                MouseEventKind::ScrollDown => {
+                                    state.scroll_down(WHEEL_ROWS);
+                                    draw_frame(terminal, state)?;
+                                }
+                                // ScrollLeft and ScrollRight are ignored by name.
+                                MouseEventKind::Down(MouseButton::Left) => {
+                                    let size = terminal
+                                        .size()
+                                        .map_err(|error| TuiError::Io(error.to_string()))?;
+                                    if let Some(index) =
+                                        slash_row_index(state, size.width, size.height, mouse.row)
+                                    {
+                                        if state.click_slash_row(index) == KeyAction::Exit {
+                                            break;
+                                        }
+                                        draw_frame(terminal, state)?;
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                         Some(Ok(_)) => {}
@@ -221,7 +245,10 @@ impl App {
                                 *events = None;
                                 *cancel = None;
                             }
-                            freeze_and_draw(terminal, state)?;
+                            // New output moves a pinned view and leaves an unpinned one.
+                            update_metrics(terminal, state)?;
+                            state.scroll_on_new_rows();
+                            draw(terminal, state)?;
                         }
                         Some(Err(error)) => {
                             // The transcript is the only channel the user reads. This used
@@ -234,13 +261,17 @@ impl App {
                             state.end_run(true);
                             *events = None;
                             *cancel = None;
-                            freeze_and_draw(terminal, state)?;
+                            update_metrics(terminal, state)?;
+                            state.scroll_on_new_rows();
+                            draw(terminal, state)?;
                         }
                         None => {
                             state.end_run(false);
                             *events = None;
                             *cancel = None;
-                            freeze_and_draw(terminal, state)?;
+                            update_metrics(terminal, state)?;
+                            state.scroll_on_new_rows();
+                            draw(terminal, state)?;
                         }
                     }
                 }
@@ -255,33 +286,26 @@ fn elapsed_millis(started: &Instant) -> i64 {
     i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
 }
 
-/// The width the next frame draws at. Read once per frame, after any resize.
-fn frame_width(terminal: &Term) -> Result<u16, TuiError> {
-    terminal
-        .size()
-        .map(|size| size.width)
-        .map_err(|error| TuiError::Io(error.to_string()))
-}
-
-/// Freeze every final prefix, then draw the band, in that order.
-///
-/// A draw that ran first would show a row the scrollback already holds, and the user
-/// would read it twice. See `SPEC-tui-inline-and-composer` section 3.3.
-fn freeze_and_draw(terminal: &mut Term, state: &mut TuiState) -> Result<(), TuiError> {
-    freeze_final_prefix(terminal, state)?;
-    // Tell the reducer the wrap width, so a row-motion key wraps like the screen.
-    state.composer_width = composer_text_width(frame_width(terminal)?);
-    // Tell the reducer how many help rows the band can show, so a scroll key clamps to
-    // what the screen can draw. Clamping only at draw time let the offset climb past the
-    // last row, and a press back then moved nothing.
+/// Write the frame geometry into the state, so the reducer clamps a scroll key against the
+/// same layout the renderer draws. One source, so the clamp and the draw cannot drift.
+fn update_metrics(terminal: &Term, state: &mut TuiState) -> Result<(), TuiError> {
     let size = terminal
         .size()
         .map_err(|error| TuiError::Io(error.to_string()))?;
-    state.help_visible_rows = help_visible_rows(band_rows(size.height));
+    state.composer_width = composer_text_width(size.width);
+    let (total, visible) = transcript_metrics(state, size.width, size.height);
+    state.transcript_total = total;
+    state.transcript_visible = visible;
+    Ok(())
+}
+
+/// Set the metrics, then draw. The common path for a key press.
+fn draw_frame(terminal: &mut Term, state: &mut TuiState) -> Result<(), TuiError> {
+    update_metrics(terminal, state)?;
     draw(terminal, state)
 }
 
-/// Run the editor on the draft, then restore the band.
+/// Run the editor on the draft, then restore the screen.
 ///
 /// The screen leaves for the editor, so the editor owns the terminal. The editor value
 /// comes from the environment. A failed run keeps the draft and pushes one error row.
@@ -301,7 +325,7 @@ fn run_editor(
     edit_draft(state, &argv, text);
     // Re-enter the alternate screen, so the session continues where it left off.
     guard.reenter()?;
-    freeze_and_draw(terminal, state)
+    draw_frame(terminal, state)
 }
 
 /// Edit `text` in the editor named by `argv`, then apply the result to `state`.
@@ -345,70 +369,6 @@ fn temp_draft_path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("rho-draft-{}-{nanos}.txt", std::process::id()))
 }
 
-/// Freeze every batch the finality rule allows now. The width is read once for the loop.
-///
-/// `mark_frozen` runs after the insert that wrote the rows, never before. A failed
-/// insert ends the session, and the rows stay unfrozen in the state.
-fn freeze_final_prefix(terminal: &mut Term, state: &mut TuiState) -> Result<(), TuiError> {
-    let width = frame_width(terminal)?;
-    while let Some(batch) = next_freeze(state, width) {
-        insert_batch(terminal, &batch)?;
-        state.mark_frozen(batch.rows);
-    }
-    Ok(())
-}
-
-/// Freeze every remaining row, whatever its state. Only the exit path may call this.
-///
-/// A task row and a subagent row outlive their turn, so the finality rule leaves them in
-/// the band. After the loop leaves, no event can arrive for them, so they freeze as they
-/// stand. Without this the user's scrollback would lose those rows.
-fn freeze_remaining(terminal: &mut Term, state: &mut TuiState) -> Result<(), TuiError> {
-    let width = frame_width(terminal)?;
-    if let Some(batch) = freeze_all(state, width) {
-        insert_batch(terminal, &batch)?;
-        state.mark_frozen(batch.rows);
-    }
-    Ok(())
-}
-
-/// End the run and freeze every remaining row, so exit leaves each row final.
-///
-/// It cancels an active run first, then makes every row final, then freezes the rest.
-/// A row that never finished freezes as it stands. See section 3.6.
-fn exit_freeze(
-    terminal: &mut Term,
-    state: &mut TuiState,
-    cancel: &mut Option<CancelToken>,
-) -> Result<(), TuiError> {
-    if let Some(token) = cancel.take() {
-        token.cancel();
-    }
-    state.end_run(false);
-    // Every remaining row freezes, including a task or a child that outlived the turn.
-    // The finality rule must not decide here, because it would leave those rows behind.
-    freeze_remaining(terminal, state)
-}
-
-/// Write one batch above the band. A zero-row batch still writes its lines.
-fn insert_batch(terminal: &mut Term, batch: &FreezeBatch) -> Result<(), TuiError> {
-    let height = u16::try_from(batch.lines.len()).unwrap_or(u16::MAX);
-    if height == 0 {
-        return Ok(());
-    }
-    terminal
-        .insert_before(height, |buf| write_lines(buf, &batch.lines))
-        .map_err(|error| TuiError::Io(error.to_string()))
-}
-
-/// Write one line per row into an insert buffer, left aligned.
-fn write_lines(buf: &mut Buffer, lines: &[String]) {
-    for (index, text) in lines.iter().enumerate() {
-        let y = buf.area.top() + u16::try_from(index).unwrap_or(0);
-        buf.set_string(0, y, text, Style::default());
-    }
-}
-
 /// Await the next agent event, or wait forever when no run is active. The
 /// `select!` guard skips this branch when `events` is `None`, so the pending
 /// future never resolves in that case.
@@ -429,32 +389,25 @@ fn draw(terminal: &mut Term, state: &TuiState) -> Result<(), TuiError> {
     Ok(())
 }
 
-/// Build the ratatui terminal for the inline band.
+/// Build the ratatui terminal for the full screen.
 ///
 /// The screen guard already entered raw mode and the alternate screen, so this writes no
-/// sequences and toggles no mode. It only sizes the viewport.
+/// sequences. `Terminal::new` uses the full-screen viewport, so rho owns every row.
 fn build_terminal() -> Result<Term, TuiError> {
-    let (_, height) =
-        crossterm::terminal::size().map_err(|error| TuiError::Io(error.to_string()))?;
     let backend = CrosstermBackend::new(io::stdout());
-    Terminal::with_options(
-        backend,
-        TerminalOptions {
-            viewport: Viewport::Inline(band_rows(height)),
-        },
-    )
-    .map_err(|error| TuiError::Io(error.to_string()))
+    Terminal::new(backend).map_err(|error| TuiError::Io(error.to_string()))
 }
 
-/// Give the terminal back through the guard, and leave the cursor below the band.
+/// Give the terminal back through the guard, and leave the cursor visible.
+///
+/// It does **not** call `Terminal::clear`. That method snapshots the cursor with
+/// `get_cursor_position`, which asks the terminal a question and waits for a reply. On the
+/// exit path the reply arrived too late, so the read timed out, rho exited with code 1, and
+/// the late reply printed into the user's shell and corrupted the next command.
+///
+/// Nothing needs clearing here. Leaving the alternate screen discards the whole buffer, so
+/// the last frame cannot linger.
 fn restore_terminal(terminal: &mut Term, guard: &mut ScreenGuard) -> Result<(), TuiError> {
-    // Clear the band before the modes go back. The last frame holds a composer box and a
-    // footer that promises keys rho no longer answers. A live run left
-    // `ctrl-c again quits` on screen after rho had exited, which is a lie the user reads.
-    terminal
-        .clear()
-        .map_err(|error| TuiError::Io(error.to_string()))?;
-    // The guard restores raw mode, mouse reporting, and the alternate screen once.
     guard.restore()?;
     terminal
         .show_cursor()

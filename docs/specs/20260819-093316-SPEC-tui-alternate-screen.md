@@ -202,15 +202,25 @@ leaves the terminal for `$EDITOR` and comes back. That path exists today in `app
 
 ## 5. The keys
 
-Each key below joins `bindings()`, so the help screen states it and cannot drift. A key that
-is not wired carries `built: false`.
+A key that already carries a meaning never scrolls. An earlier draft of this section listed
+`ctrl-u`, `ctrl-d`, `↑` and `↓` as scroll keys, and all four were already taken. See
+`D-scroll-keys-yield-to-an-empty-draft` and its supersede note.
 
-| Keys | Summary |
-| --- | --- |
-| `pageup`, `pagedown` | move the view one screen |
-| `ctrl-u`, `ctrl-d` | move the view half a screen |
-| `home`, `end` | jump to the oldest row, and to the newest |
-| `↑ ↓` | move the view one row while no panel is open |
+| Keys | Scrolls? | Meaning |
+| --- | --- | --- |
+| wheel up, wheel down | yes | one display row |
+| `pageup`, `pagedown` | yes | one screen, less `PAGE_ROWS_MARGIN` |
+| `home`, `end` | while the draft is empty | the oldest row, and the newest |
+| `ctrl-d` | never | quit while the draft is empty |
+| `ctrl-u` | never | cut to the line start |
+| `↑ ↓` | never | recall the history, move a selection |
+
+Each key above is in `bindings()`, so the help screen states it and cannot drift. A scroll
+key answers only while no panel is open and the transcript overflows.
+
+The reducer reads no screen, so the event loop writes `transcript_total` and
+`transcript_visible` into the state each frame. It already writes `composer_width` the same
+way.
 
 ## 6. The layout
 

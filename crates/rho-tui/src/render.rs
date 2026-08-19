@@ -23,7 +23,7 @@ use crate::motion::{MotionCell, motion_cell, sweep_weight};
 use crate::sanitize::sanitize_line;
 use crate::state::{
     ActivityState, Approval, HistorySearch, Panel, Row, SlashList, ToolRowStatus, TuiState,
-    filter_history, row_is_final,
+    filter_history,
 };
 use crate::theme::{Role, role_256};
 
@@ -59,62 +59,127 @@ const GLYPH_CURSOR: &str = "█";
 /// The quote bar that marks an approval's verbatim text.
 const GLYPH_QUOTE: &str = "┃";
 
-/// The band height rho asks for, in rows.
-///
-/// One footer, a composer of up to ten rows, and at least three live rows.
-pub const BAND_ROWS: u16 = 14;
+/// The rows the footer always keeps.
+const FOOTER_ROWS: u16 = 1;
+/// The composer's smallest healthy height: two rules around one draft row.
+const COMPOSER_MIN_ROWS: u16 = 3;
+/// The most draft rows the composer shows. From `D-ledger-wins-the-band`.
+const MAX_DRAFT_ROWS: usize = 10;
+/// The rules above and below the draft.
+const COMPOSER_RULES: usize = 2;
 
-/// The band height for a terminal of `height` rows.
+/// The terminal height rho needs at startup: the composer's draft row and the footer.
 ///
-/// The band never takes the whole terminal. A short terminal gets `height - 1`. A
-/// one-row terminal gets one row.
-pub fn band_rows(height: u16) -> u16 {
-    match height {
-        0 => 0,
-        1 => 1,
-        h if h < BAND_ROWS + 1 => h - 1,
-        _ => BAND_ROWS,
+/// Below it, startup is fatal and returns `TuiError::TooSmall`. A resize below it draws
+/// what fits and never ends the session. See `SPEC-tui-alternate-screen` section 7.
+pub const STARTUP_MIN_ROWS: u16 = COMPOSER_MIN_ROWS + FOOTER_ROWS;
+
+/// The screen regions and their heights, top to bottom. rho owns the whole terminal now,
+/// so there is no band budget. The transcript takes the rows the chrome leaves. See
+/// `SPEC-tui-alternate-screen` section 6.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScreenLayout {
+    /// True when the one-row banner draws at the top. The banner was frozen above the
+    /// inline band. It now lives at the top row, the calm edge farthest from the
+    /// composer, so the session context stays visible above the transcript. It is dropped
+    /// first when the screen is too small. See `SPEC-tui-alternate-screen` section 6b.
+    pub banner: bool,
+    /// The transcript window height, in display rows. The transcript scrolls inside it.
+    pub transcript_rows: usize,
+    /// The panel rows drawn below the transcript. Zero means no panel.
+    pub panel_rows: usize,
+    /// True when the composer draws its two rules.
+    pub composer_border: bool,
+    /// The composer draft rows drawn, between the rules where they draw.
+    pub composer_rows: usize,
+    /// True when the footer draws.
+    pub footer: bool,
+    /// True when the terminal is too small to draw the composer and the footer whole.
+    ///
+    /// It draws what fits and never a panel. It is fatal only at startup. See section 7.
+    pub too_small: bool,
+}
+
+/// Plan the full-screen layout for one frame.
+///
+/// The footer keeps one row. The composer keeps two rules around one draft row at least,
+/// because the draft is the one thing the user owns. A panel keeps its `panel_floor` rows
+/// next: an approval states a destructive command, so it never yields its session root,
+/// even under a tall draft. See `D-ledger-wins-the-band`. The composer then grows to its
+/// full draft, then the banner, then the panel to its full want, then the transcript takes
+/// the rest.
+///
+/// While the terminal is too small to draw the composer and the footer whole, it draws
+/// what fits in this order: the composer's draft row, then the footer, then the
+/// transcript. It draws no panel. See section 7.
+pub fn plan_screen(
+    height: u16,
+    draft_rows: usize,
+    panel_want: usize,
+    panel_floor: usize,
+) -> ScreenLayout {
+    let h = height as usize;
+    if h == 0 {
+        return ScreenLayout {
+            banner: false,
+            transcript_rows: 0,
+            panel_rows: 0,
+            composer_border: false,
+            composer_rows: 0,
+            footer: false,
+            too_small: true,
+        };
+    }
+    if height < STARTUP_MIN_ROWS {
+        // Too small. Draw the draft row, then the footer, then the transcript. No banner,
+        // no panel, no rules. The order is the keep priority, not the screen position.
+        let mut left = h;
+        let composer_rows = 1.min(left);
+        left -= composer_rows;
+        let footer = left >= 1;
+        left -= usize::from(footer);
+        return ScreenLayout {
+            banner: false,
+            transcript_rows: left,
+            panel_rows: 0,
+            composer_border: false,
+            composer_rows,
+            footer,
+            too_small: true,
+        };
+    }
+    // Healthy. Reserve the footer, then the composer minimum, then the panel floor. Then
+    // grow the composer, add the banner, grow the panel, and give the rest to the
+    // transcript.
+    let left = h - FOOTER_ROWS as usize;
+    let composer_min = COMPOSER_MIN_ROWS as usize;
+    let floor = panel_floor
+        .min(panel_want)
+        .min(left.saturating_sub(composer_min));
+    let mut pool = left - composer_min - floor;
+    let draft = draft_rows.clamp(1, MAX_DRAFT_ROWS);
+    let composer_extra = (draft + COMPOSER_RULES - composer_min).min(pool);
+    pool -= composer_extra;
+    let composer_total = composer_min + composer_extra;
+    let composer_rows = composer_total - COMPOSER_RULES;
+    let banner = pool >= 1;
+    pool -= usize::from(banner);
+    let panel_extra = panel_want.saturating_sub(floor).min(pool);
+    pool -= panel_extra;
+    let panel_rows = floor + panel_extra;
+    let transcript_rows = pool;
+    ScreenLayout {
+        banner,
+        transcript_rows,
+        panel_rows,
+        composer_border: true,
+        composer_rows,
+        footer: true,
+        too_small: false,
     }
 }
 
-/// The band regions that survive at a height, and how many live rows fit.
-///
-/// The renderer and the click mapping both read this, so the band geometry has one
-/// source. It names the live area, the composer, the panel, and the footer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Band {
-    /// The count of panel rows the band draws. Zero means no panel.
-    ///
-    /// This was a `bool`, and a panel taller than the band was therefore granted nothing.
-    /// The help panel wanted twenty-seven rows, so the help screen drew none of them. A
-    /// count lets a panel take what fits and window the rest. See
-    /// `D-ledger-wins-the-band`.
-    pub panel_rows: usize,
-    /// True when the transient panel fits at all.
-    pub panel: bool,
-    /// True when the composer rules fit.
-    pub composer_border: bool,
-    /// True when at least one composer draft row fits.
-    pub composer_input: bool,
-    /// The count of composer draft rows the band draws, between the two rules.
-    pub composer_rows: usize,
-    /// True when the footer fits.
-    pub footer: bool,
-    /// The count of live rows the band draws.
-    pub live_rows: usize,
-}
-
-/// One batch of final rows, ready for `Terminal::insert_before`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FreezeBatch {
-    /// The rendered lines, oldest first. They carry no style, and `sanitize_line` has
-    /// already run, because the terminal owns these cells after the insert.
-    pub lines: Vec<String>,
-    /// The count of transcript rows the lines cover.
-    pub rows: usize,
-}
-
-/// Draw the band. Pure. No IO. Safe to call every frame.
+/// Draw the whole screen. Pure. No IO. Safe to call every frame.
 pub fn render(state: &TuiState, frame: &mut Frame<'_>) {
     let area = frame.area();
     let width = area.width as usize;
@@ -123,76 +188,190 @@ pub fn render(state: &TuiState, frame: &mut Frame<'_>) {
         return;
     }
 
-    // Build the movable regions, then decide which survive at this height. The
-    // composer is a border pair around one or more input rows.
     let composer = composer_lines(state, width);
     let input_rows = composer.len().saturating_sub(2);
+    // A too-small screen draws no panel, so it asks for none.
     let (panel_want, panel_floor) = panel_demand(state);
-
-    // Decide the band for this height. The footer keeps its row, a panel takes its rows,
-    // the composer scrolls in what remains, and the live rows yield first. See
-    // `D-ledger-wins-the-band`.
-    let band = plan_band_with_floor(area.height, input_rows, panel_want, panel_floor);
-    let panel = panel_lines(state, width, band.panel_rows);
-
-    // Write the surviving regions top to bottom, straight into the buffer.
-    let mut y = 0usize;
-    let live: Vec<(String, Style)> = if state.rows.is_empty() && state.panel == Panel::None {
-        empty_state(state, width, band.live_rows)
+    let layout = plan_screen(area.height, input_rows, panel_want, panel_floor);
+    let (panel_want, panel_floor) = if layout.too_small {
+        (0, 0)
     } else {
-        live_window(state, area.width, band.live_rows as u16)
-            .into_iter()
-            .map(|line| (line, text_style()))
-            .collect()
+        (panel_want, panel_floor)
     };
-    for offset in 0..band.live_rows {
-        match live.get(offset) {
-            Some((text, style)) => put(frame, y, width, text, *style),
-            None => put(frame, y, width, &blank(width), text_style()),
-        }
+    let layout = plan_screen(area.height, input_rows, panel_want, panel_floor);
+
+    let mut y = 0usize;
+    // The banner is one row at the top, when the screen has room for it.
+    if layout.banner {
+        put(
+            frame,
+            y,
+            width,
+            &banner_line(state, width),
+            style_for(Role::Muted),
+        );
         y += 1;
     }
-    if band.panel {
+    // The transcript, windowed by the scroll state and anchored to the newest row.
+    let visible = layout.transcript_rows;
+    let (lines, total) = transcript_window(state, width, visible);
+    let transcript_top = y;
+    for (text, style) in &lines {
+        put(frame, y, width, text, *style);
+        y += 1;
+    }
+    // The rail is one muted column, drawn only when the transcript overflows. It has no
+    // arrows, and its shape is out of scope. It overlays the last column of the
+    // transcript, so it takes no layout row. See section 6 and `Scroll::hidden`.
+    if total > visible && visible > 0 {
+        draw_rail(state, frame, transcript_top, visible, total, width);
+    }
+
+    // The panel, sized to its content.
+    if layout.panel_rows > 0 {
+        let panel = panel_lines(state, width, layout.panel_rows);
         for (text, style) in &panel {
             put(frame, y, width, text, *style);
             y += 1;
         }
     }
-    if band.composer_border {
+    if layout.composer_border {
         let (text, style) = &composer[0];
         put(frame, y, width, text, *style);
         y += 1;
     }
-    if band.composer_input {
+    if layout.composer_rows > 0 {
         // The draft windows to the granted rows, and the last row holds the cursor.
         let draft = &composer[1..composer.len() - 1];
-        let start = draft.len().saturating_sub(band.composer_rows);
+        let start = draft.len().saturating_sub(layout.composer_rows);
         for (text, style) in &draft[start..] {
             put(frame, y, width, text, *style);
             y += 1;
         }
     }
-    if band.composer_border {
+    if layout.composer_border {
         let (text, style) = &composer[composer.len() - 1];
         put(frame, y, width, text, *style);
         y += 1;
     }
-    if band.footer {
+    if layout.footer {
         let (footer, word_at, hint_at) = footer_line(state, width);
-        // The hints are muted, and the activity word is text. One muted row for both made
-        // `done · end turn` as faint as the hints, and a user reported it as invisible.
         put(frame, y, width, &footer, text_style());
         restyle(frame, y, hint_at, width, style_for(Role::Muted));
         apply_sweep(state, frame, y, word_at);
     }
 }
 
+/// The transcript display lines for the window, padded to `visible`, plus the total.
+///
+/// The newest row sits at the bottom, directly above the composer, so a transcript that
+/// underflows the window pads above. A transcript that overflows windows by the scroll
+/// offset. The empty state fills the window when there is nothing to show.
+fn transcript_window(
+    state: &TuiState,
+    width: usize,
+    visible: usize,
+) -> (Vec<(String, Style)>, usize) {
+    if visible == 0 {
+        return (Vec::new(), 0);
+    }
+    if state.rows.is_empty() && state.panel == Panel::None {
+        let block = empty_state(state, width, visible);
+        return (block, visible);
+    }
+    let lines = transcript_lines(state, width);
+    let total = lines.len();
+    if total <= visible {
+        let mut window: Vec<(String, Style)> = Vec::with_capacity(visible);
+        for _ in 0..(visible - total) {
+            window.push((blank(width), text_style()));
+        }
+        window.extend(lines);
+        return (window, total);
+    }
+    let first = state.transcript_offset(total, visible).min(total - visible);
+    let window = lines[first..first + visible].to_vec();
+    (window, total)
+}
+
+/// Every transcript row rendered to display lines, oldest first, with styles kept.
+///
+/// A blank row separates turns and leads the row below it. A run of tool rows stays
+/// together, so the last line is a content line and never a separator.
+fn transcript_lines(state: &TuiState, width: usize) -> Vec<(String, Style)> {
+    let measure = TEXT_MEASURE_CAP.min(width.saturating_sub(TEXT_MEASURE_MARGIN));
+    let mut out: Vec<(String, Style)> = Vec::new();
+    for index in 0..state.rows.len() {
+        let row = &state.rows[index];
+        let is_tool = matches!(row, Row::Tool { .. });
+        let prev_tool = index > 0 && matches!(state.rows[index - 1], Row::Tool { .. });
+        if !(is_tool && prev_tool) {
+            out.push((blank(width), text_style()));
+        }
+        push_row(&mut out, state, index, row, width, measure);
+    }
+    out
+}
+
+/// The transcript metrics for a frame: the total display rows and the window height.
+///
+/// The app loop calls it each frame and writes the pair into the state, so the reducer
+/// clamps a scroll key against the same geometry the renderer draws. One source, so the
+/// clamp and the draw cannot drift. See `D-scroll-keys-yield-to-an-empty-draft`.
+pub fn transcript_metrics(state: &TuiState, width: u16, height: u16) -> (usize, usize) {
+    let width = width as usize;
+    if width == 0 {
+        return (0, 0);
+    }
+    let composer = composer_lines(state, width);
+    let input_rows = composer.len().saturating_sub(2);
+    let (panel_want, panel_floor) = panel_demand(state);
+    let layout = plan_screen(height, input_rows, panel_want, panel_floor);
+    let (panel_want, panel_floor) = if layout.too_small {
+        (0, 0)
+    } else {
+        (panel_want, panel_floor)
+    };
+    let layout = plan_screen(height, input_rows, panel_want, panel_floor);
+    let visible = layout.transcript_rows;
+    if visible == 0 || (state.rows.is_empty() && state.panel == Panel::None) {
+        return (0, visible);
+    }
+    let total = transcript_lines(state, width).len();
+    (total, visible)
+}
+
+/// Draw the scroll rail in the last column, muted, with a plain thumb for the view.
+fn draw_rail(
+    state: &TuiState,
+    frame: &mut Frame<'_>,
+    top: usize,
+    visible: usize,
+    total: usize,
+    width: usize,
+) {
+    let (above, _below) = state.scroll_hidden();
+    let col = width.saturating_sub(1);
+    let thumb = ((visible * visible) / total).max(1).min(visible);
+    let travel = visible - thumb;
+    let hidden = total.saturating_sub(visible).max(1);
+    let thumb_top = (above * travel) / hidden;
+    for row in 0..visible {
+        let style = if row >= thumb_top && row < thumb_top + thumb {
+            text_style()
+        } else {
+            style_for(Role::Muted)
+        };
+        put_char(frame, top + row, col, "\u{2502}", style);
+    }
+}
+
 /// The slash-command index drawn at screen row `row`, if any.
 ///
-/// A mouse click carries a row, and the row means nothing without the layout. So this
-/// asks the same `plan_band` the renderer uses, which keeps one source of truth for the
-/// geometry. It returns `None` when the click misses the list, when no list is open, or
-/// when the band is too short to draw the panel.
+/// A mouse click carries a row, and the row means nothing without the layout. So this asks
+/// the same `plan_screen` the renderer uses, which keeps one source of truth. It returns
+/// `None` when the click misses the list, when no list is open, or when the screen is too
+/// short to draw the panel.
 pub fn slash_row_index(state: &TuiState, width: u16, height: u16, row: u16) -> Option<usize> {
     let Panel::SlashList(list) = &state.panel else {
         return None;
@@ -203,13 +382,14 @@ pub fn slash_row_index(state: &TuiState, width: u16, height: u16, row: u16) -> O
     }
     let composer = composer_lines(state, width as usize);
     let input_rows = composer.len().saturating_sub(2);
-    // The panel is one row for each command, and it draws no rules of its own.
-    let band = plan_band(height, input_rows, count);
-    if !band.panel {
+    let layout = plan_screen(height, input_rows, count, 0);
+    if layout.panel_rows == 0 {
         return None;
     }
-    // The panel sits directly below the live rows, and its first row is the first command.
-    let first_command = band.live_rows;
+    // The panel sits directly below the transcript, and its first row is the first command.
+    // The banner takes the top row when it draws, so the panel starts one row lower. Missing
+    // that row made every click land on the wrong command.
+    let first_command = usize::from(layout.banner) + layout.transcript_rows;
     let clicked = row as usize;
     if clicked >= first_command && clicked < first_command + count {
         Some(clicked - first_command)
@@ -218,93 +398,10 @@ pub fn slash_row_index(state: &TuiState, width: u16, height: u16, row: u16) -> O
     }
 }
 
-/// Plan the band for one frame area. One source of geometry, for the renderer and for
-/// the click mapping.
-///
-/// The live rows always keep at least one row. Regions are added back in keep-priority
-/// order, the reverse of the drop order. A region that cannot fit is skipped, and its
-/// rows fall through to the live area.
-/// Hand out the band's rows in Ledger's rank.
-///
-/// The regions want twenty rows and the band holds fourteen, so the rank decides. The
-/// footer keeps its row. A panel takes its rows next, and `panel_floor` is the count it
-/// never yields. The composer scrolls inside what remains and keeps three rows, which is
-/// one draft row between two rules. The live rows yield first. See
-/// `D-ledger-wins-the-band`.
-///
-/// `panel_floor` is what makes an approval safe. An approval states a destructive command,
-/// so it states the whole of it, including the root the command runs in. An earlier band
-/// dropped that row to fit a tall draft.
-pub fn plan_band(height: u16, input_rows: usize, panel_want: usize) -> Band {
-    plan_band_with_floor(height, input_rows, panel_want, 0)
-}
-
-/// `plan_band`, with a count of panel rows that never yield.
-pub fn plan_band_with_floor(
-    height: u16,
-    input_rows: usize,
-    panel_want: usize,
-    panel_floor: usize,
-) -> Band {
-    const COMPOSER_RULES: usize = 2;
-
-    let mut left = height as usize;
-
-    // 0. The transcript is never erased. It is the reason the band exists, so one live row
-    //    outranks every piece of chrome. A one-row band is all transcript and no chrome.
-    let live_floor = 1.min(left);
-    left -= live_floor;
-
-    // 1. The footer keeps its row. It carries the activity word, so a band without it
-    //    cannot say whether rho works or waits.
-    let footer = left >= 1;
-    left -= usize::from(footer);
-
-    // The composer keeps three rows where it can: one draft row between two rules.
-    let composer_want = input_rows + COMPOSER_RULES;
-    let composer_floor = composer_want.min(COMPOSER_RULES + 1).min(left);
-
-    // 2. The panel takes its rows, and it leaves the composer's three standing. A floor
-    //    outranks the composer's extra rows, because an approval yields nothing.
-    let polite_cap = left.saturating_sub(composer_floor);
-    let mut panel_rows = panel_want.min(polite_cap);
-    let demanded = panel_floor.min(panel_want);
-    if panel_rows < demanded {
-        panel_rows = demanded.min(left.saturating_sub(composer_floor));
-    }
-    left -= panel_rows;
-
-    // 3. The composer scrolls inside what is left. It degrades in one stated order: the
-    //    full draft, then a windowed draft between its rules, then a bare draft row with
-    //    the rules dropped. A row that would draw nothing is never reserved.
-    let (composer_border, composer_rows) = if left >= composer_want {
-        (true, input_rows)
-    } else if left > COMPOSER_RULES {
-        (true, left - COMPOSER_RULES)
-    } else if left >= 1 && input_rows > 0 {
-        (false, left)
-    } else {
-        (false, 0)
-    };
-    left -= composer_rows + if composer_border { COMPOSER_RULES } else { 0 };
-
-    Band {
-        panel_rows,
-        panel: panel_rows > 0,
-        composer_border,
-        composer_input: composer_rows > 0,
-        composer_rows,
-        footer,
-        live_rows: live_floor + left,
-    }
-}
-
 // ---- The banner. ----------------------------------------------------------
 
-/// The one-line banner, frozen above the band when the session starts.
-///
-/// It holds the brand, the working directory, the branch, and the model. These do not
-/// change during a session, so the banner freezes once.
+/// The one-line banner. It holds the brand, the working directory, the branch, and the
+/// model, which do not change during a session.
 pub fn banner_line(state: &TuiState, width: usize) -> String {
     // An empty field draws no separator. The banner once read `ρ rho   ·  · model ·`,
     // because the renderer joined four fields and nothing filled three of them.
@@ -328,102 +425,7 @@ pub fn banner_line(state: &TuiState, width: usize) -> String {
     pad(&text, width)
 }
 
-/// The banner batch to freeze at startup, or `None` when it is already frozen.
-///
-/// The loop holds the `frozen` flag and calls this once. So the scrollback holds one
-/// banner, and a second startup step inserts no second banner. The batch covers no
-/// transcript row, so it never advances `frozen_rows`.
-pub fn banner_freeze(state: &TuiState, width: u16, frozen: bool) -> Option<FreezeBatch> {
-    if frozen {
-        return None;
-    }
-    Some(FreezeBatch {
-        lines: vec![banner_line(state, width as usize)],
-        rows: 0,
-    })
-}
-
-// ---- The live area and the freeze. ----------------------------------------
-
-/// The live rows as text, newest-anchored, one entry per drawn row.
-///
-/// It keeps the newest lines when the live rows do not fit. A line that scrolls out of
-/// the live area reaches the scrollback when its row freezes.
-pub fn live_window(state: &TuiState, width: u16, rows: u16) -> Vec<String> {
-    let rows = rows as usize;
-    if rows == 0 {
-        return Vec::new();
-    }
-    let start = state.frozen_rows.min(state.rows.len());
-    let mut lines = render_rows_plain(state, start, state.rows.len(), width as usize);
-    // Drop any overflow from the top, so the newest row stays visible.
-    if lines.len() > rows {
-        lines.drain(0..lines.len() - rows);
-    }
-    lines
-}
-
-/// The next batch to freeze, or `None` when the oldest unfrozen row is still live.
-///
-/// It takes the longest final prefix, so the scrollback keeps the session order. A row
-/// behind a live row waits, even when the row itself is final.
-pub fn next_freeze(state: &TuiState, width: u16) -> Option<FreezeBatch> {
-    let start = state.frozen_rows.min(state.rows.len());
-    let mut stop = start;
-    while stop < state.rows.len() && row_is_final(state, stop) {
-        stop += 1;
-    }
-    if stop == start {
-        return None;
-    }
-    let lines = render_rows_plain(state, start, stop, width as usize);
-    Some(FreezeBatch {
-        lines,
-        rows: stop - start,
-    })
-}
-
-/// Every remaining row, whatever its state, for the exit path only.
-///
-/// After the loop leaves, no event can arrive, so a row that never finished will never
-/// change again. It freezes as it stands: a running tool row reads `running`, which is the
-/// truth of a cancelled session. The running loop must use `next_freeze` instead, because a
-/// task and a child outlive their turn. See `SPEC-tui-inline-and-composer` section 3.6.
-pub fn freeze_all(state: &TuiState, width: u16) -> Option<FreezeBatch> {
-    let start = state.frozen_rows.min(state.rows.len());
-    let stop = state.rows.len();
-    if stop == start {
-        return None;
-    }
-    let lines = render_rows_plain(state, start, stop, width as usize);
-    Some(FreezeBatch {
-        lines,
-        rows: stop - start,
-    })
-}
-
-/// Render the rows from `start` to `stop` as plain text, oldest first.
-///
-/// A blank row separates turns, and it leads the row below it. A run of tool rows stays
-/// together. So the last line is always a content line, never a blank separator.
-fn render_rows_plain(state: &TuiState, start: usize, stop: usize, width: usize) -> Vec<String> {
-    let measure = TEXT_MEASURE_CAP.min(width.saturating_sub(TEXT_MEASURE_MARGIN));
-    let mut out: Vec<String> = Vec::new();
-    for index in start..stop {
-        let row = &state.rows[index];
-        let is_tool = matches!(row, Row::Tool { .. });
-        let prev_tool = index > 0 && matches!(state.rows[index - 1], Row::Tool { .. });
-        if !(is_tool && prev_tool) {
-            out.push(blank(width));
-        }
-        let mut block: Vec<(String, Style)> = Vec::new();
-        push_row(&mut block, state, index, row, width, measure);
-        for (text, _style) in block {
-            out.push(text);
-        }
-    }
-    out
-}
+// ---- The transcript rows. -------------------------------------------------
 
 /// Render one transcript row into its lines.
 fn push_row(
@@ -625,32 +627,29 @@ fn centre(text: &str, width: usize) -> String {
 
 // ---- The panels. ----------------------------------------------------------
 
-/// The transient panel lines, framed by two full-width rules.
-/// The rows a panel wants, and the rows it never yields.
-///
-/// The floor is what keeps an approval whole. See `D-ledger-wins-the-band`.
+/// The rows a panel wants, and the rows it never yields. The transcript takes what is
+/// left, so a panel takes its whole content on a full screen. An approval yields nothing,
+/// because every row of it is safety information, including the session root. See
+/// `D-ledger-wins-the-band` and `SPEC-tui-alternate-screen` section 6.
 fn panel_demand(state: &TuiState) -> (usize, usize) {
     match &state.panel {
         Panel::None => (0, 0),
-        // An approval yields nothing. Every row of it is safety information.
+        // An approval states every row and yields none.
         Panel::Approval(_) => (APPROVAL_ROWS, APPROVAL_ROWS),
-        // The help window wants the whole table, and it settles for a window.
-        Panel::Help => (1 + bindings().len(), HELP_MIN_ROWS),
-        // The counts below must equal the rows the panel draws. They did not, and the
-        // truncation in `panel_lines` then ate the last command of the palette.
-        Panel::SlashList(list) => (filter_slash_commands(&list.query).len(), 1),
+        // The help draws the whole binding table, because the screen has room. It yields
+        // to the transcript on a short screen, because a truncated help is not unsafe.
+        Panel::Help => (bindings().len(), 0),
+        Panel::SlashList(list) => (filter_slash_commands(&list.query).len(), 0),
         Panel::HistorySearch(search) => {
             let matches = filter_history(&state.history, &search.query).len();
             // The matches, or one row saying there were none, plus the query row.
-            (matches.clamp(1, HISTORY_MATCH_ROWS) + 1, 2)
+            (matches.clamp(1, HISTORY_MATCH_ROWS) + 1, 0)
         }
     }
 }
 
 /// The approval panel is four rows: the request, the command, the root, and the choices.
 const APPROVAL_ROWS: usize = 4;
-/// The help window never shrinks below a header and two keys.
-const HELP_MIN_ROWS: usize = 3;
 
 fn panel_lines(state: &TuiState, width: usize, budget: usize) -> Vec<(String, Style)> {
     if budget == 0 {
@@ -660,11 +659,11 @@ fn panel_lines(state: &TuiState, width: usize, budget: usize) -> Vec<(String, St
         Panel::None => Vec::new(),
         Panel::Approval(approval) => approval_panel(approval, width),
         Panel::SlashList(list) => slash_panel(list, width),
-        Panel::Help => help_panel(width, budget, state.help_offset),
+        Panel::Help => help_panel(width),
         Panel::HistorySearch(search) => history_search_panel(search, &state.history, width),
     };
-    // A panel never overruns its grant. It windowed itself where it could, and this is the
-    // backstop that keeps the band's arithmetic honest.
+    // A panel never overruns its grant. This is the backstop that keeps the arithmetic
+    // honest when the screen is short.
     lines.truncate(budget);
     lines
 }
@@ -768,66 +767,35 @@ fn slash_panel(list: &SlashList, width: usize) -> Vec<(String, Style)> {
     lines
 }
 
-/// The help window: a counted header, then as many keys as the band granted.
+/// The help panel: the whole binding table, one row per key.
 ///
-/// The table is longer than the band. This panel once drew every row, so `plan_band`
-/// granted it nothing and the help screen showed **no keys at all**, while a frame fixture
-/// pinned that blank output as correct. Now it windows, and it states its own position.
+/// rho owns the whole screen now, so the panel draws every binding and needs no window,
+/// no counted header, and no scroll. The old window showed eight rows and drew zero when
+/// the band could not grant its header row. See `SPEC-tui-alternate-screen` section 6.
 ///
-/// The total comes from `bindings()`, never from a literal, so adding or removing a
-/// binding can never make the header lie.
-/// The count of help key rows a band of `height` rows can draw.
-///
-/// The reducer clamps a scroll key with this, and `help_panel` draws with it. One function
-/// serves both, because two copies of a geometry rule drift, and a drifted clamp banks key
-/// presses that the screen never answers.
-pub fn help_visible_rows(height: u16) -> usize {
-    // The help opens over an empty draft, so the composer asks for its one row.
-    let band = plan_band_with_floor(height, 1, 1 + bindings().len(), HELP_MIN_ROWS);
-    // One granted row pays for the counted header.
-    band.panel_rows.saturating_sub(1)
-}
-
-fn help_panel(width: usize, budget: usize, offset: usize) -> Vec<(String, Style)> {
+/// The rows come from `bindings()`, never from a literal, so adding or removing a binding
+/// changes the help with no other edit.
+fn help_panel(width: usize) -> Vec<(String, Style)> {
     let muted = style_for(Role::Muted);
-    let table = bindings();
-    let total = table.len();
-    // One row of the grant pays for the header, and the keys take the rest.
-    let keys = budget.saturating_sub(1).min(total);
-    if keys == 0 {
-        return Vec::new();
-    }
-    // The window stops at the last row. A list that scrolls past its end draws blank rows,
-    // and a blank row reads as a defect.
-    let first = offset.min(total - keys);
-    let last = first + keys;
-    let header_left = format!("  keys  {}-{} of {total}", first + 1, last);
-    let above = first;
-    let below = total - last;
-    let header_right = match (above, below) {
-        (0, 0) => String::new(),
-        (0, n) => format!("↓ {n} more below"),
-        (n, 0) => format!("↑ {n} more above"),
-        (up, down) => format!("↑ {up} · ↓ {down}"),
-    };
-    let mut lines = vec![(justify(&header_left, &header_right, width), muted)];
-    for binding in table.iter().skip(first).take(keys) {
-        // An unwired binding says so, so the help never promises a key that answers
-        // nothing. See `D-a-panel-nobody-can-open`.
-        let (note, style) = if binding.built {
-            ("", text_style())
-        } else {
-            (" · not built yet", muted)
-        };
-        lines.push((
-            pad(
-                &format!("  {:<15}{}{note}", binding.keys, binding.summary),
-                width,
-            ),
-            style,
-        ));
-    }
-    lines
+    bindings()
+        .iter()
+        .map(|binding| {
+            // An unwired binding says so, so the help never promises a key that answers
+            // nothing. See `D-a-panel-nobody-can-open`.
+            let (note, style) = if binding.built {
+                ("", text_style())
+            } else {
+                (" · not built yet", muted)
+            };
+            (
+                pad(
+                    &format!("  {:<15}{}{note}", binding.keys, binding.summary),
+                    width,
+                ),
+                style,
+            )
+        })
+        .collect()
 }
 
 // ---- The composer. --------------------------------------------------------
@@ -1004,7 +972,7 @@ fn footer_hints(state: &TuiState, width: usize) -> &'static str {
     }
     match &state.panel {
         Panel::SlashList(_) => "↑ ↓ choose · enter run · esc close",
-        Panel::Help => "↑ ↓ scroll · esc close · / lists commands",
+        Panel::Help => "esc close · / lists commands",
         Panel::HistorySearch(_) => "type to search · enter accept · esc close",
         Panel::Approval(_) => "ctrl-c cancel · / commands · ? help",
         Panel::None => {
@@ -1069,6 +1037,14 @@ fn put(frame: &mut Frame<'_>, y: usize, width: usize, text: &str, style: Style) 
     let area = frame.area();
     let (x, row) = (area.x, area.y + y as u16);
     frame.buffer_mut().set_stringn(x, row, text, width, style);
+}
+
+/// Write one cell at column `col`, row `y` from the frame top, for the scroll rail.
+fn put_char(frame: &mut Frame<'_>, y: usize, col: usize, text: &str, style: Style) {
+    let area = frame.area();
+    let x = area.x + col as u16;
+    let row = area.y + y as u16;
+    frame.buffer_mut().set_stringn(x, row, text, 1, style);
 }
 
 /// A run of `width` spaces.

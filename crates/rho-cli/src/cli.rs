@@ -57,14 +57,23 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = SandboxArg::Off)]
     pub sandbox: SandboxArg,
 
-    /// Let the TUI capture the mouse, so the wheel scrolls the band and a click
+    /// Let the TUI capture the mouse, so the wheel scrolls the transcript and a click
     /// selects a list row.
     ///
-    /// Off by default, because capture takes drag-select away from the terminal. With
-    /// capture off, the wheel, a drag, and the terminal search all work on the
-    /// transcript. See decision D-native-selection-is-the-default.
+    /// On by default. rho owns the alternate screen, which has no scrollback, so the wheel
+    /// is the only way to scroll. Pass `--no-mouse` to give the mouse back to the terminal.
+    /// Option and drag still selects text in Ghostty and in iTerm2. See decision
+    /// D-the-wheel-needs-capture.
     #[arg(long, global = true)]
     pub mouse: bool,
+
+    /// Give the mouse back to the terminal, so a drag selects text without a modifier.
+    ///
+    /// It wins over `--mouse`, over the config, and over the environment. The wheel then
+    /// does nothing, because the alternate screen has no scrollback. See decision
+    /// D-the-wheel-needs-capture.
+    #[arg(long = "no-mouse", global = true, conflicts_with = "mouse")]
+    pub no_mouse: bool,
 
     /// Load skills that live in this repository.
     ///
@@ -403,13 +412,21 @@ fn rho_env_vars() -> Vec<(String, String)> {
 ///
 /// `--mouse` and `RHO_TUI_MOUSE` both reach this. The config file does not, because no
 /// binary reads a config file yet. See decision D-the-layered-config-has-no-caller.
-fn resolve_mouse(flag: bool, env: &[(String, String)]) -> bool {
+/// Whether the TUI captures the mouse. `--no-mouse` wins, then `--mouse`, then the
+/// environment, then the default, which is on.
+///
+/// The default flipped with `D-the-wheel-needs-capture`. rho owns the alternate screen, and
+/// that screen has no scrollback, so with capture off the wheel does nothing at all.
+fn resolve_mouse(flag: bool, no_flag: bool, env: &[(String, String)]) -> bool {
+    if no_flag {
+        return false;
+    }
     if flag {
         return true;
     }
     rho_config::ConfigLayer::from_env(env)
         .tui_mouse
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// Run the interactive TUI. Return a non-zero code on failure.
@@ -423,7 +440,7 @@ async fn run_interactive(cli: &Cli) -> i32 {
     let provider_name = provider::resolve_provider_name(cli.provider.as_deref(), None)
         .unwrap_or_else(|_| String::new());
     // The interface reads one switch. The flag wins, then the environment, then off.
-    let mouse = resolve_mouse(cli.mouse, &rho_env_vars());
+    let mouse = resolve_mouse(cli.mouse, cli.no_mouse, &rho_env_vars());
     // Hold `_tasks` and `_extras` for the whole run. Dropping the task registry kills
     // every background task, and dropping the MCP pool stops every server, so an early
     // drop would end work the model is still waiting on.
@@ -622,24 +639,40 @@ mod mouse_tests {
     }
 
     #[test]
-    fn the_mouse_is_off_by_default() {
-        assert!(!resolve_mouse(false, &[]));
+    fn the_mouse_is_on_by_default() {
+        // The default flipped with `D-the-wheel-needs-capture`. The alternate screen has no
+        // scrollback, so with capture off the wheel does nothing at all.
+        assert!(resolve_mouse(false, false, &[]));
     }
 
     #[test]
-    fn the_flag_turns_the_mouse_on() {
-        assert!(resolve_mouse(true, &[]));
+    fn the_no_mouse_flag_gives_the_mouse_back() {
+        assert!(!resolve_mouse(false, true, &[]));
     }
 
     #[test]
-    fn the_env_var_turns_the_mouse_on() {
-        assert!(resolve_mouse(false, &env(&[("RHO_TUI_MOUSE", "true")])));
-    }
-
-    #[test]
-    fn a_bad_env_value_leaves_the_mouse_off() {
-        // The layer omits an unaccepted boolean, so the resolution fails closed.
+    fn the_no_mouse_flag_wins_over_the_env_var() {
         assert!(!resolve_mouse(
+            false,
+            true,
+            &env(&[("RHO_TUI_MOUSE", "true")])
+        ));
+    }
+
+    #[test]
+    fn the_env_var_can_turn_the_mouse_off() {
+        assert!(!resolve_mouse(
+            false,
+            false,
+            &env(&[("RHO_TUI_MOUSE", "false")])
+        ));
+    }
+
+    #[test]
+    fn a_bad_env_value_keeps_the_default() {
+        // The layer omits an unaccepted boolean, so the resolution keeps the default.
+        assert!(resolve_mouse(
+            false,
             false,
             &env(&[("RHO_TUI_MOUSE", "yes please")])
         ));

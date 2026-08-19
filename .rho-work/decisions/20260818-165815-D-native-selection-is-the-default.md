@@ -20,3 +20,12 @@ The keyboard covers what capture would give us. `⇞ ⇟`, `ctrl-home`, and `ctr
 **Rules out:** Capture on by default. Capture as a build-time constant. A wheel handler that
 only works when capture is on by default. Any claim that the list needs a mouse, because the
 list already answers four keys.
+
+---
+
+**Superseded on 2026-08-19 by `D-the-wheel-needs-capture`.**
+
+The reason above rests on the terminal keeping its own wheel. That is true for an inline
+band, and false in the alternate screen, where there is no scrollback for a wheel to scroll.
+So capture off now means no wheel at all. Capture is on by default, and `--no-mouse` turns
+it off.

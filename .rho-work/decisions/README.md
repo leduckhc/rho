@@ -73,6 +73,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-slug-ids](20260818-041358-D-slug-ids.md) | 20260818 | An artifact is named by a timestamp and a slug, never by a counter |
 | [D-sprint-one-hook-interfaces](20260817-170455-D-sprint-one-hook-interfaces.md) | 20260817 | The Hook trait and the approval gate are sprint-1 interfaces |
 | [D-staged-server-serves-every-connection](20260818-043346-D-staged-server-serves-every-connection.md) | 20260818 | A test double must answer every connection |
+| [D-the-wheel-needs-capture](20260819-120429-D-the-wheel-needs-capture.md) | 20260819 | rho captures the mouse, because the wheel is the only way to scroll |
 | [D-three-tiers](20260817-232444-D-three-tiers.md) | 20260817 | Three tiers, named for what each contributes |
 | [D-todo-in-a-green-stage](20260817-175834-D-todo-in-a-green-stage.md) | 20260817 | Three `todo!()` bodies survived stage S4, and one is a security boundary |
 | [D-truncated-tail-warns](20260818-014343-D-truncated-tail-warns.md) | 20260818 | Resume drops a truncated last line and warns, and keeps every whole record |
