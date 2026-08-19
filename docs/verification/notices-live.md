@@ -640,6 +640,32 @@ ratatui to drop an escape and calling that a defence. A guarantee that lives in 
 when the dependency changes, and it does not travel to a log, a clipboard write, or another backend.
 
 **The clip stays, for the second reason, and the code now says so.** It costs one comparison per run
-and it makes `put`'s promise true in rho's own code. The comment states plainly that this is defence
-in depth and not a tested guarantee, because the one honest thing to avoid here is a claim that a test
-backs it.
+and it makes `put`'s promise true in rho's own code. The comment states plainly that this is defence in
+depth and not a tested guarantee. The one thing to avoid is a claim that a test backs it.
+
+## The gate command that could not fail
+
+CI rejected two pushes in a row for a prose violation that a local gate run had just reported. The
+cause was not carelessness twice. It was the tool.
+
+**`bench/check-prose.py` printed `VIOLATIONS 1` and exited 0.** It had no `sys.exit` at all, so it was
+the one gate command that could not fail. `check-ids.py` beside it already exits with its count. CI
+caught both pushes only because CI pipes the output through `tee` and greps for `VIOLATIONS 0`, rather
+than trusting the status.
+
+That made two different mistakes look like the same one:
+
+- The first push chained `git commit` after `check-prose.py | tail -1`. A pipe throws away the exit
+  code, so the commit ran after a failure.
+- The second used `set -e` with the output discarded. That is the correct shape, and it still passed,
+  because the status was 0 no matter what the script found.
+
+Two fixes, so the local gate matches CI:
+
+- `check-prose.py` now exits 1 when it reports a violation. CI is unaffected, because its pipeline
+  status comes from `tee` and the grep still decides.
+- **AGENTS.md's Gate section never listed `check-prose.py`.** It listed six commands and CI enforces
+  seven. The prose rule was documented in its own section and left out of the list a person actually
+  runs, which is how it stayed missing.
+
+Checked both ways: a file with a 27 word sentence now exits 1, and the repository's own docs exit 0.

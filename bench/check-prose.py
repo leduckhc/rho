@@ -21,3 +21,13 @@ for p in sys.argv[1:]:
                 if len(w)>20:
                     print(f"{p}:{ln} {len(w)}w: {s.strip()[:110]}"); bad+=1
 print("VIOLATIONS", bad)
+# Exit non-zero when a rule is broken, so the gate command in AGENTS.md can actually fail.
+#
+# This script returned 0 whatever it found, so `set -e` and any exit-code check were worthless
+# against it, and it was the only gate command that could not fail. CI caught two violations that a
+# local gate run had reported and discarded, because CI greps the output instead of trusting the
+# status. `check-ids.py` already exits with its count, and now so does this.
+#
+# CI is unaffected: it pipes into `tee`, so the pipeline status comes from `tee` and the grep still
+# decides.
+raise SystemExit(1 if bad else 0)

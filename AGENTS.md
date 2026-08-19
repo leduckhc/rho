@@ -318,6 +318,7 @@ cargo test --workspace --all-features
 cargo build -p rho-cli --no-default-features --features minimal
 cargo test -p rho-cli --no-default-features --features minimal --no-run
 python3 bench/check-ids.py
+python3 bench/check-prose.py $(find docs -name '*.md')
 ```
 
 `bench/check-ids.py` proves that every spec, ADR, decision, and feature reference resolves,
