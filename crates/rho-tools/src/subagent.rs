@@ -282,11 +282,23 @@ async fn start_background_child(
     let id = spawn.node.id();
     let _ = id_tx.send(Ok(id));
 
-    let finished = finish_child(env, agent, prompt, artifacts, cancel, events, spawn).await;
-    // Remember the outcome, so a later poll answers rather than finding nothing.
-    env.node
-        .registry()
-        .record_report(&env.node, id, finished.report);
+    // A refusal is recorded as a failed report, so a parent that polls learns why
+    // rather than finding nothing. The report is built here, by the one caller that
+    // needs one, instead of every refusal inventing a fake one with zero turns.
+    let report = match finish_child(env, agent, prompt, artifacts, cancel, events, spawn).await {
+        Ok(finished) => finished.report,
+        Err(refusal) => rho_core::AgentReport {
+            agent: agent.to_string(),
+            outcome: AgentOutcome::Failed { reason: refusal },
+            summary: String::new(),
+            usage: Default::default(),
+            turns: 0,
+            gate: Default::default(),
+            claims: Default::default(),
+            transcript: None,
+        },
+    };
+    env.node.registry().record_report(&env.node, id, report);
     Ok(())
 }
 
@@ -331,9 +343,11 @@ async fn run_one_child(
         Err(refusal) => return error_result(refusal.to_string()),
     };
 
-    finish_child(env, agent, prompt, artifacts, cancel, events, spawn)
-        .await
-        .output
+    // A refusal after the reservation is a result for the model, not a fault.
+    match finish_child(env, agent, prompt, artifacts, cancel, events, spawn).await {
+        Ok(finished) => finished.output,
+        Err(refusal) => error_result(refusal),
+    }
 }
 
 /// What a finished child produced: the text for the parent, and the report.
@@ -343,26 +357,6 @@ async fn run_one_child(
 struct ChildOutput {
     output: ToolOutput,
     report: rho_core::AgentReport,
-}
-
-/// A refusal that happened after the reservation, as a `ChildOutput`.
-///
-/// `finish_child` must always hand back a report, because the background path records
-/// one. A refusal is reported as a failed child rather than as a missing report.
-fn refused_child(agent: &str, reason: String) -> ChildOutput {
-    ChildOutput {
-        output: error_result(reason.clone()),
-        report: rho_core::AgentReport {
-            agent: agent.to_string(),
-            outcome: AgentOutcome::Failed { reason },
-            summary: String::new(),
-            usage: Default::default(),
-            turns: 0,
-            gate: Default::default(),
-            claims: Default::default(),
-            transcript: None,
-        },
-    }
 }
 
 /// Run a child that already holds its reservation, and build the parent's result.
@@ -554,7 +548,7 @@ async fn finish_child(
     cancel: rho_core::CancelToken,
     events: &tokio::sync::mpsc::Sender<rho_core::AgentEvent>,
     spawn: rho_core::ChildSpawn,
-) -> ChildOutput {
+) -> Result<ChildOutput, String> {
     let def = env
         .definitions
         .get(agent)
@@ -574,7 +568,7 @@ async fn finish_child(
     // Confinement lives in `build_child`, so this function reads as a sequence.
     let (child, intersection) = match build_child(env, def, spawn.queue()).await {
         Ok(pair) => pair,
-        Err(refusal) => return refused_child(agent, refusal.to_string()),
+        Err(refusal) => return Err(refusal.to_string()),
     };
 
     // JSONL content, so a JSONL extension. A reader should not have to guess.
@@ -648,7 +642,7 @@ async fn finish_child(
     ) {
         let key = format!("{}\u{1f}{}", agent, work);
         if let Err(capped) = env.retries.record_death(&key) {
-            return refused_child(agent, capped.to_string());
+            return Err(capped.to_string());
         }
     }
 
@@ -658,7 +652,7 @@ async fn finish_child(
     } else {
         ToolOutput::text(text)
     };
-    ChildOutput { output, report }
+    Ok(ChildOutput { output, report })
 }
 
 /// One task in a fan-out.
