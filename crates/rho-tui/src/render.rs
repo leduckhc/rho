@@ -1365,7 +1365,7 @@ fn markdown_role(kind: MarkdownKind) -> Role {
         MarkdownKind::Heading => Role::MdHeading,
         MarkdownKind::Fence => Role::Muted,
         MarkdownKind::CodeBlock => Role::MdCodeBlock,
-        MarkdownKind::Quote => Role::Muted,
+        MarkdownKind::Quote => Role::MdQuote,
         // The item text keeps the body colour. Measured against pi, which colours only the
         // marker and leaves the text default: colouring a whole item accent was louder than
         // the prior art and harder to read, and phase 1 cannot colour a glyph alone.
@@ -1484,7 +1484,7 @@ fn text_style() -> Style {
 /// `caution` keeps its bold weight, because the design gives the approval panel a stronger
 /// weight in every mode. No other role carries a modifier here.
 fn style_for(role: Role) -> Style {
-    let style = match role_256(role) {
+    let mut style = match role_256(role) {
         Some(index) => Style::default().fg(Color::Indexed(index)),
         None => Style::default(),
     };
@@ -1493,8 +1493,12 @@ fn style_for(role: Role) -> Style {
     // `role_16` already states the weight for every role, and the exhaustive match there means
     // a new role cannot forget it. This changes no existing appearance: `Caution` is the only
     // old role the table marks bold.
-    if role_16(role).bold {
-        return style.add_modifier(Modifier::BOLD);
+    let table = role_16(role);
+    if table.bold {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if table.italic {
+        style = style.add_modifier(Modifier::ITALIC);
     }
     style
 }

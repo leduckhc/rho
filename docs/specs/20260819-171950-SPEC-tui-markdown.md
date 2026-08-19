@@ -116,7 +116,7 @@ what it rules out.
 | the fence line itself | the fence and its language | `Muted` |
 | `- item`, `* item`, `+ item` | `•` then the text | `Text` |
 | `1. item` | the number kept, then the text | `Text` |
-| `> quote` | `┃` then the text | `Muted` |
+| `> quote` | `┃` then the text, leaning | `MdQuote`, dim and italic |
 | `---`, `***`, `___` | a full-width rule | `Muted` |
 
 **Two roles are new, not six.** The first draft minted six `Md*` roles, and review called that
@@ -124,8 +124,9 @@ vocabulary pollution: a role couples one feature to a shared enum, and every rol
 to `Role`, `Role::ALL`, and three mapping functions.
 
 Shipped: `MdHeading`, because no role carries a colour with the bold weight, and `MdCodeBlock`,
-because no role reads as "not prose". A fence and a quote reuse `Muted`. A list item reuses `Text`,
-matching pi, which leaves item text at the body colour. Phase 2 adds `MdCode` only if `MdCodeBlock` proves wrong for an inline span.
+because no role reads as "not prose". A fence reuses `Muted`, and a list item reuses `Text`, matching
+pi, which leaves item text at the body colour. `MdQuote` returned when the quote gained its lean,
+because no other role carries dim with italic. Phase 2 adds `MdCode` only if `MdCodeBlock` proves wrong for an inline span.
 
 `style_for` also stopped naming a role. It read `if role == Role::Caution`, so every bold role
 needed an edit to shared code. It now reads the weight from `role_16`, which the exhaustive
@@ -203,7 +204,8 @@ whole line. `bench/tui_frame.py` must show no regression beyond noise, and the n
 - `arithmetic_is_not_italic` — `2 * 3 * 4`
 - `an_underscore_inside_a_word_is_not_italic` — `wrap_block`
 - `a_bullet_keeps_its_text_and_colours_only_the_glyph`
-- `a_quote_takes_the_quote_role`
+- `a_quote_takes_a_bar_and_the_quote_kind`
+- `a_quote_draws_italic_and_quiet`
 - `a_rule_draws_full_width`
 
 ### The contract

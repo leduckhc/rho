@@ -489,3 +489,18 @@ cheap and it keeps paying: write the break that the rule must catch, and watch.
 with `str::find`, which returns a byte offset. A rule glyph is three bytes, so the rule row
 reported 27 where the header reported 9. Alignment is a display property and is now measured in
 display columns. The same mistake was made once before on this project, in the frame fixtures.
+
+## A blockquote leans
+
+The owner asked for an italic blockquote. pi italicises one and jcode does not, so this follows
+pi. Verified live on Bedrock: both lines of a two-line quote lean, stay dim, and keep the bar. The
+screenshot is `shots/14-italic-blockquote.png`.
+
+The change went into the role table and not into the renderer. `RoleStyle` had `color`, `dim`,
+`bold`, and `reversed`, so a lean had nowhere to live and `MdItalic` was faking one with
+`reversed` in the no-colour mode. `RoleStyle` now has an `italic` field, `style_for` reads it, and
+`MdItalic` states a real lean instead of a stand-in.
+
+`MdQuote` also returned as its own role. It was folded into `Muted` when a quote was only quiet,
+and a quiet lean is a meaning no other role carries. The rule stays the same as when six roles
+were trimmed to two: a role exists only when no current role says the thing.

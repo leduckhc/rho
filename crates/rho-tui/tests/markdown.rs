@@ -437,3 +437,31 @@ fn a_list_item_keeps_the_body_colour() {
         "a list item reads as body text, not as an accent"
     );
 }
+
+#[test]
+fn a_quote_draws_italic_and_quiet() {
+    // A quote is someone else's voice, so it leans. pi italicises a blockquote and jcode does
+    // not; the owner asked for italic. It stays quiet as well, because a quote is not the answer.
+    let rows = drawn("> a quoted line\nplain prose", 60);
+    let quote = rows
+        .iter()
+        .find(|(text, _)| text.contains("a quoted line"))
+        .expect("the quote draws");
+    let prose = rows
+        .iter()
+        .find(|(text, _)| text.trim() == "plain prose")
+        .expect("the prose draws");
+    assert!(
+        quote.1.add_modifier.contains(Modifier::ITALIC),
+        "a quote leans: {:?}",
+        quote.1
+    );
+    assert!(
+        !prose.1.add_modifier.contains(Modifier::ITALIC),
+        "prose does not"
+    );
+    assert_ne!(
+        quote.1.fg, prose.1.fg,
+        "and a quote stays quieter than the answer"
+    );
+}

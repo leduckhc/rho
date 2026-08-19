@@ -28,6 +28,9 @@ pub enum Role {
     /// Inline italic. Coloured for the same reason, and more urgently: many terminals draw no
     /// italic at all.
     MdItalic,
+    /// A quoted line and its bar. Quiet and leaning: a quote is someone else's voice. It is its
+    /// own role again because no existing role carries dim with a lean.
+    MdQuote,
     /// An inline code span. Measured against pi, which gives it RGB 138,190,183, and jcode,
     /// which adds a background. rho takes the foreground only, because `RoleStyle` has no
     /// background field and adding one is a contract change. See `SPEC-tui-markdown` 3a item 6.
@@ -36,7 +39,7 @@ pub enum Role {
 
 impl Role {
     /// Every role, so a test proves each one has all three mappings.
-    pub const ALL: [Role; 11] = [
+    pub const ALL: [Role; 12] = [
         Role::Text,
         Role::Muted,
         Role::Accent,
@@ -48,6 +51,7 @@ impl Role {
         Role::MdCode,
         Role::MdBold,
         Role::MdItalic,
+        Role::MdQuote,
     ];
 }
 
@@ -67,6 +71,9 @@ pub struct RoleStyle {
     pub color: Ansi16,
     pub dim: bool,
     pub bold: bool,
+    /// A leaning weight. Added for the quote and the inline italic role: both mean "this is not
+    /// the answer's own voice", and no colour says that on its own.
+    pub italic: bool,
     pub reversed: bool,
 }
 
@@ -77,6 +84,7 @@ impl RoleStyle {
             color: Ansi16::Default,
             dim: false,
             bold: false,
+            italic: false,
             reversed: false,
         }
     }
@@ -103,6 +111,7 @@ pub fn role_256(role: Role) -> Option<u8> {
         // Bold reads brighter than body text. Italic reads warmer, so the two never blur.
         Role::MdBold => Some(231),
         Role::MdItalic => Some(180),
+        Role::MdQuote => Some(245),
     }
 }
 
@@ -147,7 +156,13 @@ pub fn role_16(role: Role) -> RoleStyle {
             ..RoleStyle::plain()
         },
         Role::MdItalic => RoleStyle {
+            italic: true,
             color: Ansi16::Yellow,
+            ..RoleStyle::plain()
+        },
+        Role::MdQuote => RoleStyle {
+            dim: true,
+            italic: true,
             ..RoleStyle::plain()
         },
     }
@@ -186,8 +201,14 @@ pub fn role_none(role: Role) -> RoleStyle {
             bold: true,
             ..RoleStyle::plain()
         },
+        // With no colour the lean is the whole signal, which is why the field exists.
         Role::MdItalic => RoleStyle {
-            reversed: true,
+            italic: true,
+            ..RoleStyle::plain()
+        },
+        Role::MdQuote => RoleStyle {
+            dim: true,
+            italic: true,
             ..RoleStyle::plain()
         },
     }
