@@ -585,6 +585,12 @@ Two lessons, and the second is the sharper one:
 
 12. **Read the diff of every file you stage, including one you did not edit.** `git add -A` in a
    tree with more than one writer will commit another writer's work under your message.
-13. **A blocker report written from someone else's in-flight state is a guess.** It named a
+13. **The shared tree cuts both ways, so verify authorship before and after you commit.** The
+   controller once committed a second writer's file under its own message. Later the second writer
+   committed the controller's work under a bare subject line, with none of the reasoning: no rail
+   column cycle, no fixture regeneration, no note of the narrow-notice regression. The content was
+   right and the record was thin, and an unpushed commit can be amended, so it was. Check
+   `git log -1` before you write a commit, not only `git status`.
+14. **A blocker report written from someone else's in-flight state is a guess.** It named a
    function that does not exist and a cause that was not the cause. A failing test is evidence;
    an observed failing test explained by a third party is not.
