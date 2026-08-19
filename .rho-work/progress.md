@@ -506,8 +506,47 @@ between the notices in `rho-cli` and the screen guard in `rho-tui`. One of the h
 says a project skill stays unloaded until the owner trusts it. The owner needs to read that
 line.
 
-### The lesson this handover adds
+### What the new controller then closed
+
+| Item | State | Evidence |
+| --- | --- | --- |
+| The startup warnings are invisible | **fixed** | `d629260`. Startup writes zero bytes to the primary screen. `docs/verification/notices-live.md` |
+| Three `docs/features.md` rows contradict the code | **fixed** | `d629260`. The three are now `superseded` rows naming their replacement. Four new rows describe the code |
+| Three tests the spec names do not exist | **fixed** | `9599586`. `crates/rho-tui/tests/layout.rs`, ten tests |
+| `plan_screen` is public and has no direct test | **fixed** | `9599586`. Four deliberate breaks, and the one that tripped nothing is recorded below |
+| The reasoning spec is untracked | **fixed** | `e08b190` in `../rho-reasoning`. 1668 lines, labelled `wip`, unreviewed |
+| Bedrock drops a thinking block from a request | **open** | `crates/rho-provider-bedrock/src/lib.rs:613` is still `_ => {}` |
+| The branch is unpushed, and CI has seen none of it | **fixed** | Pushed. Pull request 1. All ten CI jobs pass, macOS included |
+
+The test count went from 815 to 838.
+
+Two defects were found after the handover, and neither by a test that existed:
+
+**A review found the notice defect again, at a narrower size.** Every render test used width
+100. The notice wrap width reached zero at width 24 or less, so the whole message vanished and
+only the label drew. The reviewer put the bound at 21, and measuring put it at 24. The estimate
+was optimistic, and the measurement decided.
+
+**The first CI run failed on macOS, and the failure was a false alarm.**
+`a_command_child_inherits_only_the_allowlist` probed `SHELL`. On macOS `/bin/sh` fills `SHELL`
+from the password database, so the child printed the parent's value with no leak at all. For
+`SHELL` a real leak cannot be told apart from the invention, so the probe could never prove
+anything. It passed on a developer machine only because `TERM` was set there and came first.
+
+### The lessons this handover adds
 
 7. **A deleted feature leaves a false row behind.** Commit `a72c987` removed the freeze
    machinery and left `F-freeze-upward` claiming it shipped. Step 13 is not paperwork. A row
    that outlives its code misleads the next reader.
+8. **A test that never varies one input has not tested that input.** Every render test used
+   width 100, and a notice lost its whole message below width 25. Sweep the dimension, do not
+   sample it once.
+9. **Pick the break that the guard must catch, not the break that is easy.** Deleting the
+   panel floor tripped nothing, because the test asked for a height where the floor decides
+   nothing. Find the input band where the rule binds, then break it there.
+10. **A probe a shell can invent is not a probe.** A credential leak test read `SHELL`, which
+   macOS `/bin/sh` fills from the password database. The test now measures a cleared child
+   first and refuses to run if the probe is already present.
+11. **Building a feature profile does not compile its tests.** A `#[cfg]` on a helper left its
+   test module behind, and `cargo build --features minimal` stayed green while the minimal test
+   build broke. The gate and CI now run `--no-run` on that profile.
