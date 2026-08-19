@@ -313,7 +313,11 @@ pub fn test_config() -> rho_core::SessionConfig {
     )
 }
 
-/// A tool that always returns `Err`. Used to prove that a tool failure returns to
+/// An approval policy that approves every tool call.
+pub fn allow_all() -> impl rho_core::ApprovalPolicy {
+    rho_core::AllowAllPolicy
+}
+
 /// the model as an error result, rather than killing the run.
 pub struct FailingTool {
     name: String,

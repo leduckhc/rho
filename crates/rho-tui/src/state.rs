@@ -173,6 +173,11 @@ pub struct TuiState {
     pub model: String,
     /// True after a first Ctrl-C while idle. A second Ctrl-C then exits.
     pub exit_armed: bool,
+    /// How many steering messages wait for the next turn boundary.
+    ///
+    /// The composer shows this, so the user knows a message is pending rather than
+    /// lost. It returns to zero when the driver delivers them. See `SPEC-steering`.
+    pub queued_messages: usize,
     /// Set when the run ends. Drives the status line.
     pub last_stop: Option<AgentStopReason>,
     /// The tool name and id for each tool-call index seen in the stream.
@@ -287,6 +292,11 @@ impl TuiState {
             AgentEvent::ToolUpdate { id, output } => self.on_tool_update(id, output),
             AgentEvent::ToolEnd { id, output } => self.on_tool_end(id, output.is_error, now_millis),
             AgentEvent::TurnEnd { .. } => {}
+            // A steering message is a state change the transcript does not own. The
+            // composer shows what is pending, so the reducer holds the count and
+            // adds no row. See `SPEC-steering` section 8.
+            AgentEvent::MessageQueued { position } => self.queued_messages = *position,
+            AgentEvent::MessageDelivered { .. } => self.queued_messages = 0,
             AgentEvent::AgentSpawned { id, agent, depth } => {
                 self.on_agent_spawned(id.0, agent, *depth, now_millis)
             }

@@ -86,6 +86,10 @@ pub enum AgentEvent {
     },
     /// The run is fully settled. No further turn will run.
     AgentEnd { stop_reason: AgentStopReason },
+    /// A user message was queued while a turn ran. `position` counts from one.
+    MessageQueued { position: usize },
+    /// Queued messages reached the model at a turn boundary. `count` is how many.
+    MessageDelivered { count: usize },
     /// A subagent was spawned under this session. See SPEC-subagents section 9.
     ///
     /// These variants are new, not reused `TaskStart` ones. A task is an
@@ -176,10 +180,14 @@ pub struct SessionConfig {
     /// default is stated here, not hidden. Use `with_sandbox` to change it. See
     /// `SPEC-bash-sandbox` and decision D-bash-os-sandbox.
     pub sandbox: SandboxMode,
+    /// The bounded steering queue. New messages enqueued during a run are delivered
+    /// at a turn boundary. Defaults to a queue with the standard capacity.
+    pub queue: crate::MessageQueue,
 }
 
 impl SessionConfig {
     /// Build a config with an explicit model, root, and policy. The turn cap uses
+    /// the provider default. The queue uses the standard capacity.
     /// the `AgentConfig` default.
     pub fn new(
         model: impl Into<String>,
@@ -195,6 +203,7 @@ impl SessionConfig {
             // State the default out loud. `Off` runs `bash` unconfined, which is
             // today's behaviour. A caller opts in with `with_sandbox`.
             sandbox: SandboxMode::Off,
+            queue: crate::MessageQueue::new(),
         }
     }
 
@@ -225,6 +234,12 @@ impl SessionConfig {
         self.sandbox = sandbox;
         self
     }
+
+    /// Set the steering queue.
+    pub fn with_queue(mut self, queue: crate::MessageQueue) -> Self {
+        self.queue = queue;
+        self
+    }
 }
 
 pub struct Session {
@@ -237,6 +252,9 @@ struct SessionInner {
     hooks: Arc<HookChain>,
     context: tokio::sync::Mutex<Context>,
     config: SessionConfig,
+    /// Messages that arrived while a turn ran. The driver drains it at a turn
+    /// boundary. See `SPEC-steering`.
+    queue: crate::MessageQueue,
 }
 
 impl Session {
@@ -256,6 +274,7 @@ impl Session {
                 hooks,
                 context: tokio::sync::Mutex::new(context),
                 config,
+                queue: crate::MessageQueue::new(),
             }),
         }
     }
@@ -264,6 +283,38 @@ impl Session {
     /// the current directory and allows every tool call. Use it in a test where
     /// the model id and the root do not matter. A production caller uses
     /// `with_config` and states a real config.
+    /// Queue a message for the model, to arrive at the next turn boundary.
+    ///
+    /// It never injects into a running provider request, and it never rewrites an
+    /// already-sent turn, so the stable prompt prefix stays byte-identical and the
+    /// provider cache stays warm. It returns the queued position, counted from one.
+    ///
+    /// A message queued after the run ends stays queued, and the next run delivers
+    /// it. No user message is dropped in silence. See `SPEC-steering` section 3.
+    pub fn steer(&self, message: Vec<ContentBlock>) -> Result<usize, crate::QueueError> {
+        self.inner.queue.push(message)
+    }
+
+    /// This session's steering queue. A clone shares it, so a frontend and the
+    /// driver hold one queue.
+    pub fn queue(&self) -> crate::MessageQueue {
+        self.inner.queue.clone()
+    }
+
+    /// Build a session that shares an existing steering queue.
+    ///
+    /// A subagent needs this: the registry hands out a handle that steers the
+    /// child, and the handle and the child must hold the same queue.
+    pub fn with_queue(self, queue: crate::MessageQueue) -> Self {
+        // `SessionInner` is behind an `Arc`, so rebuild it rather than mutate a
+        // shared value. A session is built once, before it runs.
+        let inner = Arc::try_unwrap(self.inner)
+            .unwrap_or_else(|_| panic!("with_queue must run before the session is shared"));
+        Self {
+            inner: Arc::new(SessionInner { queue, ..inner }),
+        }
+    }
+
     /// Start one agent run. Append `input` to the context, then drive the loop.
     /// `cancel` stops the run. Dropping the returned value also stops the run.
     pub fn prompt(&self, input: Vec<ContentBlock>, cancel: CancelToken) -> AgentEvents {
@@ -361,6 +412,36 @@ impl Driver {
             if turns >= self.config.max_turns {
                 break AgentStopReason::MaxTurnRequests;
             }
+
+            // Deliver every steering message here, and nowhere else. This is a turn
+            // boundary: the previous turn's tool calls have finished and the next
+            // provider request is not built yet. So a message never races into the
+            // middle of a request. See `SPEC-steering` section 3.
+            //
+            // The append is through `Context::append`, which is append-only, so a
+            // steering message adds a new user turn and edits no earlier one. The
+            // stable prefix stays byte-identical and the provider cache stays warm.
+            if !self.inner.queue.is_empty() {
+                let queued = self.inner.queue.drain();
+                let count = queued.len();
+                {
+                    let mut context = self.inner.context.lock().await;
+                    for message in queued {
+                        context.append(Message {
+                            role: Role::User,
+                            content: message,
+                        });
+                    }
+                }
+                if self
+                    .emit(AgentEvent::MessageDelivered { count })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+
             turns += 1;
 
             match self.run_turn().await {

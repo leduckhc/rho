@@ -217,3 +217,93 @@ fn a_child_tool_call_budget_is_capped_by_the_parent() {
         "no request inherits the parent's budget"
     );
 }
+
+// --- Steering a live child (SPEC-steering, applied to a subagent) ---
+
+#[test]
+fn a_handle_and_its_child_share_one_queue() {
+    // The whole feature turns on this. If the handle and the child hold different
+    // queues, a steer pushes into a queue nobody drains, and the message vanishes.
+    let registry = registry();
+    let root = registry.root();
+    let spawn = root
+        .spawn_child("scout", CancelToken::new().child())
+        .unwrap();
+
+    let handle = registry.live().into_iter().next().unwrap();
+    handle
+        .steer(vec![rho_core::ContentBlock::Text {
+            text: "look at parser.rs instead".to_string(),
+        }])
+        .unwrap();
+
+    assert_eq!(handle.queued(), 1, "the handle sees its own push");
+    let child_queue = spawn.queue();
+    assert_eq!(
+        child_queue.len(),
+        1,
+        "the child must see the same message, or a steer is lost"
+    );
+    let drained = child_queue.drain();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(
+        handle.queued(),
+        0,
+        "a drain by the child empties the handle"
+    );
+}
+
+#[test]
+fn steering_one_child_does_not_reach_its_sibling() {
+    let registry = registry();
+    let root = registry.root();
+    let parent = CancelToken::new();
+    let first = root.spawn_child("scout", parent.child()).unwrap();
+    let second = root.spawn_child("greedy", parent.child()).unwrap();
+
+    let live = registry.live();
+    let first_handle = live.iter().find(|h| h.id == first.node.id()).unwrap();
+    first_handle
+        .steer(vec![rho_core::ContentBlock::Text {
+            text: "for the first child only".to_string(),
+        }])
+        .unwrap();
+
+    assert_eq!(first_handle.queued(), 1);
+    assert_eq!(
+        second.queue().len(),
+        0,
+        "a steer must reach one child, never its sibling"
+    );
+}
+
+#[test]
+fn a_full_child_queue_is_a_typed_error_and_not_a_silent_drop() {
+    let registry = registry();
+    let root = registry.root();
+    let spawn = root
+        .spawn_child("scout", CancelToken::new().child())
+        .unwrap();
+    let handle = registry.live().into_iter().next().unwrap();
+
+    let text = || {
+        vec![rho_core::ContentBlock::Text {
+            text: "m".to_string(),
+        }]
+    };
+    for _ in 0..rho_core::STEER_QUEUE_CAPACITY {
+        handle.steer(text()).unwrap();
+    }
+    let error = handle
+        .steer(text())
+        .expect_err("a full queue must refuse, not grow");
+    assert!(
+        error.to_string().contains("full"),
+        "the refusal must say the queue is full, got: {error}"
+    );
+    assert_eq!(
+        spawn.queue().len(),
+        rho_core::STEER_QUEUE_CAPACITY,
+        "a full queue drops no earlier message"
+    );
+}

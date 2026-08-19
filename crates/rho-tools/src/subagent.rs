@@ -282,13 +282,16 @@ async fn run_one_child(
     // The body is the child's system prompt. It never enters the parent.
     let body = load_agent_body(def).await.unwrap_or_default();
 
+    // The child reads the queue its handle writes to. Without this the handle would
+    // push into a queue nobody drains, and every steer would vanish.
     let child = Session::with_config(
         child_config,
         Arc::clone(&env.provider),
         Arc::new(child_registry),
         Arc::clone(&env.hooks),
         Context::new(Some(body), Vec::new()),
-    );
+    )
+    .with_queue(spawn.queue());
 
     let transcript = env.transcript_dir.join(format!("{}.log", child_node.id()));
     let timeout = env.node.limits().child_timeout;

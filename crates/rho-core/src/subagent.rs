@@ -320,6 +320,7 @@ pub struct LiveAgent {
     pub depth: u32,
     cancel: CancelToken,
     progress: tokio::sync::watch::Receiver<AgentProgress>,
+    queue: crate::MessageQueue,
 }
 
 impl LiveAgent {
@@ -345,6 +346,24 @@ impl LiveAgent {
     pub fn progress(&self) -> AgentProgress {
         self.progress.borrow().clone()
     }
+
+    /// Send this child a message, to arrive at its next turn boundary.
+    ///
+    /// The child reads it as the next user message. It never lands inside a
+    /// provider request, and it never rewrites an already-sent turn, so the child's
+    /// prompt prefix stays stable. See `SPEC-steering` section 3.
+    ///
+    /// A full queue is a typed error, never a silent drop. A message queued after
+    /// the child finished stays in the queue and is never delivered, because the
+    /// child has no next turn. So a caller should check the child is still live.
+    pub fn steer(&self, message: Vec<crate::ContentBlock>) -> Result<usize, crate::QueueError> {
+        self.queue.push(message)
+    }
+
+    /// How many messages wait for this child's next turn boundary.
+    pub fn queued(&self) -> usize {
+        self.queue.len()
+    }
 }
 
 /// Everything a caller gets when it spawns a child.
@@ -358,9 +377,18 @@ pub struct ChildSpawn {
     /// The reservation. Dropping it frees the slot and deregisters the handle.
     pub slot: ChildSlot,
     progress: tokio::sync::watch::Sender<AgentProgress>,
+    queue: crate::MessageQueue,
 }
 
 impl ChildSpawn {
+    /// The queue this child must read.
+    ///
+    /// The caller passes it to `Session::with_queue`, so the handle and the child
+    /// hold one queue. Without that, a steer would push into a queue nobody drains.
+    pub fn queue(&self) -> crate::MessageQueue {
+        self.queue.clone()
+    }
+
     /// Publish the child's progress, so a frontend can render it live.
     pub fn publish(&self, progress: AgentProgress) {
         // A send fails only when every receiver is gone, and that is not an
@@ -604,12 +632,14 @@ impl AgentNode {
         // Register here, and deregister in `ChildSlot::drop`. Both sides live in
         // this file, so a caller cannot forget either one.
         let (progress_tx, progress_rx) = tokio::sync::watch::channel(AgentProgress::default());
+        let queue = crate::MessageQueue::new();
         self.registry.register(LiveAgent {
             id: child.id,
             agent: agent.into(),
             depth: child.depth,
             cancel,
             progress: progress_rx,
+            queue: queue.clone(),
         });
 
         let slot = ChildSlot {
@@ -621,6 +651,7 @@ impl AgentNode {
             node: child,
             slot,
             progress: progress_tx,
+            queue,
         })
     }
 }
