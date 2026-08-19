@@ -189,3 +189,216 @@ fn quote_body(line: &str) -> Option<&str> {
         .and_then(|rest| rest.strip_prefix(' '))
         .map(str::trim_end)
 }
+
+// ---- Inline emphasis. -----------------------------------------------------------
+
+/// One run of a line, with the emphasis that applies to it.
+///
+/// A run is the smallest unit that carries its own style. `**bold**` becomes one run with
+/// `bold` set and the markers gone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InlineRun {
+    pub text: String,
+    pub bold: bool,
+    pub italic: bool,
+    /// An inline code span. Verbatim: no other markup applies inside it.
+    pub code: bool,
+}
+
+/// Split a line into runs, removing the emphasis markers.
+///
+/// **Every rule here exists to avoid a false positive on code-heavy prose.** A naive "a pair on
+/// the same line matches" rule italicises the `3` in `2 * 3 * 4`, which the contract review
+/// caught before any code was written. So:
+///
+/// - **Flanking.** An opening marker is not followed by a space, and a closing marker is not
+///   preceded by one. That is what saves arithmetic.
+/// - **An underscore never carries emphasis.** This is a deliberate deviation from CommonMark,
+///   which renders `__init__` as bold and `_x_` as italic. In a coding agent's prose an
+///   underscore is an identifier: `wrap_block`, `snake_case`, `__init__`, `__all__`, `_private`.
+///   Only `*` carries emphasis, so a dunder is never eaten.
+/// - **No intraword star.** CommonMark italicises the `3` in `2*3*4`, because intraword `*`
+///   emphasis is legal. rho requires a non-alphanumeric before the opening run and after the
+///   closing run, so multiplication and globs survive.
+/// - **A backslash escapes a marker**, and the backslash itself is dropped.
+/// - **An unclosed marker is literal text.**
+/// - **A code span is verbatim**, and a longer backtick fence may contain a shorter one.
+///
+/// The scanner never invents a character. Its output is the input with markers removed, which
+/// is what lets the renderer trust the width. See `SPEC-tui-markdown` and
+/// `D-markdown-line-level-first`.
+pub fn scan_inline(text: &str) -> Vec<InlineRun> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut runs: Vec<InlineRun> = Vec::new();
+    let mut buf = String::new();
+    let bold = false;
+    let italic = false;
+    let mut i = 0usize;
+
+    // Close the open run, if it holds anything.
+    macro_rules! flush {
+        () => {
+            if !buf.is_empty() {
+                runs.push(InlineRun {
+                    text: std::mem::take(&mut buf),
+                    bold,
+                    italic,
+                    code: false,
+                });
+            }
+        };
+    }
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        // A backslash escapes the next character, and is itself dropped.
+        if ch == '\\' && i + 1 < chars.len() && is_marker(chars[i + 1]) {
+            buf.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+
+        // A code span wins over every other marker, and its body is verbatim.
+        if ch == '`' {
+            let fence = run_length(&chars, i, '`');
+            if let Some(end) = find_code_close(&chars, i + fence, fence) {
+                flush!();
+                runs.push(InlineRun {
+                    text: chars[i + fence..end].iter().collect(),
+                    bold: false,
+                    italic: false,
+                    code: true,
+                });
+                i = end + fence;
+                continue;
+            }
+            buf.push(ch);
+            i += 1;
+            continue;
+        }
+
+        // Only `*` opens emphasis. An underscore is an identifier character here.
+        if ch == '*' {
+            let count = run_length(&chars, i, ch).min(3);
+            let opening = bold || italic;
+            if !opening
+                && can_open(&chars, i, count, ch)
+                && let Some(end) = find_emphasis_close(&chars, i + count, count, ch)
+            {
+                flush!();
+                let inner: String = chars[i + count..end].iter().collect();
+                // A triple marker is both. A double is bold. A single is italic.
+                let (run_bold, run_italic) = match count {
+                    1 => (false, true),
+                    2 => (true, false),
+                    _ => (true, true),
+                };
+                for run in scan_inline(&inner) {
+                    runs.push(InlineRun {
+                        text: run.text,
+                        bold: run.bold || run_bold,
+                        italic: run.italic || run_italic,
+                        code: run.code,
+                    });
+                }
+                i = end + count;
+                continue;
+            }
+            buf.push(ch);
+            i += 1;
+            continue;
+        }
+
+        buf.push(ch);
+        i += 1;
+    }
+    flush!();
+    if runs.is_empty() {
+        runs.push(InlineRun {
+            text: String::new(),
+            bold: false,
+            italic: false,
+            code: false,
+        });
+    }
+    runs
+}
+
+/// True for a character that carries emphasis meaning.
+fn is_marker(ch: char) -> bool {
+    // A backslash may escape an underscore even though `_` never opens emphasis, because a
+    // writer who typed `\_` meant a literal underscore either way.
+    matches!(ch, '*' | '_' | '`' | '\\')
+}
+
+/// How many of `marker` run from `start`.
+fn run_length(chars: &[char], start: usize, marker: char) -> usize {
+    chars[start..]
+        .iter()
+        .take_while(|ch| **ch == marker)
+        .count()
+}
+
+/// Whether a marker at `start` may open a span.
+///
+/// The flanking rule: the character after the marker run must exist and must not be a space.
+/// For `_`, the character before must not be a word character, so `snake_case` is left alone.
+fn can_open(chars: &[char], start: usize, count: usize, _marker: char) -> bool {
+    // The character after the marker run must exist and must not be a space. That is the
+    // flanking rule, and it is what saves `2 * 3 * 4`.
+    match chars.get(start + count) {
+        None => false,
+        Some(next) if next.is_whitespace() => false,
+        Some(_) => {
+            // And the character before must not be alphanumeric, which saves `2*3*4` and a
+            // glob such as `a*b`. CommonMark allows intraword `*` emphasis; rho does not.
+            !start
+                .checked_sub(1)
+                .and_then(|index| chars.get(index))
+                .is_some_and(|ch| ch.is_alphanumeric())
+        }
+    }
+}
+
+/// Find the closing marker run of the same length, obeying the flanking rule.
+fn find_emphasis_close(chars: &[char], from: usize, count: usize, marker: char) -> Option<usize> {
+    let mut i = from;
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            i += 2;
+            continue;
+        }
+        if chars[i] == marker {
+            let run = run_length(chars, i, marker);
+            // The character before a closing marker must not be a space, and the character
+            // after it must not be alphanumeric, so `2*3*4` finds no close.
+            let before_ok = i > from && !chars[i - 1].is_whitespace();
+            let after_ok = !chars.get(i + run).is_some_and(|ch| ch.is_alphanumeric());
+            if run >= count && before_ok && after_ok {
+                return Some(i);
+            }
+            i += run;
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Find the closing backtick fence of exactly `fence` length.
+fn find_code_close(chars: &[char], from: usize, fence: usize) -> Option<usize> {
+    let mut i = from;
+    while i < chars.len() {
+        if chars[i] == '`' {
+            let run = run_length(chars, i, '`');
+            if run == fence {
+                return Some(i);
+            }
+            i += run;
+            continue;
+        }
+        i += 1;
+    }
+    None
+}

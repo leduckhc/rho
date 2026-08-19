@@ -19,13 +19,14 @@ use unicode_width::UnicodeWidthStr;
 use crate::bindings::{bindings, filter_slash_commands};
 use crate::concise::RowFold;
 use crate::duration::{duration_slot, format_duration};
-use crate::markdown::{MarkdownKind, scan_markdown};
+use crate::markdown::{MarkdownKind, scan_inline, scan_markdown};
 use crate::motion::{MotionCell, motion_cell, sweep_weight};
 use crate::sanitize::{sanitize_block, sanitize_line};
 use crate::state::{
     ActivityState, Approval, HistorySearch, Panel, Row, SlashList, ToolRowStatus, TuiState,
     filter_history,
 };
+use crate::styled::{StyledLine, one};
 use crate::theme::{Role, role_16, role_256};
 
 /// The brand mark. The `ρ` renders in the accent role, so it is the first accent
@@ -218,8 +219,7 @@ pub fn render(state: &TuiState, frame: &mut Frame<'_>) {
             frame,
             y,
             width,
-            &banner_line(state, width),
-            style_for(Role::Muted),
+            &one((banner_line(state, width), style_for(Role::Muted))),
         );
         y += 1;
     }
@@ -227,8 +227,8 @@ pub fn render(state: &TuiState, frame: &mut Frame<'_>) {
     let visible = layout.transcript_rows;
     let (lines, total) = transcript_window(state, width, visible);
     let transcript_top = y;
-    for (text, style) in &lines {
-        put(frame, y, width, text, *style);
+    for line in &lines {
+        put(frame, y, width, line);
         y += 1;
     }
     // The rail is one muted column, drawn only when the transcript overflows. It has no
@@ -241,33 +241,31 @@ pub fn render(state: &TuiState, frame: &mut Frame<'_>) {
     // The panel, sized to its content.
     if layout.panel_rows > 0 {
         let panel = panel_lines(state, width, layout.panel_rows);
-        for (text, style) in &panel {
-            put(frame, y, width, text, *style);
+        for line in &panel {
+            put(frame, y, width, line);
             y += 1;
         }
     }
     if layout.composer_border {
-        let (text, style) = &composer[0];
-        put(frame, y, width, text, *style);
+        put(frame, y, width, &composer[0]);
         y += 1;
     }
     if layout.composer_rows > 0 {
         // The draft windows to the granted rows, and the last row holds the cursor.
         let draft = &composer[1..composer.len() - 1];
         let start = draft.len().saturating_sub(layout.composer_rows);
-        for (text, style) in &draft[start..] {
-            put(frame, y, width, text, *style);
+        for line in &draft[start..] {
+            put(frame, y, width, line);
             y += 1;
         }
     }
     if layout.composer_border {
-        let (text, style) = &composer[composer.len() - 1];
-        put(frame, y, width, text, *style);
+        put(frame, y, width, &composer[composer.len() - 1]);
         y += 1;
     }
     if layout.footer {
         let (footer, word_at, hint_at) = footer_line(state, width);
-        put(frame, y, width, &footer, text_style());
+        put(frame, y, width, &one((footer.clone(), text_style())));
         restyle(frame, y, hint_at, width, style_for(Role::Muted));
         apply_sweep(state, frame, y, word_at);
     }
@@ -278,11 +276,7 @@ pub fn render(state: &TuiState, frame: &mut Frame<'_>) {
 /// The newest row sits at the bottom, directly above the composer, so a transcript that
 /// underflows the window pads above. A transcript that overflows windows by the scroll
 /// offset. The empty state fills the window when there is nothing to show.
-fn transcript_window(
-    state: &TuiState,
-    width: usize,
-    visible: usize,
-) -> (Vec<(String, Style)>, usize) {
+fn transcript_window(state: &TuiState, width: usize, visible: usize) -> (Vec<StyledLine>, usize) {
     if visible == 0 {
         return (Vec::new(), 0);
     }
@@ -295,9 +289,9 @@ fn transcript_window(
     let lines = transcript_lines(state, width);
     let total = lines.len();
     if total <= visible {
-        let mut window: Vec<(String, Style)> = Vec::with_capacity(visible);
+        let mut window: Vec<StyledLine> = Vec::with_capacity(visible);
         for _ in 0..(visible - total) {
-            window.push((blank(width), text_style()));
+            window.push(one((blank(width), text_style())));
         }
         window.extend(lines);
         return (window, total);
@@ -311,15 +305,15 @@ fn transcript_window(
 ///
 /// A blank row separates turns and leads the row below it. A run of tool rows stays
 /// together, so the last line is a content line and never a separator.
-fn transcript_lines(state: &TuiState, width: usize) -> Vec<(String, Style)> {
+fn transcript_lines(state: &TuiState, width: usize) -> Vec<StyledLine> {
     let measure = TEXT_MEASURE_CAP.min(width.saturating_sub(TEXT_MEASURE_MARGIN));
-    let mut out: Vec<(String, Style)> = Vec::new();
+    let mut out: Vec<StyledLine> = Vec::new();
     for index in 0..state.rows.len() {
         let row = &state.rows[index];
         let is_tool = matches!(row, Row::Tool { .. });
         let prev_tool = index > 0 && matches!(state.rows[index - 1], Row::Tool { .. });
         if !(is_tool && prev_tool) {
-            out.push((blank(width), text_style()));
+            out.push(one((blank(width), text_style())));
         }
         push_row(&mut out, state, index, row, width, measure);
     }
@@ -451,7 +445,7 @@ pub fn banner_line(state: &TuiState, width: usize) -> String {
 
 /// Render one transcript row into its lines.
 fn push_row(
-    out: &mut Vec<(String, Style)>,
+    out: &mut Vec<StyledLine>,
     state: &TuiState,
     index: usize,
     row: &Row,
@@ -467,30 +461,31 @@ fn push_row(
                 } else {
                     format!("  {line}")
                 };
-                out.push((pad(&body, width), text_style()));
+                out.push(one((pad(&body, width), text_style())));
             }
         }
         Row::Assistant { text } => {
-            // Markdown becomes colour, not punctuation. The scanner strips a line's markup
-            // *before* the text is wrapped, so the measure stays honest. See
+            // Markdown becomes colour, not punctuation. The line kind is stripped before the
+            // wrap, and inline emphasis is scanned into runs so a wrap keeps every style. See
             // `D-markdown-line-level-first` and `SPEC-tui-markdown`.
             for line in scan_markdown(&sanitize_block(text)) {
-                let style = style_for(markdown_role(line.kind));
+                let base = style_for(markdown_role(line.kind));
                 if line.kind == MarkdownKind::Rule {
-                    out.push((rule_row(width), style));
+                    out.push(one((rule_row(width), base)));
                     continue;
                 }
-                // A code line keeps its own columns, so it is never re-flowed. Prose wraps.
-                let rows = if line.kind == MarkdownKind::CodeBlock {
-                    vec![line.text]
-                } else {
-                    wrap_block(&line.text, measure)
-                };
-                if rows.is_empty() {
-                    out.push((blank(width), style));
+                // A code line is verbatim: never inline-scanned, never re-wrapped.
+                if line.kind == MarkdownKind::CodeBlock {
+                    out.push(one((pad(&line.text, width), base)));
+                    continue;
                 }
-                for row in rows {
-                    out.push((pad(&row, width), style));
+                let runs = inline_runs(&line.text, base);
+                let wrapped = wrap_runs(&runs, measure);
+                if wrapped.is_empty() {
+                    out.push(one((blank(width), base)));
+                }
+                for row in wrapped {
+                    out.push(row);
                 }
             }
         }
@@ -499,7 +494,7 @@ fn push_row(
                 Some(span) => format!("{GLYPH_THINKING} thought for {span}"),
                 None => format!("{GLYPH_THINKING} thinking"),
             };
-            out.push((pad(&body, width), style_for(Role::Muted)));
+            out.push(one((pad(&body, width), style_for(Role::Muted))));
         }
         Row::Tool {
             name,
@@ -507,21 +502,21 @@ fn push_row(
             preview,
             ..
         } => {
-            out.push((
+            out.push(one((
                 tool_header(state, index, name, preview, *status, width),
                 text_style(),
-            ));
+            )));
             if row_fold(state, index) == RowFold::Expanded {
                 for line in tool_body(state, index, preview) {
-                    out.push((
+                    out.push(one((
                         pad(&format!("    {}", sanitize_line(&line)), width),
                         style_for(Role::Muted),
-                    ));
+                    )));
                 }
             }
         }
         Row::Error { message, detail } => {
-            out.push((
+            out.push(one((
                 pad(
                     &format!(
                         "{GLYPH_ERROR} error {GLYPH_SEPARATOR} {}",
@@ -530,12 +525,12 @@ fn push_row(
                     width,
                 ),
                 style_for(Role::Error),
-            ));
+            )));
             for line in detail {
-                out.push((
+                out.push(one((
                     pad(&format!("     {}", sanitize_line(line)), width),
                     style_for(Role::Muted),
-                ));
+                )));
             }
         }
         Row::Notice { message } => {
@@ -552,38 +547,38 @@ fn push_row(
                     } else {
                         format!("{}{line}", " ".repeat(head.width()))
                     };
-                    out.push((pad(&row, width), style));
+                    out.push(one((pad(&row, width), style)));
                 }
             } else {
                 // Too narrow to keep a label column. The label takes its own row, and the
                 // text takes the whole measure, because the text is the part that matters.
-                out.push((pad(head.trim_end(), width), style));
+                out.push(one((pad(head.trim_end(), width), style)));
                 for line in wrap(&text, measure.max(1)) {
-                    out.push((pad(&line, width), style));
+                    out.push(one((pad(&line, width), style)));
                 }
             }
         }
         Row::Agent { name, outcome, .. } => {
-            out.push((
+            out.push(one((
                 pad(
                     &format!("agent {} {}", sanitize_line(name), sanitize_line(outcome)),
                     width,
                 ),
                 text_style(),
-            ));
+            )));
         }
         Row::Task {
             command,
             state: task,
             ..
         } => {
-            out.push((
+            out.push(one((
                 pad(
                     &format!("task {} {}", sanitize_line(command), sanitize_line(task)),
                     width,
                 ),
                 text_style(),
-            ));
+            )));
         }
     }
 }
@@ -655,9 +650,9 @@ fn conversation_is_empty(state: &TuiState) -> bool {
 
 /// The notice rows as display lines, in order, styled the same way the transcript styles
 /// them. One source for the style, so the splash and the transcript cannot drift.
-fn notice_lines(state: &TuiState, width: usize) -> Vec<(String, Style)> {
+fn notice_lines(state: &TuiState, width: usize) -> Vec<StyledLine> {
     let measure = TEXT_MEASURE_CAP.min(width.saturating_sub(TEXT_MEASURE_MARGIN));
-    let mut out: Vec<(String, Style)> = Vec::new();
+    let mut out: Vec<StyledLine> = Vec::new();
     for (index, row) in state.rows.iter().enumerate() {
         if matches!(row, Row::Notice { .. }) {
             push_row(&mut out, state, index, row, width, measure);
@@ -666,31 +661,31 @@ fn notice_lines(state: &TuiState, width: usize) -> Vec<(String, Style)> {
     out
 }
 
-fn empty_state(state: &TuiState, width: usize, rows: usize) -> Option<Vec<(String, Style)>> {
+fn empty_state(state: &TuiState, width: usize, rows: usize) -> Option<Vec<StyledLine>> {
     let accent = style_for(Role::Accent);
     let muted = style_for(Role::Muted);
     let art_indent = width.saturating_sub(4) / 2;
     let starter_indent = width.saturating_sub(STARTER_BLOCK_WIDTH) / 2;
 
-    let mut block: Vec<(String, Style)> = Vec::new();
+    let mut block: Vec<StyledLine> = Vec::new();
     for art in BRAND_ART {
-        block.push((
+        block.push(one((
             pad(&format!("{}{art}", " ".repeat(art_indent)), width),
             accent,
-        ));
+        )));
     }
-    block.push((blank(width), text_style()));
-    block.push((centre(WORDMARK, width), text_style()));
-    block.push((blank(width), text_style()));
+    block.push(one((blank(width), text_style())));
+    block.push(one((centre(WORDMARK, width), text_style())));
+    block.push(one((blank(width), text_style())));
     let session = format!(
         "{} {GLYPH_SEPARATOR} {} {GLYPH_SEPARATOR} ready",
         state.model, state.provider
     );
-    block.push((centre(&session, width), muted));
-    block.push((blank(width), text_style()));
+    block.push(one((centre(&session, width), muted)));
+    block.push(one((blank(width), text_style())));
     for (key, outcome) in STARTERS {
         let line = format!("{}{:<8}{outcome}", " ".repeat(starter_indent), key);
-        block.push((pad(&line, width), text_style()));
+        block.push(one((pad(&line, width), text_style())));
     }
 
     // A notice draws under the starters, because the user reads the screen top down and a
@@ -698,7 +693,7 @@ fn empty_state(state: &TuiState, width: usize, rows: usize) -> Option<Vec<(Strin
     // back to the scrollable transcript, so a notice is never truncated away.
     let notices = notice_lines(state, width);
     if !notices.is_empty() {
-        block.push((blank(width), text_style()));
+        block.push(one((blank(width), text_style())));
         block.extend(notices);
     }
     if block.len() > rows {
@@ -708,13 +703,13 @@ fn empty_state(state: &TuiState, width: usize, rows: usize) -> Option<Vec<(Strin
     // Centre the block vertically, biased one row up when the gap is odd, matching
     // the design frame.
     let top = rows.saturating_sub(block.len()).div_ceil(2);
-    let mut out: Vec<(String, Style)> = Vec::with_capacity(rows);
+    let mut out: Vec<StyledLine> = Vec::with_capacity(rows);
     for _ in 0..top {
-        out.push((blank(width), text_style()));
+        out.push(one((blank(width), text_style())));
     }
     out.append(&mut block);
     while out.len() < rows {
-        out.push((blank(width), text_style()));
+        out.push(one((blank(width), text_style())));
     }
     out.truncate(rows);
     Some(out)
@@ -752,7 +747,7 @@ fn panel_demand(state: &TuiState) -> (usize, usize) {
 /// The approval panel is four rows: the request, the command, the root, and the choices.
 const APPROVAL_ROWS: usize = 4;
 
-fn panel_lines(state: &TuiState, width: usize, budget: usize) -> Vec<(String, Style)> {
+fn panel_lines(state: &TuiState, width: usize, budget: usize) -> Vec<StyledLine> {
     if budget == 0 {
         return Vec::new();
     }
@@ -778,7 +773,7 @@ fn history_search_panel(
     search: &HistorySearch,
     history: &[String],
     width: usize,
-) -> Vec<(String, Style)> {
+) -> Vec<StyledLine> {
     let muted = style_for(Role::Muted);
     let mut lines = Vec::new();
     let matches = filter_history(history, &search.query);
@@ -795,14 +790,14 @@ fn history_search_panel(
         } else {
             text_style()
         };
-        lines.push((pad(&body, width), style));
+        lines.push(one((pad(&body, width), style)));
     }
     if matches.is_empty() {
         // A search that found nothing must say so, because an empty panel reads as a
         // defect. This is the house rule from `D-a-panel-nobody-can-open`.
-        lines.push((pad("   no match in this session", width), muted));
+        lines.push(one((pad("   no match in this session", width), muted)));
     }
-    lines.push((
+    lines.push(one((
         pad(
             &format!(
                 "  search {GLYPH_SEPARATOR} {}",
@@ -811,7 +806,7 @@ fn history_search_panel(
             width,
         ),
         text_style(),
-    ));
+    )));
     lines
 }
 
@@ -819,21 +814,21 @@ fn history_search_panel(
 ///
 /// Four rows, and it yields none of them. A command means nothing without the tree it acts
 /// on, so the root is not decoration. See `D-ledger-wins-the-band`.
-fn approval_panel(approval: &Approval, width: usize) -> Vec<(String, Style)> {
+fn approval_panel(approval: &Approval, width: usize) -> Vec<StyledLine> {
     let caution = style_for(Role::Caution);
     let muted = style_for(Role::Muted);
     let slot = duration_slot(approval.millis);
     let left = format!("  {GLYPH_APPROVAL} {}", sanitize_line(&approval.title));
     vec![
-        (justify(&left, &slot, width), caution),
-        (
+        one((justify(&left, &slot, width), caution)),
+        one((
             pad(
                 &format!("  {GLYPH_QUOTE} {}", sanitize_line(&approval.command)),
                 width,
             ),
             text_style(),
-        ),
-        (
+        )),
+        one((
             pad(
                 &format!(
                     "  {GLYPH_QUOTE}  the session root is {}",
@@ -842,12 +837,12 @@ fn approval_panel(approval: &Approval, width: usize) -> Vec<(String, Style)> {
                 width,
             ),
             muted,
-        ),
-        (pad(&format!("  {APPROVAL_CHOICES}"), width), caution),
+        )),
+        one((pad(&format!("  {APPROVAL_CHOICES}"), width), caution)),
     ]
 }
 
-fn slash_panel(list: &SlashList, width: usize) -> Vec<(String, Style)> {
+fn slash_panel(list: &SlashList, width: usize) -> Vec<StyledLine> {
     // No rules of its own. The composer's top rule already separates the panel from the
     // draft, and a second rule spent a row of a fourteen-row band on nothing.
     let mut lines = Vec::new();
@@ -863,7 +858,7 @@ fn slash_panel(list: &SlashList, width: usize) -> Vec<(String, Style)> {
         } else {
             text_style()
         };
-        lines.push((pad(&body, width), style));
+        lines.push(one((pad(&body, width), style)));
     }
     lines
 }
@@ -876,7 +871,7 @@ fn slash_panel(list: &SlashList, width: usize) -> Vec<(String, Style)> {
 ///
 /// The rows come from `bindings()`, never from a literal, so adding or removing a binding
 /// changes the help with no other edit.
-fn help_panel(width: usize) -> Vec<(String, Style)> {
+fn help_panel(width: usize) -> Vec<StyledLine> {
     let muted = style_for(Role::Muted);
     bindings()
         .iter()
@@ -888,13 +883,13 @@ fn help_panel(width: usize) -> Vec<(String, Style)> {
             } else {
                 (" · not built yet", muted)
             };
-            (
+            one((
                 pad(
                     &format!("  {:<15}{}{note}", binding.keys, binding.summary),
                     width,
                 ),
                 style,
-            )
+            ))
         })
         .collect()
 }
@@ -905,7 +900,7 @@ fn help_panel(width: usize) -> Vec<(String, Style)> {
 ///
 /// It draws `display_lines`, so a tall draft wraps and scrolls inside the box. It places
 /// the cursor glyph at `cursor_cell`, so the cursor follows the edit and the wrap.
-fn composer_lines(state: &TuiState, width: usize) -> Vec<(String, Style)> {
+fn composer_lines(state: &TuiState, width: usize) -> Vec<StyledLine> {
     let muted = style_for(Role::Muted);
     // The sides are open, so the draft owns the whole width. A vertical border has to land
     // on an exact column on every row, and it drifts when a wide glyph misreports its
@@ -939,7 +934,7 @@ fn composer_lines(state: &TuiState, width: usize) -> Vec<(String, Style)> {
         }
     }
 
-    let mut lines = vec![(rule_line(width), muted)];
+    let mut lines = vec![one((rule_line(width), muted))];
     for (index, row) in rows.into_iter().enumerate() {
         // The placeholder is muted, as `docs/tui-design.md` section 8 states. It drew in
         // the default foreground, which reads as bright as the assistant's answer.
@@ -948,9 +943,9 @@ fn composer_lines(state: &TuiState, width: usize) -> Vec<(String, Style)> {
         } else {
             text_style()
         };
-        lines.push((pad(&row, width), style));
+        lines.push(one((pad(&row, width), style)));
     }
-    lines.push((rule_line(width), muted));
+    lines.push(one((rule_line(width), muted)));
     lines
 }
 
@@ -1131,13 +1126,37 @@ fn apply_sweep(state: &TuiState, frame: &mut Frame<'_>, y: usize, word_at: Optio
 // ---- Small helpers. -------------------------------------------------------
 
 /// Write one full-width row into the frame buffer, clipped to the width.
-fn put(frame: &mut Frame<'_>, y: usize, width: usize, text: &str, style: Style) {
+fn put(frame: &mut Frame<'_>, y: usize, width: usize, line: &StyledLine) {
     // The row `y` counts from the top of the band, and the band is not the screen. An
     // inline viewport anchors to the cursor row, so `Frame::area()` carries the origin.
     // A write at an absolute (0, 0) panics there, and every fullscreen fixture missed it.
+    //
+    // **This is where the row's width invariant is enforced**, and it is the only place. A
+    // run that would cross the right edge is clipped, and a row short of the width is padded
+    // to it. So no producer can overflow the row, and none has to remember to pad. See
+    // `crates/rho-tui/src/styled.rs`.
     let area = frame.area();
-    let (x, row) = (area.x, area.y + y as u16);
-    frame.buffer_mut().set_stringn(x, row, text, width, style);
+    let row = area.y + y as u16;
+    let mut column = 0usize;
+    for (text, style) in line {
+        if column >= width {
+            break;
+        }
+        let room = width - column;
+        frame
+            .buffer_mut()
+            .set_stringn(area.x + column as u16, row, text, room, *style);
+        column += text.width().min(room);
+    }
+    if column < width {
+        frame.buffer_mut().set_stringn(
+            area.x + column as u16,
+            row,
+            blank(width - column),
+            width - column,
+            Style::default(),
+        );
+    }
 }
 
 /// Write one cell at column `col`, row `y` from the frame top, for the scroll rail.
@@ -1194,6 +1213,126 @@ fn pad(text: &str, width: usize) -> String {
         }
         out
     }
+}
+
+/// The styled runs of one line, with its inline markers removed.
+///
+/// `base` is the line's own style, from its markdown kind. Bold and italic add a modifier to
+/// it, and a code span takes the code role instead, because a colour reads more clearly than a
+/// third modifier. Measured against pi, which colours inline code and leaves emphasis as
+/// modifiers.
+fn inline_runs(text: &str, base: Style) -> StyledLine {
+    let code = style_for(Role::MdCode);
+    scan_inline(text)
+        .into_iter()
+        .filter(|run| !run.text.is_empty())
+        .map(|run| {
+            let mut style = if run.code { code } else { base };
+            if run.bold {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            if run.italic {
+                style = style.add_modifier(Modifier::ITALIC);
+            }
+            (run.text, style)
+        })
+        .collect()
+}
+
+/// Wrap styled runs to `width`, keeping each run's style across the break.
+///
+/// Wrapping has to happen **over runs**, not over text. The contract review found the ordering
+/// bug: wrapping raw text and then removing `**` leaves the row narrower than the wrap assumed.
+/// Working on runs whose markers are already gone keeps the measure honest.
+///
+/// The pass is per character, which is cheap at a text measure of 80 columns, and it coalesces
+/// neighbouring characters of one style back into one run.
+fn wrap_runs(runs: &StyledLine, width: usize) -> Vec<StyledLine> {
+    if width == 0 {
+        return Vec::new();
+    }
+    // Flatten to characters, each carrying its style. The leading indent is kept, so a wrapped
+    // code-ish line stays legible.
+    let mut cells: Vec<(char, Style)> = Vec::new();
+    for (text, style) in runs {
+        for ch in text.chars() {
+            cells.push((ch, *style));
+        }
+    }
+    if cells.is_empty() {
+        return Vec::new();
+    }
+    let mut rows: Vec<StyledLine> = Vec::new();
+    let mut row: Vec<(char, Style)> = Vec::new();
+    let mut word: Vec<(char, Style)> = Vec::new();
+    let mut row_width = 0usize;
+    let mut word_width = 0usize;
+
+    // Push the finished row, coalescing runs of one style.
+    let flush_row = |row: &mut Vec<(char, Style)>, rows: &mut Vec<StyledLine>| {
+        if row.is_empty() {
+            return;
+        }
+        let mut line: StyledLine = Vec::new();
+        for (ch, style) in row.drain(..) {
+            match line.last_mut() {
+                Some((text, last)) if *last == style => text.push(ch),
+                _ => line.push((ch.to_string(), style)),
+            }
+        }
+        rows.push(line);
+    };
+
+    for (ch, style) in cells {
+        let cw = ch.to_string().width();
+        if ch == ' ' {
+            // A space closes the pending word onto the row.
+            if row_width + word_width > width && row_width > 0 {
+                flush_row(&mut row, &mut rows);
+                row_width = 0;
+            }
+            row.append(&mut word);
+            row_width += word_width;
+            word_width = 0;
+            if row_width + cw <= width {
+                row.push((ch, style));
+                row_width += cw;
+            }
+            continue;
+        }
+        word.push((ch, style));
+        word_width += cw;
+        // A single word longer than the row must break, or it would never fit.
+        if word_width > width {
+            if row_width > 0 {
+                flush_row(&mut row, &mut rows);
+                row_width = 0;
+            }
+            row.append(&mut word);
+            flush_row(&mut row, &mut rows);
+            word_width = 0;
+        }
+    }
+    if row_width + word_width > width && row_width > 0 {
+        flush_row(&mut row, &mut rows);
+    }
+    row.append(&mut word);
+    flush_row(&mut row, &mut rows);
+    // Trailing spaces are padding, and `put` owns padding.
+    for line in &mut rows {
+        while line
+            .last()
+            .is_some_and(|(text, _)| text.chars().all(|ch| ch == ' '))
+        {
+            line.pop();
+        }
+        if let Some((text, _)) = line.last_mut() {
+            while text.ends_with(' ') {
+                text.pop();
+            }
+        }
+    }
+    rows
 }
 
 /// The colour role for one markdown kind. One arm per kind, so a new kind cannot be added

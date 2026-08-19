@@ -21,11 +21,15 @@ pub enum Role {
     /// A line inside a code block. Its own colour, because no existing role reads as "not
     /// prose". A fence, a quote, and a bullet reuse `Muted` and `Accent`.
     MdCodeBlock,
+    /// An inline code span. Measured against pi, which gives it RGB 138,190,183, and jcode,
+    /// which adds a background. rho takes the foreground only, because `RoleStyle` has no
+    /// background field and adding one is a contract change. See `SPEC-tui-markdown` 3a item 6.
+    MdCode,
 }
 
 impl Role {
     /// Every role, so a test proves each one has all three mappings.
-    pub const ALL: [Role; 8] = [
+    pub const ALL: [Role; 9] = [
         Role::Text,
         Role::Muted,
         Role::Accent,
@@ -34,6 +38,7 @@ impl Role {
         Role::Caution,
         Role::MdHeading,
         Role::MdCodeBlock,
+        Role::MdCode,
     ];
 }
 
@@ -85,6 +90,7 @@ pub fn role_256(role: Role) -> Option<u8> {
         // A fence and a bullet stay quiet, because both are punctuation.
         Role::MdHeading => Some(78),
         Role::MdCodeBlock => Some(110),
+        Role::MdCode => Some(115),
     }
 }
 
@@ -120,7 +126,7 @@ pub fn role_16(role: Role) -> RoleStyle {
             bold: true,
             ..RoleStyle::plain()
         },
-        Role::MdCodeBlock => RoleStyle {
+        Role::MdCodeBlock | Role::MdCode => RoleStyle {
             color: Ansi16::Cyan,
             ..RoleStyle::plain()
         },
@@ -152,7 +158,7 @@ pub fn role_none(role: Role) -> RoleStyle {
             bold: true,
             ..RoleStyle::plain()
         },
-        Role::MdCodeBlock => RoleStyle {
+        Role::MdCodeBlock | Role::MdCode => RoleStyle {
             dim: true,
             ..RoleStyle::plain()
         },

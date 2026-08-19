@@ -348,3 +348,70 @@ model version has reached the end of its life". Its one-key fallback then offere
 which is also end of life, so the fallback ping-ponged between two dead models. Worth knowing
 before rho copies a fallback: a fallback list needs a liveness check, or it trades one dead
 model for another.
+
+## Inline styling, shipped and verified live
+
+Phase 2 is in. The same prompt, the same model, and no marker reaches the screen.
+
+```
+Heading Two                                        <- bold, accent, no hashes
+This sentence contains bold text, italic text, and inline code all together.
+                          ^^^^^^^^  ^^^^^^^^^^^      ^^^^^^^^^^^
+                          bold      italic           code colour
+• The first item has bold content and code snippet inside
+• The second item also contains bold and another code block here
+┃ This is a blockquote line with emphasis.
+────────────────────────────────────────────────────────────────
+```rust
+fn main() {
+    let x = 5;
+    if x > 3 {
+```
+```
+
+The screenshot is `shots/11-inline-styling.png`. No `**`, no `*`, and no backtick is on screen.
+
+### The contract, and where the width invariant lives
+
+A row was `(String, Style)`, one style for the whole row. It is now `StyledLine`, a list of
+styled runs, and 32 producer sites were converted. Review asked whether `StyledLine` should be
+a struct owning its width. It is not. **`put` owns it**, and `put` is the only consumer: it
+clips a run at the right edge and pads a short row. One place, in code, for every producer
+including a future one. A struct would spread the same rule across 32 call sites and still rely
+on each of them calling it.
+
+Wrapping now runs **over runs**, not over text, which is what closes the ordering bug review
+found. A per-character pass carries each character's style, then neighbours of one style are
+coalesced back into runs.
+
+### Two rules where rho deliberately leaves CommonMark
+
+Both come from the domain, and both have tests.
+
+**An underscore never carries emphasis.** CommonMark renders `__init__` as bold. rho leaves it
+alone, because in a coding agent's prose an underscore is an identifier: `wrap_block`,
+`snake_case`, `__all__`, `_private`. Only `*` carries emphasis.
+
+**An intraword star never opens.** CommonMark italicises the `3` in `2*3*4`. rho requires a
+non-alphanumeric before an opening marker and after a closing one, so multiplication and globs
+survive.
+
+### The breaks, and two that taught something
+
+| The break | Result |
+| --- | --- |
+| Wrap over raw text instead of runs, the ordering bug | 4 tests fail |
+| Let an underscore open emphasis again | 2 tests fail, `__init__` is eaten |
+| Remove the closing flanking rule only | **nothing fails** |
+| Remove the intraword rule only | **nothing fails** |
+| Remove flanking entirely, the naive rule | 1 test fails: `2 * 3 * 4` becomes `2  3  4` |
+
+The two that failed to trip are the interesting ones, and they are not vacuous tests this time.
+Each single rule is covered by another: for `2 * 3 * 4` the opening rule catches it, and if that
+is removed the closing rule does. Removing one leaves the other standing. Only removing flanking
+altogether gets through, and the test catches that, reporting exactly the `2  3  4` the review
+predicted before any code existed.
+
+That is defence in depth rather than a hole, but it took three attempts to establish which, and
+the difference matters: a break that trips nothing is either a weak test or a redundant rule,
+and only tracing it says which.

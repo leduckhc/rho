@@ -1,6 +1,6 @@
 # SPEC-tui-markdown — colour the markup, and keep the row a grid
 
-Status: **phase 1 shipped. phase 2 is draft, and revised by review.**
+Status: **phase 1 and phase 2 both shipped.** Tables and syntax highlighting stay out of scope.
 
 The contract went to review before either side was written. It came back `REVISE`, and this
 spec now carries the revisions. Phase 1, the line-level subset, is built and tested, because it
@@ -39,12 +39,12 @@ and an incremental renderer. That is far more than this spec wants.
 Each styles a whole row, so its markup can be stripped **before** the text is wrapped and one
 style covers every row the line produces. No contract change.
 
-**Phase 2, not started.** `**bold**`, `*italic*`, and `` `code` ``. Each styles part of a row,
-which the current row type cannot express.
+**Phase 2, shipped.** `**bold**`, `*italic*`, `***both***`, and `` `code` ``. Each styles part
+of a row, which needed the row type to carry runs.
 
 The split is where the renderer stops being able to express the answer, not a guess at effort.
 
-## 3. The contract, for phase 2
+## 3. The contract, shipped
 
 **The sides.** The row producers in `rho-tui::render` own one side. The frame writer, `put`,
 owns the other. Today they agree on one style for a whole row, so inline colour is not
@@ -67,27 +67,30 @@ pub fn line_width(line: &StyledLine) -> usize;
 `put` takes a `&StyledLine` and writes each run in order. Every producer that has no inline
 styling calls `plain`, so the change is mechanical for 29 of the 30 sites.
 
-## 3a. What review requires before phase 2 starts
+## 3a. What review required, and how each item was answered
 
 Item 6 is new, and it comes from measuring pi and jcode side by side rather than reading them.
 See `docs/verification/notices-live.md`.
 
 The reviewer rated the first four `High` or `Medium-High`. None may be skipped.
 
-1. **State the pipeline as scan, then wrap, then pad, over runs.** The first draft of this spec
+1. **Done.** The pipeline is scan, then wrap over runs, then pad in `put`. The first draft of this spec
    had the order wrong: wrapping ran on raw text, so removing `**` afterwards left a row four
    columns short of the wrap's own measure. The claim "markup never changes width by accident"
    was deleted, because markup removal **always** changes width.
-2. **`StyledLine` must own its width invariant**, or the spec must say plainly that `put` clips
-   and that every caller pads. A bare type alias carries no invariant, so the earlier claim
-   that `line_width` is "the source of truth for wrapping" cannot hold.
-3. **The inline rules are insufficient as written.** `2 * 3 * 4` italicises ` 3 ` under "a pair
-   on the same row matches", and `2 ** 3 ** 4` bolds it. Phase 2 needs the CommonMark flanking
-   rule, plus backslash escapes, multi-backtick code spans, and `***triple***`.
+2. **Answered by placing the invariant at the consumer.** `StyledLine` stays a list of runs,
+   and `put` is the single place that clips a run at the right edge and pads a short row. One
+   place enforces it in code, for every producer including a future one. A struct would spread
+   the rule across 30 call sites and still depend on each of them calling it.
+3. **Done, and rho goes further than CommonMark in two places.** The flanking rule is in, plus
+   backslash escapes, multi-backtick spans, and `***triple***`. Beyond CommonMark: **an
+   underscore never carries emphasis**, so `__init__` and `snake_case` survive, and **an
+   intraword star never opens**, so `2*3*4` survives. Both are deliberate: in a coding agent's
+   prose those are identifiers and arithmetic, not emphasis.
 4. **Fence state spans the whole message**, never the visible window. Phase 1 already does
    this, and phase 2 must keep it.
 5. **A table and a nested list degrade to verbatim.** Phase 1 does this, with a test.
-6. **A background colour is a contract question, not a detail.** jcode draws inline code as
+6. **Deferred, and stated.** Inline code takes a foreground colour only, as pi does. jcode draws inline code as
    RGB 140,180,255 on RGB 45,45,45, and measured beside a foreground-only change it reads more
    clearly. `RoleStyle` has `color`, `dim`, `bold`, and `reversed`, and **no background field**.
    So an inline code background needs the role table extended, and every role must then state a
