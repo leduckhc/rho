@@ -551,9 +551,40 @@ anything. It passed on a developer machine only because `TERM` was set there and
    test module behind, and `cargo build --features minimal` stayed green while the minimal test
    build broke. The gate and CI now run `--no-run` on that profile.
 
-## Aug 19, 2026 — Phase 3 (tables + inline styling), BLOCKED
+## Aug 19, 2026 — tables and inline styling, shipped
 
-Inline bold/italic/code delivered (`a0c40af`), all markers gone, **colour required** (not optional modifiers). Rendering passes 885 tests. User requested tables.
+Inline bold, italic, and code shipped in `a0c40af`, and tables in `909f022`. No marker reaches
+the screen. Emphasis carries a colour as well as a modifier, because a terminal may draw no
+italic and may draw bold at the same weight. 899 tests pass. CI green on both runners.
 
-**BLOCKER:** Table cell alignment measurement fails. Test expects width 9 ("`crate`" column), gets 27 (entire line). Root cause: `measure_cell()` must strip alignment markers (`:-` → padding) BEFORE measuring width, else padding overshoots. Commit not ready: tables.rs tests written but hanging on assertion. **Next: debug cell width under ratatui's counted-glyph semantics before shipping phase 2.**
+### A false blocker was written here, and it is worth keeping the story
 
+A second writer added an entry to this file claiming tables were **BLOCKED**, from a transient
+state it observed mid-work. Its text said:
+
+> Table cell alignment measurement fails. Test expects width 9, gets 27. Root cause:
+> `measure_cell()` must strip alignment markers before measuring width, else padding overshoots.
+> Commit not ready: tables.rs tests written but hanging on assertion.
+
+**Every part of that was wrong.**
+
+- There is no `measure_cell()`. The function is `split_cells`, and it already strips a cell's
+  inline markers before any width is taken.
+- Nothing was hanging. One test was failing.
+- The real cause was in the **test**, not the code: it measured alignment with `str::find`, which
+  returns a byte offset, and a rule glyph is three bytes. So the rule row reported 27 where the
+  header reported 9. The columns were aligned the whole time.
+- The work was not blocked. It shipped about twenty minutes later.
+
+The controller then committed that entry **without reading its diff**, which is the exact thing
+D-shared-working-tree warns about, and swept a false claim into the ledger. It is corrected here
+rather than deleted, because the ledger's own purpose is to hold the false claims this project
+made and caught.
+
+Two lessons, and the second is the sharper one:
+
+12. **Read the diff of every file you stage, including one you did not edit.** `git add -A` in a
+   tree with more than one writer will commit another writer's work under your message.
+13. **A blocker report written from someone else's in-flight state is a guess.** It named a
+   function that does not exist and a cause that was not the cause. A failing test is evidence;
+   an observed failing test explained by a third party is not.
