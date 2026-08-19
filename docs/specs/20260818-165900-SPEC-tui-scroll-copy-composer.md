@@ -345,6 +345,12 @@ pub fn transcript_dump(state: &TuiState, width: u16) -> Vec<String>;
 pub fn dump_script(lines: &[String]) -> String;
 ```
 
+> **The dump is not built. See `D-alternate-screen-after-all`.** The paragraph below states
+> the design as it stood. `ctrl-p` and `dump_script` exist in no code. The dump gave back the
+> terminal's search, and the terminal's own search reaches the alternate screen in iTerm2 and
+> in Ghostty, so the need does not exist. A spike proved the dump works, and that record
+> stays in `docs/verification/alt-screen-spike.md` for a future reader.
+
 `ctrl-p` returns `KeyAction::DumpTranscript`. The event loop writes `dump_script`. It enters
 the alternate screen again even when the write fails, because a terminal left outside it
 loses the interface, and a terminal left inside it loses the user's shell.

@@ -9,12 +9,11 @@
 //! leaves the band for the terminal's scrollback through `Terminal::insert_before`.
 //! See `SPEC-tui-inline-and-composer` and `D-inline-viewport-not-alternate-screen`.
 
-use std::io::{self, Stdout, Write};
+use std::io::{self, Stdout};
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{Event, EventStream, KeyEventKind, MouseButton, MouseEventKind};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -27,6 +26,7 @@ use crate::render::{
     FreezeBatch, band_rows, banner_freeze, composer_text_width, freeze_all, help_visible_rows,
     next_freeze, render,
 };
+use crate::screen::ScreenGuard;
 use crate::slash_row_index;
 use crate::state::{KeyAction, TuiState};
 
@@ -43,26 +43,18 @@ pub enum TuiError {
 
 /// The escape sequences that start the interface. `mouse` adds mouse capture.
 ///
-/// The sequences are data, so a test reads them with no terminal. Neither sequence
-/// enters the alternate screen, because the band lives in the main screen.
+/// The sequences are data, so a test reads them with no terminal. rho now enters the
+/// alternate screen at startup, so this delegates to the screen guard. See
+/// `D-alternate-screen-after-all`.
 pub fn setup_sequences(mouse: bool) -> String {
-    if mouse {
-        // Report button presses, drags, and the wheel, in SGR form.
-        "\u{1b}[?1000h\u{1b}[?1002h\u{1b}[?1003h\u{1b}[?1006h".to_string()
-    } else {
-        String::new()
-    }
+    crate::screen::enter_sequences(mouse)
 }
 
-/// The sequences that give the terminal back. It disables only what the setup enabled.
+/// The sequences that give the terminal back. It mirrors `setup_sequences`.
 ///
-/// It mirrors `setup_sequences`, so it turns off no mode the setup skipped.
+/// It delegates to the screen guard, so the setup and the restore never drift apart.
 pub fn restore_sequences(mouse: bool) -> String {
-    if mouse {
-        "\u{1b}[?1006l\u{1b}[?1003l\u{1b}[?1002l\u{1b}[?1000l".to_string()
-    } else {
-        String::new()
-    }
+    crate::screen::restore_sequences(mouse)
 }
 
 /// The interactive TUI app. It owns the session and the current run state.
@@ -119,15 +111,27 @@ impl App {
     }
 
     /// Run the UI until the user exits. Owns the terminal for its lifetime.
+    ///
+    /// The screen guard restores the terminal on every exit path: a clean return, an error,
+    /// a panic that unwinds through here, and a fatal signal. See
+    /// `D-alternate-screen-after-all`.
     pub async fn run(&mut self) -> Result<(), TuiError> {
-        let mut terminal = setup_terminal(self.mouse)?;
-        let result = self.event_loop(&mut terminal).await;
+        let mut guard = ScreenGuard::enter(self.mouse)?;
+        // Restore the terminal on SIGTERM, SIGHUP, or SIGINT. The task ends when run does.
+        let signals = crate::screen::spawn_signal_restore(self.mouse);
+        let mut terminal = build_terminal()?;
+        let result = self.event_loop(&mut terminal, &mut guard).await;
+        signals.abort();
         // Always restore the terminal, even after an error.
-        let restore = restore_terminal(&mut terminal, self.mouse);
+        let restore = restore_terminal(&mut terminal, &mut guard);
         result.and(restore)
     }
 
-    async fn event_loop(&mut self, terminal: &mut Term) -> Result<(), TuiError> {
+    async fn event_loop(
+        &mut self,
+        terminal: &mut Term,
+        guard: &mut ScreenGuard,
+    ) -> Result<(), TuiError> {
         let mut input = EventStream::new();
 
         let App {
@@ -136,10 +140,8 @@ impl App {
             cancel,
             events,
             started,
-            mouse,
             ..
         } = self;
-        let mouse = *mouse;
 
         // Freeze the banner once, above the band, then draw the first frame.
         let width = frame_width(terminal)?;
@@ -177,7 +179,7 @@ impl App {
                                 // result. The band leaves the screen for the editor, and it
                                 // returns after. A failed run keeps the draft.
                                 KeyAction::EditDraft(text) => {
-                                    run_editor(terminal, state, mouse, &text)?;
+                                    run_editor(terminal, guard, state, &text)?;
                                 }
                             }
                             freeze_and_draw(terminal, state)?;
@@ -281,12 +283,12 @@ fn freeze_and_draw(terminal: &mut Term, state: &mut TuiState) -> Result<(), TuiE
 
 /// Run the editor on the draft, then restore the band.
 ///
-/// The band leaves the screen, so the editor owns the terminal. The editor value comes
-/// from the environment. A failed run keeps the draft and pushes one error row.
+/// The screen leaves for the editor, so the editor owns the terminal. The editor value
+/// comes from the environment. A failed run keeps the draft and pushes one error row.
 fn run_editor(
     terminal: &mut Term,
+    guard: &mut ScreenGuard,
     state: &mut TuiState,
-    mouse: bool,
     text: &str,
 ) -> Result<(), TuiError> {
     let command = editor_command(
@@ -294,15 +296,11 @@ fn run_editor(
         std::env::var("EDITOR").ok().as_deref(),
     );
     let argv = editor_argv(&command);
-    restore_terminal(terminal, mouse)?;
+    // Leave the alternate screen and raw mode, so the editor owns the terminal.
+    guard.restore()?;
     edit_draft(state, &argv, text);
-    // Re-enter the band, so the session continues where it left off.
-    enable_raw_mode().map_err(|error| TuiError::Io(error.to_string()))?;
-    let mut stdout = io::stdout();
-    stdout
-        .write_all(setup_sequences(mouse).as_bytes())
-        .and_then(|_| stdout.flush())
-        .map_err(|error| TuiError::Io(error.to_string()))?;
+    // Re-enter the alternate screen, so the session continues where it left off.
+    guard.reenter()?;
     freeze_and_draw(terminal, state)
 }
 
@@ -431,17 +429,14 @@ fn draw(terminal: &mut Term, state: &TuiState) -> Result<(), TuiError> {
     Ok(())
 }
 
-/// Enter raw mode and open the inline band. Never enter the alternate screen.
-fn setup_terminal(mouse: bool) -> Result<Term, TuiError> {
-    enable_raw_mode().map_err(|error| TuiError::Io(error.to_string()))?;
-    let mut stdout = io::stdout();
-    stdout
-        .write_all(setup_sequences(mouse).as_bytes())
-        .and_then(|_| stdout.flush())
-        .map_err(|error| TuiError::Io(error.to_string()))?;
+/// Build the ratatui terminal for the inline band.
+///
+/// The screen guard already entered raw mode and the alternate screen, so this writes no
+/// sequences and toggles no mode. It only sizes the viewport.
+fn build_terminal() -> Result<Term, TuiError> {
     let (_, height) =
         crossterm::terminal::size().map_err(|error| TuiError::Io(error.to_string()))?;
-    let backend = CrosstermBackend::new(stdout);
+    let backend = CrosstermBackend::new(io::stdout());
     Terminal::with_options(
         backend,
         TerminalOptions {
@@ -451,21 +446,16 @@ fn setup_terminal(mouse: bool) -> Result<Term, TuiError> {
     .map_err(|error| TuiError::Io(error.to_string()))
 }
 
-/// Give the terminal back, and leave the cursor below the band.
-fn restore_terminal(terminal: &mut Term, mouse: bool) -> Result<(), TuiError> {
+/// Give the terminal back through the guard, and leave the cursor below the band.
+fn restore_terminal(terminal: &mut Term, guard: &mut ScreenGuard) -> Result<(), TuiError> {
     // Clear the band before the modes go back. The last frame holds a composer box and a
     // footer that promises keys rho no longer answers. A live run left
     // `ctrl-c again quits` on screen after rho had exited, which is a lie the user reads.
-    // The transcript above the band is ordinary output, so the clear never touches it.
     terminal
         .clear()
         .map_err(|error| TuiError::Io(error.to_string()))?;
-    let mut stdout = io::stdout();
-    stdout
-        .write_all(restore_sequences(mouse).as_bytes())
-        .and_then(|_| stdout.flush())
-        .map_err(|error| TuiError::Io(error.to_string()))?;
-    disable_raw_mode().map_err(|error| TuiError::Io(error.to_string()))?;
+    // The guard restores raw mode, mouse reporting, and the alternate screen once.
+    guard.restore()?;
     terminal
         .show_cursor()
         .map_err(|error| TuiError::Io(error.to_string()))?;

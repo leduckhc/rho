@@ -54,20 +54,24 @@ fn agent_end() -> AgentEvent {
 // ---- Section 5: the setup sequences. -------------------------------------------
 
 #[test]
-fn the_setup_never_enters_the_alternate_screen() {
+fn the_setup_enters_the_alternate_screen() {
+    // Inverted deliberately for `D-alternate-screen-after-all`. rho now owns the whole
+    // terminal, so the setup enters the alternate screen. The old assertion, that it never
+    // did, described the superseded inline band.
     assert!(
-        !setup_sequences(false).contains("?1049h"),
-        "the whole architecture rests on the main screen"
+        setup_sequences(false).contains("?1049h"),
+        "rho enters the alternate screen at startup"
     );
-    assert!(!setup_sequences(true).contains("?1049h"));
+    assert!(setup_sequences(true).contains("?1049h"));
 }
 
 #[test]
 fn the_restore_matches_the_setup() {
-    // The restore disables no mode the setup skipped. With mouse off, both are empty.
-    assert_eq!(setup_sequences(false), "");
-    assert_eq!(restore_sequences(false), "");
-    // With mouse on, the restore turns off exactly the modes the setup turned on.
+    // With mouse off, the setup enters the alternate screen and the restore leaves it.
+    // See `D-alternate-screen-after-all`.
+    assert!(setup_sequences(false).contains("?1049h"));
+    assert!(restore_sequences(false).contains("?1049l"));
+    // With mouse on, the restore turns off exactly the mouse modes the setup turned on.
     for mode in ["1000", "1002", "1003", "1006"] {
         let enabled = setup_sequences(true).contains(&format!("{mode}h"));
         let disabled = restore_sequences(true).contains(&format!("{mode}l"));
@@ -311,9 +315,12 @@ fn exit_freezes_a_running_tool_row_as_running() {
 
 #[test]
 fn capture_is_off_by_default() {
-    assert_eq!(
-        setup_sequences(false),
-        "",
+    // With mouse off, the setup enters the alternate screen but adds no mouse capture, so
+    // drag-select still works. See `D-alternate-screen-after-all`.
+    let setup = setup_sequences(false);
+    assert!(setup.contains("?1049h"), "the setup enters the screen");
+    assert!(
+        !setup.contains("1006h"),
         "capture is off by default, so drag-select works"
     );
 }

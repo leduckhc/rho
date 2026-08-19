@@ -5,7 +5,7 @@ Decision: `D-alternate-screen-after-all`.
 Evidence: `docs/verification/alt-screen-spike.md`.
 
 rho enters the alternate screen at startup and draws the whole terminal. The transcript
-scrolls inside rho. `ctrl-p` writes the transcript into the terminal's own scrollback.
+scrolls inside rho. The terminal's own search still reaches the screen, so rho writes no dump.
 
 ## 1. The sides, and who owns each
 
@@ -17,7 +17,7 @@ A side is any two places that must agree. This change has five.
 | The terminal | the terminal emulator | the escape sequences, and the mouse protocol |
 | The scroll state | `rho-tui` | the offset rules, and the pin rule |
 | The keys | `rho-tui`, through `bindings.rs` | every scroll key answers, and the help states it |
-| The command line | `rho-cli` | the mouse default, and the dump key |
+| The command line | `rho-cli` | the mouse default |
 
 The contract kinds this change touches: the public API, the data model, the error set, the
 wire format to the terminal, the configuration, and the behaviour rules.
@@ -47,7 +47,7 @@ impl ScreenGuard {
 
     /// Restore every mode now, and make `Drop` a no-op.
     ///
-    /// The dump needs the normal buffer, so it restores, writes, and enters again.
+    /// The external editor needs the normal buffer, so it restores and enters again.
     pub fn restore(&mut self) -> Result<(), TuiError>;
 
     /// Enter the alternate screen again after `restore`.
@@ -185,23 +185,20 @@ table. A new terminal **mode** does force an edit to `enter`, `restore`, `enter_
 and `restore_sequences`, and that is accepted: a mode is a change to the contract with the
 terminal, so it belongs in this spec first.
 
-## 4. The dump
+## 4. There is no transcript dump
 
-```rust
-/// Write every transcript row into the terminal's own scrollback.
-///
-/// It restores the terminal, writes plain rows, and enters the alternate screen again. The
-/// rows carry no style and no cursor, and `sanitize_line` has already run on each.
-pub fn dump_transcript(
-    guard: &mut ScreenGuard,
-    state: &TuiState,
-    width: u16,
-    out: &mut impl std::io::Write,
-) -> Result<usize, TuiError>;
-```
+An earlier draft of this spec gave `ctrl-p` a dump. It left the alternate screen, wrote every
+transcript row into the terminal's own scrollback, and entered the alternate screen again. A
+spike proved it works, and `docs/verification/alt-screen-spike.md` records that it recovered
+40 of 40 rows.
 
-It returns the row count it wrote. A spike recovered 40 of 40 prose rows and 40 of 40 tool
-rows this way.
+**It is not built, because it answers a question nobody asked.** The dump existed to give
+back the terminal's search and copy. The owner tested iTerm2 and Ghostty, and the terminal's
+own search reaches the alternate screen in both. So nothing is lost, and a feature that
+serves no need is a promise rho must keep for no gain.
+
+The guard still needs `restore` and `reenter`, and the reason is the external editor. rho
+leaves the terminal for `$EDITOR` and comes back. That path exists today in `app.rs`.
 
 ## 5. The keys
 
@@ -210,7 +207,6 @@ is not wired carries `built: false`.
 
 | Keys | Summary |
 | --- | --- |
-| `ctrl-p` | write the transcript to the terminal scrollback |
 | `pageup`, `pagedown` | move the view one screen |
 | `ctrl-u`, `ctrl-d` | move the view half a screen |
 | `home`, `end` | jump to the oldest row, and to the newest |
@@ -250,8 +246,8 @@ Removed: `next_freeze`, `freeze_all`, `banner_freeze`, `FreezeBatch`, and every
 `insert_before` call. `frozen_rows` becomes zero and then goes, and the late-event drop path
 goes with it. `BAND_ROWS` stops being a layout budget, and `plan_band` goes with the band.
 
-`dump_transcript` needs the one capability the freeze path had, which is rendering a row as
-plain text with no style. That code moves into the dump rather than dying.
+Nothing inherits the freeze path's one useful capability, which was rendering a row as plain
+text with no style. There is no dump, so that code goes too.
 
 A test must pin the repair: `a_late_event_reaches_an_old_row`.
 
@@ -288,7 +284,7 @@ behaviour writes `tui.mouse = false` or passes `--no-mouse`.
 
 The default flips from off to on. `D-alternate-screen-after-all` records why, and the cost:
 mouse capture can take native selection away, so the footer must name the modifier that
-restores it, and `ctrl-p` is the bulk escape hatch.
+restores it. A user who wants the mouse out of the way passes `--no-mouse`.
 
 ## 9. Test cases
 
@@ -341,13 +337,10 @@ Each test names the assertion it proves.
 - `a_late_event_reaches_an_old_row` — the repair from section 6b. An event that names a row
   already scrolled out of view still updates that row, because rho can repaint it now.
 
-### The dump
+### The external editor
 
-- `reenter_returns_to_the_alternate_screen` — `reenter` after `restore` writes `?1049h`.
-- `the_dump_writes_every_row` — the returned count equals the transcript row count.
-- `the_dump_writes_plain_rows` — no output row contains an escape byte.
-- `the_dump_returns_to_the_alternate_screen` — the sink holds `?1049l` before the rows and
-  `?1049h` after them.
+- `the_guard_leaves_and_reenters_for_the_editor` — `restore` then `reenter` writes `?1049l`
+  and then `?1049h`. This is the only caller of the pair, now that there is no dump.
 
 ### The keys and the help
 
@@ -378,6 +371,6 @@ Each test names the assertion it proves.
   alternate screen does not change that. It needs its own spec.
 - **The tool row payload.** A tool row states no payload today, which
   `docs/verification/ledger-band-live.md` records. It is a separate defect.
-- **Search inside rho.** `ctrl-p` hands the transcript to the terminal, whose search is
-  better than any rho would write this year.
+- **Search inside rho.** The terminal's own search reaches the alternate screen in iTerm2
+  and in Ghostty, and it is better than any search rho would write this year.
 - **Windows and Linux measurement.** Every number here came from macOS, ghostty, and tmux.

@@ -14,6 +14,8 @@ mod motion;
 mod paste;
 mod render;
 mod sanitize;
+mod screen;
+mod scroll;
 mod state;
 mod theme;
 
@@ -30,6 +32,8 @@ pub use render::{
     next_freeze, plan_band, render, slash_row_index,
 };
 pub use sanitize::{fit_to_width, sanitize_line};
+pub use screen::{ScreenGuard, enter_sequences};
+pub use scroll::{PAGE_ROWS_MARGIN, Scroll, WHEEL_ROWS};
 pub use state::{
     ActivityState, Approval, HistorySearch, KeyAction, Panel, Row, SlashList, ToolRowStatus,
     TuiState, filter_history, row_is_final,
