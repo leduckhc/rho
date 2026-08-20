@@ -199,6 +199,12 @@ Named, with the assertion each one proves.
 - `home_supplies_the_global_path` — with no XDG variable, `global` is
   `$HOME/.config/rho/config.toml`.
 - `no_home_yields_no_global_path` — `global` is `None`, and discovery does not fail.
+- `an_empty_home_value_yields_no_global_path` — an exported-but-empty variable counts as
+  unset, so discovery never names `/rho/config.toml` at the filesystem root. Added during
+  step 7: a break that deleted the empty check passed `no_home_yields_no_global_path`,
+  because that test sets no variable at all and never reaches the empty case.
+- `an_empty_xdg_value_falls_back_to_home` — the empty check must not throw away a usable
+  `HOME` that sits beside an empty XDG variable.
 - `the_project_path_sits_under_the_bootstrap_root` — `project` is
   `<root>/.rho/config.toml`.
 - `discovery_names_a_path_that_does_not_exist` — a path is returned for an absent file.
@@ -219,7 +225,10 @@ Named, with the assertion each one proves.
 - `every_scalar_key_merges_and_reaches_the_config` — the completeness guard for the
   hand-kept `merge` list, so a forgotten line fails a test instead of dropping a value.
 - `from_paths_maps_the_two_paths` and `the_builder_carries_env_profile_and_flags` — the one
-  constructor the whole contract rests on.
+  constructor the whole contract rests on. `from_paths_maps_the_two_paths` gives **both**
+  files the same key, so a swap of the two slots reverses the winner and fails the test.
+  An earlier version gave each file a different key, and a deliberate swap passed it,
+  because both values still reached the config.
 - `a_broken_project_file_stops_the_run` — a non-zero exit, and the path is in the message.
 - `a_missing_config_file_is_not_an_error` — the run proceeds with defaults.
 - `an_unknown_profile_is_an_error` — `--profile` names a block no file defines.

@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use rho_config::Sources;
+use rho_config::{ConfigPaths, Sources};
 use tempfile::TempDir;
 
 /// Make a temporary directory. It is removed when the returned handle drops.
@@ -42,8 +42,21 @@ pub fn env_vars(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 
 /// A `Sources` that reads only one project file.
 pub fn sources_with_project_file(path: PathBuf) -> Sources {
-    Sources {
-        project_file: Some(path),
-        ..Sources::default()
-    }
+    project_sources(path)
+}
+
+/// A `Sources` built from one project path, through the one constructor.
+///
+/// The fields are `pub(crate)`, so a test builds a `Sources` the same way the product
+/// does. See `SPEC-config-call-site` section 2.
+pub fn project_sources(path: PathBuf) -> Sources {
+    Sources::from_paths(ConfigPaths {
+        global: None,
+        project: Some(path),
+    })
+}
+
+/// A `Sources` that reads no file at all, for an environment-only or flag-only test.
+pub fn empty_sources() -> Sources {
+    Sources::from_paths(ConfigPaths::default())
 }

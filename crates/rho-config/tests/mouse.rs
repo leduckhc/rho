@@ -5,18 +5,14 @@
 
 mod common;
 
-use common::{env_vars, temp_dir, write_file};
-use rho_config::{Config, ConfigLayer, Sources};
+use common::{env_vars, project_sources, temp_dir, write_file};
+use rho_config::{Config, ConfigLayer};
 
 /// Load a config from one project file and one environment list.
 fn load(file: &str, env: &[(&str, &str)]) -> Config {
     let dir = temp_dir();
     let project = write_file(&dir, "project.toml", file);
-    let sources = Sources {
-        project_file: Some(project),
-        env: env_vars(env),
-        ..Sources::default()
-    };
+    let sources = project_sources(project).with_env(env_vars(env));
     Config::load(&sources).expect("the sources resolve")
 }
 

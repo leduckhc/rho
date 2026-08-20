@@ -9,8 +9,8 @@ mod common;
 
 use std::path::PathBuf;
 
-use common::env_vars;
-use rho_config::{ApprovalMode, Config, ConfigError, ConfigLayer, Sources};
+use common::{empty_sources, env_vars};
+use rho_config::{ApprovalMode, Config, ConfigError, ConfigLayer};
 use rho_core::SandboxMode;
 
 /// Every `RHO_<KEY>` variable for the scalar keys, with a value for each.
@@ -56,10 +56,7 @@ fn from_env_maps_every_scalar_key() {
 fn load_reads_every_scalar_key_from_the_environment() {
     // A full `Config::load` reads each scalar key from the environment layer. This
     // proves the mapping reaches the resolved `Config`, not merely the raw layer.
-    let sources = Sources {
-        env: every_scalar_env(),
-        ..Sources::default()
-    };
+    let sources = empty_sources().with_env(every_scalar_env());
     let config = Config::load(&sources).expect("the environment layer resolves");
     assert_eq!(config.provider.as_deref(), Some("env-provider"));
     assert_eq!(config.model.as_deref(), Some("env-model"));
@@ -87,10 +84,7 @@ fn env_sandbox_bad_value_fails_closed() {
     // `RHO_SANDBOX=loose` must stop the run with a `ConfigError::Parse` that names the
     // key and the value. An environment value must not be a softer path into the same
     // security setting than a file value. See D-plugin-does-not-classify-itself and D-config-fails-closed.
-    let sources = Sources {
-        env: env_vars(&[("RHO_SANDBOX", "loose")]),
-        ..Sources::default()
-    };
+    let sources = empty_sources().with_env(env_vars(&[("RHO_SANDBOX", "loose")]));
     match Config::load(&sources) {
         Err(ConfigError::Parse { message, .. }) => {
             assert!(message.contains("sandbox"), "message: {message}");
@@ -104,10 +98,7 @@ fn env_sandbox_bad_value_fails_closed() {
 fn env_approval_bad_value_fails_closed() {
     // `RHO_APPROVAL=bananas` must stop the run with a `ConfigError::Parse` that names
     // the key and the value. The environment must never widen a security key.
-    let sources = Sources {
-        env: env_vars(&[("RHO_APPROVAL", "bananas")]),
-        ..Sources::default()
-    };
+    let sources = empty_sources().with_env(env_vars(&[("RHO_APPROVAL", "bananas")]));
     match Config::load(&sources) {
         Err(ConfigError::Parse { message, .. }) => {
             assert!(message.contains("approval"), "message: {message}");
@@ -122,18 +113,12 @@ fn env_ephemeral_accepts_the_stated_truthy_and_falsy_values() {
     // The boolean rule: `1`, `true`, and `yes` are true. `0`, `false`, and `no` are
     // false. The rule is case-insensitive and trims surrounding space.
     for value in ["1", "true", "yes", "TRUE", " Yes "] {
-        let sources = Sources {
-            env: env_vars(&[("RHO_EPHEMERAL", value)]),
-            ..Sources::default()
-        };
+        let sources = empty_sources().with_env(env_vars(&[("RHO_EPHEMERAL", value)]));
         let config = Config::load(&sources).expect("an accepted truthy value loads");
         assert!(config.ephemeral, "value {value:?} must be true");
     }
     for value in ["0", "false", "no", "NO"] {
-        let sources = Sources {
-            env: env_vars(&[("RHO_EPHEMERAL", value)]),
-            ..Sources::default()
-        };
+        let sources = empty_sources().with_env(env_vars(&[("RHO_EPHEMERAL", value)]));
         let config = Config::load(&sources).expect("an accepted falsy value loads");
         assert!(!config.ephemeral, "value {value:?} must be false");
     }
@@ -143,10 +128,7 @@ fn env_ephemeral_accepts_the_stated_truthy_and_falsy_values() {
 fn env_ephemeral_unaccepted_value_fails_closed() {
     // A value the rule does not accept fails closed, rather than reading as false. The
     // error names the key and the value.
-    let sources = Sources {
-        env: env_vars(&[("RHO_EPHEMERAL", "nonsense")]),
-        ..Sources::default()
-    };
+    let sources = empty_sources().with_env(env_vars(&[("RHO_EPHEMERAL", "nonsense")]));
     match Config::load(&sources) {
         Err(ConfigError::Parse { message, .. }) => {
             assert!(message.contains("ephemeral"), "message: {message}");
@@ -159,10 +141,7 @@ fn env_ephemeral_unaccepted_value_fails_closed() {
 #[test]
 fn env_no_skills_unaccepted_value_fails_closed() {
     // The `no-skills` boolean obeys the same rule as `ephemeral`, and fails closed.
-    let sources = Sources {
-        env: env_vars(&[("RHO_NO_SKILLS", "maybe")]),
-        ..Sources::default()
-    };
+    let sources = empty_sources().with_env(env_vars(&[("RHO_NO_SKILLS", "maybe")]));
     match Config::load(&sources) {
         Err(ConfigError::Parse { message, .. }) => {
             assert!(message.contains("no-skills"), "message: {message}");

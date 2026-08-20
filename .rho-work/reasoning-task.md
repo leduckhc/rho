@@ -1,213 +1,149 @@
-# Task — finish SPEC-reasoning-across-providers
+# Task — reasoning across providers, and the config call site it grew into
 
-Working notes for branch `feat/reasoning-across-providers`. Spec:
-`docs/specs/20260819-134615-SPEC-reasoning-across-providers.md`.
+Working notes for branch `feat/reasoning-across-providers`. Specs:
+`docs/specs/20260819-134615-SPEC-reasoning-across-providers.md` and
+`docs/specs/20260820-200901-SPEC-config-call-site.md`.
 
-## The task, in one sentence
+## TASK
 
-Make rho show a model's reasoning correctly, and replay it correctly, on every provider.
+Make rho show a model's reasoning correctly on every provider. Wire the config that
+feature needs, and keep a cloned repository from running commands on startup.
 
-## Why the work is open
+The second sentence was not in the original task. It grew from one ruling. Section
+`UNKNOWN` asks whether that growth is still wanted.
 
-Another agent wrote 1668 lines, then stopped. Commit `e08b190` saved that work and vouched
-for none of it. This file states what is done, what is not, and what must be decided first.
+## STATED
 
-The gate now passes on the saved work: `fmt` clean, `clippy` clean, 855 tests pass, the
-minimal build links, `check-ids.py` reports 0, `check-prose.py` reports 0. No `todo!()`
-anywhere in `crates/*/src`.
+Each item is a quote. Four came from `ask_user` replies, so the quote is the option title
+you picked. Two questions were **cancelled**, and that is recorded here as well, because a
+cancellation is not an answer.
 
-**A green gate is not a finished feature here.** The saved work is the display half. The
-contract half is missing, and three defects sit inside the part that looks done.
+- **S1.** "what's this branch about? is it finished?"
+- **S2.** "write the task we have at hand" and "write the list of requirements we have"
+- **S3.** "what do you mean by refuse? if the argument value is wrong, throw error"
+  → This is the R6 ruling, in your own typed words. The `ask_user` question about R6 was
+  cancelled, and you answered in prose instead.
+- **S4.** "Wire the whole config now"
+  → This overruled `D-the-layered-config-has-no-caller`, which had deferred the wiring.
+- **S5.** "Trust the project file fully, as the spec reads today"
+- **S6.** "Take the probe's mitigation (recommended)"
+  → This narrowed S5 after a live probe proved command execution at startup.
+- **S7.** "continue pi session 01a020b6-173e-7c66-8086-9d2342040dba"
+- **S8.** "turn the task and requirements list into Stated / Inferred / Unknown"
 
-## Lane
+Two cancellations, recorded because they shaped the work:
 
-Step 0 of `AGENTS.md`: this is **a feature**, so every step applies. It is also a
-**contract** change, so step 3 comes before any code, and step 9 reviews the contract on
-its own before either side implements it.
+- **S9.** The R6 question was cancelled. S3 replaced it.
+- **S10.** The trust carve-out question was cancelled, so S5 stood until S6 replaced it.
 
-Two of the requirements below are **bug fixes** on already-committed code. They take the bug
-fix lane: the reproducing test lands first, and step 7 is the whole point.
+## INFERRED
 
-## What is done
+What I filled in, and the evidence for each. Anything here is mine, not yours, so it is
+the first place to look for a wrong assumption.
 
-| Part | Where | State |
-| --- | --- | --- |
-| Three-name reasoning reader | `rho-provider-openrouter/src/lib.rs` | done, 4 tests |
-| `ThinkingSplitter`, the tag rule | `rho-core/src/thinking.rs` | done, 11 tests |
-| `ReasoningDisplay`, four modes | `rho-core/src/reasoning.rs` | done, 3 tests |
-| Splitter wired into the reducer | `rho-tui/src/state.rs` | done, 3 tests |
-| The four display modes drawn | `rho-tui/src/render.rs` | done, 5 tests |
-| Config key `tui-reasoning` | `rho-config/src/lib.rs` | parses, then is discarded — see R7 |
-| `--reasoning` flag | `rho-cli/src/cli.rs` | flag and env only — see R7 |
-| Named arms, no `_ => {}` | `rho-provider-bedrock/src/lib.rs` | done, 1 test |
+### Already built on these
 
-## Requirements
+- **I1.** Refuse means a typed error and a non-zero exit, at **every** source: the flag,
+  the variable, and the file. S3 said "throw error" about an argument. I applied it to all
+  three, because one meaning with two behaviours is the defect R6 already was.
+  *Shipped in `2f807c4`.*
+- **I2.** `--reasoning loud` and `RHO_TUI_REASONING=loud` both fail. The committed test
+  `a_bad_flag_value_falls_back_to_summary` is deleted, because S3 asserts the opposite of it.
+  *Shipped in `2f807c4`.*
+- **I3.** Config discovery reads `XDG_CONFIG_HOME`, then `HOME`. No path literal, no `dirs`
+  dependency, and no `HOME` lookup existed anywhere, so S4 needs discovery invented.
+- **I4.** An exported-but-empty `HOME` counts as unset. Joining from `""` would name
+  `/rho/config.toml` at the filesystem root, which no user means.
+- **I5.** Discovery is pure, and it never tests the filesystem. `Config::read_file` already
+  answers `Ok(None)` for an absent file, so a second existence check would be two answers.
+- **I6.** `Sources` fields become `pub(crate)`, with one constructor and one method per
+  source. They were `pub`, so `Sources { ..Default::default() }` walked around any rule
+  written as prose. This cost a rewrite of 20 construction sites across 7 files.
+- **I7.** An untrusted project command becomes `RefusedProjectCommand`, not a dropped value.
+  A drop would hand the provider an empty key and a 401, which reads as a broken account.
+- **I8.** The refusal names `--trust-project` in its message, so the fix is discoverable.
+- **I9.** A refusal fires only when the value still matches what the untrusted project file
+  held. A profile may replace it, and that later value is not the one the gate refused.
+- **I10.** A global file is never gated. A home directory is not a clone.
+- **I11.** The gate covers a command credential, `skill-paths`, and `mcp-config`. S6 named
+  the probe's mitigation, and those are the three keys the probe named.
 
-Each one names its spec section and its proof. `R1` to `R4` are the contract, and they are
-blocked until the contract review passes. `R5` to `R7` are independent, and `R6` and `R7`
-are confirmed defects that may be fixed first.
+### Chosen but not yet built
 
-### R1 — Split the data model into a trace and a replay block
+- **I12.** `--profile` must exist. Layer 4 selects a profile, and `Cli` has no such flag,
+  so profiles are unreachable today.
+- **I13.** `read_only`, `mouse`, and `no_skills` become `Option<bool>`, and `sandbox`
+  becomes `Option<SandboxArg>`. `sandbox` carries a clap default today, so layer 6 would
+  always beat a file asking for `sandbox = "strict"`. A review named that a fail-open
+  inside the merge built to prevent one.
+- **I14.** The clap `env` attribute is dropped from `--provider`, `--model`, and `--log`.
+  `SPEC-config` section 2 already forbids a second precedence.
+- **I15.** Credentials resolve through `Config::resolve_credential`. `provider.rs` uses
+  `std::env::var(...).unwrap_or_default()` in five places, so an absent key becomes an
+  empty string and a 401.
+- **I16.** The load happens once per process, and every later reader takes `&Config`.
 
-Spec section 4. `ContentBlock` in `rho-core/src/content.rs:24` still holds the old
-`Thinking { thinking, signature }`. The spec replaces it with two variants, because the old
-name never said which blocks travel, and that is why one was dropped in silence.
+## UNKNOWN
 
-- `ReasoningTrace { text }` — for the reader, and it never reaches a provider.
-- `ReasoningReplay { text, signature: Option<String> }` — echoed back when the wire asks.
-- Add `thought_signature: Option<String>` to `ToolCall`, so a Gemini crate needs no edit to
-  shared code later.
-- `signature` stays `Option<String>`. An earlier draft used `""` for none, and a review
-  named that a fail-open default.
+I cannot decide these. Each needs one choice from you.
 
-Proof: `a_trace_never_reaches_a_provider`, and `every_content_block_has_an_explicit_arm`
-must still hold in every provider after the variants change.
+- **U1. Priority. Does the config work continue, or does reasoning come first?**
+  S4 has grown far past the reasoning feature. R1 to R5, R9, and R10 of the reasoning spec
+  are all still open, and the reasoning defect you first reported is among them. Pick one:
+  **(a)** finish the config call site, then return to reasoning; **(b)** park the config
+  work now that the security gate is in, and go do reasoning.
+  *This is the same question the previous session ended on, and it is still unanswered.*
 
-### R2 — Add the replay policy, as data
+- **U2. `approval` and `sandbox` from a project file.** S5 trusts them and S6 did not
+  narrow them. The probe rated them High and Medium-High. A cloned repository can still
+  set your approval mode and your sandbox mode. Pick one: **(a)** leave them trusted, as
+  S5 says; **(b)** add them to the gate of S6.
 
-Spec section 3 "One". `ReplayPolicy` and `ReasoningWire` do not exist anywhere in the tree.
-This is the cornerstone, and guessing fails in both directions: Kimi and DeepSeek **require**
-the replayed field, and Mistral answers 422 `Extra inputs are not permitted` without it.
+- **U3. `--read-only` against an `approval` key.** Both exist, and only the flag is read
+  today. One must win, and no ruling names which.
 
-- `ReasoningWire { read_fields, replay, rejects_unknown_fields, ask_to_enable }`.
-- `ReasoningReplay` with `Never`, `SignedWhileSameModel`, `TextOnToolCall`,
-  `SignatureOnToolCall`.
-- The table governs the OpenAI-compatible family only. Reading stays per-provider code,
-  because Gemini marks a part with `thought: true` and no field name selects that.
+- **U4. The stderr announcements.** Rules 4, 7, and 8 say rho reports a loaded file, an
+  absent global path, and a dropped capability. No named test asserts any of that text, and
+  `Config` has no field to carry it. Pick one: **(a)** add a notices field to `Config`, which
+  is a contract change; **(b)** have the CLI recompute what to report; **(c)** drop the rules.
 
-Proof: `never_replay_sends_nothing`, `a_rejecting_endpoint_receives_no_reasoning_field`,
-`a_tool_call_endpoint_receives_the_text`, `a_signature_replays_on_the_matching_tool_call`,
-`a_signed_block_replays_for_the_same_model`, `a_signed_block_is_dropped_for_another_model`.
+- **U5. Where the reasoning tag rule and `ask_to_enable` meet.** Both fix the same reported
+  defect from opposite ends. The spec keeps both, and no test pins what happens when a model
+  returns a structured block **and** writes a tag in the same turn. The spec's prose says the
+  tag is left alone in that case. No test proves it.
 
-### R3 — Ask Bedrock for thinking
+## State of the tree
 
-Spec section 0 defect 1, and `ask_to_enable`. This is the defect the owner reported. rho
-never asks for extended thinking, so Claude writes `<thinking>` tags into ordinary text.
-`rho-provider-bedrock/src/lib.rs` currently drops reasoning in a named arm and says replay
-is phase 2.
+HEAD is `01cd81c`. Two commits landed in this branch beyond the rescue commit.
 
-Proof: `ask_to_enable_adds_the_thinking_request`.
-
-Note: the tag rule in R5 is the safety net for a model that writes tags anyway. It is not a
-substitute for asking, and the spec treats them as two separate fixes.
-
-### R4 — Make the persisted format work in both directions
-
-Spec section 4, "The persisted format". Untested today, and a session file binds every other
-version of rho.
-
-- A new rho reads `"type": "thinking"` as `ReasoningTrace`, and it never replays a stale
-  signature from an older session.
-- An old rho must still load a new file, so the new variants serialise under the old
-  `"type": "thinking"` tag with an added `replay` key.
-- A missing `replay` key reads as `false`, which is the safe direction.
-- A truncated final line is dropped, and the session still opens.
-
-Proof: `an_old_thinking_block_imports_as_a_trace`, `a_new_block_is_readable_by_an_old_rho`,
-`a_missing_replay_key_reads_as_false`, `a_truncated_final_line_does_not_stop_the_load`,
-`the_reasoning_text_is_stored_in_every_mode`.
-
-### R5 — Keep an orphaned tool call whole
-
-Spec section 6 rule 5. An orphaned tool call gets a synthetic error result, so the signature
-chain stays whole. pi does this, and its comment says it "satisfies API requirements".
-
-Proof: `an_orphaned_tool_call_gets_a_synthetic_result`.
-
-### R6 — Stop the CLI swallowing a bad reasoning mode
-
-**A confirmed defect, and the two paths disagree with each other.**
-
-- `rho --reasoning loud` silently becomes `summary`. See
-  `resolve_reasoning` at `rho-cli/src/cli.rs:428`, where `.ok()` discards the error.
-- `RHO_TUI_REASONING=loud` silently becomes `summary`, by the same `.ok()`.
-- `tui-reasoning = "loud"` in a config file is a hard error. See
-  `a_bad_reasoning_value_fails_closed` in `rho-config/tests/reasoning.rs:51`.
-
-The spec requires `an_unknown_reasoning_mode_is_refused`, and says "it does not fall back in
-silence". The committed code and its test `a_bad_flag_value_falls_back_to_summary` assert the
-opposite, and the doc comment defends the fallback.
-
-So this needs a **decision before a fix**: refuse everywhere, as the spec says, or fall back
-everywhere with a warning on stderr. Either answer is defensible, and the current split is
-not. Whichever wins, the spec, the code, and one of the two tests must change together.
-
-### R7 — Make the config file reach the screen
-
-**A confirmed defect.** `rho-config` parses `tui-reasoning`, validates it, and stores it in
-`Config::reasoning` at `rho-config/src/lib.rs:175`. Nothing ever reads that field.
-`resolve_reasoning` re-reads the environment and never consults the loaded config, so a
-config-file setting is parsed and then thrown away.
-
-The spec test is named `the_flag_beats_the_config_and_the_environment`, and the config leg of
-that precedence chain does not exist.
-
-Proof: `the_flag_beats_the_config_and_the_environment`, plus a test that a config file alone
-changes the drawn mode.
-
-### R8 — Reconcile the spec's test names with the tree
-
-Step 13. The spec names 38 tests. 14 match the tree by name, and 9 more exist under a
-different name, so the spec and the code disagree about what is proven.
-
-| Spec name | Name in the tree |
+| Commit | What it did |
 | --- | --- |
-| `a_mixed_case_tag_is_stripped` | `a_mixed_case_tag_opens_a_block` |
-| `an_opening_tag_split_across_three_deltas_matches` | `an_opening_tag_split_across_three_deltas` |
-| `a_self_closing_tag_opens_no_region` | `a_self_closing_tag_is_an_empty_block_and_keeps_the_rest` |
-| `an_unclosed_tag_stops_at_a_tool_call` | `an_unclosed_tag_before_a_tool_call_keeps_only_the_reasoning` |
-| `a_reasoning_delta_splits_on_a_character_boundary` | `a_multibyte_reasoning_body_is_not_corrupted` |
-| `the_reasoning_mode_parses_every_value` | `every_name_round_trips` |
-| `an_unknown_reasoning_mode_is_refused` | `an_unknown_name_is_an_error`, and see R6 |
-| `the_flag_beats_the_config_and_the_environment` | `the_flag_wins_over_the_env_var`, and see R7 |
-| `a_stripped_tag_does_not_change_the_request` | absent, and `no_text_is_emitted_before_the_decision` too |
+| `e08b190` | rescued 1668 unreviewed lines, and vouched for none of them |
+| `2f807c4` | R6: an unknown reasoning mode is refused at every source |
+| `01cd81c` | the config call-site contract, reviewed before any code |
 
-Pick one name per test, and make the spec and the tree agree. Add the two absent tests.
+Uncommitted, and gate-green at **874 tests**: config discovery and the project trust gate.
+That is `ConfigPaths::discover`, `ProjectTrust`, the `Sources` builder, and
+`CredentialSource::RefusedProjectCommand`, with 17 new tests in two files.
 
-### R9 — Prove the saved work catches its own defects
+**Step 7 found two of my own tests worthless, and that is the day's most useful result.**
+Three deliberate breaks caught only one failure at first.
 
-Step 7, and it was never run on any of this. The commit says so. For each of the 14 landed
-tests, break the implementation on purpose and watch the test fail.
+| Break | Caught at first? |
+| --- | --- |
+| `XDG_CONFIG_HOME` precedence inverted | yes |
+| the two path slots swapped in `from_paths` | **no** |
+| the empty-value check deleted | **no** |
 
-Copy the file to `/tmp` first. **Never restore with `git checkout`**, because it destroys
-every uncommitted change in that file. See `D-jcode-bash-lessons`.
+The swap hid because each file set a different key, so both values still arrived. Both files
+now set the same key, so the winner reveals the order. The empty case hid because the test
+set no variable at all, so it never reached the check. Two tests were added for it.
 
-The suspect ones are the display tests, because a renderer test can assert a row exists
-while the mode logic is inverted.
+Four more breaks were then run against the trust gate, and each one failed a test. One
+break downgraded the refusal to an empty literal, which is the exact silent drop
+`AGENTS.md` names. `an_untrusted_project_command_never_runs_the_command` proves the gate by
+running a real command and checking that the marker file is absent.
 
-### R10 — Drive it for real, then write it down
+## Next step
 
-Step 11, and there is no `docs/verification/` file for reasoning. No fixture can catch this
-class of defect, because a fixture describes a response and these defects are in the
-**request**. Sprint 1 lost a week to exactly that.
-
-- Build `cargo build --release -p rho-cli`, then run a real prompt on Bedrock with a Claude
-  model, and confirm no `<thinking>` tag reaches the screen as the answer.
-- Run a **two-call tool loop**, because Bedrock worked for one tool call and returned 400 for
-  two.
-- Exercise every provider the change touches. OpenRouter and Bedrock are both in the diff.
-- Ask the model to print a literal `<thinking>` tag, and confirm it prints.
-- Write the commands and the real output into `docs/verification/`.
-
-### R11 — Update the docs last
-
-Step 13. `docs/features.md` has one reasoning mention, on the OpenRouter row, and it claims
-"Reasoning tokens pass through". Add the rows this work creates, with the owning crate and
-the extension point. Record R6's decision in `.rho-work/decisions/`. Delete any claim the
-tree cannot prove.
-
-## Order of work
-
-1. R6 and R7 first. They are confirmed defects on committed code, they are small, and R6
-   needs a decision that nothing else waits on.
-2. R9 next, on the 14 landed tests. Do this before building on them.
-3. Write the contract for R1 and R2 in the spec, as compilable Rust. Review it on its own,
-   with the one question from step 9: does a new case need an edit to shared code?
-4. Then R1, R2, R3, R4, R5 behind the reviewed contract.
-5. R8, R10, R11 to close.
-
-## Open question for the owner
-
-R6 needs a ruling: does an unknown reasoning mode refuse, or warn and fall back? The spec
-says refuse. The committed CLI falls back and defends it in a comment. I will not pick for
-you, because the spec and the code each have a test asserting the opposite of the other.
+Blocked on U1.

@@ -7,8 +7,8 @@ mod common;
 
 use std::str::FromStr;
 
-use common::{env_vars, temp_dir, write_file};
-use rho_config::{ApprovalMode, Config, ConfigLayer, EnvLookup, Sources, SystemEnv};
+use common::{empty_sources, env_vars, project_sources, temp_dir, write_file};
+use rho_config::{ApprovalMode, Config, ConfigLayer, ConfigPaths, EnvLookup, Sources, SystemEnv};
 use rho_core::SandboxMode;
 
 #[test]
@@ -57,16 +57,16 @@ fn load_merges_and_resolves_end_to_end() {
          [profiles.fast]\n\
          model = \"fast-model\"\n",
     );
-    let sources = Sources {
-        global_file: Some(global),
-        project_file: Some(project),
-        profile: Some("fast".to_string()),
-        env: env_vars(&[("RHO_PROVIDER", "env-provider")]),
-        flags: ConfigLayer {
-            model: Some("flag-model".to_string()),
-            ..ConfigLayer::default()
-        },
-    };
+    let sources = Sources::from_paths(ConfigPaths {
+        global: Some(global),
+        project: Some(project),
+    })
+    .with_profile(Some("fast".to_string()))
+    .with_env(env_vars(&[("RHO_PROVIDER", "env-provider")]))
+    .with_flags(ConfigLayer {
+        model: Some("flag-model".to_string()),
+        ..ConfigLayer::default()
+    });
     let config = Config::load(&sources).expect("the sources resolve");
     // The flag is the strongest layer that names `model`.
     assert_eq!(config.model.as_deref(), Some("flag-model"));
@@ -103,10 +103,7 @@ fn a_sandbox_key_parses_through_sandbox_mode() {
     // core share one parser.
     let dir = temp_dir();
     let path = write_file(&dir, "config.toml", "sandbox = \"confined\"\n");
-    let sources = Sources {
-        project_file: Some(path),
-        ..Sources::default()
-    };
+    let sources = project_sources(path);
     let config = Config::load(&sources).expect("a valid sandbox value");
     assert_eq!(config.sandbox, SandboxMode::from_str("confined").unwrap());
     assert_eq!(config.sandbox, SandboxMode::Confined);
@@ -126,10 +123,7 @@ fn system_env_reads_the_real_environment() {
 fn the_environment_is_read_in_one_layer_only() {
     // `RHO_MODEL` with no `--model` flag reaches the config through the environment
     // layer. A `--model` flag beats it. The variable is not double-counted as a flag.
-    let from_env = Sources {
-        env: env_vars(&[("RHO_MODEL", "env-model")]),
-        ..Sources::default()
-    };
+    let from_env = empty_sources().with_env(env_vars(&[("RHO_MODEL", "env-model")]));
     let config = Config::load(&from_env).expect("the environment layer resolves");
     assert_eq!(
         config.model.as_deref(),
@@ -137,14 +131,12 @@ fn the_environment_is_read_in_one_layer_only() {
         "with no flag, the variable reaches the config through the environment layer"
     );
 
-    let with_flag = Sources {
-        env: env_vars(&[("RHO_MODEL", "env-model")]),
-        flags: ConfigLayer {
+    let with_flag = empty_sources()
+        .with_env(env_vars(&[("RHO_MODEL", "env-model")]))
+        .with_flags(ConfigLayer {
             model: Some("flag-model".to_string()),
             ..ConfigLayer::default()
-        },
-        ..Sources::default()
-    };
+        });
     let config = Config::load(&with_flag).expect("the flag layer resolves");
     assert_eq!(
         config.model.as_deref(),
@@ -160,12 +152,8 @@ fn an_unset_read_only_flag_does_not_override_a_file_approval() {
     // the flag.
     let dir = temp_dir();
     let path = write_file(&dir, "config.toml", "approval = \"read-only\"\n");
-    let sources = Sources {
-        project_file: Some(path),
-        // The flags layer names no approval, exactly as an unset `--read-only` flag.
-        flags: ConfigLayer::default(),
-        ..Sources::default()
-    };
+    // The flags layer names no approval, exactly as an unset `--read-only` flag.
+    let sources = project_sources(path).with_flags(ConfigLayer::default());
     let config = Config::load(&sources).expect("a valid approval value");
     assert_eq!(
         config.approval,
