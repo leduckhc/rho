@@ -439,6 +439,15 @@ async fn cancelling_a_queued_child_resolves_started_with_cancelled() {
         .await
         .expect("a cancelled waiter must not hang");
     assert!(matches!(outcome, Err(Dequeued::Cancelled)));
+
+    // The text reaches a parent model through the spawn tool, so it is part of the
+    // contract and not a debug string. It must say the child never ran, or the parent
+    // cannot tell a cancel before the work from a cancel during it.
+    let told = outcome.expect_err("the waiter was cancelled").to_string();
+    assert!(
+        told.contains("cancelled") && told.contains("before it ran"),
+        "the message must state the cancel and that no work happened: {told}"
+    );
 }
 
 #[tokio::test]

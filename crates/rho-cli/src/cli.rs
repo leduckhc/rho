@@ -569,6 +569,10 @@ mod tests {
             "30",
             "--max-agent-tool-calls",
             "9",
+            "--max-queued-per-parent",
+            "5",
+            "--max-queued-total",
+            "11",
         ])
         .unwrap();
         let limits = subagent_limits(&cli);
@@ -578,6 +582,17 @@ mod tests {
         assert_eq!(
             limits.max_tool_calls, 9,
             "a tool-call budget nobody can set is not a budget"
+        );
+        // A full wait line tells the user to raise one of these two flags. A flag that
+        // parses and changes nothing teaches a lie, which is the exact defect a live
+        // sweep found in the older limits. See `SubagentError::QueueFull`.
+        assert_eq!(
+            limits.max_queued_per_parent, 5,
+            "a wait line the caller cannot bound is not bounded by the caller"
+        );
+        assert_eq!(
+            limits.max_queued_total, 11,
+            "the process wait line must obey its flag too"
         );
     }
 

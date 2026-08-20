@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::cancel::CancelToken;
 use crate::subagent::error::SubagentError;
+use crate::subagent::handles::{
+    AgentRef, AliasError, derive_handle, is_digits_only, validate_alias,
+};
 use crate::subagent::limits::SubagentLimits;
 use crate::subagent::report::AgentReport;
 use crate::usage::Usage;
@@ -243,6 +246,28 @@ struct RegistryState {
     /// outlive its handle. The ancestor chain is kept beside the report, because the
     /// handle that carried it is gone and a read still has to be scoped.
     finished: std::collections::VecDeque<FinishedAgent>,
+    /// The derived handle of every addressable child, by id.
+    ///
+    /// It is the union of the three indexes above, and nothing else, so it cannot
+    /// outgrow them. A name is derived and stored in the same critical section as the
+    /// registration, or two admissions of one agent name could pick one name. See
+    /// decision D-one-registry-state-lock.
+    handles: std::collections::HashMap<u64, HandleBinding>,
+    /// Every caller-chosen alias, by tree and name.
+    ///
+    /// Keyed by the tree root, because a name belongs to one session and two sessions
+    /// must be able to use the same one. It is pruned with its child.
+    aliases: std::collections::HashMap<(AgentId, String), AgentId>,
+}
+
+/// A child's derived handle, and the tree it belongs to.
+///
+/// The tree is stored, not computed, because the ancestor chain lives on the live
+/// handle or the queued entry and a remembered child has neither for long.
+#[derive(Clone, Debug)]
+struct HandleBinding {
+    tree: AgentId,
+    name: String,
 }
 
 /// A queued child's entry. The ancestor chain sits beside it, exactly as the
@@ -364,7 +389,12 @@ impl AgentRegistry {
         }
         let mut state = self.state();
         if state.finished.len() >= MAX_REMEMBERED_REPORTS {
-            state.finished.pop_front();
+            // The oldest report leaves, and its name leaves with it, so a handle answers
+            // for exactly as long as `agent_status` can.
+            if let Some(evicted) = state.finished.pop_front() {
+                let evicted_id = evicted.id;
+                prune_handle(&mut state, evicted_id);
+            }
         }
         state.finished.push_back(FinishedAgent {
             id,
@@ -413,12 +443,109 @@ impl AgentRegistry {
 
     /// Register a live child. Called by `spawn_child`, which cannot forget.
     fn register(&self, handle: LiveAgent) {
-        self.state().live.insert(handle.id.0, handle);
+        let mut state = self.state();
+        let tree = tree_root(&handle.ancestors, handle.id);
+        bind_handle(&mut state, handle.id, tree, &handle.agent);
+        state.live.insert(handle.id.0, handle);
     }
 
     /// Deregister a child. Called by `ChildSlot::drop`, which cannot forget.
     fn deregister(&self, id: AgentId) {
-        self.state().live.remove(&id.0);
+        let mut state = self.state();
+        state.live.remove(&id.0);
+        // The name outlives the slot only while something still answers for the id: a
+        // queued entry, or a remembered report. Otherwise it goes, or the table would
+        // grow with every finished child.
+        prune_handle(&mut state, id);
+    }
+
+    /// The derived handle of one child, or `None` when nothing answers for it.
+    ///
+    /// Not scoped, because a name is not an address on its own: [`AgentRegistry::resolve`]
+    /// is the scoped read, and every accessor re-checks the id it returns.
+    pub fn handle_of(&self, id: AgentId) -> Option<String> {
+        self.state()
+            .handles
+            .get(&id.0)
+            .map(|binding| binding.name.clone())
+    }
+
+    /// Resolve a reference to a child's id, inside the caller's own tree.
+    ///
+    /// An id resolves when it names a descendant of `caller`. A digits-only name
+    /// resolves as an id. Any other name resolves as a derived handle, then an alias, so
+    /// an alias can never hide a real child. It returns `None` for a child of another
+    /// tree, exactly as an unknown id returns `None`, so a caller cannot tell the two
+    /// apart. See decision D-a-caller-addresses-only-its-own.
+    pub fn resolve(&self, caller: &AgentNode, reference: &AgentRef) -> Option<AgentId> {
+        match reference {
+            AgentRef::Id(id) => self.scoped(caller, AgentId(*id)),
+            AgentRef::Name(name) if is_digits_only(name) => {
+                // A digits-only name is always an id. A name that cannot fit in a u64 is
+                // simply no id, and that is an ordinary not-found.
+                let id = name.parse::<u64>().ok()?;
+                self.scoped(caller, AgentId(id))
+            }
+            AgentRef::Name(name) => {
+                let tree = caller.tree_root();
+                let found = {
+                    let state = self.state();
+                    let by_handle = state
+                        .handles
+                        .iter()
+                        .find(|(_, binding)| binding.tree == tree && binding.name == *name)
+                        .map(|(id, _)| AgentId(*id));
+                    // The handle is read first, so the shadow rule holds at read time and
+                    // not only at write time.
+                    by_handle.or_else(|| state.aliases.get(&(tree, name.clone())).copied())
+                };
+                self.scoped(caller, found?)
+            }
+        }
+    }
+
+    /// The id, but only when something in the caller's own tree answers for it.
+    ///
+    /// It accepts a live child, a queued one, and one whose report is remembered, which
+    /// is exactly the set `status` answers for. So a name resolves for as long as the id
+    /// does, and never longer.
+    fn scoped(&self, caller: &AgentNode, id: AgentId) -> Option<AgentId> {
+        self.status(caller, id).map(|_| id)
+    }
+
+    /// Set an alias for a child, inside the caller's tree.
+    ///
+    /// It refuses a name that a derived handle already holds, and a name another alias
+    /// holds. A derived handle always resolves first, so an alias can never hide a real
+    /// child. A refused alias never fails the spawn: the caller reports the refusal and
+    /// keeps the work. See `SPEC-subagent-slots-handles-grace` section 3.2.
+    pub fn set_alias(
+        &self,
+        caller: &AgentNode,
+        id: AgentId,
+        alias: impl Into<String>,
+    ) -> Result<(), AliasError> {
+        let alias = alias.into();
+        // The shape is checked before the scope, because a malformed name is the
+        // caller's own mistake and needs no lookup.
+        validate_alias(&alias)?;
+        if self.scoped(caller, id).is_none() {
+            return Err(AliasError::Unknown { id });
+        }
+        let tree = caller.tree_root();
+        let mut state = self.state();
+        if state
+            .handles
+            .values()
+            .any(|binding| binding.tree == tree && binding.name == alias)
+        {
+            return Err(AliasError::ShadowsHandle { name: alias });
+        }
+        if state.aliases.contains_key(&(tree, alias.clone())) {
+            return Err(AliasError::Taken { name: alias });
+        }
+        state.aliases.insert((tree, alias), id);
+        Ok(())
     }
 
     /// Cancel one queued descendant of `caller`. Returns true when it found one.
@@ -470,7 +597,10 @@ impl AgentRegistry {
 
     /// Remove a queued entry. Called by `QueuedChild::drop` and by a handout.
     fn dequeue(&self, id: AgentId) {
-        self.state().queued.remove(&id.0);
+        let mut state = self.state();
+        state.queued.remove(&id.0);
+        // A waiter that never ran and left no report takes its name with it.
+        prune_handle(&mut state, id);
     }
 
     /// Allocate a fresh, unique agent id.
@@ -537,6 +667,14 @@ impl AgentNode {
     /// This node's depth. The root is depth 0.
     pub fn depth(&self) -> u32 {
         self.depth
+    }
+
+    /// The root of this node's tree. A root node is its own tree.
+    ///
+    /// A handle and an alias are keyed by this, so two sessions in one process may both
+    /// hold an `explore` and neither can reach the other's.
+    pub fn tree_root(&self) -> AgentId {
+        tree_root(&self.ancestors, self.id)
     }
 
     /// The number of live children this node runs now.
@@ -681,6 +819,9 @@ impl AgentNode {
             }
             let sequence = state.next_sequence;
             state.next_sequence += 1;
+            // The name is derived here, in the same critical section as the entry, so a
+            // waiter is addressable by name from the moment it exists.
+            bind_handle(&mut state, id, tree_root(&ancestors, id), &agent);
             state.queued.insert(
                 id.0,
                 QueuedEntry {
@@ -976,10 +1117,19 @@ impl QueuedChild {
         });
 
         // One critical section moves the id from the queued index to the live one, so
-        // no lookup finds it in both or in neither.
+        // no lookup finds it in both or in neither. `bind_handle` runs here too, and it
+        // is the guard inside it that keeps the name: a handout that derived a fresh one
+        // would strand the name the model was told, exactly as a fresh id once stranded
+        // every steer and cancel. One place binds a name, so no caller can forget.
         {
             let mut state = self.parent.registry.state();
             state.queued.remove(&self.id.0);
+            bind_handle(
+                &mut state,
+                handle.id,
+                tree_root(&handle.ancestors, handle.id),
+                &handle.agent,
+            );
             state.live.insert(handle.id.0, handle);
         }
         self.handed_out = true;
@@ -1009,6 +1159,54 @@ fn position_in_line(state: &RegistryState, entry: &QueuedEntry) -> usize {
         .values()
         .filter(|other| other.parent == entry.parent && other.sequence < entry.sequence)
         .count()
+}
+
+/// The root of the tree a child belongs to.
+///
+/// The first ancestor is the root node, and a root has no ancestors, so it is its own
+/// tree. A handle is keyed by this, which is what keeps one session's numbering out of
+/// another's. See decision D-handle-is-a-second-address.
+fn tree_root(ancestors: &[AgentId], own: AgentId) -> AgentId {
+    ancestors.first().copied().unwrap_or(own)
+}
+
+/// Derive and store a child's handle, unless it already holds one.
+///
+/// **It never re-derives.** A queued child is told its name at admission, so the handout
+/// must keep it. A fresh name at start would strand the name the model was given, exactly
+/// as a fresh id once stranded every steer and cancel.
+///
+/// The caller holds the state lock, so the read of the taken names and the write of the
+/// new one are one critical section. Two admissions of one agent name therefore cannot
+/// choose one name. See decision D-one-registry-state-lock.
+fn bind_handle(state: &mut RegistryState, id: AgentId, tree: AgentId, agent: &str) {
+    if state.handles.contains_key(&id.0) {
+        return;
+    }
+    let taken: std::collections::HashSet<String> = state
+        .handles
+        .values()
+        .filter(|binding| binding.tree == tree)
+        .map(|binding| binding.name.clone())
+        .collect();
+    let name = derive_handle(&taken, agent);
+    state.handles.insert(id.0, HandleBinding { tree, name });
+}
+
+/// Drop a child's handle and every alias for it, once nothing answers for the id.
+///
+/// A name must resolve for exactly as long as `status` answers, so the test is the three
+/// indexes and not one of them. Without this the handle table would be an unbounded map
+/// keyed by agent names a model chose. See decision D-bash-line-cap.
+fn prune_handle(state: &mut RegistryState, id: AgentId) {
+    if state.live.contains_key(&id.0)
+        || state.queued.contains_key(&id.0)
+        || state.finished.iter().any(|entry| entry.id == id)
+    {
+        return;
+    }
+    state.handles.remove(&id.0);
+    state.aliases.retain(|_, owner| *owner != id);
 }
 
 /// Walk an ancestor chain and refuse a cycle.

@@ -465,3 +465,23 @@ The documented spelling is `tools: read, list`, so no contract is broken. The fa
 is what is wrong: it teaches nothing. The fix needs a contract decision first, because
 `AgentSet` carries only `loaded` and `withheld` and a rejected file has nowhere to go. It is
 not fixed in the slot-queue change.
+
+## Open items the slot queue left, both recorded rather than remembered
+
+A local review pass over the queue found two costs. Neither is fixed, and each needs a contract
+decision of its own.
+
+1. **A blocking spawn has no wait deadline.** One `spawn_agents` call can hold a parent's turn for
+   `ceil(max_queued_per_parent / max_children_per_parent) x child_timeout`, about forty minutes at
+   the defaults, and a prompt-injected model picks the fan-out width and the sleeping children. A
+   fix needs a queue-wait deadline separate from `child_timeout`, with its own error case and its
+   own flag. See `SPEC-subagent-slots-handles-grace` section 2.8, which now states the cost.
+2. **A steering message is bounded by count, not by bytes.** `MessageQueue` holds 32 messages, and
+   the queue now exists for 128 waiting children as well as 32 live ones. Each message body is
+   model-written and its size is not capped. This is the shape of the bug that turned 8 MB of
+   `bash` output into 805 MB, so the cap belongs in `MessageQueue::push` with a named error.
+
+**Config keys for the subagent limits stay unwired, on purpose.** `rho-config` parses a
+`[subagents]` layer that no binary reads, so only a flag changes a limit today. That gap is
+larger than the queue and it belongs to another worktree. See decision
+D-the-layered-config-has-no-caller.

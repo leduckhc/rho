@@ -1881,3 +1881,399 @@ async fn agent_status_says_a_cancelled_queued_child_will_not_start() {
         "the answer must say the child was cancelled: {text}"
     );
 }
+
+// --- Named handles reach the model (SPEC-subagent-slots-handles-grace section 3) ---
+
+#[tokio::test]
+async fn steer_agent_accepts_a_handle() {
+    // The point of the feature: a model says the name it read, not a number it kept.
+    let dir = tempfile::tempdir().unwrap();
+    let env = queued_env(dir.path(), 4);
+    let _first = hold_a_slot(&env, dir.path()).await;
+
+    let steer = rho_tools::SteerAgentTool::new(Arc::clone(&env));
+    let output = steer
+        .execute(
+            serde_json::json!({ "id": "scout", "message": "read the spec first" }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a steer is a result");
+    let text = output_text(&output);
+    assert!(
+        !output.is_error,
+        "a derived handle must reach the child: {text}"
+    );
+    assert!(
+        text.contains("scout"),
+        "and the receipt names the child it reached: {text}"
+    );
+}
+
+#[tokio::test]
+async fn steer_agent_still_accepts_an_integer_id() {
+    // The migration keeps the old shape, because a model already writes integers and a
+    // hard switch would refuse every one of them.
+    let dir = tempfile::tempdir().unwrap();
+    let env = queued_env(dir.path(), 4);
+    let id = hold_a_slot(&env, dir.path()).await;
+
+    let steer = rho_tools::SteerAgentTool::new(Arc::clone(&env));
+    let output = steer
+        .execute(
+            serde_json::json!({ "id": id, "message": "carry on" }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a steer is a result");
+    assert!(
+        !output.is_error,
+        "an integer id must still work: {}",
+        output_text(&output)
+    );
+}
+
+#[tokio::test]
+async fn cancel_agent_accepts_a_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = queued_env(dir.path(), 4);
+    let _first = hold_a_slot(&env, dir.path()).await;
+
+    let cancel = rho_tools::CancelAgentTool::new(Arc::clone(&env));
+    let output = cancel
+        .execute(
+            serde_json::json!({ "id": "scout" }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a cancel is a result");
+    let text = output_text(&output);
+    assert!(!output.is_error, "a handle must stop the child: {text}");
+    assert!(text.contains("stop"), "and say so: {text}");
+}
+
+#[tokio::test]
+async fn agent_status_accepts_a_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = queued_env(dir.path(), 4);
+    let _first = hold_a_slot(&env, dir.path()).await;
+
+    let status = rho_tools::AgentStatusTool::new(Arc::clone(&env));
+    let text = output_text(
+        &status
+            .execute(
+                serde_json::json!({ "id": "scout" }),
+                ctx(dir.path().to_path_buf()),
+            )
+            .await
+            .expect("a status read is a result"),
+    );
+    assert!(
+        text.contains("running") || text.contains("queued"),
+        "a handle must answer with the child's state: {text}"
+    );
+}
+
+#[tokio::test]
+async fn agent_status_with_no_id_lists_this_tree_and_names_each_handle() {
+    // Every malformed-reference refusal tells the model to "call agent_status with no
+    // argument to list what is running". That call has to exist, or the refusal names a
+    // shape rho refuses. A refusal that teaches an impossible call is the defect family
+    // that already shipped here once.
+    let dir = tempfile::tempdir().unwrap();
+    let env = queued_env(dir.path(), 4);
+    let id = hold_a_slot(&env, dir.path()).await;
+
+    let status = rho_tools::AgentStatusTool::new(Arc::clone(&env));
+    let text = output_text(
+        &status
+            .execute(serde_json::json!({}), ctx(dir.path().to_path_buf()))
+            .await
+            .expect("a list is a result"),
+    );
+    assert!(
+        text.contains("scout") && text.contains(&id.to_string()),
+        "the list must name each child's handle and its id: {text}"
+    );
+}
+
+#[tokio::test]
+async fn agent_status_with_no_id_says_plainly_when_nothing_runs() {
+    // The empty case must not be an empty string, which is the fail-open shape.
+    let dir = tempfile::tempdir().unwrap();
+    let env = queued_env(dir.path(), 4);
+
+    let status = rho_tools::AgentStatusTool::new(Arc::clone(&env));
+    let text = output_text(
+        &status
+            .execute(serde_json::json!({}), ctx(dir.path().to_path_buf()))
+            .await
+            .expect("a list is a result"),
+    );
+    assert!(
+        text.to_lowercase().contains("no subagent"),
+        "an empty list must say so: {text}"
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_agent_ref_names_both_accepted_shapes() {
+    // A model that sends the wrong shape must learn what to send. serde's own untagged
+    // message, "data did not match any variant", teaches nothing.
+    let dir = tempfile::tempdir().unwrap();
+    let env = queued_env(dir.path(), 4);
+    let _first = hold_a_slot(&env, dir.path()).await;
+    let steer = rho_tools::SteerAgentTool::new(Arc::clone(&env));
+
+    for bad in [
+        serde_json::json!(true),
+        serde_json::json!(1.5),
+        serde_json::json!(-3),
+        serde_json::json!(null),
+        serde_json::json!({ "id": 1 }),
+    ] {
+        let output = steer
+            .execute(
+                serde_json::json!({ "id": bad, "message": "hello" }),
+                ctx(dir.path().to_path_buf()),
+            )
+            .await;
+        let text = match output {
+            Ok(result) => output_text(&result),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            text.contains("subagent id") && text.contains("handle"),
+            "the refusal must name both shapes for {bad}: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_number_beyond_u64_is_refused_as_no_id() {
+    // serde reads it as a float, so it is not an id. A truncation to u64::MAX would
+    // address a child that does not exist.
+    let dir = tempfile::tempdir().unwrap();
+    let env = queued_env(dir.path(), 4);
+    let cancel = rho_tools::CancelAgentTool::new(Arc::clone(&env));
+
+    let args: serde_json::Value =
+        serde_json::from_str(r#"{ "id": 18446744073709551616 }"#).unwrap();
+    let output = cancel.execute(args, ctx(dir.path().to_path_buf())).await;
+    let text = match output {
+        Ok(result) => output_text(&result),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        text.contains("subagent id"),
+        "a number past u64 is no id, and the refusal must teach: {text}"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_agent_ref_name_is_an_ordinary_not_found() {
+    // An empty string parses, matches no child, and is a result rather than a fault.
+    let dir = tempfile::tempdir().unwrap();
+    let env = queued_env(dir.path(), 4);
+    let _first = hold_a_slot(&env, dir.path()).await;
+    let status = rho_tools::AgentStatusTool::new(Arc::clone(&env));
+
+    let text = output_text(
+        &status
+            .execute(
+                serde_json::json!({ "id": "" }),
+                ctx(dir.path().to_path_buf()),
+            )
+            .await
+            .expect("a not-found is a result"),
+    );
+    assert!(
+        text.contains("no subagent"),
+        "an unmatched name is an ordinary miss: {text}"
+    );
+}
+
+#[tokio::test]
+async fn spawn_agent_sets_an_alias_from_its_argument() {
+    // The model names the work it delegated, so its later calls read as prose.
+    let dir = tempfile::tempdir().unwrap();
+    let env = queued_env(dir.path(), 4);
+    let spawn = SpawnAgentTool::new(Arc::clone(&env));
+
+    let started = spawn
+        .execute(
+            serde_json::json!({
+                "agent": "scout", "prompt": "hold the slot",
+                "background": true, "alias": "auth-audit"
+            }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a background spawn is a result");
+    let text = output_text(&started);
+    assert!(
+        text.contains("auth-audit"),
+        "the result must tell the model the name it may use: {text}"
+    );
+
+    let steer = rho_tools::SteerAgentTool::new(Arc::clone(&env));
+    let reached = steer
+        .execute(
+            serde_json::json!({ "id": "auth-audit", "message": "check the tokens" }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a steer is a result");
+    assert!(
+        !reached.is_error,
+        "and the alias must reach the child: {}",
+        output_text(&reached)
+    );
+}
+
+#[tokio::test]
+async fn spawn_agent_reports_a_rejected_alias_without_failing_the_spawn() {
+    // The child is already admitted, and the work matters more than the label.
+    let dir = tempfile::tempdir().unwrap();
+    let env = queued_env(dir.path(), 4);
+    let spawn = SpawnAgentTool::new(Arc::clone(&env));
+
+    let started = spawn
+        .execute(
+            serde_json::json!({
+                "agent": "scout", "prompt": "hold the slot",
+                "background": true, "alias": "bad\nname"
+            }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a spawn with a bad label is still a spawn");
+    let text = output_text(&started);
+    assert!(
+        !started.is_error,
+        "a rejected label must not fail the work: {text}"
+    );
+    assert!(
+        text.contains("control character") || text.contains("plain name"),
+        "the note must say why the name was refused: {text}"
+    );
+    assert!(
+        text.contains("scout"),
+        "and it must give the derived handle instead: {text}"
+    );
+}
+
+#[tokio::test]
+async fn an_alias_of_exactly_the_cap_is_accepted_and_one_more_is_refused() {
+    // The boundary, counted in characters, so 64 emoji pass and 65 letters do not.
+    let dir = tempfile::tempdir().unwrap();
+    let env = queued_env(dir.path(), 4);
+    let spawn = SpawnAgentTool::new(Arc::clone(&env));
+
+    let exact = "\u{1f600}".repeat(rho_core::MAX_ALIAS_LENGTH);
+    let accepted = spawn
+        .execute(
+            serde_json::json!({
+                "agent": "scout", "prompt": "one", "background": true, "alias": exact
+            }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+    let accepted_text = output_text(&accepted);
+    assert!(
+        !accepted_text.contains("at most"),
+        "the cap itself is allowed: {accepted_text}"
+    );
+
+    let over = "a".repeat(rho_core::MAX_ALIAS_LENGTH + 1);
+    let refused = spawn
+        .execute(
+            serde_json::json!({
+                "agent": "scout", "prompt": "two", "background": true, "alias": over
+            }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+    let refused_text = output_text(&refused);
+    assert!(
+        refused_text.contains("at most 64 characters"),
+        "one character more must be refused, and the note must state the bound: {refused_text}"
+    );
+}
+
+#[tokio::test]
+async fn a_fan_out_gives_one_name_to_one_child_and_notes_the_other() {
+    // One name, one owner. Two tasks that ask for the same label must not both answer
+    // to it, or a later steer would reach whichever the map happened to hold.
+    let dir = tempfile::tempdir().unwrap();
+    let tool = SpawnAgentsTool::new(fanout_env(dir.path(), 4));
+
+    let output = tool
+        .execute(
+            serde_json::json!({
+                "tasks": [
+                    { "agent": "scout", "prompt": "first", "alias": "worker" },
+                    { "agent": "scout", "prompt": "second", "alias": "worker" }
+                ]
+            }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a fan-out is a result");
+
+    let text = output_text(&output);
+    assert_eq!(
+        text.matches("child answer").count(),
+        2,
+        "both tasks must run, whatever happened to the labels: {text}"
+    );
+    assert!(
+        text.contains("already names another subagent"),
+        "the second task must be told its label was taken: {text}"
+    );
+}
+
+#[tokio::test]
+async fn the_schemas_offer_the_alias_and_both_id_shapes() {
+    // A model uses only what the schema shows. The agent `enum` had to be added for the
+    // same reason: a live run proved the model invents what it cannot see. So an
+    // argument that no schema advertises is an argument that does not exist.
+    let dir = tempfile::tempdir().unwrap();
+    let env = queued_env(dir.path(), 4);
+
+    let spawn = SpawnAgentTool::new(Arc::clone(&env)).input_schema();
+    assert!(
+        spawn["properties"]["alias"]["type"] == "string",
+        "spawn_agent must offer an alias: {spawn}"
+    );
+    let fan = SpawnAgentsTool::new(Arc::clone(&env)).input_schema();
+    assert!(
+        fan["properties"]["tasks"]["items"]["properties"]["alias"]["type"] == "string",
+        "each fan-out task must offer an alias: {fan}"
+    );
+
+    // Both shapes, on all three addressing tools, or a model that learned the name form
+    // on one tool would be refused on the next.
+    for schema in [
+        rho_tools::SteerAgentTool::new(Arc::clone(&env)).input_schema(),
+        rho_tools::CancelAgentTool::new(Arc::clone(&env)).input_schema(),
+        rho_tools::AgentStatusTool::new(Arc::clone(&env)).input_schema(),
+    ] {
+        let shape = &schema["properties"]["id"]["type"];
+        assert_eq!(
+            shape,
+            &serde_json::json!(["integer", "string"]),
+            "the id field must accept an id and a name: {schema}"
+        );
+    }
+
+    // And `agent_status` must not require the id, because every malformed-reference
+    // refusal tells the model to call it with none.
+    let status = rho_tools::AgentStatusTool::new(Arc::clone(&env)).input_schema();
+    assert!(
+        status["required"].is_null(),
+        "agent_status takes no required argument: {status}"
+    );
+}

@@ -189,7 +189,48 @@ summarised it. The flag name and the child's answer were lost in the paraphrase.
 asks two narrow questions, which a model quotes rather than rewrites. A model paraphrase is not a
 defect, and a check that cannot tell the difference is a bad check.
 
-## 8. One more defect, outside this change, not fixed here
+## 8. Named handles, driven for real
+
+The last slice of the spec. A model addresses a child by a name instead of a number, and it may
+set a name of its own. `bench/demo-subagents.sh` section 10 asserts it against Bedrock.
+
+```text
+10. A model can address a child by name
+  PASS a background spawn reports a name the model may use
+  PASS agent_status with no id lists the running children
+  PASS listing with no id is not a refusal
+  PASS a steer reaches a child by its caller-set name
+  PASS a name is not refused as a malformed id
+  PASS a derived handle stops a child
+  PASS a derived handle is not refused
+  PASS an unknown name is an ordinary miss that teaches
+
+Result
+  passed: 55
+  failed: 0
+```
+
+**Proved against the old behaviour too.** With `resolve` made to refuse every name, the same
+suite reported `passed: 53, failed: 2`, and the two were the steer-by-alias and the
+cancel-by-handle checks. So these checks can fail.
+
+**What the mutations found that reading did not.** Eight deliberate breaks went into the handle
+code. Six were caught at once. Two were not, and both were real:
+
+| Mutation | Why nothing caught it | What it means |
+| --- | --- | --- |
+| the handout re-derives a name | the handout never called the binder, so the guard was unreachable | the promise "a waiter keeps its name" rested on an accident |
+| `resolve` skips the ownership re-check | every handle test used a root caller | a mid-tree caller could reach a cousin's child by name |
+
+Both are fixed, and both now have tests. See decision D-one-place-binds-a-name.
+
+**One guard was fail-open, and it hid this spec for a whole run.** `bench/check-spec-tests.py`
+read the entire `Status:` line and exempted any spec that mentioned "draft" or "planned". This
+spec says `delivered` and then explains that one line is marked planned, so the guard exempted
+it and reported green while checking nothing. It now reads only the first word of the status.
+The name count it checks rose from 210 to 318 the moment that was fixed.
+
+## 9. One more defect, outside this change, not fixed here
 
 The first definition file in this session wrote its tool list as a YAML sequence:
 

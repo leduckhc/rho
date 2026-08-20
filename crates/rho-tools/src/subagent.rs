@@ -87,6 +87,13 @@ struct SpawnArgs {
     /// `agent_status` when it wants to know.
     #[serde(default)]
     background: bool,
+    /// A name for this child, so later calls can say it instead of an id.
+    ///
+    /// It never fails the spawn. A refused name is a note in the result, because the
+    /// child is already admitted and the work matters more than the label. See
+    /// `SPEC-subagent-slots-handles-grace` section 3.2.
+    #[serde(default)]
+    alias: Option<String>,
 }
 
 /// The `spawn_agent` tool. It spawns a subagent and returns its summary.
@@ -175,6 +182,13 @@ impl Tool for SpawnAgentTool {
                         "Return at once instead of waiting. Use it for long work you want to \
                          carry on beside. Poll it with agent_status, redirect it with \
                          steer_agent, and stop it with cancel_agent."
+                },
+                "alias": {
+                    "type": "string",
+                    "description":
+                        "A short name for this child, such as \"auth-audit\", so later calls \
+                         can say the name instead of the id. At most 64 characters, no line \
+                         breaks. A name already in use is reported and the work still runs."
                 }
             },
             "required": ["agent", "prompt"]
@@ -190,9 +204,12 @@ impl Tool for SpawnAgentTool {
         if !args.background {
             return Ok(run_one_child(
                 &self.env,
-                &args.agent,
-                &args.prompt,
-                &args.artifacts,
+                &ChildRequest {
+                    agent: &args.agent,
+                    prompt: &args.prompt,
+                    artifacts: &args.artifacts,
+                    alias: args.alias.as_deref(),
+                },
                 &ctx.cancel,
                 &ctx.agent_events,
             )
@@ -206,6 +223,8 @@ impl Tool for SpawnAgentTool {
         let cancel = ctx.cancel.clone();
         let events = ctx.agent_events.clone();
         let name = args.agent.clone();
+        // Kept out of the task, because the label belongs to this call's result.
+        let alias = args.alias.clone();
         let (id_tx, id_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let started = start_background_child(
@@ -225,17 +244,67 @@ impl Tool for SpawnAgentTool {
 
         // Wait only for the id, never for the work.
         match id_rx.await {
-            Ok(Ok(id)) => Ok(ToolOutput::text(format!(
-                "started {} in the background as id {}. Poll it with agent_status, \
-                 redirect it with steer_agent, or stop it with cancel_agent.",
-                name, id.0
-            ))),
+            Ok(Ok(id)) => {
+                // The label is set here, not in the task, because the tool result is
+                // where the model learns the name it may use.
+                let note = label_child(&self.env, id, alias.as_deref());
+                let handle = self
+                    .env
+                    .node
+                    .registry()
+                    .handle_of(id)
+                    .unwrap_or_else(|| name.clone());
+                let mut text = format!(
+                    "started {} in the background as \"{}\" (id {}). Poll it with \
+                     agent_status, redirect it with steer_agent, or stop it with \
+                     cancel_agent. Either the name or the id works.",
+                    name, handle, id.0
+                );
+                if let Some(note) = note {
+                    text.push_str("\n\n");
+                    text.push_str(&note);
+                }
+                Ok(ToolOutput::text(text))
+            }
             // A refusal before the child began, for example a limit.
             Ok(Err(refusal)) => Ok(error_result(refusal)),
             Err(_) => Ok(error_result(
                 "the background subagent task ended before it reported an id.".to_string(),
             )),
         }
+    }
+}
+
+/// One child's work, as the caller asked for it.
+///
+/// A named struct, not four more parameters. `run_one_child` already took six, and a
+/// four-argument `Session::new` once hid a fake model id and an approve-all policy here.
+/// See decision D-no-four-argument-session-new.
+struct ChildRequest<'a> {
+    agent: &'a str,
+    prompt: &'a str,
+    artifacts: &'a [String],
+    /// The name the caller asked for, if any.
+    alias: Option<&'a str>,
+}
+
+/// Set the caller's alias, and return the note the parent should read.
+///
+/// `None` means there is nothing to say: either no name was asked for, or it was taken.
+/// A refusal is a note and never an error, so the work outlives the label.
+fn label_child(env: &Arc<SpawnEnv>, id: rho_core::AgentId, alias: Option<&str>) -> Option<String> {
+    let handle = env.node.registry().handle_of(id);
+    let alias = alias?;
+    match env.node.registry().set_alias(&env.node, id, alias) {
+        Ok(()) => Some(format!("[you can call this child \"{alias}\".]")),
+        Err(refusal) => Some(format!(
+            "[the name \"{}\" was not set: {refusal} Use {} or id {}.]",
+            alias.escape_debug(),
+            handle
+                .map(|name| format!("\"{name}\""))
+                .unwrap_or_else(|| "its id".to_string()),
+            id.0
+        )),
     }
 }
 
@@ -356,12 +425,16 @@ fn unstarted_report(agent: &str, outcome: AgentOutcome) -> rho_core::AgentReport
 
 async fn run_one_child(
     env: &Arc<SpawnEnv>,
-    agent: &str,
-    prompt: &str,
-    artifacts: &[String],
+    request: &ChildRequest<'_>,
     parent_cancel: &rho_core::CancelToken,
     events: &tokio::sync::mpsc::Sender<rho_core::AgentEvent>,
 ) -> ToolOutput {
+    let ChildRequest {
+        agent,
+        prompt,
+        artifacts,
+        alias,
+    } = *request;
     // A task rho cannot act on is refused first, and the refusal teaches. A goal is
     // required, because the goal is the child's prompt. See `SPEC-agent-tasks`.
     if let Err(refusal) = rho_core::AgentTask::new(agent, prompt).validate() {
@@ -409,10 +482,39 @@ async fn run_one_child(
         Err(refusal) => return error_result(refusal.to_string()),
     };
 
+    // The label is set once the child holds an id, so a sibling that asked for the same
+    // name is told, and the second child still runs.
+    let note = label_child(env, spawn.node.id(), alias);
+
     // A refusal after the reservation is a result for the model, not a fault.
-    match finish_child(env, agent, prompt, artifacts, cancel, events, spawn).await {
+    let mut output = match finish_child(env, agent, prompt, artifacts, cancel, events, spawn).await
+    {
         Ok(finished) => finished.output,
         Err(refusal) => error_result(refusal),
+    };
+    if let Some(note) = note {
+        output = with_note(output, &note);
+    }
+    output
+}
+
+/// Append a note to a tool result, keeping whether it was an error.
+///
+/// A note is rho's own line, so it goes after the child's text and never inside it.
+fn with_note(output: ToolOutput, note: &str) -> ToolOutput {
+    let mut content = output.content;
+    match content.last_mut() {
+        Some(rho_core::ContentBlock::Text { text }) => {
+            text.push_str("\n\n");
+            text.push_str(note);
+        }
+        _ => content.push(rho_core::ContentBlock::Text {
+            text: note.to_string(),
+        }),
+    }
+    ToolOutput {
+        content,
+        is_error: output.is_error,
     }
 }
 
@@ -735,6 +837,10 @@ struct FanOutTask {
     agent: String,
     /// The work to delegate to this child.
     prompt: String,
+    /// A name for this child. Two tasks that ask for one name give it to the first,
+    /// and the second is told. See `SPEC-subagent-slots-handles-grace` section 3.2.
+    #[serde(default)]
+    alias: Option<String>,
 }
 
 /// Arguments for the `spawn_agents` tool.
@@ -818,6 +924,13 @@ impl Tool for SpawnAgentsTool {
                             "prompt": {
                                 "type": "string",
                                 "description": "The work to delegate to this child."
+                            },
+                            "alias": {
+                                "type": "string",
+                                "description":
+                                    "A short name for this child. One name belongs to one \
+                                     child: a second task asking for it is told, and it \
+                                     still runs."
                             }
                         },
                         "required": ["agent", "prompt"]
@@ -847,15 +960,25 @@ impl Tool for SpawnAgentsTool {
         // Run every task together. `join_all` keeps the results in request order,
         // even though execution is concurrent, so the prompt prefix stays stable
         // and the provider cache stays warm. See decision D-measured-cost-and-cache.
-        let runs =
-            args.tasks.iter().map(|task| {
-                let env = Arc::clone(&self.env);
-                let cancel = ctx.cancel.clone();
-                let events = ctx.agent_events.clone();
-                async move {
-                    run_one_child(&env, &task.agent, &task.prompt, &[], &cancel, &events).await
-                }
-            });
+        let runs = args.tasks.iter().map(|task| {
+            let env = Arc::clone(&self.env);
+            let cancel = ctx.cancel.clone();
+            let events = ctx.agent_events.clone();
+            async move {
+                run_one_child(
+                    &env,
+                    &ChildRequest {
+                        agent: &task.agent,
+                        prompt: &task.prompt,
+                        artifacts: &[],
+                        alias: task.alias.as_deref(),
+                    },
+                    &cancel,
+                    &events,
+                )
+                .await
+            }
+        });
         let results = futures::future::join_all(runs).await;
 
         // One section per child, named by its agent and its task, so the model can

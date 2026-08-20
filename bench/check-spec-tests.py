@@ -79,13 +79,21 @@ def named_in_test_sections(spec: pathlib.Path) -> list[tuple[int, str, str]]:
 
 
 def is_delivered(spec: pathlib.Path) -> bool:
-    """True when a spec claims its feature shipped, so its promises are due."""
+    """True when a spec claims its feature shipped, so its promises are due.
+
+    **Only the first word of the status counts.** An earlier version searched the whole
+    status line for "draft" or "planned", so a spec that said "delivered" and then
+    explained that one line was marked planned exempted itself entirely. The guard read
+    as green while it checked nothing, which is the fail-open shape this project keeps
+    paying for. A status is a state, not prose, so only the state is read.
+    """
     match = STATUS.search(spec.read_text())
     if match is None:
         # No status line, so treat it as due. A spec should say where it stands.
         return True
-    status = match.group(1).lower()
-    return "draft" not in status and "planned" not in status
+    status = match.group(1).strip().lower()
+    state = re.split(r"[\s.,;:]+", status, maxsplit=1)[0]
+    return state not in {"draft", "planned"}
 
 
 def main() -> int:

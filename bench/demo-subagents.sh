@@ -180,7 +180,18 @@ section "5. A child cannot read the parent's credentials"
 if [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
   OUT="$(run 'Use spawn_agent with agent="greedy" and prompt="Run exactly this bash command and report its raw output: printenv AWS_SECRET_ACCESS_KEY || echo ABSENT_FROM_CHILD_ENV". Report the child result verbatim.' --trust-project)"
   expect "the child environment holds no AWS secret" "ABSENT_FROM_CHILD_ENV" "$OUT"
-  reject "the secret value never appears in the output" "$AWS_SECRET_ACCESS_KEY" "$OUT"
+  # Never hand the live secret to `expect` or `reject`. On failure both print the
+  # needle and the whole output, so this check used to write the real credential to
+  # the terminal and to any CI log at exactly the moment scrubbing broke. A security
+  # check that leaks the secret when it trips is worse than no check. So the
+  # comparison happens here and only a verdict leaves this block.
+  if printf '%s' "$OUT" | grep -qF -- "$AWS_SECRET_ACCESS_KEY"; then
+    fail "the secret value never appears in the output" \
+      "the live secret to be absent (not printed here)" \
+      "<withheld: the output holds the credential this check just caught>"
+  else
+    pass "the secret value never appears in the output"
+  fi
 else
   printf '  SKIP  no AWS_SECRET_ACCESS_KEY in the environment to probe with\n'
 fi
@@ -223,7 +234,9 @@ expect "fan-out child 3 answered" "gamma" "$OUT"
 # leaves no room at all, so two of the three tasks must wait.
 OUT="$(run 'Use spawn_agents with three tasks: scout on a.txt, scout on b.txt, scout on c.txt. Reproduce the whole tool result verbatim, every section, changing nothing.' --trust-project --max-children-per-parent 1)"
 reject "the per-parent cap queues a task instead of refusing it" "per-parent child limit" "$OUT"
-expect "the task that had a slot ran" "alpha" "$OUT"
+# `alpha` is not checked here. Under a cap of one it is the task that always holds the
+# slot, so it runs even when queueing is broken and the other two are refused. A check
+# that cannot fail is not a check. The two below are the load-bearing ones.
 expect "the first task that waited still ran" "beta" "$OUT"
 expect "the second task that waited still ran" "gamma" "$OUT"
 
@@ -283,7 +296,9 @@ section "9. A queued child holds an id, and the model can act on it"
 # asked to quote rho's own words, because a check needs rho's text and not a paraphrase.
 OUT="$(run 'Do exactly this. Call spawn_agent with agent="slowpoke", prompt="Run exactly this bash command: python3 -c \"import time; time.sleep(20)\"" and background=true. Then call spawn_agent with agent="scout", prompt="What is in a.txt?" and background=true. Then call agent_status on the id the second call gave you. Quote the agent_status result verbatim.' --trust-project --max-children-per-parent 1 --child-timeout-secs 25)"
 expect "a spawn over the cap is admitted, not refused" "queued" "$OUT"
-expect "and the model is told where it sits in the line" "place 1" "$OUT"
+# A pattern, not one phrase. rho says "at place 1 in its parent's line", and a model
+# that answers "position 1" or "first in line" is paraphrasing, which is not a defect.
+expect "and the model is told where it sits in the line" "place 1\|position 1\|first in" "$OUT"
 reject "no refusal names the per-parent cap any more" "per-parent child limit" "$OUT"
 
 # A cancelled waiter must never be promised a start. This is the defect that driving it
@@ -291,13 +306,40 @@ reject "no refusal names the per-parent cap any more" "per-parent child limit" "
 OUT="$(run 'Do exactly this. Call spawn_agent with agent="slowpoke", prompt="Run exactly this bash command: python3 -c \"import time; time.sleep(20)\"" and background=true. Then call spawn_agent with agent="scout", prompt="What is in a.txt?" and background=true. Then call cancel_agent on the second id. Then call agent_status on that same second id. Quote both results verbatim.' --trust-project --max-children-per-parent 1 --child-timeout-secs 25)"
 expect "a queued child is cancellable by the id the model holds" "asked to stop" "$OUT"
 reject "a cancelled child is never promised a start" "it will start" "$OUT"
-expect "and the answer says it was cancelled" "cancel" "$OUT"
+# "cancelled", not "cancel": the shorter needle also matches the tool name cancel_agent
+# echoed in the model's prose, so it passed without rho reporting anything. Both rho
+# answers spell it with two l's, the queued one and `AgentOutcome::label`.
+expect "and the answer says it was cancelled" "cancelled" "$OUT"
 
 # A steer must reach a child that has not started yet.
 OUT="$(run 'Do exactly this. Call spawn_agent with agent="slowpoke", prompt="Run exactly this bash command: python3 -c \"import time; time.sleep(20)\"" and background=true. Then call spawn_agent with agent="scout", prompt="What is in a.txt?" and background=true. Then call steer_agent on the second id with the message "read b.txt as well". Quote the steer_agent result verbatim.' --trust-project --max-children-per-parent 1 --child-timeout-secs 25)"
-expect "a steer is accepted for a child that has not started" "queued for" "$OUT"
+expect "a steer is accepted for a child that has not started" "queued for\|at position\|position 1" "$OUT"
 expect "and the receipt names the agent, which holds no live handle yet" "scout" "$OUT"
 reject "a steer for a queued child is never a lost message" "cannot be steered" "$OUT"
+
+# --- 10. A child answers to a name, not only a number ---
+
+section "10. A model can address a child by name"
+# The whole point of a handle: the model repeats a name it read, instead of keeping a
+# number. The prompt asks for narrow answers, because a check needs rho's own words.
+OUT="$(run 'Do exactly this. Call spawn_agent with agent="slowpoke", prompt="Run exactly this bash command: python3 -c \"import time; time.sleep(15)\"", background=true and alias="the-sleeper". Then call agent_status with no id at all. Then reply with exactly two lines: line 1 the whole agent_status answer, line 2 the name you were told you may use for that child.' --trust-project --child-timeout-secs 20)"
+expect "a background spawn reports a name the model may use" "the-sleeper\|slowpoke" "$OUT"
+expect "agent_status with no id lists the running children" "slowpoke\|the-sleeper\|running" "$OUT"
+reject "listing with no id is not a refusal" "not valid\|check the tool schema" "$OUT"
+
+# A steer addressed by the caller-set name must reach the child.
+OUT="$(run 'Do exactly this. Call spawn_agent with agent="slowpoke", prompt="Run exactly this bash command: python3 -c \"import time; time.sleep(15)\"", background=true and alias="the-sleeper". Then call steer_agent with id="the-sleeper" and the message "stop sleeping". Then quote the steer_agent result verbatim.' --trust-project --child-timeout-secs 20)"
+expect "a steer reaches a child by its caller-set name" "queued for\|at position\|position 1" "$OUT"
+reject "a name is not refused as a malformed id" "must be a subagent id" "$OUT"
+
+# And by the handle rho derived, with no alias set at all.
+OUT="$(run 'Do exactly this. Call spawn_agent with agent="slowpoke", prompt="Run exactly this bash command: python3 -c \"import time; time.sleep(15)\"" and background=true. Then call cancel_agent with id="slowpoke", using that exact string and not a number. Then quote the cancel_agent result verbatim.' --trust-project --child-timeout-secs 20)"
+expect "a derived handle stops a child" "asked to stop" "$OUT"
+reject "a derived handle is not refused" "must be a subagent id" "$OUT"
+
+# A name the model invents must teach, not fail silently.
+OUT="$(run 'Call cancel_agent with id="no-such-child". Then quote the result verbatim.' --trust-project)"
+expect "an unknown name is an ordinary miss that teaches" "no subagent" "$OUT"
 
 # --- Result ---
 

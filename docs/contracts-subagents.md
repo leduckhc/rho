@@ -201,6 +201,64 @@ A `LiveAgent` exists only while its child runs. `spawn_child` registers it and
 `ChildSlot::drop` removes it. A handle to a finished child would cancel nothing, so none is
 handed out.
 
+### A child answers to a name, not only a number
+
+```rust
+pub const MAX_ALIAS_LENGTH: usize = 64;
+
+/// A model-facing reference to a child: an id, or a name.
+pub enum AgentRef {
+    Id(u64),
+    Name(String),
+}
+
+impl AgentRegistry {
+    /// The derived handle for a child, unique in its tree.
+    pub fn handle_of(&self, id: AgentId) -> Option<String>;
+
+    /// Resolve a reference to a child's id, inside the caller's own descendants.
+    pub fn resolve(&self, caller: &AgentNode, reference: &AgentRef) -> Option<AgentId>;
+
+    /// Name a child. One name belongs to one child, and no name hides a handle.
+    pub fn set_alias(
+        &self,
+        caller: &AgentNode,
+        id: AgentId,
+        alias: impl Into<String>,
+    ) -> Result<(), AliasError>;
+}
+
+pub enum AliasError {
+    ShadowsHandle { name: String },
+    Taken { name: String },
+    Unknown { id: AgentId },
+    TooLong { limit: usize, length: usize },
+    NotPrintable { name: String },
+    DigitsOnly { name: String },
+}
+```
+
+rho derives a handle from the agent name and numbers a collision: `explore`, then `explore-2`.
+The numbering reads the live index, the queued index, and the remembered reports, inside the
+same lock as the registration, so two admissions of one agent name cannot choose one name. One
+function binds a name, and it never re-derives, so a queued child keeps the name it was told.
+
+**A handle is scoped twice.** The table is keyed by the tree root, and `resolve` re-checks the
+id it found against the caller's own descendants. The second check is load-bearing: every node
+of one tree shares the tree key, so without it a caller could reach a cousin's child by name.
+
+**A digits-only name is always an id.** So an agent called `42` keeps `42` for display, and
+`set_alias` refuses a digits-only name rather than store one that could never be reached.
+
+**An alias is bounded and printable, because the model writes it.** At most 64 characters,
+counted in characters, and no control character, so a name cannot forge a line of rho's own
+output. A refused alias never fails the spawn: the child is already admitted, and the result
+carries a note with the reason and the derived handle instead.
+
+**A name lives exactly as long as the id answers.** When a report leaves the 64-deep ring, the
+handle and every alias for that child go with it. So the two tables are bounded by the three
+indexes and cannot grow with model-chosen names.
+
 ### A finished child still answers
 
 ```rust
@@ -317,6 +375,11 @@ trips, so `max_tool_calls` exists to bound a single turn that asks for forty too
 
 **A queued child spends none of its timeout while it waits.** The clock lives in
 `collect_report`, which runs only after `started` resolves.
+
+**A blocking spawn now waits, and the wait has a stated cost.** One tool call can hold a
+parent's turn for `ceil(max_queued_per_parent / max_children_per_parent) x child_timeout`, about
+forty minutes at the defaults. rho does not bound that separately today. A caller that cannot
+afford the wait passes `background: true` and gets an id at once.
 
 ## 5. The task, and the gate that verifies it
 
@@ -562,11 +625,17 @@ Five tools. Four are `ToolKind::Execute`, so `--read-only` denies them. `agent_s
 
 | Tool | Arguments | Kind | Notes |
 | --- | --- | --- | --- |
-| `spawn_agent` | `agent`, `prompt`, `artifacts`, `background` | Execute | `agent` is a schema `enum` of the loaded names |
-| `spawn_agents` | `tasks`, at least one | Execute | one fan-out per call, results in request order |
+| `spawn_agent` | `agent`, `prompt`, `artifacts`, `background`, `alias` | Execute | `agent` is a schema `enum` of the loaded names |
+| `spawn_agents` | `tasks`, at least one, each with an optional `alias` | Execute | one fan-out per call, results in request order |
 | `steer_agent` | `id`, `message` | Execute | scoped to the caller's own descendants |
-| `agent_status` | `id` | Read | answers for a running child and a finished one |
+| `agent_status` | `id`, optional | Read | answers for a queued, a running, and a finished child. With no `id` it lists this session's children |
 | `cancel_agent` | `id` | Execute | siblings and the parent keep running |
+
+**`id` accepts a number or a string.** A number is an id. A string is a handle or an alias, and
+a digits-only string is an id. One function builds that schema for all three tools, so a model
+that learns the shape on one may use it on the next. Every malformed reference is refused with
+the same sentence, which names both shapes, shows what arrived, and points at the
+no-argument `agent_status` call.
 
 **`background` is the difference between waiting and polling.** The default is false, and the
 call then blocks until the child stops, so the parent can never poll it. With `background: true`
@@ -586,7 +655,8 @@ model can choose well.
 field it controls.
 
 An unknown id is a **result**, not a fault. A child finishing between the model reading the
-list and acting on it is ordinary. The refusal names the id and lists what is running.
+list and acting on it is ordinary. The refusal names the reference it was given and lists what
+is running, each child by its handle and its id.
 
 ## 9. The error set
 
@@ -614,6 +684,9 @@ pub enum QueueError {
     Full { capacity: usize },
 }
 ```
+
+`AliasError` is a separate set, because a refused name never fails the work it labels. See
+section 3.
 
 `TooManyChildren` stays in the set, because `spawn_child` still refuses. `admit_child` never
 returns it, because that cap queues. `TooManyLiveAgents` refuses twice: at admission, and again

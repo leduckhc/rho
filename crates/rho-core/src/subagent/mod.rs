@@ -11,6 +11,7 @@
 //! | `report` | The result contract: [`AgentReport`] and [`AgentOutcome`] |
 //! | `error` | [`SubagentError`], where every refusal teaches |
 //! | `tree` | The spawn tree, the registry, and a live child's handle |
+//! | `handles` | [`AgentRef`], [`AliasError`], and how a name is derived |
 //! | `retry` | [`RetryLedger`], jcode's reclaim cap |
 //! | `collect` | Turning a child's event stream into a report |
 //!
@@ -23,6 +24,7 @@
 mod collect;
 mod confine;
 mod error;
+mod handles;
 mod limits;
 mod report;
 mod retry;
@@ -31,6 +33,7 @@ mod tree;
 pub use collect::{CollectOptions, collect_report};
 pub use confine::{BothPolicies, ToolIntersection, intersect_tools, narrow_sandbox};
 pub use error::{QueueScope, SubagentError};
+pub use handles::{AgentRef, AliasError, MAX_ALIAS_LENGTH};
 pub use limits::{DEFAULT_SUBAGENT_GRACE_TURNS, SubagentLimits};
 pub use report::{AgentOutcome, AgentReport, MAX_SUMMARY_CHARS};
 pub use retry::{MAX_CHILD_RETRIES, RetryLedger};

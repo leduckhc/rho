@@ -1,7 +1,10 @@
 # SPEC-subagent-slots-handles-grace — Slot queue, named handles, and grace turns
 
-Status: draft. This spec describes unwritten code. `bench/check-spec-tests.py` exempts a draft,
-because every test below is a promise and not a claim.
+Status: delivered. `bench/check-spec-tests.py` enforces every test name below.
+
+One line in section 5 is exempt, and it says on the line itself why no test can exist for it.
+The status line must not carry that word, because the guard reads this line first and exempts a
+whole spec that mentions it. That is how this spec sat unchecked for one run.
 Owning crates: `rho-core` for the spawner, the registry, and the run loop. `rho-tools` for
 the five model-facing tools. `rho-cli` for the flags.
 Features: three new rows, F-agent-slot-queue, F-agent-handles, and F-agent-grace-turns. See
@@ -556,6 +559,19 @@ D-per-parent-fifo-start-order.
 the child starts, so a task that waited does not arrive with less time. The retry ledger counts
 a death, and a wait is not a death, so waiting cannot consume a retry.
 
+**The cost, stated: a wide fan-out can hold a parent's turn for a long time.** A blocking spawn
+now waits instead of refusing, so the worst case for one tool call is
+`ceil(max_queued_per_parent / max_children_per_parent) x child_timeout`. At the shipped defaults
+that is `ceil(16 / 4) x 600 s`, about forty minutes, and a prompt-injected model chooses both the
+fan-out width and the children that sleep. The old refusal always returned at once, so this is a
+real trade: rho took the wait away from the model and gave it to the parent's turn.
+
+This spec does **not** bound that wait, and a security review named it. A queue-wait deadline,
+separate from `child_timeout`, is the fix, and it is a new contract: it needs its own error case,
+its own flag, and its own decision. It is out of scope here, and it is recorded in
+`.rho-work/progress.md` rather than left in a reviewer's head. Until then, a caller that cannot
+afford the wait uses `background: true`, which returns at once with an id.
+
 ### 2.9 Fairness and order
 
 **Start order is first-in-first-out per parent, and the semaphore provides it.**
@@ -612,9 +628,14 @@ impl AgentRegistry {
 
 ### 3.2 The alias rule
 
-**A caller may set one alias per child. An alias never shadows a derived handle.** The model
-sets an alias through an optional `alias` argument on `spawn_agent`. A Rust caller sets one
-through the registry.
+**A caller may name a child. A name belongs to one child, and an alias never shadows a derived
+handle.** The model sets an alias through an optional `alias` argument on `spawn_agent`, and on
+each task of `spawn_agents`. A Rust caller sets one through the registry.
+
+An earlier draft of this sentence said "one alias per child". The error set has no case for a
+second name on one child, so the implementation would have had to invent one or lie with
+`Taken`. A second name for one child costs one map entry and hides nothing, so it is allowed.
+The rule that matters is the other direction: one name, one owner.
 
 ```rust
 impl AgentRegistry {
@@ -715,6 +736,16 @@ The schema of `id` on `steer_agent`, `agent_status`, and `cancel_agent` becomes:
           "description": "The subagent id, or its handle, from the spawn result." } }
 ```
 
+One function builds that schema for all three tools, so a model that learns the shape from one
+may use it on the next. A test asserts all three, because a model uses only what the schema
+shows: the agent `enum` had to be added for exactly that reason.
+
+**`agent_status` takes no required argument.** The refusal above tells the model to call it with
+none, so that call has to work. It lists this session's live children, each with its handle and
+its id, and it says plainly when nothing is running. A refusal that teaches a call rho refuses
+is the defect family that already shipped here, so the field is optional and two tests hold it
+that way.
+
 **The migration.** A caller that sends the old integer shape resolves through `AgentRef::Id`.
 A caller that sends a handle resolves through `AgentRef::Name`. No coordinated release is
 needed, because no old shape is refused. This is a `oneOf` rejected in favour of one field,
@@ -726,9 +757,20 @@ because one field is simpler for the model and for `serde`.
 `resolve` returns an id, and every scoped accessor then checks that id against the caller's
 descendants. So a handle reaches no child of another tree.
 
-Two guards stack. The handle table is keyed per tree, so tree B holds no binding for tree
-A's child. And `descendant` re-checks the resolved id against the caller's ancestors. The
-test names it: `one_tree_cannot_reach_another_by_handle`.
+Two guards stack, and **the second one is load-bearing, not belt-and-braces.** The handle table
+is keyed per tree, so tree B holds no binding for tree A's child. But every node of one tree
+shares that key, so the per-tree key alone does not scope a name inside a tree: a name lookup by
+a mid-tree caller finds a cousin's binding. The ancestor re-check inside `resolve` is what
+refuses it. A mutation that deleted that re-check passed every other handle test, because they
+all used a root caller. Two tests now cover the case:
+`a_child_cannot_reach_its_uncles_child_by_handle` and `an_alias_cannot_be_set_on_a_cousin`. The
+cross-tree case is `one_tree_cannot_reach_another_by_handle`. See decision
+D-a-caller-addresses-only-its-own.
+
+**One place binds a name.** `bind_handle` runs inside the registration's own critical section,
+for a fresh spawn, for an admission that queues, and for the handout that starts a waiter. It
+never re-derives, so the name a queued child was told is the name it keeps. A mutation that made
+the handout re-derive was invisible until the handout was routed through that one function.
 
 ### 3.5 What a handle does after the child finishes
 
@@ -957,13 +999,17 @@ A child that never started still owes its parent a report, in `crates/rho-tools/
   because only a race reaches the second arm.
 - `an_unstarted_report_claims_no_work` — zero turns, no summary, and no transcript.
 
-Named handles, in `crates/rho-core/tests/subagent_handles.rs`:
+Named handles, in `crates/rho-core/tests/subagent_handles.rs`. **This section is built.**
 - `a_handle_is_derived_from_the_agent_name` — the first `explore` is `explore`.
 - `a_second_child_of_one_name_is_numbered` — the second `explore` is `explore-2`.
 - `a_handle_is_unique_per_tree_not_per_process` — two trees each hold `explore`.
+- `a_queued_child_holds_a_handle_too` — a waiter is addressable by name, not only by id.
+- `a_started_child_keeps_the_handle_it_was_given_while_queued` — the handout never re-derives.
 - `sixteen_threads_admitting_one_agent_name_get_sixteen_distinct_handles` — the set size is the
   assertion, so the test proves the invariant rather than one lucky interleave. It fails if the
   handle is derived outside the registration lock.
+- `a_handle_is_not_reused_while_a_finished_child_is_remembered` — the numbering reads all three
+  indexes, so a remembered `explore` keeps its name and a newcomer takes the next.
 - `resolve_reads_an_integer_id` — the old shape still resolves.
 - `resolve_reads_a_digits_only_string_as_an_id` — a numeric string reaches the same child.
 - `a_digits_only_name_resolves_as_an_id_and_never_as_a_handle` — an agent called `42` keeps
@@ -971,26 +1017,52 @@ Named handles, in `crates/rho-core/tests/subagent_handles.rs`:
 - `resolve_reads_a_handle_name` — a name reaches the child.
 - `an_alias_resolves_to_its_child` — a set alias reaches the child.
 - `an_alias_that_shadows_a_handle_is_refused` — a derived handle wins.
-- `an_alias_that_is_already_taken_is_refused` — one alias per name.
+- `an_alias_that_is_already_taken_is_refused` — one name, one owner.
 - `resolve_checks_a_handle_before_an_alias` — the shadow rule holds at read time.
+- `an_alias_longer_than_the_cap_is_refused_and_the_cap_is_counted_in_characters` — 64 emoji pass.
+- `an_alias_with_a_control_character_is_refused` — a newline, a bell, and an escape, so no
+  forged output line.
+- `an_alias_for_a_child_of_another_tree_is_unknown` — the write path is scoped too.
+- `an_alias_cannot_be_set_on_a_cousin` — and it is scoped inside one tree, not only across two.
+- `a_child_cannot_reach_its_uncles_child_by_handle` — the ancestor re-check, which a mutation
+  proved was the only guard for this case.
 - `one_tree_cannot_reach_another_by_handle` — the scope guard stands.
 - `a_handle_resolves_while_the_report_is_remembered` — it outlives the live handle.
 - `a_handle_stops_resolving_when_the_report_is_evicted` — the 64 cap bounds it too.
+- `an_alias_goes_when_its_child_is_forgotten` — so the alias map is bounded by the same three
+  indexes, and a freed name may be used again.
+- `the_handle_table_holds_no_more_than_the_three_indexes` — a thousand short-lived children
+  leave nothing behind.
+- `an_agent_ref_reads_a_number_and_a_string` — the wire shape, both arms.
+- `a_malformed_agent_ref_names_both_accepted_shapes` — a boolean, a float, a negative number,
+  `null`, an object, and a list each teach what to send instead.
+- `a_number_beyond_u64_is_refused_as_no_id` — serde reads it as a float, so it is not an id.
+- `an_empty_agent_ref_name_is_an_ordinary_not_found`
+- `every_alias_refusal_teaches_what_to_do` — all six variants are sentences that teach.
 
-The handle tools, in `crates/rho-tools/tests/subagent_tool.rs`:
+The naming rules themselves, as pure functions, in `crates/rho-core/src/subagent/handles.rs`:
+- `a_free_name_is_taken_as_it_stands`
+- `a_collision_counts_from_two_and_skips_what_is_held` — and it fills a hole a finished child left.
+- `the_search_terminates_when_every_low_number_is_held` — the loop is bounded by the taken set.
+- `a_digits_only_name_is_recognised`
+- `an_alias_is_bounded_printable_and_never_digits`
+
+The handle tools, in `crates/rho-tools/tests/subagent_tool.rs`. **This section is built.**
 - `steer_agent_accepts_a_handle` — `AgentRef::Name` reaches the child.
 - `steer_agent_still_accepts_an_integer_id` — the migration keeps the old shape.
 - `cancel_agent_accepts_a_handle`
 - `agent_status_accepts_a_handle`
+- `agent_status_with_no_id_lists_this_tree_and_names_each_handle` — the call every malformed
+  refusal recommends really exists.
+- `agent_status_with_no_id_says_plainly_when_nothing_runs` — the empty case is not an empty string.
 - `spawn_agent_sets_an_alias_from_its_argument`
 - `spawn_agent_reports_a_rejected_alias_without_failing_the_spawn` — the work outlives the label.
 - `a_fan_out_gives_one_name_to_one_child_and_notes_the_other` — one name, one owner.
 - `an_alias_of_exactly_the_cap_is_accepted_and_one_more_is_refused` — the boundary, counted in
   characters, so 64 emoji pass and 65 do not.
-- `an_alias_with_a_newline_or_a_control_character_is_refused` — no forged output line.
-- `a_malformed_agent_ref_names_both_accepted_shapes` — a boolean, a float, a negative number,
-  `null`, and an object each teach what to send instead.
-- `a_number_beyond_u64_is_refused_as_no_id` — serde reads it as a float, so it is not an id.
+- `the_schemas_offer_the_alias_and_both_id_shapes` — a model uses only what the schema shows.
+- `a_malformed_agent_ref_names_both_accepted_shapes` — through a real tool call.
+- `a_number_beyond_u64_is_refused_as_no_id`
 - `an_empty_agent_ref_name_is_an_ordinary_not_found`
 
 Grace turns, in `crates/rho-core/tests/subagent_grace.rs`. **This section is built**, and the
@@ -1004,7 +1076,8 @@ names below are the tests that exist:
 - `a_child_that_ignores_the_warning_still_reports_out_of_turns` — the outcome keeps meaning.
 - `the_tool_call_budget_gets_no_grace_warning` — the budget keeps its hard stop.
 - `grace_turns_zero_disables_the_warning` — a caller turns it off.
-- `a_non_zero_grace_window_reaches_the_child_and_zero_does_not` — the builder boundary.
+- `a_child_with_a_zero_grace_window_is_not_warned` — the same, driven through the spawn tool.
+- `a_child_is_warned_before_its_turn_cap` — a non-zero window reaches a real child.
 - `a_definition_cannot_set_grace_turns` — a project file cannot change it.
 - `a_plain_session_gets_no_warning_by_default` — `SessionConfig::new` sets zero.
 - `the_driver_reads_the_grace_window_from_the_session_config` — the one copy site works.

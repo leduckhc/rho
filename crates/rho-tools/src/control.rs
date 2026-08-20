@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rho_core::{
-    AgentId, AgentStatus, ContentBlock, Tool, ToolContext, ToolError, ToolKind, ToolOutput,
+    AgentId, AgentRef, AgentStatus, ContentBlock, Tool, ToolContext, ToolError, ToolKind,
+    ToolOutput,
 };
 use serde::Deserialize;
 
@@ -21,16 +22,29 @@ use crate::subagent::SpawnEnv;
 
 #[derive(Debug, Deserialize)]
 struct SteerArgs {
-    /// The subagent id, from a spawn event or the live list.
-    id: u64,
+    /// The subagent id, or its handle, from a spawn result or the live list.
+    id: AgentRef,
     /// The message the child reads at its next turn boundary.
     message: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct CancelArgs {
-    /// The subagent id to stop.
-    id: u64,
+    /// The subagent to stop, by id or by handle.
+    id: AgentRef,
+}
+
+/// The schema of the `id` field, shared by the three tools that address a child.
+///
+/// One definition, so three tools cannot describe one field three ways. A model that
+/// learns the shape from `steer_agent` may use it on `cancel_agent`.
+fn agent_ref_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": ["integer", "string"],
+        "description":
+            "The subagent id, such as 7, or its handle, such as \"explore-2\", from the \
+             spawn result. A name you set with the alias argument works too."
+    })
 }
 
 /// Name the children that are live now, for a refusal that teaches.
@@ -43,7 +57,16 @@ fn live_summary(env: &SpawnEnv) -> String {
     }
     let names: Vec<String> = live
         .iter()
-        .map(|handle| format!("{} ({})", handle.id.0, handle.agent))
+        .map(|handle| {
+            // The handle first, because that is the address the model should learn to
+            // use. The id follows, because the older shape still works.
+            let name = env
+                .node
+                .registry()
+                .handle_of(handle.id)
+                .unwrap_or_else(|| handle.agent.clone());
+            format!("{} (id {})", name, handle.id.0)
+        })
         .collect();
     format!("Running now: {}.", names.join(", "))
 }
@@ -89,10 +112,7 @@ impl Tool for SteerAgentTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "id": {
-                    "type": "integer",
-                    "description": "The subagent id, from the spawn event or the running list."
-                },
+                "id": agent_ref_schema(),
                 "message": {
                     "type": "string",
                     "description": "What the child should do next."
@@ -108,7 +128,15 @@ impl Tool for SteerAgentTool {
         _ctx: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let args: SteerArgs = parse_args(args)?;
-        let id = AgentId(args.id);
+        // A name resolves inside this tree only, exactly as a bare id does.
+        let Some(id) = self.env.node.registry().resolve(&self.env.node, &args.id) else {
+            return Ok(crate::subagent::error_result(format!(
+                "no subagent \"{}\" is running in this session, so it cannot be steered. It \
+                 may have finished already. {}",
+                args.id,
+                live_summary(&self.env)
+            )));
+        };
         // The name is read before the push, because a queued child holds no live handle
         // and the receipt still has to name the agent.
         let agent = agent_name(&self.env, id);
@@ -121,8 +149,8 @@ impl Tool for SteerAgentTool {
             vec![ContentBlock::Text { text: args.message }],
         ) else {
             return Ok(crate::subagent::error_result(format!(
-                "no subagent with id {} is running, so it cannot be steered. It may have \
-                 finished already. {}",
+                "no subagent \"{}\" is running in this session, so it cannot be steered. It \
+                 may have finished already. {}",
                 args.id,
                 live_summary(&self.env)
             )));
@@ -132,7 +160,7 @@ impl Tool for SteerAgentTool {
                 "queued for {} (id {}), at position {position}. The child reads it after \
                  its current tool calls finish.",
                 agent.unwrap_or_else(|| "the subagent".to_string()),
-                args.id
+                id.0
             ))),
             // A full queue is a typed refusal, never a silent drop.
             Err(full) => Ok(crate::subagent::error_result(full.to_string())),
@@ -158,7 +186,8 @@ impl Tool for AgentStatusTool {
     }
 
     fn description(&self) -> &str {
-        "Poll the status of a running or finished subagent. Returns current progress."
+        "Poll the status of a running or finished subagent. Returns current progress. \
+         Call it with no id to list the subagents this session is running."
     }
 
     fn kind(&self) -> ToolKind {
@@ -169,12 +198,8 @@ impl Tool for AgentStatusTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "id": {
-                    "type": "integer",
-                    "description": "The subagent id from spawn_agent or spawn_agents."
-                }
-            },
-            "required": ["id"]
+                "id": agent_ref_schema()
+            }
         })
     }
 
@@ -185,25 +210,39 @@ impl Tool for AgentStatusTool {
     ) -> Result<ToolOutput, ToolError> {
         #[derive(Deserialize)]
         struct Args {
-            id: u64,
+            /// Absent means "list this session's children".
+            ///
+            /// Every malformed-reference refusal tells the model to call this tool with no
+            /// argument. So the no-argument call has to work, or the refusal names a shape
+            /// rho refuses. A refusal that teaches an impossible call has shipped here
+            /// before, and this field is why it cannot happen again.
+            #[serde(default)]
+            id: Option<AgentRef>,
         }
         let args: Args = parse_args(args)?;
+
+        let Some(reference) = args.id else {
+            return Ok(ToolOutput::text(live_summary(&self.env)));
+        };
+
+        // A name and an id resolve through one path, so the two shapes cannot drift.
+        let Some(id) = self.env.node.registry().resolve(&self.env.node, &reference) else {
+            return Ok(ToolOutput::text(format!(
+                "no subagent \"{reference}\" is known in this session tree. It may belong to \
+                 another session, or it finished long enough ago to be forgotten. {}",
+                live_summary(&self.env)
+            )));
+        };
 
         // `status` answers for a live child **and** for one that finished. A background
         // child finishes while the parent is busy, and `ChildSlot::drop` removes the
         // live handle, so a lookup that only knew live children would lose every
         // result the parent asked for. jcode keeps a `latest_completion_report` for the
         // same reason.
-        let Some(status) = self
-            .env
-            .node
-            .registry()
-            .status(&self.env.node, AgentId(args.id))
-        else {
+        let Some(status) = self.env.node.registry().status(&self.env.node, id) else {
             return Ok(ToolOutput::text(format!(
-                "no subagent with id {} is known in this session tree. It may belong to \
+                "no subagent \"{reference}\" is known in this session tree. It may belong to \
                  another session, or it finished long enough ago to be forgotten. {}",
-                args.id,
                 live_summary(&self.env)
             )));
         };
@@ -220,7 +259,7 @@ impl Tool for AgentStatusTool {
             } => format!(
                 "{agent} (id {}) was cancelled while it waited for a slot, so it will not \
                  start. Poll it again for its final report.",
-                args.id
+                id.0
             ),
             rho_core::AgentStatus::Queued {
                 agent, position, ..
@@ -228,7 +267,7 @@ impl Tool for AgentStatusTool {
                 "{agent} (id {}) is queued, at place {position} in its parent's line. It has \
                  not started, and it will start when a sibling finishes. Cancel it with \
                  cancel_agent, or steer it now and it reads the message on its first turn.",
-                args.id
+                id.0
             ),
             rho_core::AgentStatus::Running {
                 agent,
@@ -244,7 +283,7 @@ impl Tool for AgentStatusTool {
                 };
                 format!(
                     "{agent} (id {}) is running: {} turn(s), {tokens} token(s){steering}.",
-                    args.id, progress.turns
+                    id.0, progress.turns
                 )
             }
             // A finished child reports what a blocking spawn would have returned, plus
@@ -253,7 +292,7 @@ impl Tool for AgentStatusTool {
                 let mut text = format!(
                     "{} (id {}) finished: {}. {} turn(s), {} token(s).",
                     report.agent,
-                    args.id,
+                    id.0,
                     report.outcome.label(),
                     report.turns,
                     report.usage.input_tokens + report.usage.output_tokens
@@ -306,10 +345,7 @@ impl Tool for CancelAgentTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "id": {
-                    "type": "integer",
-                    "description": "The subagent id to stop."
-                }
+                "id": agent_ref_schema()
             },
             "required": ["id"]
         })
@@ -321,23 +357,28 @@ impl Tool for CancelAgentTool {
         _ctx: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let args: CancelArgs = parse_args(args)?;
-        if self
+        let stopped = self
             .env
             .node
             .registry()
-            .cancel_descendant(&self.env.node, AgentId(args.id))
-        {
-            Ok(ToolOutput::text(format!(
+            .resolve(&self.env.node, &args.id)
+            .filter(|id| {
+                self.env
+                    .node
+                    .registry()
+                    .cancel_descendant(&self.env.node, *id)
+            });
+        match stopped {
+            Some(id) => Ok(ToolOutput::text(format!(
                 "subagent {} was asked to stop. Its siblings keep running.",
-                args.id
-            )))
-        } else {
-            Ok(crate::subagent::error_result(format!(
-                "no subagent with id {} is running, so nothing was cancelled. It may have \
-                 finished already. {}",
+                id.0
+            ))),
+            None => Ok(crate::subagent::error_result(format!(
+                "no subagent \"{}\" is running in this session, so nothing was cancelled. It \
+                 may have finished already. {}",
                 args.id,
                 live_summary(&self.env)
-            )))
+            ))),
         }
     }
 }
