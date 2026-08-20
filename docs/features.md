@@ -246,6 +246,23 @@ restates them. See `F-lifecycle-hook-points` and `F-slash-commands` above.
 | F-agent-definitions | Agent definitions | An agent is a markdown file with frontmatter. A project definition is withheld until the project is trusted. | `rho-skills` | `sprint-2` | Author a definition file. The loader is shared with skills. |
 | F-tool-list-keywords | Tool list keywords | A definition writes `tools: all` or `tools: *` to inherit every tool the parent holds, and `tools: none` to hold none. A keyword must stand alone, and a mixed line keeps the named tools and warns. | `rho-skills` | `built` | Author a definition file. See decision D-a-tool-keyword-stands-alone. |
 
+`docs/specs/20260820-115320-SPEC-subagent-slots-handles-grace.md` owns the three rows below.
+All three are proposed, and none is built.
+
+| ID | Name | Outcome | Owning crate | Status | Extension point |
+|----|------|---------|--------------|--------|-----------------|
+| F-agent-slot-queue | Agent slot queue | A spawn over a concurrency cap queues instead of refusing. It returns an id at once, and the child starts when a slot frees. A queued child can be polled, steered, and cancelled. | `rho-core` | `planned` | `AgentNode::spawn_child` stays the immediate form, so a caller bypasses the queue. `--max-queued-per-parent` bounds the line. |
+| F-agent-handles | Agent handles | A model addresses a child by a derived name, such as `explore-2`, or by a caller-set alias. The id stays the identity, and a handle resolves only inside the caller's own tree. | `rho-core` | `planned` | `AgentRegistry::set_alias` names a child. `AgentRef` accepts an id or a name, so the old integer shape keeps working. |
+| F-agent-grace-turns | Agent grace turns | rho warns a child a fixed number of turns before its turn cap, so the child writes its summary. The warning uses the steering queue, and it never displaces a user message. | `rho-core` | `planned` | `SessionConfig::with_grace_turns`, and `--agent-grace-turns`. Zero disables it. |
+
+`docs/specs/20260820-115310-SPEC-subagent-worktree-isolation.md` owns the two rows below. Both
+are proposed, and neither is built.
+
+| ID | Name | Outcome | Owning crate | Status | Extension point |
+|----|------|---------|--------------|--------|-----------------|
+| F-subagent-workspace-isolation | Subagent workspace isolation | A child works in its own tree, so a fan-out that writes files is safe. Only a trusted caller grants isolation. A definition and the model may refuse it, and neither may demand it. | `rho-core` | `planned` | Implement the `Workspace` trait and install it in `SpawnEnv`. `rho-tools` ships the git one. |
+| F-child-work-kept-on-a-branch | Child work kept on a branch | A child's changes are committed to a named branch when it stops, including after a cancel or a timeout. An unchanged tree leaves no branch, and a failed commit leaves the tree on disk. | `rho-tools` | `planned` | Implement `Workspace::reclaim` differently. Read `AgentReport.branch` and `AgentReport.isolation_root`. |
+
 `docs/specs/20260819-102750-SPEC-agent-tasks.md` owns the four rows below. A child carries a
 task, and rho verifies the result. See decision D-a-child-does-not-grade-itself.
 

@@ -1,0 +1,601 @@
+# SPEC-subagent-slots-handles-grace — Slot queue, named handles, and grace turns
+
+Status: draft. This spec describes unwritten code. `bench/check-spec-tests.py` exempts a draft,
+because every test below is a promise and not a claim.
+Owning crates: `rho-core` for the spawner, the registry, and the run loop. `rho-tools` for
+the five model-facing tools. `rho-cli` for the flags.
+Features: three new rows, F-agent-slot-queue, F-agent-handles, and F-agent-grace-turns. See
+`docs/features.md`.
+
+Every contract named here belongs in `docs/contracts-subagents.md`. That page is the
+reference. This page is the reasoning. This page follows `SPEC-subagents`.
+
+## 1. Why one spec for three gaps
+
+A source comparison against pi and jcode found three gaps. All three touch the same types:
+`AgentNode::spawn_child`, `AgentId`, `AgentStatus`, `LiveAgent`, and the run loop. A
+separate spec each would fight over those types. So one spec settles all three.
+
+The three gaps:
+
+- rho refuses a spawn over a concurrency cap. pi queues it and returns an id.
+- A model addresses a child by a bare integer. pi derives a name.
+- A child hits the turn cap with no warning. pi warns it first.
+
+Two rules from `SPEC-subagents` hold throughout, and this spec never weakens them.
+
+- **A caller addresses only its own descendants.** Every lookup is scoped. See decision
+  D-a-caller-addresses-only-its-own.
+- **A refusal must teach, and it must name no flag that does not exist.**
+
+## 2. The slot queue
+
+### 2.1 Where the waiting happens
+
+**A concurrency cap queues the child. It does not refuse.** The spawn returns a live id at
+once. The child starts when a slot frees. rho does the waiting, not the model. See decision
+D-queue-over-refuse.
+
+The alternative was a tool call that blocks the model until a slot frees. rho rejects it.
+A blocked model holds no id, so it cannot poll, steer, or cancel the pending child. A
+queued id gives the model all three, exactly as a background spawn does.
+
+This still obeys the rule that a refusal must teach. A concurrency cap is not a refusal any
+more, because the work is admissible. It only cannot start yet. The caps that stay a
+refusal still teach. See section 2.7.
+
+### 2.2 The admission contract
+
+```rust
+/// The result of admitting a child when a concurrency cap may be full.
+///
+/// A concurrency cap no longer refuses. It queues. So a caller must handle both a
+/// slot that was free and one that was not. See decision D-queue-over-refuse.
+pub enum Admission {
+    /// A slot was free. The child holds it and may start now.
+    Started(ChildSpawn),
+    /// No slot was free. The child has an id and waits in its parent's line.
+    Queued(QueuedChild),
+}
+
+/// A child that holds an id but not yet a slot.
+///
+/// It is addressable while it waits. A caller may poll it, steer it, or cancel it,
+/// all by the same id a started child uses. Its `CancelToken` and its `MessageQueue`
+/// exist now, so a steer buffers and a cancel lands before the child ever runs.
+pub struct QueuedChild {
+    /* private: id, agent, depth, ancestors, cancel, queue, sequence */
+}
+
+impl QueuedChild {
+    pub fn id(&self) -> AgentId;
+    pub fn agent(&self) -> &str;
+    pub fn depth(&self) -> u32;
+    /// The child's place in its parent's wait line, counted from one.
+    pub fn position(&self) -> usize;
+    /// Give up the place. Then `started` resolves `Err(Dequeued::Cancelled)`.
+    pub fn cancel(&self);
+    pub fn is_cancelled(&self) -> bool;
+    /// The queue the child reads once it starts. A steer buffers here meanwhile.
+    pub fn queue(&self) -> MessageQueue;
+    /// Wait for a slot, reserve it, and return the live spawn.
+    ///
+    /// It reserves the per-parent slot and the process-wide slot with the same
+    /// compare-and-swap loop `spawn_child` uses, so two racing starts cannot both
+    /// pass a cap of one. It resolves `Err` when the child was cancelled while it
+    /// waited, alone or with its parent.
+    pub async fn started(self) -> Result<ChildSpawn, Dequeued>;
+}
+
+/// Why a queued child never started.
+pub enum Dequeued {
+    /// The child was cancelled while it waited, alone or with its parent.
+    Cancelled,
+}
+```
+
+The new entry point on `AgentNode`:
+
+```rust
+impl AgentNode {
+    /// Reserve a slot now, or queue when a concurrency cap is full.
+    ///
+    /// It refuses at once for a cap that waiting cannot fix: the depth limit, the
+    /// cycle guard, and a full wait line. It queues for a concurrency cap: the
+    /// per-parent child cap and the process-wide live cap. The tools call this. See
+    /// decision D-queue-over-refuse and decision D-caps-that-cannot-wait-refuse.
+    pub fn admit_child(
+        &self,
+        agent: impl Into<String>,
+        cancel: CancelToken,
+    ) -> Result<Admission, SubagentError>;
+}
+```
+
+`spawn_child` stays, unchanged, as the immediate form:
+
+```rust
+impl AgentNode {
+    /// Reserve a slot now, or refuse. This never queues.
+    ///
+    /// A Rust caller uses it to bypass the queue, the way pi's scheduled job passes
+    /// `bypassQueue: true`. `admit_child` is the queueing form the tools use. So the
+    /// bypass is a method choice, not a flag. This is the extension point for a
+    /// caller that must not wait.
+    pub fn spawn_child(
+        &self,
+        agent: impl Into<String>,
+        cancel: CancelToken,
+    ) -> Result<ChildSpawn, SubagentError>;
+}
+```
+
+**The wake path.** `ChildSlot::drop` already frees both counts. It now also wakes the wait
+line. It notifies the parent's own line first, then the process-wide waiters. Each woken
+starter retries the compare-and-swap loop. The retry keeps the tested race property, and
+the notify only decides who retries first.
+
+### 2.3 A queued state for status
+
+`AgentStatus` gains a third variant. A child with an id and no slot is neither running nor
+finished.
+
+```rust
+pub enum AgentStatus {
+    /// Queued for a slot. It has an id, and it has not started.
+    Queued {
+        agent: String,
+        depth: u32,
+        /// The place in the parent's wait line, counted from one.
+        position: usize,
+    },
+    Running {
+        agent: String,
+        depth: u32,
+        progress: AgentProgress,
+        queued: usize,
+    },
+    Finished {
+        report: AgentReport,
+    },
+}
+```
+
+**An older reader is source code, and the compiler stops it.** `AgentStatus` is an
+in-process type. A frontend and the `agent_status` tool match it. A new variant is a
+source-breaking change, so every match fails to compile until it handles `Queued`. That is
+the safe outcome. A silent fall-through is impossible.
+
+**A newer reader meets no older record, because rho never serialises `AgentStatus`.** The
+only persisted subagent record is `AgentReport`, and a queued child has no report yet. So a
+queued state is never written and never read back. `AgentReport` keeps its forward
+compatibility through `#[serde(default)]` on `gate` and `claims`, and this spec adds no
+serialised field.
+
+**`AgentStatus` gains no catch-all variant.** A catch-all is the fail-open shape decision
+D-plugin-does-not-classify-itself warns against. So `AgentStatus` stays not serialised
+rather than gain an `Unknown` case.
+
+### 2.4 When the timeout clock starts
+
+**The `child_timeout` clock starts when the child starts, not when it queues.** A queued
+child spends no part of its 600 seconds while it waits.
+
+The clock lives in `collect_report`, which runs only after `started` resolves. A queued
+child never reaches `collect_report` until it holds a slot. So the property holds by
+construction. The test names it: `a_queued_child_does_not_spend_its_timeout_while_it_waits`.
+
+### 2.5 Cancel, steer, and a cancelled parent
+
+- **Cancel a queued child.** `QueuedChild::cancel` marks it. `started` then resolves
+  `Err(Dequeued::Cancelled)`. The caller records `AgentOutcome::Canceled`. It held no slot,
+  so nothing frees except its place in the line.
+- **Steer a queued child.** A steer buffers in the child's queue. The queue exists now, so
+  the push is accepted, up to the cap. The child's first turn boundary delivers it once the
+  child starts. A full queue returns `QueueError::Full` as usual.
+- **A parent cancelled while three children wait.** The parent's cancel is an ancestor
+  cancel, so every descendant token fires. All three queued children resolve
+  `Err(Dequeued::Cancelled)`. The caller records each as `Canceled`. No slot ever opens for
+  them.
+
+### 2.6 What bounds the queue
+
+**The wait line is bounded.** An unbounded queue is a memory defect, and this project
+shipped one. A queued child holds a cancel token and a message queue, so an unbounded line
+grows without limit.
+
+`SubagentLimits` gains one field:
+
+```rust
+pub struct SubagentLimits {
+    pub max_depth: u32,
+    pub max_children_per_parent: usize,
+    pub max_live_total: usize,
+    pub child_timeout: Duration,
+    pub max_tool_calls: u32,
+    /// How many children one parent may queue for a slot. A full line refuses.
+    pub max_queued_per_parent: usize,
+    /// Turns of warning before the child's turn cap. See section 4.
+    pub grace_turns: u32,
+}
+```
+
+The default `max_queued_per_parent` is 16, flag `--max-queued-per-parent`. A full line
+refuses at once:
+
+```rust
+pub enum SubagentError {
+    EmptyGoal,
+    DepthExceeded { limit: u32, attempted: u32 },
+    TooManyChildren { limit: usize, current: usize },
+    TooManyLiveAgents { limit: usize, current: usize },
+    WeakerSandbox { parent: SandboxMode, requested: SandboxMode },
+    CycleDetected,
+    RetryCapReached { deaths: u32, limit: u32 },
+    /// The wait line for this parent is full. Wait, or cancel a queued child.
+    QueueFull { limit: usize },
+}
+```
+
+`TooManyChildren` and `TooManyLiveAgents` stay in the enum, because `spawn_child` still
+returns them. `admit_child` never returns them, because it queues instead. See decision
+D-bounded-slot-queue.
+
+### 2.7 Which caps still refuse
+
+Waiting frees a concurrency slot. Waiting adds no depth and breaks no cycle. So:
+
+| Cap | `admit_child` behaviour | Why |
+| --- | --- | --- |
+| `max_children_per_parent` | queue | a live child frees a slot |
+| `max_live_total` | queue | a live child frees a slot |
+| `max_depth` | refuse at once | waiting adds no depth |
+| the cycle guard | refuse at once | waiting breaks no cycle |
+| `max_queued_per_parent` | refuse at once | the wait line itself is full |
+
+Each refusal names the limit and its value. See decision D-caps-that-cannot-wait-refuse.
+
+### 2.8 The fan-out and the queue
+
+**`spawn_agents` uses the queue.** A task over the per-parent cap now queues instead of a
+per-task refusal. Every task runs, in the end, unless the wait line is full.
+
+**The result order is unchanged.** `spawn_agents` collects with `join_all`, which keeps the
+results in request order whatever the start order. So the request-order promise holds. The
+prompt prefix stays stable and the provider cache stays warm. See decision
+D-per-parent-fifo-start-order.
+
+### 2.9 Fairness and order
+
+**Start order is first-in-first-out per parent.** A child that queued earlier under one
+parent starts before a later one under that parent. Order between two parents is
+unspecified.
+
+A single fan-out cares that its own tasks start in the order it asked. Two independent
+library callers share no clock. A global order would need a central scheduler, and the
+compare-and-swap design avoids a central lock on purpose. See decision
+D-per-parent-fifo-start-order.
+
+## 3. Named handles
+
+### 3.1 The handle contract
+
+**The id stays the identity, unique per process. A handle is a second address for the same
+child.** rho derives a handle from the agent name. It numbers a collision. A first
+`explore` becomes `explore`. A second becomes `explore-2`. A third becomes `explore-3`.
+
+**A handle is unique per tree, not per process.** Tree A's `explore` and tree B's `explore`
+are two different children. The registry keys a handle by the tree root, so the numbering
+never crosses a tree. See decision D-handle-is-a-second-address.
+
+```rust
+impl AgentRegistry {
+    /// The derived handle for a child, unique in its tree.
+    pub fn handle_of(&self, id: AgentId) -> Option<String>;
+
+    /// Resolve a reference to a child's id, inside the caller's own tree.
+    ///
+    /// An id resolves when it names a descendant of `caller`. A digits-only name
+    /// resolves as an id. Any other name resolves as a derived handle, then an
+    /// alias. It returns `None` for a child of another tree, exactly as an unknown
+    /// id returns `None`.
+    pub fn resolve(&self, caller: &AgentNode, reference: &AgentRef) -> Option<AgentId>;
+}
+```
+
+### 3.2 The alias rule
+
+**A caller may set one alias per child. An alias never shadows a derived handle.** The model
+sets an alias through an optional `alias` argument on `spawn_agent`. A Rust caller sets one
+through the registry.
+
+```rust
+impl AgentRegistry {
+    /// Set one alias for a child, inside the caller's tree.
+    ///
+    /// It refuses a name that a derived handle already holds. It refuses a name that
+    /// another alias already holds. A derived handle always resolves first, so an
+    /// alias can never hide a real child.
+    pub fn set_alias(
+        &self,
+        caller: &AgentNode,
+        id: AgentId,
+        alias: impl Into<String>,
+    ) -> Result<(), AliasError>;
+}
+
+pub enum AliasError {
+    /// A derived handle already holds this name in this tree.
+    ShadowsHandle { name: String },
+    /// Another alias already holds this name in this tree.
+    Taken { name: String },
+    /// The id names no child of this caller.
+    Unknown { id: AgentId },
+}
+```
+
+`resolve` checks a derived handle before an alias. So the shadow rule holds at read time
+too, not only at write time.
+
+**A digits-only name is always an id, so a digits-only handle is unreachable by name.** An
+agent name may hold digits, so an agent called `42` derives the handle `42`. A model that
+sends `"42"` reaches the child with id 42 instead. `set_alias` therefore refuses a
+digits-only alias, and `handle_of` still returns the derived name for display. The id
+always reaches the child, so no child becomes unreachable. The test names it:
+`a_digits_only_name_resolves_as_an_id_and_never_as_a_handle`.
+
+### 3.3 The tool schema change
+
+**The `id` argument accepts both a number and a name. The old shape keeps working.** A model
+already writes integers, and a hard switch to a string would reject them.
+
+```rust
+/// A model-facing reference to a child: an id, or a name.
+///
+/// `serde` reads a JSON number as `Id` and a JSON string as `Name`. A digits-only
+/// name is resolved as an id, so a model that sends `"42"` reaches the same child as
+/// one that sends `42`. See decision D-agent-ref-accepts-id-or-name.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum AgentRef {
+    Id(u64),
+    Name(String),
+}
+```
+
+The schema of `id` on `steer_agent`, `agent_status`, and `cancel_agent` becomes:
+
+```json
+{ "id": { "type": ["integer", "string"],
+          "description": "The subagent id, or its handle, from the spawn result." } }
+```
+
+**The migration.** A caller that sends the old integer shape resolves through `AgentRef::Id`.
+A caller that sends a handle resolves through `AgentRef::Name`. No coordinated release is
+needed, because no old shape is refused. This is a `oneOf` rejected in favour of one field,
+because one field is simpler for the model and for `serde`.
+
+### 3.4 Scoping
+
+**A handle resolves only inside the caller's own descendants, exactly as an id does.**
+`resolve` returns an id, and every scoped accessor then checks that id against the caller's
+descendants. So a handle reaches no child of another tree.
+
+Two guards stack. The handle table is keyed per tree, so tree B holds no binding for tree
+A's child. And `descendant` re-checks the resolved id against the caller's ancestors. The
+test names it: `one_tree_cannot_reach_another_by_handle`.
+
+### 3.5 What a handle does after the child finishes
+
+**A handle resolves while the child is queued, while it is live, and while its report is
+remembered.** The remembered-report store is bounded at 64, oldest dropped first. When a
+report is evicted, its handle binding is removed too. So a handle resolves for exactly as
+long as `agent_status` can answer for the child.
+
+A foreground child records no report and surfaces no id, so its handle drops when its slot
+drops. A background or queued child records a report, so its handle outlives its slot until
+the report is evicted.
+
+## 4. Grace turns
+
+### 4.1 The trigger
+
+**rho warns the child a fixed number of turns before its turn cap.** The default is 5 grace
+turns. The warning fires at a turn boundary, when the turns that remain first reach the
+grace count.
+
+**The warning applies to the turn cap only, not the tool-call budget.** A tool-call budget
+is spent inside a turn, so it has no safe boundary to warn at, and a count of remaining
+calls is a number the child cannot act on. Both caps still map to `AgentOutcome::OutOfTurns`.
+See decision D-grace-turn-warning.
+
+The value lives in three types, and each has one owner:
+
+```rust
+/// The subagent default grace window, in turns.
+pub const DEFAULT_SUBAGENT_GRACE_TURNS: u32 = 5;
+
+/// `rho_core::AgentConfig`, the per-run caps. It holds `max_turns` and
+/// `max_tool_calls` today, and it gains one field.
+pub struct AgentConfig {
+    pub max_turns: u32,
+    pub max_tool_calls: u32,
+    /// Turns of warning before `max_turns`. Zero disables the warning.
+    pub grace_turns: u32,
+}
+
+/// `rho_core::SessionConfig`, the stated session shape. It gains the same field
+/// and one builder method. `SessionConfig::new` sets it to zero, so a plain
+/// session gets no warning until a caller opts in.
+pub struct SessionConfig {
+    pub model: String,
+    pub session_root: PathBuf,
+    pub approval: Arc<dyn ApprovalPolicy>,
+    pub max_turns: u32,
+    pub max_tool_calls: u32,
+    pub sandbox: SandboxMode,
+    pub queue: MessageQueue,
+    /// Turns of warning before `max_turns`. Zero disables the warning.
+    pub grace_turns: u32,
+}
+
+impl SessionConfig {
+    /// Set the grace window. The driver enforces it.
+    pub fn with_grace_turns(self, grace_turns: u32) -> Self;
+}
+```
+
+`SubagentLimits::grace_turns` defaults to `DEFAULT_SUBAGENT_GRACE_TURNS`, flag
+`--agent-grace-turns`. `build_child` copies it into the child's `SessionConfig`, capped to
+`max_turns - 1`, so the warning fires before the last turn. This mirrors how
+`cap_tool_calls` flows the tool-call budget into the child.
+
+### 4.2 The delivery path
+
+**The warning is delivered through the steering queue.** The driver pushes it, and the same
+turn-boundary drain delivers it through `Context::append`. So the sent prefix stays
+byte-identical and the provider cache stays warm. There is one delivery point, and the
+warning uses it.
+
+**When the queue is full, the warning yields.** The push may return `QueueError::Full`,
+because a user message may fill the queue at that moment. rho never drops a user message to
+make room. So a full queue means the warning is skipped for now. The driver retries at the
+next boundary, and it marks the warning delivered only on a successful push. The child then
+hits the hard cap and reports `OutOfTurns` with whatever summary it had, exactly as today.
+See decision D-grace-turn-warning.
+
+### 4.3 Exactly one warning
+
+**A `grace_warned` flag on the driver prevents a second warning.** The driver sets it only
+when the push succeeds. A skipped push over a full queue leaves it unset, so the driver
+retries. Once one warning lands, no second one ever does. The test names it:
+`only_one_grace_warning_reaches_the_child`.
+
+### 4.4 The text
+
+The message tells the child to write its summary now. It states the true number of turns
+that remain. `{remaining}` is the count computed at push time, so it never lies.
+
+```rust
+/// The verbatim grace warning. `{remaining}` is the true number of turns still
+/// allowed at the moment of the push, so the text never overstates the budget.
+const GRACE_MESSAGE: &str =
+    "You have {remaining} turns left before rho stops you. Write your final summary \
+     now. State what you did, what you did not check, and any open question. If you \
+     keep working past this, rho returns the last summary you wrote.";
+```
+
+### 4.5 Whether the warning counts as a turn
+
+**The warning is not a turn.** It is a user message delivered at a turn boundary, exactly
+like a steer. It does not increment the turn counter. The child then spends real turns to
+answer, and those count against `max_turns` as usual.
+
+**The outcome keeps its meaning.** A child that writes its summary and stops ends `Done`. A
+child that ignores the warning and hits the cap ends `OutOfTurns`, and the summary now holds
+its wrap-up. `OutOfTurns` still means the child hit its turn cap.
+
+### 4.6 Whether a caller can turn the warning off
+
+**A Rust caller disables the warning with `with_grace_turns(0)`. The CLI disables it with
+`--agent-grace-turns 0`.** A definition cannot set it, so a project file cannot turn off a
+child's warning. The default stays 5 for a subagent, and 0 for a plain session.
+
+## 5. Test cases
+
+**This spec describes unwritten code.** Every test below is new. Each names the assertion it
+proves. Every test uses a scripted fake provider. No network, and no `sleep`.
+
+The slot queue, in `crates/rho-core/tests/subagent_slots.rs`:
+- `admit_child_over_the_per_parent_cap_queues_and_returns_an_id` — a concurrency cap queues.
+- `admit_child_over_the_process_wide_cap_queues_and_returns_an_id` — the second cap queues.
+- `a_queued_child_starts_when_a_slot_frees` — dropping a live slot wakes the next in line.
+- `a_queued_child_starts_before_a_later_one_under_one_parent` — per-parent order is kept.
+- `spawn_child_still_refuses_over_a_cap` — the bypass form never queues.
+- `two_racing_starts_cannot_both_pass_a_cap_of_one` — the compare-and-swap property holds.
+- `a_queued_child_does_not_spend_its_timeout_while_it_waits` — the clock starts at start.
+- `cancelling_a_queued_child_resolves_started_with_cancelled` — a cancel frees the place.
+- `cancelling_a_parent_dequeues_every_queued_child` — three waiters resolve cancelled.
+- `steering_a_queued_child_buffers_until_it_starts` — the first boundary delivers it.
+- `depth_beyond_the_cap_refuses_and_never_queues` — waiting adds no depth.
+- `a_cycle_refuses_and_never_queues` — waiting breaks no cycle.
+- `a_full_wait_line_refuses_and_names_the_limit` — the queue itself is bounded.
+- `the_wait_line_does_not_grow_without_a_bound` — a thousand tasks do not queue a thousand.
+
+The queued status, in `crates/rho-core/tests/subagent_slots.rs`:
+- `status_reports_a_queued_child_with_its_position` — the third variant answers.
+- `status_reports_running_after_a_queued_child_starts` — the state moves on start.
+
+The fan-out with the queue, in `crates/rho-tools/tests/subagent_tool.rs`:
+- `a_fan_out_over_the_cap_queues_the_extra_tasks_and_runs_them_all`
+- `a_fan_out_reports_in_request_order_though_start_order_differs`
+
+Named handles, in `crates/rho-core/tests/subagent_handles.rs`:
+- `a_handle_is_derived_from_the_agent_name` — the first `explore` is `explore`.
+- `a_second_child_of_one_name_is_numbered` — the second `explore` is `explore-2`.
+- `a_handle_is_unique_per_tree_not_per_process` — two trees each hold `explore`.
+- `resolve_reads_an_integer_id` — the old shape still resolves.
+- `resolve_reads_a_digits_only_string_as_an_id` — a numeric string reaches the same child.
+- `a_digits_only_name_resolves_as_an_id_and_never_as_a_handle` — an agent called `42` keeps
+  its derived handle for display, and `set_alias` refuses a digits-only alias.
+- `resolve_reads_a_handle_name` — a name reaches the child.
+- `an_alias_resolves_to_its_child` — a set alias reaches the child.
+- `an_alias_that_shadows_a_handle_is_refused` — a derived handle wins.
+- `an_alias_that_is_already_taken_is_refused` — one alias per name.
+- `resolve_checks_a_handle_before_an_alias` — the shadow rule holds at read time.
+- `one_tree_cannot_reach_another_by_handle` — the scope guard stands.
+- `a_handle_resolves_while_the_report_is_remembered` — it outlives the live handle.
+- `a_handle_stops_resolving_when_the_report_is_evicted` — the 64 cap bounds it too.
+
+The handle tools, in `crates/rho-tools/tests/subagent_tool.rs`:
+- `steer_agent_accepts_a_handle` — `AgentRef::Name` reaches the child.
+- `steer_agent_still_accepts_an_integer_id` — the migration keeps the old shape.
+- `cancel_agent_accepts_a_handle`
+- `agent_status_accepts_a_handle`
+- `spawn_agent_sets_an_alias_from_its_argument`
+
+Grace turns, in `crates/rho-core/tests/subagent_grace.rs`:
+- `a_child_is_warned_five_turns_before_its_cap` — the default fires at the right boundary.
+- `the_warning_states_the_true_turns_remaining` — the text never overstates the budget.
+- `only_one_grace_warning_reaches_the_child` — the flag prevents a second.
+- `a_full_queue_at_grace_time_keeps_every_user_message` — the warning yields, never drops.
+- `the_warning_is_retried_after_the_queue_drains` — a skipped warning lands later.
+- `the_warning_does_not_count_as_a_turn` — the counter is unchanged.
+- `a_child_that_ignores_the_warning_still_reports_out_of_turns` — the outcome keeps meaning.
+- `the_tool_call_budget_gets_no_grace_warning` — the budget keeps its hard stop.
+- `grace_turns_zero_disables_the_warning` — a caller turns it off.
+- `a_definition_cannot_set_grace_turns` — a project file cannot change it.
+
+## 6. What this spec forbids, and the extension points
+
+**What it forbids.**
+
+- A queue that grows without a bound. The wait line is capped.
+- A blocked tool call with no id for the pending child.
+- A handle that replaces the id, or that resolves across trees.
+- An alias that shadows a derived handle.
+- A breaking change to the `id` argument shape.
+- A second grace warning, or a warning that drops a user message.
+- A grace warning that overstates the turns that remain.
+- A serialised `AgentStatus`, and any catch-all variant on it.
+
+**The extension points.**
+
+- A Rust caller bypasses the queue with `AgentNode::spawn_child`, the immediate form.
+- A host tunes the queue and the grace window through `SubagentLimits` and its flags.
+- A caller sets a memorable alias through `AgentRegistry::set_alias`.
+- A caller disables the grace warning through `SessionConfig::with_grace_turns`.
+
+## 7. Out of scope
+
+- A global start order across two parents. Order is per parent only.
+- A handle for a nested grandchild. A child gets a handle inside its own tree only.
+- A grace warning for the tool-call budget. The budget keeps its hard stop.
+- A grace warning for a plain top-level session by default. It stays opt-in there.
+- A definition-supplied grace value, and a definition-supplied alias. A definition is a
+  project file, so only a trusted caller or the spawning model sets these. The model may name
+  its own child through the `alias` argument, because a label on a child it already owns adds
+  no reach.
+- A persisted queued state. `AgentStatus` is never serialised.
+- A priority queue. The wait line is first-in-first-out per parent.
+- A `bypassQueue` argument for the model. The bypass is a Rust method, not a tool field.
