@@ -452,3 +452,16 @@ and no caller uses it. The old F-token-and-cost-accounting row claimed the total
    gate fails for reasons that have nothing to do with the stage.
 6. **Verify a CI guard by breaking the rule on purpose.** Each of the three new
    guards was confirmed to fail on a real violation, not merely to pass today.
+
+## Open defect, found by driving the slot queue for real
+
+`rho-skills` reads a definition's `tools` field as a string. A file that writes a YAML
+sequence, `tools: [read, list]`, fails `serde_yaml`, and `load_definition` returns `None`.
+The whole definition then disappears with no notice, so `spawn_agent` is never registered
+and the model answers that it has no such tool. Two live runs were wasted before the cause
+was found. See `docs/verification/subagent-slot-queue.md` section 6.
+
+The documented spelling is `tools: read, list`, so no contract is broken. The failure path
+is what is wrong: it teaches nothing. The fix needs a contract decision first, because
+`AgentSet` carries only `loaded` and `withheld` and a rejected file has nowhere to go. It is
+not fixed in the slot-queue change.

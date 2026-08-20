@@ -18,9 +18,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rho_core::AgentNode;
 use rho_core::{
-    AgentOutcome, AllowAllPolicy, ApprovalPolicy, BothPolicies, Context, Gate, HookChain, Provider,
-    RetryLedger, Session, SessionConfig, Tool, ToolContext, ToolError, ToolKind, ToolOutput,
-    ToolRegistry, collect_report, narrow_sandbox,
+    Admission, AgentOutcome, AllowAllPolicy, ApprovalPolicy, BothPolicies, Context, Dequeued, Gate,
+    HookChain, Provider, RetryLedger, Session, SessionConfig, Tool, ToolContext, ToolError,
+    ToolKind, ToolOutput, ToolRegistry, collect_report, narrow_sandbox,
 };
 use rho_skills::{AgentDefinition, load_agent_body};
 use serde::Deserialize;
@@ -272,34 +272,86 @@ async fn start_background_child(
     }
 
     let cancel = parent_cancel.child();
-    let spawn = match env.node.spawn_child(agent, cancel.clone()) {
-        Ok(spawn) => spawn,
+    // A full parent queues, so the id exists before the slot does. The id goes out
+    // first either way, because the model polls, steers, and cancels by it while the
+    // child waits. See decision D-queue-over-refuse.
+    let admitted = match env.node.admit_child(agent, cancel.clone()) {
+        Ok(admitted) => admitted,
         Err(refusal) => {
             let _ = id_tx.send(Err(refusal.to_string()));
             return Err(refusal.to_string());
         }
     };
-    let id = spawn.node.id();
-    let _ = id_tx.send(Ok(id));
+    let (id, waited) = match admitted {
+        Admission::Started(spawn) => {
+            let id = spawn.node.id();
+            let _ = id_tx.send(Ok(id));
+            (id, Ok(spawn))
+        }
+        Admission::Queued(queued) => {
+            let id = queued.id();
+            let _ = id_tx.send(Ok(id));
+            (id, queued.started().await)
+        }
+    };
+
+    // A child that never started still owes the parent an answer, because the parent
+    // holds its id and will poll it. A cancel is a cancel, and a full process is a
+    // failure, so the outcome keeps its meaning either way.
+    let spawn = match waited {
+        Ok(spawn) => spawn,
+        Err(dequeued) => {
+            env.node.registry().record_report(
+                &env.node,
+                id,
+                unstarted_report(agent, dequeued_outcome(dequeued)),
+            );
+            return Err(dequeued.to_string());
+        }
+    };
 
     // A refusal is recorded as a failed report, so a parent that polls learns why
     // rather than finding nothing. The report is built here, by the one caller that
     // needs one, instead of every refusal inventing a fake one with zero turns.
     let report = match finish_child(env, agent, prompt, artifacts, cancel, events, spawn).await {
         Ok(finished) => finished.report,
-        Err(refusal) => rho_core::AgentReport {
-            agent: agent.to_string(),
-            outcome: AgentOutcome::Failed { reason: refusal },
-            summary: String::new(),
-            usage: Default::default(),
-            turns: 0,
-            gate: Default::default(),
-            claims: Default::default(),
-            transcript: None,
-        },
+        Err(refusal) => unstarted_report(agent, AgentOutcome::Failed { reason: refusal }),
     };
     env.node.registry().record_report(&env.node, id, report);
     Ok(())
+}
+
+/// What a child that never started reports as its outcome.
+///
+/// A pure function, because the two arms mean different things to a parent and only a
+/// race can produce the second one. A test cannot drive that race through a tool, so
+/// the mapping is tested here instead of nowhere: a review proved that swapping the two
+/// arms passed every test. A cancel is what the parent asked for, so it is `Canceled`. A
+/// full process is not, so it is `Failed` and it carries the reason.
+fn dequeued_outcome(dequeued: Dequeued) -> AgentOutcome {
+    match dequeued {
+        Dequeued::Cancelled => AgentOutcome::Canceled,
+        Dequeued::ProcessWideFull { .. } => AgentOutcome::Failed {
+            reason: dequeued.to_string(),
+        },
+    }
+}
+
+/// The report of a child that produced nothing: it never started, or it died first.
+///
+/// One builder, so a refusal and a death cannot describe themselves differently. Zero
+/// turns and no transcript are the truth here, not a placeholder.
+fn unstarted_report(agent: &str, outcome: AgentOutcome) -> rho_core::AgentReport {
+    rho_core::AgentReport {
+        agent: agent.to_string(),
+        outcome,
+        summary: String::new(),
+        usage: Default::default(),
+        turns: 0,
+        gate: Default::default(),
+        claims: Default::default(),
+        transcript: None,
+    }
 }
 
 async fn run_one_child(
@@ -334,12 +386,26 @@ async fn run_one_child(
     // on the handle so a caller can cancel this one child.
     let cancel = parent_cancel.child();
 
-    // Reserve a slot in the tree. A refusal names the limit and what to do.
-    // The slot frees when it drops at the end of this call, and the handle goes
+    // Reserve a slot in the tree, or wait for one. A refusal names the limit and what
+    // to do. The slot frees when it drops at the end of this call, and the handle goes
     // with it. A failed spawn is a result, so the model can choose again. See
     // decision D-measured-cost-and-cache.
-    let spawn = match env.node.spawn_child(agent, cancel.clone()) {
-        Ok(spawn) => spawn,
+    //
+    // A full parent queues. rho does the waiting, not the model, so a fan-out wider
+    // than the cap runs every task instead of losing the extra ones to a refusal. The
+    // wait ends when a sibling of this child frees its slot, and every sibling is
+    // bounded by the child timeout. A line of waiters is bounded by the sum of the
+    // timeouts ahead of it, not by one. The `child_timeout` clock starts in
+    // `collect_report`, below, so a task that waited still gets its whole budget. See
+    // `SPEC-subagent-slots-handles-grace` section 2.8.
+    let spawn = match env.node.admit_child(agent, cancel.clone()) {
+        Ok(Admission::Started(spawn)) => spawn,
+        Ok(Admission::Queued(queued)) => match queued.started().await {
+            Ok(spawn) => spawn,
+            // Cancelled, or the process-wide cap filled while it waited. Both name
+            // themselves, and neither is a fault.
+            Err(dequeued) => return error_result(dequeued.to_string()),
+        },
         Err(refusal) => return error_result(refusal.to_string()),
     };
 
@@ -824,5 +890,42 @@ pub(crate) fn error_result(reason: impl Into<String>) -> ToolOutput {
             text: reason.into(),
         }],
         is_error: true,
+    }
+}
+
+#[cfg(test)]
+mod unstarted_child_tests {
+    use super::*;
+
+    #[test]
+    fn a_cancelled_waiter_is_cancelled_and_a_full_process_is_a_failure() {
+        // A review swapped these two arms and every test still passed, because only a
+        // race reaches the second one. The two mean different things: a parent asked for
+        // the cancel, and it did not ask for the full process. A parent that reads
+        // "cancelled" for a refusal would think its own cancel worked.
+        assert!(matches!(
+            dequeued_outcome(Dequeued::Cancelled),
+            AgentOutcome::Canceled
+        ));
+
+        let outcome = dequeued_outcome(Dequeued::ProcessWideFull { limit: 32 });
+        match outcome {
+            AgentOutcome::Failed { reason } => assert!(
+                reason.contains("--max-live-agents"),
+                "the reason must name the flag that would raise the limit: {reason}"
+            ),
+            other => panic!("a full process is a failure, not {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unstarted_report_claims_no_work() {
+        // Zero turns, no summary, and no transcript are the truth for a child that never
+        // ran. A placeholder here would show a parent work that never happened.
+        let report = unstarted_report("scout", AgentOutcome::Canceled);
+        assert_eq!(report.agent, "scout");
+        assert_eq!(report.turns, 0);
+        assert!(report.summary.is_empty());
+        assert!(report.transcript.is_none());
     }
 }

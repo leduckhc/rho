@@ -384,6 +384,13 @@ pub enum AgentStatus {
         depth: u32,
         /// The place in the parent's wait line, counted from one.
         position: usize,
+        /// Whether this child, or an ancestor, was cancelled while it waited.
+        ///
+        /// A cancel wakes the waiting task, and the entry leaves the map when that task
+        /// drops it. A reader that ignored this told a model the child held a place and
+        /// would start, moments after the model cancelled it. A live run found it. See
+        /// decision D-a-cancelled-waiter-says-so.
+        cancelled: bool,
     },
     Running {
         agent: String,
@@ -426,7 +433,10 @@ construction. The test names it: `a_queued_child_does_not_spend_its_timeout_whil
 
 - **Cancel a queued child.** `QueuedChild::cancel` marks it. `started` then resolves
   `Err(Dequeued::Cancelled)`. The caller records `AgentOutcome::Canceled`. It held no slot,
-  so nothing frees except its place in the line.
+  so nothing frees except its place in the line. **`status` reports the cancel at once**, through
+  `AgentStatus::Queued { cancelled: true, .. }`, because the entry stays in the map until the
+  waiting task drops it. In that window `agent_status` states that the child will not start, and
+  it offers no place and no steer. See decision D-a-cancelled-waiter-says-so.
 - **Steer a queued child.** A steer buffers in the child's queue. The queue exists now, so
   the push is accepted, up to the cap. The child's first turn boundary delivers it once the
   child starts. A full queue returns `QueueError::Full` as usual.
@@ -529,6 +539,13 @@ decision D-the-process-wide-cap-still-refuses.
 **`spawn_agents` uses the queue.** A task over the per-parent cap now queues instead of a
 per-task refusal. Every task runs, in the end, unless the wait line is full or the
 process-wide cap is reached. Those two remain per-task refusals, and each names its limit.
+
+**Both spawn tools call `admit_child`. This is built.** `spawn_agent` and `spawn_agents` share
+one path, so a single spawn and a fan-out cannot drift. A background spawn sends the id as soon
+as the child is admitted, queued or started, because the model polls, steers, and cancels by
+that id while the child waits. A queued child that never starts is recorded as a report, so a
+parent that polls learns why: `Canceled` for a cancel, and `Failed` for a full process.
+`AgentNode::spawn_child` keeps its refusal, and no tool calls it now.
 
 **The result order is unchanged.** `spawn_agents` collects with `join_all`, which keeps the
 results in request order whatever the start order. So the request-order promise holds. The
@@ -876,12 +893,21 @@ name below is a test that exists:
 - `a_queued_child_starts_before_a_later_one_under_one_parent` — per-parent order is kept.
 - `spawn_child_still_refuses_over_a_cap` — the bypass form never queues.
 - `two_racing_starts_cannot_both_pass_a_cap_of_one` — the permit count holds under a race.
-- `a_queued_child_does_not_spend_its_timeout_while_it_waits` — the clock starts at start.
+- `a_queued_child_does_not_spend_its_timeout_while_it_waits` — the clock starts at start. It
+  lives in `crates/rho-tools/tests/subagent_tool.rs`, not here, because the clock is inside
+  `collect_report` and only the tool path reaches it. The test pauses the tokio clock, so the
+  waiter starts exactly when the first child's budget runs out.
 - `cancelling_a_queued_child_resolves_started_with_cancelled` — a cancel frees the place.
+- `status_says_a_cancelled_queued_child_will_not_start` — the state carries the cancel while the
+  entry is still in the map. A live run read a place and a promised start after a cancel.
 - `cancelling_a_parent_dequeues_every_queued_child` — three waiters resolve cancelled.
 - `steering_a_queued_child_buffers_until_it_starts` — the first boundary delivers it.
 - `depth_beyond_the_cap_refuses_and_never_queues` — waiting adds no depth.
-- `a_cycle_refuses_and_never_queues` — waiting breaks no cycle.
+- `a_cycle_refuses_and_never_queues` — planned. A cycle is unreachable through the public API,
+  because every id is fresh and a parent link is stored directly. So no test can build one
+  through `admit_child`. The guard itself is proved by
+  `a_cycle_in_the_parent_chain_is_refused_rather_than_looping`, and `admit_child` runs it before
+  it touches either wait line.
 - `a_full_wait_line_refuses_and_names_the_limit` — one parent's line is bounded, and the message
   names `--max-queued-per-parent`.
 - `a_full_process_wait_line_refuses_and_names_the_other_limit` — many roots, each with one waiter,
@@ -909,11 +935,27 @@ and `crates/rho-tools/tests/subagent_tool.rs`:
 - `one_tree_cannot_reach_another_queued_child_by_id` — the scope guard covers the new map.
 - `agent_status_answers_for_a_queued_child` — the tool path, not only the type.
 - `cancel_agent_stops_a_queued_child` — the tool path, through the new queued branch.
-- `steer_agent_buffers_for_a_queued_child` — the tool path, and the message survives the start.
+- `steer_agent_buffers_for_a_queued_child` — the tool path accepts the message and reports where
+  it sits. That the message survives the start is proved by
+  `steering_a_queued_child_buffers_until_it_starts`, in the core, where a start is drivable.
+- `agent_status_says_a_cancelled_queued_child_will_not_start` — the tool path never promises a
+  start after a cancel, whichever answer the timing gives.
 
 The fan-out with the queue, in `crates/rho-tools/tests/subagent_tool.rs`:
 - `a_fan_out_over_the_cap_queues_the_extra_tasks_and_runs_them_all`
-- `a_fan_out_reports_in_request_order_though_start_order_differs`
+- `a_fan_out_reports_in_request_order_though_start_order_differs` — the first task names an agent
+  that does not exist, so it never starts. The report still leads with it.
+- `a_blocking_spawn_over_the_cap_waits_and_then_runs` — a `background: false` spawn queues too. It
+  must not return before a slot frees, and it must run once one does.
+- `a_task_over_the_process_wide_cap_is_refused_and_the_others_still_run` — this replaces the older
+  per-parent-cap refusal test, whose name went with the behaviour. The per-parent cap queues now,
+  so the cap that still refuses is the one a fan-out test must pin.
+
+A child that never started still owes its parent a report, in `crates/rho-tools/src/subagent.rs`:
+- `a_cancelled_waiter_is_cancelled_and_a_full_process_is_a_failure` — the outcome of a
+  `Dequeued`, as a pure function. A review swapped the two arms and every other test passed,
+  because only a race reaches the second arm.
+- `an_unstarted_report_claims_no_work` — zero turns, no summary, and no transcript.
 
 Named handles, in `crates/rho-core/tests/subagent_handles.rs`:
 - `a_handle_is_derived_from_the_agent_name` — the first `explore` is `explore`.

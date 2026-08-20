@@ -477,6 +477,40 @@ fn fanout_env(dir: &std::path::Path, max_children: usize) -> Arc<SpawnEnv> {
     })
 }
 
+/// A fan-out env whose process-wide cap is `max_live`. That cap still refuses.
+fn live_capped_env(dir: &std::path::Path, max_live: usize) -> Arc<SpawnEnv> {
+    let limits = SubagentLimits {
+        max_live_total: max_live,
+        ..SubagentLimits::new()
+    };
+    let registry = AgentRegistry::new(limits);
+    let def = definition(dir, Some(vec!["read".to_string()]));
+    let mut definitions = HashMap::new();
+    definitions.insert(def.name.clone(), def);
+    Arc::new(SpawnEnv {
+        node: registry.new_tree(),
+        definitions,
+        parent_config: SessionConfig::new(
+            "parent-model",
+            dir.to_path_buf(),
+            Arc::new(AllowAllPolicy),
+        ),
+        provider: Arc::new(ScriptedProvider::new(vec![
+            text_turn("child answer"),
+            text_turn("child answer"),
+            text_turn("child answer"),
+            text_turn("child answer"),
+        ])),
+        hooks: Arc::new(HookChain::new()),
+        tools: Arc::new(FakeToolFactory {
+            parent: vec!["read".to_string()],
+        }),
+        transcript_dir: dir.to_path_buf(),
+        runner: Arc::new(rho_tools::SandboxedRunner::new(rho_core::SandboxMode::Off)),
+        retries: Arc::new(rho_core::RetryLedger::new()),
+    })
+}
+
 fn output_text(output: &rho_core::ToolOutput) -> String {
     match &output.content[0] {
         rho_core::ContentBlock::Text { text } => text.clone(),
@@ -516,11 +550,13 @@ async fn a_fan_out_runs_every_task_and_reports_in_request_order() {
 }
 
 #[tokio::test]
-async fn a_task_over_the_per_parent_cap_is_refused_and_the_others_still_run() {
-    // The cap must bite per task, never per call. A limit that fails the whole
-    // fan-out would make one bad task lose every good result.
+async fn a_task_over_the_process_wide_cap_is_refused_and_the_others_still_run() {
+    // The per-parent cap queues now, so this pins the cap that still refuses. It must
+    // bite per task, never per call: a limit that failed the whole fan-out would make
+    // one refused task lose every good result. See section 2.7 of
+    // `SPEC-subagent-slots-handles-grace`.
     let dir = tempfile::tempdir().unwrap();
-    let tool = SpawnAgentsTool::new(fanout_env(dir.path(), 2));
+    let tool = SpawnAgentsTool::new(live_capped_env(dir.path(), 1));
 
     let output = tool
         .execute(
@@ -539,12 +575,12 @@ async fn a_task_over_the_per_parent_cap_is_refused_and_the_others_still_run() {
 
     let text = output_text(&output);
     assert!(
-        text.contains("per-parent child limit is 2"),
-        "a refusal must name the limit it hit, got: {text}"
+        text.contains("--max-live-agents"),
+        "a refusal must name the flag that would raise the limit, got: {text}"
     );
     assert!(
         text.contains("child answer"),
-        "the tasks that fit must still report their work, got: {text}"
+        "the task that fitted must still report its work, got: {text}"
     );
 }
 
@@ -1375,5 +1411,473 @@ async fn a_grace_window_wider_than_the_child_turn_cap_still_warns_once_after_wor
     assert!(
         first_delivery > first_turn,
         "the child must work before it is told to summarise: {transcript}"
+    );
+}
+
+// --- The queue reaches the model (SPEC-subagent-slots-handles-grace section 2.8) ---
+
+/// An env whose parent cap is `max_children` and whose child never answers.
+///
+/// A hanging child holds its slot, so the next spawn has to queue. The timeout is
+/// long on purpose: a slot that frees itself would prove nothing about a queue.
+fn queued_env(dir: &std::path::Path, max_children: usize) -> Arc<SpawnEnv> {
+    let limits = SubagentLimits {
+        max_children_per_parent: max_children,
+        child_timeout: Duration::from_secs(600),
+        ..SubagentLimits::new()
+    };
+    let registry = AgentRegistry::new(limits);
+    let def = definition(dir, Some(vec!["read".to_string()]));
+    let mut definitions = HashMap::new();
+    definitions.insert(def.name.clone(), def);
+    Arc::new(SpawnEnv {
+        node: registry.new_tree(),
+        definitions,
+        parent_config: SessionConfig::new(
+            "parent-model",
+            dir.to_path_buf(),
+            Arc::new(AllowAllPolicy),
+        ),
+        provider: Arc::new(HangingProvider),
+        hooks: Arc::new(HookChain::new()),
+        tools: Arc::new(FakeToolFactory {
+            parent: vec!["read".to_string()],
+        }),
+        transcript_dir: dir.to_path_buf(),
+        runner: Arc::new(rho_tools::SandboxedRunner::new(rho_core::SandboxMode::Off)),
+        retries: Arc::new(rho_core::RetryLedger::new()),
+    })
+}
+
+/// The id a background spawn reported. A test that guessed it would prove nothing.
+fn spawned_id(output: &rho_core::ToolOutput) -> u64 {
+    let text = output_text(output);
+    text.split("id ")
+        .nth(1)
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|digits| digits.parse().ok())
+        .unwrap_or_else(|| panic!("the result must name a numeric id: {text}"))
+}
+
+/// Queue a background child, and prove the id arrives before the child starts.
+///
+/// The bound is the assertion. The parent's slot is held by a child that never
+/// answers, so a spawn that waited for the start would never return at all. A test
+/// that just awaited it would hang, and a hang teaches nothing.
+async fn queue_a_child(env: &Arc<SpawnEnv>, dir: &std::path::Path) -> rho_core::ToolOutput {
+    let tool = SpawnAgentTool::new(Arc::clone(env));
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        tool.execute(
+            serde_json::json!({ "agent": "scout", "prompt": "wait your turn", "background": true }),
+            ctx(dir.to_path_buf()),
+        ),
+    )
+    .await
+    .expect("a queued child reports its id at once, so the model can poll it while it waits")
+    .expect("a spawn over the cap is admitted, not refused")
+}
+
+/// Start a background child that hangs, so it holds its slot for the whole test.
+async fn hold_a_slot(env: &Arc<SpawnEnv>, dir: &std::path::Path) -> u64 {
+    let tool = SpawnAgentTool::new(Arc::clone(env));
+    let output = tool
+        .execute(
+            serde_json::json!({ "agent": "scout", "prompt": "hold the slot", "background": true }),
+            ctx(dir.to_path_buf()),
+        )
+        .await
+        .expect("a background spawn is a result");
+    spawned_id(&output)
+}
+
+#[tokio::test]
+async fn a_fan_out_over_the_cap_queues_the_extra_tasks_and_runs_them_all() {
+    // The per-parent cap used to refuse a task, so a fan-out of four under a cap of two
+    // lost half the work and the model had to retry it by hand. Every task must now run.
+    // See decision D-queue-over-refuse.
+    let dir = tempfile::tempdir().unwrap();
+    let tool = SpawnAgentsTool::new(fanout_env(dir.path(), 2));
+
+    let output = tool
+        .execute(
+            serde_json::json!({
+                "tasks": [
+                    { "agent": "scout", "prompt": "alpha" },
+                    { "agent": "scout", "prompt": "beta" },
+                    { "agent": "scout", "prompt": "gamma" },
+                    { "agent": "scout", "prompt": "delta" }
+                ]
+            }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a fan-out is a result, not a fault");
+
+    let text = output_text(&output);
+    assert!(
+        !text.contains("per-parent child limit"),
+        "the per-parent cap must queue, never refuse a task: {text}"
+    );
+    assert_eq!(
+        text.matches("child answer").count(),
+        4,
+        "every task must run, whether it waited or not: {text}"
+    );
+}
+
+#[tokio::test]
+async fn a_fan_out_reports_in_request_order_though_start_order_differs() {
+    // The first task never starts, because its agent does not exist. So the start order
+    // is beta then gamma, and the report order must still be alpha, beta, gamma. A
+    // result order that followed the start order would break the stable prompt prefix,
+    // and with it the provider cache. See decision D-per-parent-fifo-start-order.
+    let dir = tempfile::tempdir().unwrap();
+    let tool = SpawnAgentsTool::new(fanout_env(dir.path(), 1));
+
+    let output = tool
+        .execute(
+            serde_json::json!({
+                "tasks": [
+                    { "agent": "ghost", "prompt": "alpha" },
+                    { "agent": "scout", "prompt": "beta" },
+                    { "agent": "scout", "prompt": "gamma" }
+                ]
+            }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a fan-out is a result, not a fault");
+
+    let text = output_text(&output);
+    let alpha = text.find("alpha").expect("task 1 must be reported");
+    let beta = text.find("beta").expect("task 2 must be reported");
+    let gamma = text.find("gamma").expect("task 3 must be reported");
+    assert!(
+        alpha < beta && beta < gamma,
+        "the report follows the request, not the start: {text}"
+    );
+    assert_eq!(
+        text.matches("child answer").count(),
+        2,
+        "both real tasks must run under a cap of one: {text}"
+    );
+}
+
+#[tokio::test]
+async fn agent_status_answers_for_a_queued_child() {
+    // A queued id the model cannot poll is a dead id. The tool path must answer, and it
+    // must name the place in the line, because that is the one number a model can act on.
+    let dir = tempfile::tempdir().unwrap();
+    let env = queued_env(dir.path(), 1);
+    let _holder = hold_a_slot(&env, dir.path()).await;
+
+    let queued = queue_a_child(&env, dir.path()).await;
+    assert!(
+        !queued.is_error,
+        "a full parent queues, so this is not an error: {}",
+        output_text(&queued)
+    );
+    let id = spawned_id(&queued);
+
+    let status = rho_tools::AgentStatusTool::new(Arc::clone(&env));
+    let output = status
+        .execute(
+            serde_json::json!({ "id": id }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a status read is a result");
+    let text = output_text(&output);
+    assert!(
+        text.contains("queued") && text.contains("place 1"),
+        "the tool must report the queued state and its place: {text}"
+    );
+}
+
+#[tokio::test]
+async fn cancel_agent_stops_a_queued_child() {
+    // A queued child that cannot be cancelled would hold its place until a slot freed,
+    // and then run work the parent no longer wants.
+    let dir = tempfile::tempdir().unwrap();
+    let env = queued_env(dir.path(), 1);
+    let _holder = hold_a_slot(&env, dir.path()).await;
+
+    let queued = queue_a_child(&env, dir.path()).await;
+    let id = spawned_id(&queued);
+
+    let cancel = rho_tools::CancelAgentTool::new(Arc::clone(&env));
+    let output = cancel
+        .execute(
+            serde_json::json!({ "id": id }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a cancel is a result");
+    let text = output_text(&output);
+    assert!(
+        !output.is_error,
+        "a queued child is cancellable by the id the model holds: {text}"
+    );
+    assert!(
+        text.contains("stop"),
+        "the result must say the child was asked to stop: {text}"
+    );
+}
+
+#[tokio::test]
+async fn steer_agent_buffers_for_a_queued_child() {
+    // The model is told the id at once, so it may steer before the child starts. A
+    // dropped message there would be a silent loss.
+    let dir = tempfile::tempdir().unwrap();
+    let env = queued_env(dir.path(), 1);
+    let _holder = hold_a_slot(&env, dir.path()).await;
+
+    let queued = queue_a_child(&env, dir.path()).await;
+    let id = spawned_id(&queued);
+
+    let steer = rho_tools::SteerAgentTool::new(Arc::clone(&env));
+    let output = steer
+        .execute(
+            serde_json::json!({ "id": id, "message": "read the spec first" }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a steer is a result");
+    let text = output_text(&output);
+    assert!(
+        !output.is_error,
+        "a queued child accepts a steer, which buffers: {text}"
+    );
+    assert!(
+        text.contains("position 1"),
+        "the result must say where the message sits: {text}"
+    );
+    assert!(
+        text.contains("scout"),
+        "the receipt must name the agent, which a queued child holds no live handle for: {text}"
+    );
+}
+
+#[tokio::test]
+async fn a_blocking_spawn_over_the_cap_waits_and_then_runs() {
+    // A blocking spawn used to be refused over the cap. It now waits, and the model's
+    // turn waits with it. Both halves matter: it must not return before a slot frees,
+    // and it must run once one does. A test that only checked the end would pass against
+    // an implementation that never queued at all.
+    let dir = tempfile::tempdir().unwrap();
+    let limits = SubagentLimits {
+        max_children_per_parent: 1,
+        child_timeout: Duration::from_secs(600),
+        ..SubagentLimits::new()
+    };
+    let registry = AgentRegistry::new(limits);
+    let def = definition(dir.path(), Some(vec!["read".to_string()]));
+    let mut definitions = HashMap::new();
+    definitions.insert(def.name.clone(), def);
+    let env = Arc::new(SpawnEnv {
+        node: registry.new_tree(),
+        definitions,
+        parent_config: SessionConfig::new(
+            "parent-model",
+            dir.path().to_path_buf(),
+            Arc::new(AllowAllPolicy),
+        ),
+        // The first child never answers, so only a cancel frees its slot.
+        provider: Arc::new(FirstHangsProvider {
+            calls: Mutex::new(0),
+        }),
+        hooks: Arc::new(HookChain::new()),
+        tools: Arc::new(FakeToolFactory {
+            parent: vec!["read".to_string()],
+        }),
+        transcript_dir: dir.path().to_path_buf(),
+        runner: Arc::new(rho_tools::SandboxedRunner::new(rho_core::SandboxMode::Off)),
+        retries: Arc::new(rho_core::RetryLedger::new()),
+    });
+
+    let holder = hold_a_slot(&env, dir.path()).await;
+
+    let spawn = SpawnAgentTool::new(Arc::clone(&env));
+    let root = dir.path().to_path_buf();
+    let mut waiting = tokio::spawn(async move {
+        spawn
+            .execute(
+                serde_json::json!({ "agent": "scout", "prompt": "wait for a slot" }),
+                ctx(root),
+            )
+            .await
+            .expect("a blocking spawn is a result")
+    });
+
+    // It cannot finish while the only slot is held, and it must not refuse either.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+            .await
+            .is_err(),
+        "a blocking spawn over the cap waits, and it does not return a refusal"
+    );
+
+    let cancel = rho_tools::CancelAgentTool::new(Arc::clone(&env));
+    cancel
+        .execute(
+            serde_json::json!({ "id": holder }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a cancel is a result");
+
+    let output = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("a freed slot must start the waiter")
+        .expect("the spawn task must not panic");
+    let text = output_text(&output);
+    assert!(
+        text.contains("child answer"),
+        "the waiter runs once a slot frees: {text}"
+    );
+}
+
+/// A provider that hangs the first child and answers every later one.
+///
+/// The first child then dies at its own timeout and frees the slot, so the queued
+/// child starts late. A single hanging provider could not show this, because every
+/// child would hang.
+struct FirstHangsProvider {
+    calls: Mutex<usize>,
+}
+
+#[async_trait]
+impl Provider for FirstHangsProvider {
+    fn id(&self) -> &str {
+        "first-hangs"
+    }
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+        _cancel: CancelToken,
+    ) -> Result<ProviderStream, ProviderError> {
+        let first = {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            *calls == 1
+        };
+        if first {
+            return Ok(Box::pin(stream::pending()));
+        }
+        Ok(Box::pin(stream::iter(
+            text_turn("child answer").into_iter().map(Ok),
+        )))
+    }
+}
+
+// A paused clock, so the wait is a whole timeout long and costs the test no real time.
+// Tokio advances a paused clock to the next timer when every task is idle, and the only
+// timer here is the first child's timeout. So the waiter starts exactly when the first
+// child's budget runs out, which is the moment a shared clock would show.
+#[tokio::test(start_paused = true)]
+async fn a_queued_child_does_not_spend_its_timeout_while_it_waits() {
+    // The first child hangs and dies at its 300 ms timeout. The second waited that
+    // whole time, and it must still arrive with its full budget. A clock that started
+    // at admission would cancel it the moment it started, and the parent would read a
+    // cancelled child that never ran a turn. See section 2.4.
+    let dir = tempfile::tempdir().unwrap();
+    let limits = SubagentLimits {
+        max_children_per_parent: 1,
+        child_timeout: Duration::from_millis(300),
+        ..SubagentLimits::new()
+    };
+    let registry = AgentRegistry::new(limits);
+    let def = definition(dir.path(), Some(vec!["read".to_string()]));
+    let mut definitions = HashMap::new();
+    definitions.insert(def.name.clone(), def);
+    let env = Arc::new(SpawnEnv {
+        node: registry.new_tree(),
+        definitions,
+        parent_config: SessionConfig::new(
+            "parent-model",
+            dir.path().to_path_buf(),
+            Arc::new(AllowAllPolicy),
+        ),
+        provider: Arc::new(FirstHangsProvider {
+            calls: Mutex::new(0),
+        }),
+        hooks: Arc::new(HookChain::new()),
+        tools: Arc::new(FakeToolFactory {
+            parent: vec!["read".to_string()],
+        }),
+        transcript_dir: dir.path().to_path_buf(),
+        runner: Arc::new(rho_tools::SandboxedRunner::new(rho_core::SandboxMode::Off)),
+        retries: Arc::new(rho_core::RetryLedger::new()),
+    });
+
+    let tool = SpawnAgentsTool::new(env);
+    let output = tool
+        .execute(
+            serde_json::json!({
+                "tasks": [
+                    { "agent": "scout", "prompt": "the one that hangs" },
+                    { "agent": "scout", "prompt": "the one that waits" }
+                ]
+            }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a fan-out is a result, not a fault");
+
+    let text = output_text(&output);
+    let waiter = text
+        .split("## scout — the one that waits")
+        .nth(1)
+        .expect("the waiting task must be reported")
+        .to_string();
+    assert!(
+        waiter.contains("child answer"),
+        "a task that waited keeps its whole budget: {text}"
+    );
+    assert!(
+        !waiter.contains("was cancelled"),
+        "the timeout clock must start at the start, not at the admission: {text}"
+    );
+}
+
+#[tokio::test]
+async fn agent_status_says_a_cancelled_queued_child_will_not_start() {
+    // A live run on Bedrock cancelled a queued child and polled it at once. The tool
+    // still promised the child would start, and offered a steer that could never be
+    // delivered. Whatever the timing, the answer must never promise a start after a
+    // cancel. See decision D-a-cancelled-waiter-says-so.
+    let dir = tempfile::tempdir().unwrap();
+    let env = queued_env(dir.path(), 1);
+    let _holder = hold_a_slot(&env, dir.path()).await;
+    let id = spawned_id(&queue_a_child(&env, dir.path()).await);
+
+    let cancel = rho_tools::CancelAgentTool::new(Arc::clone(&env));
+    cancel
+        .execute(
+            serde_json::json!({ "id": id }),
+            ctx(dir.path().to_path_buf()),
+        )
+        .await
+        .expect("a cancel is a result");
+
+    let status = rho_tools::AgentStatusTool::new(Arc::clone(&env));
+    let text = output_text(
+        &status
+            .execute(
+                serde_json::json!({ "id": id }),
+                ctx(dir.path().to_path_buf()),
+            )
+            .await
+            .expect("a status read is a result"),
+    );
+
+    assert!(
+        !text.contains("it will start"),
+        "a cancelled child must never be promised a start: {text}"
+    );
+    assert!(
+        text.contains("cancel"),
+        "the answer must say the child was cancelled: {text}"
     );
 }

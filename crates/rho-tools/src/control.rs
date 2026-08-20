@@ -11,7 +11,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rho_core::{AgentId, ContentBlock, Tool, ToolContext, ToolError, ToolKind, ToolOutput};
+use rho_core::{
+    AgentId, AgentStatus, ContentBlock, Tool, ToolContext, ToolError, ToolKind, ToolOutput,
+};
 use serde::Deserialize;
 
 use crate::args::parse_args;
@@ -44,6 +46,17 @@ fn live_summary(env: &SpawnEnv) -> String {
         .map(|handle| format!("{} ({})", handle.id.0, handle.agent))
         .collect();
     format!("Running now: {}.", names.join(", "))
+}
+
+/// The agent a child runs, whether it waits, runs, or finished.
+///
+/// A refusal and a receipt both name the agent, and a queued child holds no live
+/// handle to read it from. One reader, so the three states cannot drift.
+fn agent_name(env: &SpawnEnv, id: AgentId) -> Option<String> {
+    match env.node.registry().status(&env.node, id)? {
+        AgentStatus::Queued { agent, .. } | AgentStatus::Running { agent, .. } => Some(agent),
+        AgentStatus::Finished { report } => Some(report.agent),
+    }
 }
 
 /// The `steer_agent` tool. It sends a message to one running subagent.
@@ -95,12 +108,18 @@ impl Tool for SteerAgentTool {
         _ctx: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let args: SteerArgs = parse_args(args)?;
-        let Some(handle) = self
-            .env
-            .node
-            .registry()
-            .descendant(&self.env.node, AgentId(args.id))
-        else {
+        let id = AgentId(args.id);
+        // The name is read before the push, because a queued child holds no live handle
+        // and the receipt still has to name the agent.
+        let agent = agent_name(&self.env, id);
+        // One entry point for a live child and a queued one. A steer that only knew the
+        // live index would drop a message for a child the model was just told about,
+        // and the model would have no way to see the loss.
+        let Some(pushed) = self.env.node.registry().steer_descendant(
+            &self.env.node,
+            id,
+            vec![ContentBlock::Text { text: args.message }],
+        ) else {
             return Ok(crate::subagent::error_result(format!(
                 "no subagent with id {} is running, so it cannot be steered. It may have \
                  finished already. {}",
@@ -108,11 +127,12 @@ impl Tool for SteerAgentTool {
                 live_summary(&self.env)
             )));
         };
-        match handle.steer(vec![ContentBlock::Text { text: args.message }]) {
+        match pushed {
             Ok(position) => Ok(ToolOutput::text(format!(
                 "queued for {} (id {}), at position {position}. The child reads it after \
                  its current tool calls finish.",
-                handle.agent, args.id
+                agent.unwrap_or_else(|| "the subagent".to_string()),
+                args.id
             ))),
             // A full queue is a typed refusal, never a silent drop.
             Err(full) => Ok(crate::subagent::error_result(full.to_string())),
@@ -190,7 +210,18 @@ impl Tool for AgentStatusTool {
 
         let text = match status {
             // A queued child has an id and no slot. The place is the one number a
-            // model can act on: it says whether waiting is worth it.
+            // model can act on: it says whether waiting is worth it. A cancelled waiter
+            // gets no place and no promise, because it will never start. See decision
+            // D-a-cancelled-waiter-says-so.
+            rho_core::AgentStatus::Queued {
+                agent,
+                cancelled: true,
+                ..
+            } => format!(
+                "{agent} (id {}) was cancelled while it waited for a slot, so it will not \
+                 start. Poll it again for its final report.",
+                args.id
+            ),
             rho_core::AgentStatus::Queued {
                 agent, position, ..
             } => format!(

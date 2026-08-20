@@ -41,6 +41,13 @@ pub enum AgentStatus {
         depth: u32,
         /// The place in the parent's wait line, counted from one.
         position: usize,
+        /// Whether this child, or an ancestor, was cancelled while it waited.
+        ///
+        /// A cancel wakes the waiting task, and the entry leaves the map when that task
+        /// drops it. In between, a reader that ignored this said the child had a place
+        /// and would start. Both were false, and a live run proved it. See decision
+        /// D-a-cancelled-waiter-says-so.
+        cancelled: bool,
     },
     /// Still working. The numbers come from the live handle.
     Running {
@@ -391,6 +398,7 @@ impl AgentRegistry {
                 agent: entry.agent.clone(),
                 depth: entry.depth,
                 position: position_in_line(&state, entry),
+                cancelled: entry.cancel.is_cancelled(),
             });
         }
         state

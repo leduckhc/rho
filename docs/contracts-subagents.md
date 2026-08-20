@@ -205,6 +205,7 @@ handed out.
 
 ```rust
 pub enum AgentStatus {
+    Queued { agent: String, depth: u32, position: usize, cancelled: bool },
     Running { agent: String, depth: u32, progress: AgentProgress, queued: usize },
     Finished { report: AgentReport },
 }
@@ -213,6 +214,60 @@ pub enum AgentStatus {
 A background child usually finishes while its parent is busy, and `ChildSlot::drop` removes the
 live handle at once. A lookup that knew only live children would lose every result the parent
 asked for. So `record_report` keeps the report and `status` answers from it.
+
+`Queued` answers for a child that holds an id and no slot. The place is computed on read, never
+stored, because the children ahead leave and nothing would renumber a stored place. `cancelled`
+is read from the entry's own token, so a child that was cancelled while it waited is never told
+that it will start. See decision D-a-cancelled-waiter-says-so.
+
+### A full parent queues a child, and never refuses it
+
+```rust
+pub enum Admission {
+    Started(ChildSpawn),
+    Queued(QueuedChild),
+}
+
+pub enum Dequeued {
+    Cancelled,
+    ProcessWideFull { limit: usize },
+}
+
+impl AgentNode {
+    /// Reserve a slot now, or queue when this parent's cap is full. The tools call this.
+    pub fn admit_child(
+        &self,
+        agent: impl Into<String>,
+        cancel: CancelToken,
+    ) -> Result<Admission, SubagentError>;
+
+    /// Reserve a slot now, or refuse. A caller that must not wait calls this.
+    pub fn spawn_child(
+        &self,
+        agent: impl Into<String>,
+        cancel: CancelToken,
+    ) -> Result<ChildSpawn, SubagentError>;
+}
+
+impl QueuedChild {
+    pub fn id(&self) -> AgentId;
+    pub fn agent(&self) -> &str;
+    pub fn depth(&self) -> u32;
+    pub fn position(&self) -> usize;
+    pub fn cancel(&self);
+    pub fn is_cancelled(&self) -> bool;
+    pub fn queue(&self) -> MessageQueue;
+    /// Wait for a per-parent slot, then take the process-wide one without waiting.
+    pub async fn started(self) -> Result<ChildSpawn, Dequeued>;
+}
+```
+
+Only the per-parent cap queues. Waiting on it waits for this parent's own child. Every other cap
+refuses at once, because waiting could not fix it: waiting adds no depth, breaks no cycle, and a
+wait on the process-wide cap is a wait on another tree. Both wait lines are bounded, and a full
+line refuses and names its flag. `spawn_agent` and `spawn_agents` both call `admit_child`, so a
+fan-out wider than the cap runs every task. See `SPEC-subagent-slots-handles-grace` sections 2.1
+to 2.9.
 
 The registry keeps the **last 64** reports, oldest dropped first. The bound is deliberate,
 because a report holds a summary the model wrote, and an unbounded store keyed by model output
@@ -231,6 +286,9 @@ pub struct SubagentLimits {
     pub max_live_total: usize,
     pub child_timeout: Duration,
     pub max_tool_calls: u32,
+    pub max_queued_per_parent: usize,
+    pub max_queued_total: usize,
+    pub grace_turns: u32,
 }
 ```
 
@@ -241,6 +299,9 @@ pub struct SubagentLimits {
 | `max_live_total` | 32 | `--max-live-agents` | across sessions in one process |
 | `child_timeout` | 600 s | `--child-timeout-secs` | yes |
 | `max_tool_calls` | 64 | `--max-agent-tool-calls` | yes |
+| `max_queued_per_parent` | 16 | `--max-queued-per-parent` | yes, through `spawn_agents` |
+| `max_queued_total` | 128 | `--max-queued-total` | across sessions in one process |
+| `grace_turns` | 5 for a child, 0 for a plain session | `--agent-grace-turns` | yes |
 
 The CLI depth is 1 and has no flag, because a command-line child receives no spawn tool and no
 flag could change that. See decision D-cli-depth-is-zero.
@@ -249,9 +310,13 @@ flag could change that. See decision D-cli-depth-is-zero.
 and no binary reads the resolved config yet. So a config file changes no limit here. The gap
 covers the whole config crate, and decision D-the-layered-config-has-no-caller records it.
 
-Both reservations use a compare-and-swap loop, so two racing spawns cannot both pass a cap of
-one. A turn cap counts provider round trips, so `max_tool_calls` exists to bound a single turn
-that asks for forty tools.
+Both reservations are semaphore permits, so two racing spawns cannot both pass a cap of one, and
+a freed permit grants the next waiter directly. A counter cannot be waited on, and a counter plus
+a notify loses a wake. See decision D-permits-not-counters. A turn cap counts provider round
+trips, so `max_tool_calls` exists to bound a single turn that asks for forty tools.
+
+**A queued child spends none of its timeout while it waits.** The clock lives in
+`collect_report`, which runs only after `started` resolves.
 
 ## 5. The task, and the gate that verifies it
 
@@ -536,12 +601,24 @@ pub enum SubagentError {
     WeakerSandbox { parent: SandboxMode, requested: SandboxMode },
     CycleDetected,
     RetryCapReached { deaths: u32, limit: u32 },
+    QueueFull { scope: QueueScope, limit: usize },
+}
+
+/// Which wait line filled up. A reader must know which flag to raise.
+pub enum QueueScope {
+    Parent,
+    Process,
 }
 
 pub enum QueueError {
     Full { capacity: usize },
 }
 ```
+
+`TooManyChildren` stays in the set, because `spawn_child` still refuses. `admit_child` never
+returns it, because that cap queues. `TooManyLiveAgents` refuses twice: at admission, and again
+at the start through `Dequeued::ProcessWideFull`, because a waiter holds no process-wide permit
+while it waits.
 
 **A refusal must teach something true.** The depth message once named a flag that did not
 exist, so it sent the reader after a fix that could not work.

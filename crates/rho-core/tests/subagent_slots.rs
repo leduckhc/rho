@@ -488,10 +488,12 @@ async fn status_reports_a_queued_child_with_its_position() {
             agent,
             depth,
             position,
+            cancelled,
         } => {
             assert_eq!(agent, "scout");
             assert_eq!(depth, 1);
             assert_eq!(position, 1);
+            assert!(!cancelled, "a waiting child is not a cancelled one");
         }
         other => panic!("a queued child must report Queued: {other:?}"),
     }
@@ -865,4 +867,119 @@ async fn a_position_counts_only_its_own_siblings() {
         3,
         "and the third under the other parent is third"
     );
+}
+
+#[tokio::test]
+async fn admission_reports_started_when_a_slot_was_free_and_queued_when_it_was_not() {
+    // Both arms, and every `QueuedChild` accessor. A public accessor no test reads is
+    // where three defects hid in this project already. See AGENTS.md step 8.
+    let registry = registry(one_slot());
+    let root = registry.new_tree();
+
+    let first = root
+        .admit_child("scout", CancelToken::new())
+        .expect("a free slot admits");
+    let live_id = match first {
+        Admission::Started(ref spawn) => spawn.node.id(),
+        Admission::Queued(_) => panic!("the first child holds the only slot"),
+    };
+
+    let cancel = CancelToken::new();
+    let second = root
+        .admit_child("explore", cancel.clone())
+        .expect("a full parent queues");
+    let Admission::Queued(queued) = second else {
+        panic!("a full per-parent cap must queue");
+    };
+
+    assert_ne!(queued.id(), live_id, "a waiter holds an id of its own");
+    assert_eq!(queued.agent(), "explore", "it remembers what it will run");
+    assert_eq!(queued.depth(), 1, "a child of the root waits at depth 1");
+    assert_eq!(queued.position(), 1, "it is first in its parent's line");
+    assert!(!queued.is_cancelled(), "a fresh waiter is not cancelled");
+    assert_eq!(
+        queued.queue().len(),
+        0,
+        "its queue exists and starts empty, so a steer buffers rather than fails"
+    );
+
+    cancel.cancel();
+    assert!(
+        queued.is_cancelled(),
+        "the token the caller passed is the token that stops it"
+    );
+}
+
+#[tokio::test]
+async fn the_wait_line_does_not_grow_without_a_bound() {
+    // A thousand admissions must not queue a thousand children. Each waiter holds a
+    // cancel token and a message queue, so an unbounded line is a memory defect. This
+    // asserts the bound, not one example of it. See decision D-bounded-slot-queue.
+    let limits = SubagentLimits {
+        max_children_per_parent: 1,
+        max_queued_per_parent: 16,
+        ..SubagentLimits::new()
+    };
+    let registry = registry(limits);
+    let root = registry.new_tree();
+
+    let mut held = Vec::new();
+    let mut refused = 0;
+    for _ in 0..1000 {
+        match root.admit_child("scout", CancelToken::new()) {
+            Ok(admission) => held.push(admission),
+            Err(SubagentError::QueueFull { limit, .. }) => {
+                assert_eq!(limit, 16, "the refusal names the bound it enforced");
+                refused += 1;
+            }
+            Err(other) => panic!("only a full line may refuse here: {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        held.len(),
+        17,
+        "one child runs and sixteen wait, whatever the caller asks for"
+    );
+    assert_eq!(refused, 983, "every admission over the bound is refused");
+}
+
+#[tokio::test]
+async fn status_says_a_cancelled_queued_child_will_not_start() {
+    // Found on live Bedrock, not by a test. A cancel wakes the waiter, and the entry
+    // leaves the map when that task drops it. In between, `status` reported a place in
+    // the line and promised the child would start. Both were false. See decision
+    // D-a-cancelled-waiter-says-so.
+    let registry = registry(one_slot());
+    let root = registry.new_tree();
+    let _live = root
+        .admit_child("scout", CancelToken::new())
+        .expect("the first child holds the only slot");
+
+    let cancel = CancelToken::new();
+    let waiter = root
+        .admit_child("scout", cancel.clone())
+        .expect("a full parent queues");
+    let Admission::Queued(queued) = waiter else {
+        panic!("a full per-parent cap must queue");
+    };
+
+    match registry.status(&root, queued.id()) {
+        Some(AgentStatus::Queued { cancelled, .. }) => {
+            assert!(!cancelled, "a fresh waiter has not been cancelled")
+        }
+        other => panic!("a queued child reports queued, got {other:?}"),
+    }
+
+    cancel.cancel();
+
+    match registry.status(&root, queued.id()) {
+        Some(AgentStatus::Queued { cancelled, .. }) => {
+            assert!(
+                cancelled,
+                "the state must carry the cancel, or the tool cannot report it"
+            )
+        }
+        other => panic!("the entry is still in the map until its waiter drops, got {other:?}"),
+    }
 }
