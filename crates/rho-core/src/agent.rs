@@ -121,12 +121,20 @@ pub struct AgentConfig {
     pub max_turns: u32,
     /// The per-run tool-call budget. The loop stops with `MaxToolCalls` at the cap.
     pub max_tool_calls: u32,
+    /// Turns of warning before `max_turns`. Zero disables the warning.
+    ///
+    /// See `SPEC-subagent-slots-handles-grace` section 4 and decision
+    /// D-grace-turn-warning.
+    pub grace_turns: u32,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             max_turns: 32,
+            // Off by default. A plain session gets no warning until a caller opts
+            // in, and a subagent opts in through `SubagentLimits`.
+            grace_turns: 0,
             // Sixteen turns of four calls each. High enough that ordinary work
             // never notices, low enough that a loop cannot run all night.
             max_tool_calls: 64,
@@ -183,6 +191,12 @@ pub struct SessionConfig {
     /// The bounded steering queue. New messages enqueued during a run are delivered
     /// at a turn boundary. Defaults to a queue with the standard capacity.
     pub queue: crate::MessageQueue,
+    /// Turns of warning before `max_turns`. Zero disables the warning.
+    ///
+    /// `new` sets zero, so a plain session is unchanged by this feature. A subagent
+    /// opts in, because a child that runs out of turns has nobody to ask. See
+    /// `SPEC-subagent-slots-handles-grace` section 4.
+    pub grace_turns: u32,
 }
 
 impl SessionConfig {
@@ -204,6 +218,9 @@ impl SessionConfig {
             // today's behaviour. A caller opts in with `with_sandbox`.
             sandbox: SandboxMode::Off,
             queue: crate::MessageQueue::new(),
+            // State the default out loud. Zero means no warning, which is today's
+            // behaviour for every top-level session.
+            grace_turns: AgentConfig::default().grace_turns,
         }
     }
 
@@ -238,6 +255,15 @@ impl SessionConfig {
     /// Set the steering queue.
     pub fn with_queue(mut self, queue: crate::MessageQueue) -> Self {
         self.queue = queue;
+        self
+    }
+
+    /// Set the grace window, in turns before `max_turns`. Zero disables it.
+    ///
+    /// The driver enforces it, and it delivers the warning through the steering
+    /// queue, so the sent prefix stays byte-identical.
+    pub fn with_grace_turns(mut self, grace_turns: u32) -> Self {
+        self.grace_turns = grace_turns;
         self
     }
 }
@@ -346,6 +372,7 @@ impl Session {
             config: AgentConfig {
                 max_turns: self.inner.config.max_turns,
                 max_tool_calls: self.inner.config.max_tool_calls,
+                grace_turns: self.inner.config.grace_turns,
             },
             inner: Arc::clone(&self.inner),
             tx,
@@ -397,6 +424,19 @@ struct Driver {
     tool_calls: std::sync::atomic::AtomicU32,
 }
 
+/// The grace warning the driver delivers, with the true number of turns left.
+///
+/// The text is verbatim from `SPEC-subagent-slots-handles-grace` section 4.4. It
+/// states the real count at the moment of the push, so it never overstates the
+/// budget.
+fn grace_message(remaining: u32) -> String {
+    format!(
+        "You have {remaining} turns left before rho stops you. Write your final summary \
+         now. State what you did, what you did not check, and any open question. If you \
+         keep working past this, rho returns the last summary you wrote."
+    )
+}
+
 impl Driver {
     /// Drive the whole run. Append the user input, then run turns until a stop.
     async fn run(self, input: Vec<ContentBlock>) {
@@ -409,6 +449,10 @@ impl Driver {
         }
 
         let mut turns = 0u32;
+        // One warning per run, and only once it lands. A push that a full queue
+        // refuses leaves this false, so the next boundary tries again. See
+        // `SPEC-subagent-slots-handles-grace` section 4.3.
+        let mut grace_warned = false;
         let stop_reason = loop {
             if self.cancel.is_cancelled() {
                 // The cancel landed before this turn started. Emit a paired
@@ -430,6 +474,35 @@ impl Driver {
             }
             if turns >= self.config.max_turns {
                 break AgentStopReason::MaxTurnRequests;
+            }
+
+            // Warn the child before its turn cap, so it can write a summary.
+            //
+            // The push happens here, just before the drain, so the warning is
+            // delivered by the same append-only path a steer uses. That keeps the
+            // sent prefix byte-identical and the provider cache warm.
+            //
+            // `turns >= 1` is the clamp that matters. A window wider than the cap
+            // would otherwise fire before the child has done anything, and a child
+            // asked to summarise nothing wastes its first turn. See section 4.1 and
+            // decision D-grace-turn-warning.
+            if self.config.grace_turns > 0 && !grace_warned && turns >= 1 {
+                let remaining = self.config.max_turns - turns;
+                if remaining <= self.config.grace_turns {
+                    // A full queue holds a user's own messages, and rho never drops
+                    // one to make room for its own. So the warning yields and the
+                    // next boundary retries it.
+                    if self
+                        .inner
+                        .queue
+                        .push(vec![ContentBlock::Text {
+                            text: grace_message(remaining),
+                        }])
+                        .is_ok()
+                    {
+                        grace_warned = true;
+                    }
+                }
             }
 
             // Deliver every steering message here, and nowhere else. This is a turn

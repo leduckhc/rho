@@ -762,9 +762,17 @@ impl SessionConfig {
 ```
 
 `SubagentLimits::grace_turns` defaults to `DEFAULT_SUBAGENT_GRACE_TURNS`, flag
-`--agent-grace-turns`. `build_child` copies it into the child's `SessionConfig`, capped to
-`max_turns - 1`, so the warning fires before the last turn. This mirrors how
+`--agent-grace-turns`. `build_child` copies it into the child's `SessionConfig`. This mirrors how
 `cap_tool_calls` flows the tool-call budget into the child.
+
+**`build_child` applies no clamp against `max_turns`, and an earlier draft said it did.** The
+driver only warns at a boundary **after** the child has taken a turn, so a window wider than the
+cap already fires once, in the right place. A clamp was written first, and a deliberate break
+proved no test could see it, because the behaviour is identical either way. AGENTS.md step 6 says
+to delete a branch no test reaches, so it is gone. The driver's `turns >= 1` rule is the guard, and
+two tests pin it: `a_window_wider_than_the_cap_still_warns_once_and_not_before_the_first_turn` in
+`rho-core`, and `a_grace_window_wider_than_the_child_turn_cap_still_warns_once_after_work` in
+`rho-tools`.
 
 **Three types hold the value, and the flow has one direction, so no two can disagree.** The
 same three types already hold `max_tool_calls`, and the existing flow is the pattern to copy.
@@ -780,8 +788,10 @@ reach into a subagent type, and a plain session could never opt in.
 
 ### 4.2 The delivery path
 
-**The warning is delivered through the steering queue.** The driver pushes it, and the same
-turn-boundary drain delivers it through `Context::append`. So the sent prefix stays
+**The warning is delivered through the steering queue.** The driver pushes it just before the
+drain, and the same turn-boundary drain delivers it through `Context::append`. A child transcript
+records the delivery as `TranscriptBody::Delivered { count }`, because a reader who sees a child
+change course deserves to see what rho told it. So the sent prefix stays
 byte-identical and the provider cache stays warm. There is one delivery point, and the
 warning uses it.
 
@@ -921,7 +931,8 @@ The handle tools, in `crates/rho-tools/tests/subagent_tool.rs`:
 - `a_number_beyond_u64_is_refused_as_no_id` — serde reads it as a float, so it is not an id.
 - `an_empty_agent_ref_name_is_an_ordinary_not_found`
 
-Grace turns, in `crates/rho-core/tests/subagent_grace.rs`:
+Grace turns, in `crates/rho-core/tests/subagent_grace.rs`. **This section is built**, and the
+names below are the tests that exist:
 - `a_child_is_warned_five_turns_before_its_cap` — the default fires at the right boundary.
 - `the_warning_states_the_true_turns_remaining` — the text never overstates the budget.
 - `only_one_grace_warning_reaches_the_child` — the flag prevents a second.

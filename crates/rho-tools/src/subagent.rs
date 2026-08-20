@@ -475,7 +475,14 @@ async fn build_child(
     let child_config = SessionConfig::new(model, env.parent_config.session_root.clone(), approval)
         .with_sandbox(sandbox)
         .with_max_turns(max_turns)
-        .with_max_tool_calls(max_tool_calls);
+        .with_max_tool_calls(max_tool_calls)
+        // A definition cannot set this, so a project file cannot turn off a child's
+        // warning. No clamp against `max_turns` is applied here: the driver only warns
+        // at a boundary after the child has taken a turn, so a window wider than the
+        // cap already behaves the same. A clamp here was written first, and a
+        // deliberate break proved no test could see it. See `SPEC-subagent-slots-handles-grace`
+        // section 4 and AGENTS.md step 6.
+        .with_grace_turns(env.node.limits().grace_turns);
 
     // The body is the child's system prompt. It never enters the parent.
     let body = load_agent_body(def).await.unwrap_or_default();

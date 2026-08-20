@@ -93,6 +93,13 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "SECONDS")]
     pub child_timeout_secs: Option<u64>,
 
+    /// Turns of warning before a subagent's turn cap. `0` turns the warning off.
+    ///
+    /// A child that runs out of turns has nobody to ask, so rho tells it to write
+    /// its summary this many turns early. The default is 5.
+    #[arg(long, global = true, value_name = "TURNS")]
+    pub agent_grace_turns: Option<u32>,
+
     /// How many tool calls one subagent may make. Defaults to 64.
     ///
     /// A turn cap counts provider round trips. It does not bound a child that makes
@@ -509,6 +516,7 @@ fn subagent_limits(cli: &Cli) -> rho_core::SubagentLimits {
             .unwrap_or(stated.max_children_per_parent),
         max_live_total: cli.max_live_agents.unwrap_or(stated.max_live_total),
         max_tool_calls: cli.max_agent_tool_calls.unwrap_or(stated.max_tool_calls),
+        grace_turns: cli.agent_grace_turns.unwrap_or(stated.grace_turns),
         child_timeout: cli
             .child_timeout_secs
             .map(std::time::Duration::from_secs)
@@ -553,6 +561,28 @@ mod tests {
             limits.max_tool_calls, 9,
             "a tool-call budget nobody can set is not a budget"
         );
+    }
+
+    #[test]
+    fn the_grace_flag_reaches_the_limits() {
+        let cli = Cli::parse_from(["rho", "--agent-grace-turns", "2"]);
+        assert_eq!(subagent_limits(&cli).grace_turns, 2);
+    }
+
+    #[test]
+    fn the_grace_window_defaults_to_the_stated_subagent_value() {
+        let cli = Cli::parse_from(["rho"]);
+        assert_eq!(
+            subagent_limits(&cli).grace_turns,
+            rho_core::DEFAULT_SUBAGENT_GRACE_TURNS,
+            "a child is warned by default, because it has nobody to ask for more turns"
+        );
+    }
+
+    #[test]
+    fn the_grace_warning_can_be_turned_off_from_the_command_line() {
+        let cli = Cli::parse_from(["rho", "--agent-grace-turns", "0"]);
+        assert_eq!(subagent_limits(&cli).grace_turns, 0);
     }
 
     #[test]

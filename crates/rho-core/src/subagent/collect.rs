@@ -111,6 +111,9 @@ pub async fn collect_report(
                             // `StreamEvent::TextEnd` carries only an index, so the
                             // text comes from what this loop already accumulated.
                             let body = match &event {
+                                AgentEvent::MessageDelivered { count } => {
+                                    Some(crate::TranscriptBody::Delivered { count: *count })
+                                }
                                 AgentEvent::TurnStart => Some(crate::TranscriptBody::TurnStart {
                                     turn: turns + 1,
                                 }),

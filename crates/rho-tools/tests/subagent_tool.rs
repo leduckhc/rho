@@ -46,6 +46,48 @@ impl Provider for ScriptedProvider {
     }
 }
 
+/// A provider that replays one turn for ever, so a child runs until a cap stops it.
+struct CyclingProvider {
+    turn: Vec<StreamEvent>,
+}
+
+#[async_trait]
+impl Provider for CyclingProvider {
+    fn id(&self) -> &str {
+        "cycling"
+    }
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+        _cancel: CancelToken,
+    ) -> Result<ProviderStream, ProviderError> {
+        Ok(Box::pin(stream::iter(
+            self.turn.clone().into_iter().map(Ok),
+        )))
+    }
+}
+
+/// One turn that asks for a tool call, so the run continues past it.
+fn tool_call_turn(id: &str, tool_name: &str, arguments: serde_json::Value) -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::MessageStart {
+            role: Role::Assistant,
+        },
+        StreamEvent::ToolCallStart {
+            index: 0,
+            id: id.to_string(),
+            name: tool_name.to_string(),
+        },
+        StreamEvent::ToolCallEnd {
+            index: 0,
+            arguments,
+        },
+        StreamEvent::Done {
+            stop_reason: StopReason::ToolUse,
+        },
+    ]
+}
+
 /// A provider that never yields an event, so a child reaches its timeout.
 ///
 /// A test needs this to cover the timeout path. An empty script fails fast
@@ -1197,5 +1239,141 @@ async fn agent_status_reports_a_finished_background_child() {
     assert!(
         text.contains("the background answer") || text.contains("transcript"),
         "and the parent must be able to reach its work, got: {text}"
+    );
+}
+
+// --- Grace turns reach a real child (SPEC-subagent-slots-handles-grace section 4) ---
+
+/// A child whose model keeps calling a tool, so it runs until its turn cap.
+///
+/// A text turn ends a run at `EndTurn`, so a text script never reaches a cap and
+/// never reaches the grace window.
+fn grace_env(dir: &std::path::Path, grace_turns: u32, max_turns: u32) -> Arc<SpawnEnv> {
+    let limits = SubagentLimits {
+        grace_turns,
+        ..SubagentLimits::new()
+    };
+    let registry = AgentRegistry::new(limits);
+    let mut def = definition(dir, Some(vec!["read".to_string()]));
+    def.max_turns = Some(max_turns);
+    let mut definitions = HashMap::new();
+    definitions.insert(def.name.clone(), def);
+    Arc::new(SpawnEnv {
+        node: registry.new_tree(),
+        definitions,
+        parent_config: SessionConfig::new(
+            "parent-model",
+            dir.to_path_buf(),
+            Arc::new(AllowAllPolicy),
+        ),
+        provider: Arc::new(CyclingProvider {
+            turn: tool_call_turn("c1", "read", serde_json::json!({})),
+        }),
+        hooks: Arc::new(HookChain::new()),
+        tools: Arc::new(FakeToolFactory {
+            parent: vec!["read".to_string()],
+        }),
+        transcript_dir: dir.to_path_buf(),
+        runner: Arc::new(rho_tools::SandboxedRunner::new(rho_core::SandboxMode::Off)),
+        retries: Arc::new(rho_core::RetryLedger::new()),
+    })
+}
+
+#[tokio::test]
+async fn a_child_is_warned_before_its_turn_cap() {
+    // The wiring test. `SubagentLimits::grace_turns` must reach the child's
+    // `SessionConfig`, or the feature exists in `rho-core` and never runs.
+    let dir = tempfile::tempdir().unwrap();
+    let env = grace_env(dir.path(), 2, 4);
+    let tool = SpawnAgentTool::new(Arc::clone(&env));
+    let tool_ctx = ctx(dir.path().to_path_buf());
+
+    let result = tool
+        .execute(
+            serde_json::json!({ "agent": "scout", "prompt": "work until you stop" }),
+            tool_ctx,
+        )
+        .await
+        .expect("a spawn returns a result");
+
+    let transcript = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+        .unwrap_or_default();
+
+    // The transcript records a delivery, and nothing else steers this child, so a
+    // delivery here can only be the grace warning. The verbatim text is proved in
+    // `crates/rho-core/tests/subagent_grace.rs`.
+    assert!(
+        transcript.contains(r#""type":"Delivered""#),
+        "the child must be warned before its cap. Result: {:?}. Transcript: {transcript}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn a_child_with_a_zero_grace_window_is_not_warned() {
+    // The negative half. A host that turns the warning off must reach the child too.
+    let dir = tempfile::tempdir().unwrap();
+    let env = grace_env(dir.path(), 0, 4);
+    let tool = SpawnAgentTool::new(Arc::clone(&env));
+    let tool_ctx = ctx(dir.path().to_path_buf());
+
+    tool.execute(
+        serde_json::json!({ "agent": "scout", "prompt": "work until you stop" }),
+        tool_ctx,
+    )
+    .await
+    .expect("a spawn returns a result");
+
+    let transcript = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+        .unwrap_or_default();
+
+    assert!(
+        !transcript.contains(r#""type":"Delivered""#),
+        "a zero window must send nothing: {transcript}"
+    );
+}
+
+#[tokio::test]
+async fn a_grace_window_wider_than_the_child_turn_cap_still_warns_once_after_work() {
+    // A window of 9 against a cap of 2. The warning must still fire once, and it must
+    // land after the child has taken a turn, because a child asked to summarise
+    // nothing wastes the turn. The driver's boundary rule is what guarantees this.
+    let dir = tempfile::tempdir().unwrap();
+    let env = grace_env(dir.path(), 9, 2);
+    let tool = SpawnAgentTool::new(Arc::clone(&env));
+    let tool_ctx = ctx(dir.path().to_path_buf());
+
+    tool.execute(
+        serde_json::json!({ "agent": "scout", "prompt": "work until you stop" }),
+        tool_ctx,
+    )
+    .await
+    .expect("a spawn returns a result");
+
+    let transcript = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+        .unwrap_or_default();
+
+    // A cap of two and a window of nine.
+    let deliveries = transcript.matches(r#""type":"Delivered""#).count();
+    let first_turn = transcript.find(r#""type":"TurnStart""#).unwrap_or(0);
+    let first_delivery = transcript
+        .find(r#""type":"Delivered""#)
+        .expect("a capped window must still warn once");
+    assert_eq!(deliveries, 1, "one warning only: {transcript}");
+    assert!(
+        first_delivery > first_turn,
+        "the child must work before it is told to summarise: {transcript}"
     );
 }

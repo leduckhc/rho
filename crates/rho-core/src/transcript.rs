@@ -66,6 +66,12 @@ pub enum TranscriptBody {
     ToolEnd { id: String, error: bool },
     /// Usage the provider reported for a turn.
     Usage { input: u64, output: u64 },
+    /// rho delivered messages into the child at a turn boundary.
+    ///
+    /// A steer and a grace warning both land here. Without this line a reader sees a
+    /// child change course for no visible reason, so the transcript would hide the
+    /// one thing that explains it.
+    Delivered { count: usize },
     /// The run ended. `outcome` matches `AgentOutcome`'s own wire name.
     End { outcome: String },
 }

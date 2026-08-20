@@ -31,7 +31,7 @@ mod tree;
 pub use collect::{CollectOptions, collect_report};
 pub use confine::{BothPolicies, ToolIntersection, intersect_tools, narrow_sandbox};
 pub use error::SubagentError;
-pub use limits::SubagentLimits;
+pub use limits::{DEFAULT_SUBAGENT_GRACE_TURNS, SubagentLimits};
 pub use report::{AgentOutcome, AgentReport, MAX_SUMMARY_CHARS};
 pub use retry::{MAX_CHILD_RETRIES, RetryLedger};
 pub use tree::{

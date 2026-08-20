@@ -20,7 +20,16 @@ pub struct SubagentLimits {
     /// A turn cap counts provider round trips, so it does not bound a child that
     /// makes forty tool calls inside one turn. This does.
     pub max_tool_calls: u32,
+    /// Turns of warning before a child's turn cap. Zero disables the warning.
+    ///
+    /// A child that runs out of turns has nobody to ask for more, so it is warned
+    /// and asked to write its summary. A top-level session defaults to zero, because
+    /// a user is there to react. See `SPEC-subagent-slots-handles-grace` section 4.
+    pub grace_turns: u32,
 }
+
+/// The subagent default grace window, in turns.
+pub const DEFAULT_SUBAGENT_GRACE_TURNS: u32 = 5;
 
 impl SubagentLimits {
     /// The starting limits, stated here and not hidden. See decision D-no-four-argument-session-new.
@@ -34,6 +43,7 @@ impl SubagentLimits {
             max_live_total: 32,
             child_timeout: Duration::from_secs(600),
             max_tool_calls: 64,
+            grace_turns: DEFAULT_SUBAGENT_GRACE_TURNS,
         }
     }
 }

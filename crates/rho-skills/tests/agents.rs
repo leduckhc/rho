@@ -222,3 +222,29 @@ async fn a_keyword_is_recognised_whatever_its_case() {
         .expect("the definition loads");
     assert_eq!(def.tools, None);
 }
+
+#[tokio::test]
+async fn a_definition_cannot_set_grace_turns() {
+    // The grace window belongs to the host, not to a project file. A definition that
+    // names it is ignored, exactly as any unknown field is, so a repository cannot
+    // turn off a child's warning. See `SPEC-subagent-slots-handles-grace` section 4.6.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "scout.md",
+        "---\nname: scout\ndescription: Recon.\ngrace_turns: 0\n---\nbody\n",
+    );
+    let def = load_definition(&path, SkillOrigin::User)
+        .await
+        .expect("an unknown field never stops a definition loading");
+
+    // The parsed definition carries no grace field at all. This is a compile-time
+    // fact: `AgentDefinition` has no such member, so a project file cannot reach it.
+    // The assertion below pins the loader's behaviour on the unknown key.
+    assert_eq!(def.name, "scout");
+    assert!(
+        def.warnings.is_empty(),
+        "an unknown key is ignored quietly, like every other: {:?}",
+        def.warnings
+    );
+}
