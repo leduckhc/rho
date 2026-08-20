@@ -31,6 +31,5 @@ Moved here from `AGENTS.md`, which keeps the development flow and the binding ru
 | `bench/` | Footprint and start-up measurement scripts, and the CI guards. |
 | `agentic-workflow.yaml` | The agentic workflow template. The controller fills a copy per unit of work. It is not a CI workflow. |
 | `.rho-work/tracks/` | One filled copy of the template per unit of work. Working state, not shipped. |
-| `workflow-sprint-2.yaml`, `workflow-sprint-3.yaml` | The sprint-2 and sprint-3 workflows. A record of two finished sprints. |
 | `.rho-work/` | Controller notes and the progress ledger. Not shipped. |
 | `.rho-work/decisions/` | One decision, one file. A shared file clashed between worktrees. |

@@ -17,10 +17,6 @@ A status states what the code proves, not what a plan intends. `agentic-workflow
 holds the template that every unit of work follows. A filled copy lives in
 `.rho-work/tracks/`, and `.rho-work/progress.md` records what each sprint delivered.
 
-A status states what the code proves, not what a plan intends. `workflow-sprint-2.yaml`
-holds the current sprint. Sprint 2 is at work on config (`rho-config`), the session log,
-and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
-
 **Extension point** describes how a third party replaces or extends the feature without forking rho.
 
 ---
