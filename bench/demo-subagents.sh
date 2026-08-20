@@ -217,10 +217,26 @@ expect "fan-out child 1 answered" "alpha" "$OUT"
 expect "fan-out child 2 answered" "beta" "$OUT"
 expect "fan-out child 3 answered" "gamma" "$OUT"
 
-OUT="$(run 'Use spawn_agents with four tasks: scout on a.txt, scout on b.txt, scout on c.txt, scout on a.txt. Reproduce the whole tool result verbatim, every section, changing nothing.' --trust-project --max-children-per-parent 2)"
-expect "the per-parent cap refuses the tasks over the limit" "per-parent child limit is 2" "$OUT"
-expect "the refusal names a flag that really exists" "max-children-per-parent" "$OUT"
-expect "a refused task does not lose the work of the tasks that fit" "alpha\|beta" "$OUT"
+# The per-parent cap used to refuse the tasks over the limit, and this script asserted
+# that refusal. It queues now, so every task runs. See decision D-queue-over-refuse and
+# `SPEC-subagent-slots-handles-grace` section 2.8. A cap of one is used on purpose: it
+# leaves no room at all, so two of the three tasks must wait.
+OUT="$(run 'Use spawn_agents with three tasks: scout on a.txt, scout on b.txt, scout on c.txt. Reproduce the whole tool result verbatim, every section, changing nothing.' --trust-project --max-children-per-parent 1)"
+reject "the per-parent cap queues a task instead of refusing it" "per-parent child limit" "$OUT"
+expect "the task that had a slot ran" "alpha" "$OUT"
+expect "the first task that waited still ran" "beta" "$OUT"
+expect "the second task that waited still ran" "gamma" "$OUT"
+
+# One cap still refuses, because a wait on it is a wait on another session's children.
+#
+# The prompt asks two narrow questions instead of asking for a long verbatim quote. A
+# first version asked for the whole tool result, and the model answered "That's the
+# verbatim result" and then summarised it. Two checks failed while rho was correct,
+# which is exactly the failure this script's header warns about. A narrow question is
+# quotable, so the answer carries rho's own words.
+OUT="$(run 'Use spawn_agents with three tasks: scout on a.txt, scout on b.txt, scout on c.txt. Then reply with exactly two lines and nothing else. Line 1: the command-line flag that any refusal told you to ask the user to raise. Line 2: the contents of a.txt, as the child that ran reported them.' --trust-project --max-live-agents 1)"
+expect "the process-wide cap refuses, and it names the flag that raises it" "max-live-agents" "$OUT"
+expect "a refused task does not lose the work of the task that fitted" "alpha" "$OUT"
 
 # --- 8. The transcript ---
 
@@ -259,6 +275,29 @@ else
   pass "it lives outside the session root, so it cannot be committed by accident"
 fi
 
+
+# --- 9. A queued child is addressable while it waits ---
+
+section "9. A queued child holds an id, and the model can act on it"
+# A background child holds the only slot, so the next spawn must queue. The model is
+# asked to quote rho's own words, because a check needs rho's text and not a paraphrase.
+OUT="$(run 'Do exactly this. Call spawn_agent with agent="slowpoke", prompt="Run exactly this bash command: python3 -c \"import time; time.sleep(20)\"" and background=true. Then call spawn_agent with agent="scout", prompt="What is in a.txt?" and background=true. Then call agent_status on the id the second call gave you. Quote the agent_status result verbatim.' --trust-project --max-children-per-parent 1 --child-timeout-secs 25)"
+expect "a spawn over the cap is admitted, not refused" "queued" "$OUT"
+expect "and the model is told where it sits in the line" "place 1" "$OUT"
+reject "no refusal names the per-parent cap any more" "per-parent child limit" "$OUT"
+
+# A cancelled waiter must never be promised a start. This is the defect that driving it
+# for real found. See decision D-a-cancelled-waiter-says-so.
+OUT="$(run 'Do exactly this. Call spawn_agent with agent="slowpoke", prompt="Run exactly this bash command: python3 -c \"import time; time.sleep(20)\"" and background=true. Then call spawn_agent with agent="scout", prompt="What is in a.txt?" and background=true. Then call cancel_agent on the second id. Then call agent_status on that same second id. Quote both results verbatim.' --trust-project --max-children-per-parent 1 --child-timeout-secs 25)"
+expect "a queued child is cancellable by the id the model holds" "asked to stop" "$OUT"
+reject "a cancelled child is never promised a start" "it will start" "$OUT"
+expect "and the answer says it was cancelled" "cancel" "$OUT"
+
+# A steer must reach a child that has not started yet.
+OUT="$(run 'Do exactly this. Call spawn_agent with agent="slowpoke", prompt="Run exactly this bash command: python3 -c \"import time; time.sleep(20)\"" and background=true. Then call spawn_agent with agent="scout", prompt="What is in a.txt?" and background=true. Then call steer_agent on the second id with the message "read b.txt as well". Quote the steer_agent result verbatim.' --trust-project --max-children-per-parent 1 --child-timeout-secs 25)"
+expect "a steer is accepted for a child that has not started" "queued for" "$OUT"
+expect "and the receipt names the agent, which holds no live handle yet" "scout" "$OUT"
+reject "a steer for a queued child is never a lost message" "cannot be steered" "$OUT"
 
 # --- Result ---
 

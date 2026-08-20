@@ -9,7 +9,7 @@ A fan-out wider than the per-parent cap used to lose the extra tasks. Each one c
 refusal, and the model had to notice and retry by hand. rho now queues them. The model gets an id
 at once, and the child starts when a slot frees.
 
-## Setup
+## 1. Setup
 
 ```sh
 cargo build --release -p rho-cli
@@ -31,7 +31,7 @@ max_turns: 3
 You read exactly the one file the prompt names. Answer in one sentence.
 ```
 
-## 1. A fan-out of four under a cap of one runs every task
+## 2. A fan-out of four under a cap of one runs every task
 
 ```sh
 rho run "Use spawn_agents once, with four tasks, to send the scout agent at a.txt, b.txt, \
@@ -48,7 +48,7 @@ d.txt contains "delta file".
 Four answers under a cap of one, in 20.7 seconds. Three of the four waited. Before this change,
 three of the four returned "the per-parent child limit is 1".
 
-## 2. The same command a second time
+## 3. The same command a second time
 
 The "twice" rule has caught two defects in this project, so every path runs twice.
 
@@ -58,7 +58,7 @@ a.txt contains "alpha file", b.txt contains "beta file", c.txt contains "gamma f
 and d.txt contains "delta file".
 ```
 
-## 3. The process-wide cap still refuses, and it still teaches
+## 4. The process-wide cap still refuses, and it still teaches
 
 ```sh
 rho run "Use spawn_agents once with three tasks: scout on a.txt, scout on b.txt, scout on \
@@ -80,7 +80,7 @@ agent to finish, or ask the user to raise --max-live-agents."
 One cap queues and one refuses, exactly as section 2.7 of the spec states. The refusal names the
 flag, and the task that fitted still reported its work.
 
-## 4. A queued child is pollable by the id the model was given
+## 5. A queued child is pollable by the id the model was given
 
 ```sh
 rho run "Do exactly this: call spawn_agent twice with background true, first for scout on \
@@ -99,7 +99,7 @@ on its first turn.
 
 The id the model holds is the id that waits, and the place is computed on read.
 
-## 5. The defect this step found
+## 6. The defect this step found
 
 The same run, with a cancel between the spawn and the poll:
 
@@ -139,7 +139,57 @@ live run cannot be made to land inside it on purpose:
 `status_says_a_cancelled_queued_child_will_not_start` and
 `agent_status_says_a_cancelled_queued_child_will_not_start`.
 
-## 6. One more defect, outside this change, not fixed here
+## 7. The end-to-end suite, and what it proves
+
+The checks above are now assertions in `bench/demo-subagents.sh`, so nobody has to trust this
+page. The script drives the release binary against Bedrock and exits non-zero on any failure.
+
+```sh
+env -u AWS_PROFILE ./bench/demo-subagents.sh
+```
+
+```text
+7. A fan-out runs children together, and the caps bite
+  PASS fan-out child 1 answered
+  PASS fan-out child 2 answered
+  PASS fan-out child 3 answered
+  PASS the per-parent cap queues a task instead of refusing it
+  PASS the task that had a slot ran
+  PASS the first task that waited still ran
+  PASS the second task that waited still ran
+  PASS the process-wide cap refuses, and it names the flag that raises it
+  PASS a refused task does not lose the work of the task that fitted
+
+9. A queued child holds an id, and the model can act on it
+  PASS a spawn over the cap is admitted, not refused
+  PASS and the model is told where it sits in the line
+  PASS no refusal names the per-parent cap any more
+  PASS a queued child is cancellable by the id the model holds
+  PASS a cancelled child is never promised a start
+  PASS and the answer says it was cancelled
+  PASS a steer is accepted for a child that has not started
+  PASS and the receipt names the agent, which holds no live handle yet
+  PASS a steer for a queued child is never a lost message
+
+Result
+  passed: 48
+  failed: 0
+```
+
+**Three consecutive runs passed, and the suite exits 0.** A live suite that passes once proves
+less, because a model paraphrase changes between runs.
+
+**The new checks were proved against the old behaviour.** With `run_one_child` and
+`start_background_child` put back to `spawn_child`, the same suite reported `passed: 42,
+failed: 6`, and the six were exactly the queue checks. So these checks can fail.
+
+**Two checks failed first, and rho was right both times.** They asked the model to reproduce a
+whole tool result verbatim, and the model answered "That's the verbatim result" and then
+summarised it. The flag name and the child's answer were lost in the paraphrase. The prompt now
+asks two narrow questions, which a model quotes rather than rewrites. A model paraphrase is not a
+defect, and a check that cannot tell the difference is a bad check.
+
+## 8. One more defect, outside this change, not fixed here
 
 The first definition file in this session wrote its tool list as a YAML sequence:
 
