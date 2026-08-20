@@ -166,14 +166,24 @@ pub trait Workspace: Send + Sync {
     async fn reclaim(&self, isolated: Isolated) -> Result<Reclaimed, WorkspaceError>;
 }
 
-/// A child's isolated root, plus an opaque handle the implementation needs later.
+/// A child's isolated root, plus what the caller must record about it.
+///
+/// Every field here is an observation the implementation makes at create time. The
+/// report cannot invent them, because the spawn wiring holds no git state. A field
+/// that no trait method returns is a field nobody can fill.
 #[derive(Clone, Debug)]
 pub struct Isolated {
     /// The child's session root. Every child tool confines to it.
     pub path: PathBuf,
     /// A value the implementation reads at reclaim time. `rho-core` never reads it.
-    /// The git one stores its branch name here.
+    /// The git one stores its recorded administrative directory and branch here.
     pub handle: String,
+    /// The snapshot the root started from. A git commit id, or another backend's
+    /// equivalent. `None` when a backend has no such notion.
+    pub base: Option<String>,
+    /// True when the source tree held uncommitted changes at create time. So a
+    /// caller can assert on it, rather than read a sentence.
+    pub parent_was_dirty: bool,
 }
 
 /// The outcome of reclaiming a child's tree.
@@ -183,6 +193,8 @@ pub struct Reclaimed {
     pub kept_at: Option<String>,
     /// The tree the child used. `None` once the implementation deleted it.
     pub left_on_disk: Option<PathBuf>,
+    /// Every nested repository found in the tree. Their content is not kept.
+    pub nested_repositories: Vec<PathBuf>,
 }
 ```
 
@@ -213,8 +225,10 @@ repository, so a report that claimed a branch would have been a lie.
 
 **Four rules. Each one alone stops the attack.**
 
-1. **Hooks are off for every git call.** rho passes `-c core.hooksPath=/dev/null`, and
-   `--no-verify` where a command accepts it. The probe shows no hook then runs.
+1. **Hooks are off for every git call.** rho passes `-c core.hooksPath=/dev/null`. It also passes
+   `--no-verify` to `commit`, which is the only command reclaim runs that accepts the flag. A
+   probe confirmed that `status`, `add`, and `worktree` reject it, so the spec names one command
+   rather than promising a flag that fails.
 2. **The administrative directory is recorded at create time, and passed explicitly.** Every
    later call uses `--git-dir <recorded>` and `--work-tree <worktree>`. So a rewritten `.git`
    file is never read. The probe shows the commit then lands on the real branch.
@@ -225,12 +239,25 @@ repository, so a report that claimed a branch would have been a lie.
    machine with no configured identity then still keeps the child's work. Without this the
    commit fails and the work is lost.
 
-rho also sets `GIT_TERMINAL_PROMPT=0`, so a git call never waits for a human. See decision
+rho also sets `GIT_TERMINAL_PROMPT=0`, so a git call never waits for a human, and
+`-c core.attributesFile=/dev/null` with `GIT_CONFIG_NOSYSTEM=1`. See decision
 D-a-workspace-hardens-every-git-call.
 
-**The child may not write `.git` inside its root.** The rules above make a rewritten pointer
-harmless, and this rule stops the child from trying. The child's write path denies a path whose
-components hold `.git`. This is defence in depth. Rule 2 is the load-bearing one.
+**A content filter is a fourth door, and it is closed in depth.** A probe showed that a `clean`
+filter defined in the repository config, and selected by an in-tree `.gitattributes`, runs a
+command as rho during `add`. An **undefined** filter is skipped safely, and the probe confirmed
+that too. The definition must live in the configuration, which sits outside the worktree, so only
+a child that can already write outside its root can reach it. Such a child already has rho-level
+reach, so this is defence in depth rather than a fresh hole. rho still neutralises the attributes
+file, because the cost is one flag.
+
+**The child may not write `.git` inside its root, and that rule has an owner and a limit.** The
+write path enforces it: `write` and `edit` both resolve through `confine`, at
+`crates/rho-tools/src/write.rs` and `crates/rho-tools/src/edit.rs`, and both deny a path whose
+components hold `.git`. The rule is **write-only**, so reading `.git/HEAD` still works. **`bash`
+cannot enforce it**, because `bash` calls `confine` nowhere: its boundary is the approval policy
+and the OS sandbox. So a child with `bash` and no sandbox can still rewrite the pointer, and rule
+2 is what makes that harmless. This rule is depth, and rule 2 is the boundary.
 
 **A nested repository is named, not swallowed.** A child may create its own repository inside
 the worktree. `git add -A` then records a gitlink, and the nested content is **not** kept. The
@@ -256,6 +283,20 @@ construction.
 **The forbidden defect.** An artifact written inside a worktree, and checked against the
 parent root, is a defect. It cannot happen here, because the gate root is always the child's
 root. The gate never sees the parent root for an isolated child.
+
+**The gate obeys the same four rules.** The gate runs **before** reclaim, and
+`SPEC-agent-tasks` runs an `ArtifactSpec::Command` check through `SandboxedRunner` with the
+child's root as the working directory. So a check that runs git, directly or through a build
+tool, would read the worktree `.git` file that the child may have rewritten. The probe in
+`docs/verification/worktree-git-probe.md` shows what happens then: the child's hook runs as rho,
+before reclaim, with rho's environment. The trusted-author rule covers the command **string**,
+not the child's rewrite of a pointer at run time.
+
+So for an isolated child, the gate runs every check with `GIT_DIR` set to the recorded
+administrative directory, `GIT_WORK_TREE` set to the worktree, `GIT_CONFIG_NOSYSTEM=1`, and
+`core.hooksPath` neutralised through the environment. A check then cannot reach a pointer or a
+hook the child controls, whatever it shells out to. This is one rule with two enforcement points,
+and the spec states both rather than trusting reclaim alone.
 
 **Reclaim runs after the gate.** The gate must read the child's files. So reclaim cannot run
 first. A deleted tree has no files to check.
@@ -293,8 +334,9 @@ pub struct IsolationReport {
     /// when the commit failed.
     #[serde(default)]
     pub kept_at: Option<String>,
-    /// The commit the worktree started from.
-    pub base: String,
+    /// The commit the worktree started from, when the backend has one.
+    #[serde(default)]
+    pub base: Option<String>,
     /// True when the parent tree held uncommitted changes at create time. So a
     /// caller can assert on it, rather than read a sentence.
     #[serde(default)]
@@ -344,14 +386,22 @@ pub enum WorkspaceError {
     ReclaimFailed { path: PathBuf, detail: String },
     /// A worktree was left on disk by a crash. A later run reports it.
     Orphaned { path: PathBuf },
-    /// Too many orphans already sit on disk. rho refuses a new worktree rather
-    /// than fill the disk. See section 10.
+    /// Too many orphans already sit on disk. rho refuses a new tree rather than
+    /// fill the disk. See section 10.
     TooManyOrphans { limit: usize, found: usize },
-    /// The agent name cannot become a path or a branch, and the id alone was
-    /// also unusable. See section 10.
-    NameNotUsable { agent: String },
+    /// A failure only this backend can name.
+    ///
+    /// Without this variant a container or an overlay implementation could not
+    /// report its own failures, and adding one would edit a shared enum in
+    /// `rho-core`. That is the closed-for-extension shape AGENTS.md step 9
+    /// forbids. So the open case exists, and it names the backend.
+    Backend { backend: String, detail: String },
 }
 ```
+
+**The git variants are named, and they are not the whole set.** A git backend reports
+`NotAGitRepo` or `BranchExists`. A container backend reports `Backend`. So a third party adds a
+failure without touching `rho-core`.
 
 **Every one of these is a result, not the end of the run.** rho's rule holds: a child
 failure returns a tool result the parent can act on. A dead child never kills its parent.
@@ -434,11 +484,14 @@ asking git, and it never deletes a path git does not list. See decision D-no-git
 deletes it. Auto-deletion could destroy unrecovered work. A later run lists an orphan and
 reports it. A human removes it.
 
-**An orphan count is bounded, because a disk is bounded.** rho counts the orphans under
-`.rho/worktrees/` before it creates a new tree. Past `MAX_ISOLATION_ORPHANS`, which is 32, it
-refuses with `TooManyOrphans` and names the directory to clean. Never deleting and never counting
-would grow without a limit, which is the family that already cost this project 805 MB. So rho
-keeps the work and refuses to add more. See decision D-an-orphan-is-capped-not-deleted.
+**An orphan count is bounded, because a disk is bounded.** An orphan is an entry under
+`.rho/worktrees/` that `git worktree list` does **not** name. That definition matters: a live
+sibling's tree sits in the same directory, and counting it would refuse work because other
+children are running. rho counts the orphans before it creates a new tree. Past
+`MAX_ISOLATION_ORPHANS`, which is 32, it refuses with `TooManyOrphans` and names the directory to
+clean. Never deleting and never counting would grow without a limit, which is the family that
+already cost this project 805 MB. So rho keeps the work and refuses to add more. See decision
+D-an-orphan-is-capped-not-deleted.
 
 **The naming scheme, and it never trusts the agent name.** A name in a definition only warns
 when it breaks the character rule, and a bad name still loads. `sanitize` strips control
@@ -447,7 +500,8 @@ characters and keeps `/`, `..`, a space, and a leading dash. A user-scope defini
 
 rho builds a slug from the name: it keeps `[a-z0-9-]`, lowercases the rest, drops every other
 character, trims a leading or trailing dash, and truncates to 32 characters. An empty result
-falls back to `agent`. Then:
+falls back to `agent`. So the slug is always usable, and no error variant is needed for a bad
+name. Then:
 
 - Worktree directory: `<git-common-parent>/.rho/worktrees/<slug>-<agent_id>-<yyyymmdd-hhmmss>`
 - Branch: `rho/agent/<slug>-<agent_id>-<yyyymmdd-hhmmss>`
@@ -545,10 +599,16 @@ The hardened git call, in `rho-tools`:
   the commit lands on the real branch.
 - `a_child_hook_never_runs_during_reclaim` — hooks are off, proved with a hook that would write
   a file.
+- `a_child_hook_never_runs_during_the_gate` — the gate runs before reclaim, so it needs the same
+  rules.
+- `a_gate_command_reads_the_recorded_git_directory` — a check that shells to git cannot follow
+  the child's pointer.
 - `the_git_subprocess_environment_holds_no_credential` — the same scrub `bash` applies.
 - `a_commit_succeeds_with_no_configured_git_identity` — rho passes its own identity.
-- `a_child_cannot_write_dot_git_inside_its_root` — the write path denies it.
+- `a_child_cannot_write_dot_git_inside_its_root_with_write_or_edit` — the write path denies it.
+- `reading_dot_git_head_still_works` — the rule is write-only.
 - `a_nested_repository_is_named_in_the_report` — its content is not kept, and the report says so.
+- `a_backend_failure_reports_the_backend_variant` — a non-git implementation needs no shared edit.
 
 The naming slug, in `rho-tools`:
 - `an_agent_name_with_a_path_traversal_becomes_a_safe_slug` — `../../../../tmp/x` stays inside.
@@ -558,7 +618,9 @@ The naming slug, in `rho-tools`:
 Orphans and removal, in `rho-tools`:
 - `reclaim_removes_a_tree_through_git_and_not_by_deleting_a_path`
 - `reclaim_refuses_a_path_git_does_not_list` — a symlink swap changes nothing.
+- `a_live_sibling_tree_is_not_counted_as_an_orphan` — the definition, or the cap refuses real work.
 - `too_many_orphans_refuses_a_new_worktree_and_names_the_directory`
+- `the_isolation_report_carries_the_base_when_the_backend_has_one`
 
 The failure set, in `rho-tools`:
 - `a_non_git_root_fails_the_isolated_spawn_as_a_result` — `NotAGitRepo`, and the parent continues.
