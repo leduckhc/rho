@@ -1,6 +1,7 @@
 # The terminal interface design
 
-Stage U1 of sprint 3. See `workflow-sprint-3.yaml`.
+The design stage of the terminal interface work, in sprint 3. `agentic-workflow.yaml` holds
+that stage kind now.
 
 This document designs the interface that `SPEC-tui` will grow into. It builds on
 `docs/tui-prior-art.md`, which is the verified brief, and on Makit's design language in

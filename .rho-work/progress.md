@@ -93,7 +93,8 @@ was unusable, because any missing file ended the session.
 
 ## Sprint 2 stage results
 
-`workflow-sprint-2.yaml` drives this sprint. The scope is config, the session log,
+Sprint 2 ran from `workflow-sprint-2.yaml`, which `agentic-workflow.yaml` replaced. The
+scope is config, the session log,
 and the ACP frontend. ACP is the point of the project, because makit needs a cheap
 ACP backend.
 
@@ -259,7 +260,8 @@ gets skipped.
 
 ## Sprint 3, the terminal interface
 
-`workflow-sprint-3.yaml` drives this sprint. The goal is an interface a critic ranks at or
+Sprint 3 ran from `workflow-sprint-3.yaml`, which `agentic-workflow.yaml` replaced. The
+goal is an interface a critic ranks at or
 above pi, codex, claude code, and jcode, in a binary that stays the fastest of them.
 
 The sprint has one rule that the earlier sprints did not. **A critic panel must agree.** Four

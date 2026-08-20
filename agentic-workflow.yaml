@@ -1,0 +1,723 @@
+# rho agentic workflow — the template
+#
+# This file is a blueprint, not a record. The controller reads it, and it fills a copy
+# per unit of work. Nothing here names a sprint, and nothing here is edited per sprint.
+#
+# The name is deliberate. "Agentic workflow" means the pipeline that agents follow to
+# build a feature. `.github/workflows/` holds the CI workflows, and they are a different
+# thing with the same old name. See `.rho-work/PROPOSAL-agentic-workflow.md`, finding W-14.
+#
+# It replaces `workflow.yaml`, `workflow-sprint-2.yaml`, and `workflow-sprint-3.yaml`.
+# Those three files were `AGENTS.md` retyped by hand, once per sprint. Each retype
+# dropped a step, and the dropped steps were the ones that catch defects. Sprint 1 had no
+# mutation stage and no surface sweep, and it shipped three `todo!()` bodies through a
+# green stage. Sprint 2 added the mutation stage, and it caught vacuous tests. Sprint 3
+# dropped the mutation stage again. Git holds all three files, and `.rho-work/progress.md`
+# holds what each sprint did.
+#
+# How the controller uses this file
+#   1. Classify the work into a lane. The lane says which stage kinds apply.
+#   2. Create a track directory, and copy the frame and prove stages into it.
+#   3. Run `plan`. It generates the build stages, and a reviewer approves them first.
+#   4. Spawn one subagent per stage. Bind its inputs by name from a prior handover.
+#   5. Verify every gate yourself. A subagent report is a claim, not a result.
+#
+# Legend
+#   stage_kinds:  the fixed catalogue of work a stage can be. A track picks from it.
+#   phase:        frame, build, or prove. Only build is generated per feature.
+#   role:         the subagent persona that does the work.
+#   produces:     the typed slots the subagent must fill and return.
+#   dod:          the definition of done. Another role writes it, never the owner.
+#   gates:        named command sets from `gate_sets`. All must exit 0.
+
+version: 2
+kind: agentic-workflow-template
+project: rho
+domain: getrho.dev
+repo: ~/Work/Vibe/rho
+source_of_truth: AGENTS.md          # this file is that checklist, made machine-readable
+instances: .rho-work/tracks/        # a filled copy lives here. never in this file
+
+principles:
+  - Speed and memory are features. Measure before you claim a win.
+  - TDD is mandatory. A failing test lands before production logic.
+  - A green suite proves only what the tests assert. Break the code and watch a test fail.
+  - Contract first. Design the interface before either side writes code.
+  - SOLID. Every crate has one reason to change.
+  - Open for extension, closed for modification. A new case is a new impl.
+  - Prose is ASD-STE100. Active voice. One instruction per sentence.
+  - An artifact is named by a timestamp and a slug, never by a counter. See D-slug-ids.
+
+# ---------------------------------------------------------------------------
+# Gates. One definition, and this is it.
+#
+# Four files used to define the gate, and three of them were wrong. A subagent that
+# obeyed its brief exactly still shipped work that failed the real gate. So a gate lives
+# here and nowhere else. `AGENTS.md` `## Gate` and `.rho-work/BRIEF.md` section 5 must
+# match `gate_sets.full`. No agent may add a command to this map.
+# ---------------------------------------------------------------------------
+gates:
+  fmt: cargo fmt --all --check
+  clippy: cargo clippy --workspace --all-targets --all-features -- -D warnings
+  test: cargo test --workspace --all-features
+  minimal-build: cargo build -p rho-cli --no-default-features --features minimal
+  minimal-test-build: cargo test -p rho-cli --no-default-features --features minimal --no-run
+  ids: python3 bench/check-ids.py
+  prose: python3 bench/check-prose.py $(find docs -name '*.md')
+  workflow: python3 bench/check-agentic-workflow.py
+  stubs: "grep -rn 'todo!\\|unimplemented!' crates/*/src   # must find nothing"
+
+gate_sets:
+  # `full` is the ship gate, and it is `AGENTS.md` `## Gate`, command for command.
+  # `bench/check-agentic-workflow.py` compares the two, so they cannot drift again.
+  full: [fmt, clippy, test, minimal-build, minimal-test-build, ids, prose, workflow]
+  rust: [fmt, clippy, test]                         # a code stage, mid-track
+  docs: [prose, ids, workflow]                      # a docs or spec stage
+  surface: [stubs, ids]                             # the sweep stage
+
+gate_rules:
+  - A stage may add a narrower command with `gate_extra`. It may never remove one.
+  - Gate a stage on its own crates while a sibling stage is mid-flight.
+  - The controller runs every gate itself, and reads the exit code. A report is a claim.
+
+# ---------------------------------------------------------------------------
+# Lanes. Step 0 of AGENTS.md, machine-readable.
+#
+# The controller proposes the lane. The `recon` stage confirms it, or challenges it with
+# evidence. An agent may argue for a stricter lane freely, and for a looser one never.
+#
+# `skips` is the only mechanism that removes a stage. A stage kind carries no lane list of
+# its own, because two mechanisms disagreed and the controller then had to guess. So a
+# stage runs unless its lane skips it. There is no free-form "not applicable".
+# ---------------------------------------------------------------------------
+lanes:
+  feature:
+    description: A feature, or a new public API.
+    skips: []
+  bug-fix:
+    description: A fix for a defect that reached main.
+    skips: [plan, design, spec-fix]
+    extra: The red test must reproduce the bug before you touch the logic.
+  refactor:
+    description: A change with no change in behaviour.
+    skips: [plan, design, spec-fix, red]
+    extra: The existing tests are the specification. They must pass unchanged.
+  dependency-bump:
+    description: A version change in Cargo.toml or package.json.
+    skips: [plan, design, spec-fix, red, green, mutate]
+    extra: Confirm Cargo.lock holds exactly one rustls. Check every new default for fail-open.
+  revert:
+    description: Work goes back out.
+    skips: [plan, design, spec-fix, red, green, mutate, sweep]
+    extra: Keep the test the reverted work added, unless the test is what was wrong.
+  docs-only:
+    description: Prose, with no code change.
+    skips: [plan, design, spec-fix, red, green, mutate, sweep, measure, drive]
+  unstated_lane: feature   # the strictest lane. it skips nothing. never the loosest. see R-1
+
+# ---------------------------------------------------------------------------
+# Slot rules. How to read `produces`, and what an absent value means.
+#
+# There is no optional slot. An absent marker used to read as permissive here, and that
+# is how `ToolKind::Other` approved a tool that forgot its kind. See R-1.
+# ---------------------------------------------------------------------------
+slot_rules:
+  - Every slot in `produces` is required. A stage with an unfilled slot fails.
+  - A slot with a `lanes` key is required in those lanes, and it does not exist in any other.
+  - A slot with `must_include` fails unless every listed item is present by name.
+  - Every slot carries evidence. Evidence is a command with its exit code, or a `file:line`.
+  - A slot value of "none" is a claim, so it needs the same evidence as any other value.
+
+# ---------------------------------------------------------------------------
+# Fixed definitions of done. For a lane that skips `plan`, so no architect wrote one.
+# The template writes these, because the owner of the work never may.
+# ---------------------------------------------------------------------------
+fixed_dod:
+  refactor:
+    - text: Every existing test passes, unchanged.
+      evidence: "cargo test --workspace --all-features; exit 0; and `git diff --stat` names no test file"
+    - text: The public API is byte-identical, or the spec names the change.
+      evidence: 'file:line per changed signature'
+  dependency-bump:
+    - text: The full gate passes on the new version.
+      evidence: "gate_sets.full; every command exit 0"
+    - text: Cargo.lock holds exactly one rustls version.
+      evidence: "grep -c 'name = \"rustls\"' Cargo.lock"
+    - text: Every new default is checked for fail-open, and each check is named.
+      evidence: 'file:line per default'
+  revert:
+    - text: The commit says why the work goes out.
+      evidence: the commit message
+    - text: The test the reverted work added is kept, or the reason it went too is stated.
+      evidence: 'test name, plus file:line'
+
+# ---------------------------------------------------------------------------
+# Roles. A role is a subagent persona, plus the limit on what it may author.
+#
+# `may_author` is the whole design. No agent authors the DoD it is scored against.
+# The architect writes the developer's DoD. The tester writes the assertion the
+# developer must satisfy. The reviewer writes findings and nothing else.
+# ---------------------------------------------------------------------------
+roles:
+  controller:
+    model: opus
+    subagent_type: none            # the master agent. it spawns, it does not get spawned
+    purpose: Classify, dispatch, verify every gate, and drive the product for real.
+    may_author: [lane, track, dispatch, verification]
+    never: Trust a subagent report without re-running its gate.
+  scout:
+    model: haiku
+    subagent_type: scout
+    purpose: Read prior art and the tree, and report compressed facts with a source.
+    may_author: [facts]
+    never: Propose a design.
+  designer:
+    model: sonnet
+    subagent_type: designer
+    purpose: Design the layout, the palette, and the motion.
+    may_author: [design]
+    never: Judge its own design. See the critic-panel gate kind.
+  architect:
+    model: opus
+    subagent_type: architect
+    purpose: Write the spec and the contract with verbatim Rust signatures.
+    may_author: [contract, test_names, dod, build_stages]
+    never: Write the implementation it specified.
+  tester:
+    model: opus
+    subagent_type: qa
+    purpose: Write failing tests from the spec, before any implementation.
+    may_author: [tests]
+    never: Write production logic, or leave the suite green.
+  developer:
+    model: opus
+    subagent_type: developer
+    purpose: Make the failing tests pass. No untested behaviour.
+    may_author: [implementation]
+    never: Edit a test to fit the implementation. Say the test is wrong, and stop.
+  reviewer:
+    model: opus
+    subagent_type: reviewer
+    purpose: Reject any artifact that misses its DoD. Never rubber-stamp.
+    may_author: [findings]
+    never: Write the code it reviews, or accept "the tests pass" as a DoD.
+  secops:
+    model: opus
+    subagent_type: secops
+    purpose: Audit credentials, command execution, path boundaries, and peer trust.
+    may_author: [findings]
+    never: Rate a severity without a probe that tests it.
+  documenter:
+    model: sonnet
+    subagent_type: docs
+    purpose: Reconcile the docs with the code that shipped.
+    may_author: [docs]
+    never: Keep a claim that no test or benchmark proves.
+  devops:
+    model: opus
+    subagent_type: devops
+    purpose: CI guards, release builds, and the size and memory benchmarks.
+    may_author: [guards, measurements]
+    never: Record a number without the command and the machine that produced it.
+
+# ---------------------------------------------------------------------------
+# Phases. Three of them, and only the middle one varies with the work.
+# ---------------------------------------------------------------------------
+phases:
+  - id: frame
+    writable: false
+    purpose: Learn the shape of the work, and design its contract.
+    stages: [classify, recon, plan]
+  - id: build
+    writable: true
+    purpose: One red-to-green pair per contract surface. `plan` generates this list.
+    stages: generated
+    allowed_kinds: [design, spec-fix, red, green]
+  - id: prove
+    writable: false
+    purpose: The steps a hand-typed sprint file kept dropping.
+    stages: [mutate, sweep, review, measure, drive, land]
+
+# Why `prove` is fixed. Each stage traces to a step in AGENTS.md, and to a defect that
+# reached main. An unknown feature cannot delete its own safety net.
+#
+#   mutate  step 7      a memory-cap test passed against its own bug. D-bash-line-cap
+#   sweep   step 8      three todo!() bodies survived a green stage. D-todo-in-a-green-stage
+#   review  step 9      an audit rated a live credential leak as minor. D-bash-scrubs-credentials
+#   measure step 13     speed and memory are features, so a number without its command is a slogan
+#   drive   step 11     222 tests passed while the product was unusable
+#   land    steps 12,13 a stale spec re-introduced a deleted constructor. D-no-four-argument-session-new
+
+# ---------------------------------------------------------------------------
+# Stage kinds. The catalogue. A track picks from it and never invents a kind.
+#
+# `inputs` bind by name from a prior handover, so a missing upstream slot fails at spawn
+# time, not twenty minutes in. `produces` is the exact schema the subagent returns.
+# ---------------------------------------------------------------------------
+stage_kinds:
+
+  - id: classify
+    phase: frame
+    role: controller
+    agents_md_step: 0
+    produces:
+      lane: {type: enum, values: [feature, bug-fix, refactor, dependency-bump, revert, docs-only]}
+      one_sentence: {type: prose, note: The problem in the user's own terms.}
+      skips: {type: list, evidence: lane-permits-each}
+    dod_authored_by: template
+    gates: []
+
+  - id: recon
+    phase: frame
+    role: scout
+    agents_md_step: 1
+    inputs:
+      lane: classify.lane
+    produces:
+      where_the_code_goes: {type: list, evidence: 'file:line, plus the docs/features.md row'}
+      prior_art: {type: list, evidence: source-read-per-claim}
+      decisions_that_apply: {type: list, evidence: 'D-<slug>'}
+      lane_verdict: {type: enum, values: [confirmed, challenged], evidence: reason}
+      defect_reproduction:
+        lanes: [bug-fix]
+        type: prose
+        evidence: the command that shows the wrong behaviour, and its real output
+      tests_that_are_the_spec:
+        lanes: [refactor]
+        type: list
+        evidence: 'test name per file:line. these tests must pass unchanged'
+    dod_authored_by: template
+    reviewed_by: [reviewer]
+    gates: []
+
+  - id: plan
+    phase: frame
+    role: architect
+    agents_md_step: 3
+    inputs:
+      facts: recon.where_the_code_goes
+      settled: recon.decisions_that_apply
+    produces:
+      spec_path: {type: path, evidence: 'docs/specs/<yyyymmdd-hhmmss>-SPEC-<slug>.md'}
+      sides: {type: list, note: Every pair of places that must agree, and the crate that owns each.}
+      contract: {type: rust-signatures, evidence: compiles-in-scratch-crate}
+      error_taxonomy: {type: list, evidence: which-side-handles-each}
+      extension_point: {type: prose, note: What a third party adds without a fork.}
+      test_names: {type: list, min: 1, evidence: name-plus-assertion}
+      out_of_scope: {type: prose}
+      build_stages: {type: stage-list, max_items: 4}
+      dod_per_build_stage: {type: list, evidence: command-or-assertion-per-item}
+    dod_authored_by: template
+    reviewed_by: [reviewer]
+    review_question: >
+      Does a new case need an edit to shared code? If yes, the contract is wrong.
+    gates: [docs]
+    blocks: build          # no build stage runs until this review passes
+
+  - id: design
+    phase: build
+    role: designer
+    optional: true
+    inputs:
+      facts: recon.prior_art
+    produces:
+      frames: {type: list, evidence: text-mock-at-80-and-40-columns}
+      palette: {type: list, evidence: measured-contrast-ratio-per-pair}
+      motion: {type: prose, note: What moves, how fast, and what stops it.}
+    dod_authored_by: architect
+    reviewed_by: [reviewer]
+    gates: [docs]
+
+  - id: spec-fix
+    phase: build
+    role: architect
+    optional: true
+    purpose: Fix the findings from the plan review. Never a second plan.
+    inputs:
+      findings: plan.review.findings          # the reviewer's handover. see spawn.handover
+    produces:
+      fixes: {type: list, evidence: finding-to-fix-to-test}
+    dod_authored_by: reviewer
+    reviewed_by: [reviewer]
+    gates: [docs]
+
+  - id: red
+    phase: build
+    role: tester
+    agents_md_step: 5
+    inputs:
+      contract: plan.contract
+      names: plan.test_names
+    inputs_when:
+      bug-fix:                                # this lane skips `plan`, so bind the recon slots
+        reproduction: recon.defect_reproduction
+        settled: recon.decisions_that_apply
+    produces:
+      test_files: {type: list, evidence: path-per-file}
+      failure_reason: {type: prose, evidence: unimplemented-body-not-a-type-error}
+      dod_for_green:
+        type: list
+        evidence: command-or-assertion-per-item
+        note: >
+          The assertion the developer must satisfy. The tester writes it, because the
+          developer never writes the definition of done it is scored against. In the
+          feature lane it repeats `plan.dod_per_build_stage` and adds nothing.
+    dod_authored_by: architect
+    dod_authored_by_when:
+      bug-fix: template        # no architect ran in this lane, so the `rules` below are the DoD
+    reviewed_by: [reviewer]
+    gates: []
+    gate_extra_shape: ["cargo test -p <crate> --no-run", "! cargo test -p <crate> --quiet"]
+    rules:
+      - Reproduce the defect first, in the bug-fix lane. The test must fail on the real bug.
+      - Use no `sleep`. Synchronise with a channel, a `Notify`, or `tokio::time` pause.
+      - Use no network. Use a stub binary, `wiremock`, or a recorded fixture.
+      - Isolate the filesystem with `tempfile`. Never read the real `~/.rho` or `~/.agents`.
+      - Leave the suite red. A green suite here means the test asserts nothing.
+
+  - id: green
+    phase: build
+    role: developer
+    agents_md_step: 6
+    inputs:
+      red_tests: red.test_files
+      dod: plan.dod_per_build_stage
+    inputs_when:
+      bug-fix:                                # no architect ran, so the tester wrote the DoD
+        red_tests: red.test_files
+        dod: red.dod_for_green
+      refactor:                               # no new test exists. the old suite is the spec
+        existing_tests: recon.tests_that_are_the_spec
+        dod: fixed_dod.refactor
+    produces:
+      files: {type: list, evidence: path-per-file}
+      dod_state: {type: list, evidence: 'command, exit code, and the last relevant line'}
+    dod_authored_by: architect
+    dod_authored_by_when:
+      bug-fix: tester          # the tester wrote `red.dod_for_green`
+      refactor: template       # `fixed_dod.refactor` is the whole DoD
+    reviewed_by: [reviewer, secops]
+    gates: [rust]
+    rules:
+      - Write only the code a failing test needs. The sweep stage will delete the rest.
+      - Never edit a test. If the test is wrong, say so in the report and stop.
+
+  - id: mutate
+    phase: prove
+    role: controller
+    agents_md_step: 7
+    inputs:
+      new_tests: red.test_files
+    inputs_when:
+      refactor:                               # break the code, and watch an old test fail
+        new_tests: recon.tests_that_are_the_spec
+    produces:
+      mutations: {type: list, evidence: 'break, command, real failing output, then restore'}
+      rewritten: {type: list, note: Every test that passed against its break, and its new form.}
+    dod_authored_by: template
+    reviewed_by: [reviewer]
+    gates: [rust]
+    rules:
+      - Copy the file to /tmp first. Never restore it with `git checkout`. See D-jcode-bash-lessons.
+      - A test that passes against the break is a defect. Rewrite it, and prove it again.
+      - Pin the invariant, not the example. See D-two-weak-tests.
+
+  - id: sweep
+    phase: prove
+    role: controller
+    agents_md_step: 8
+    produces:
+      public_items_added: {type: list, evidence: test-name-per-item}
+      untested: {type: list, note: Empty, or a named reason per item.}
+      fail_open_audit: {type: list, evidence: 'checked: Other or Unknown variant, default trait body, Default impl, process boundary'}
+    dod_authored_by: template
+    reviewed_by: [reviewer]
+    gates: [surface]
+
+  - id: review
+    phase: prove
+    role: reviewer
+    agents_md_step: 9
+    produces:
+      findings: {type: list, evidence: 'severity blocker, major, or minor, plus file:line'}
+      public_items_with_no_test: {type: list}
+    dod_authored_by: template
+    gates: [full]
+    rules:
+      - The reviewer never wrote the code. Re-reading your own diff is not a review.
+      - The brief must state the defect history, and must assume another of the same family exists.
+      - Add a secops pass for anything that runs a command, reads a path, holds a
+        credential, or trusts another process.
+      - A severity is a hypothesis. Test it. See D-bash-scrubs-credentials.
+
+  - id: measure
+    phase: prove
+    role: devops
+    agents_md_step: 13
+    purpose: >
+      Speed and memory are features, so every track measures its cost. All three sprint
+      files held this stage, and the template must not lose it.
+    produces:
+      numbers: {type: list, evidence: 'the command, the machine, and the date, per number'}
+      against_recorded: {type: list, evidence: 'the docs/benchmarks.md row it compares with'}
+      regression: {type: enum, values: [none, measured], evidence: number-before-and-after}
+    dod_authored_by: template
+    reviewed_by: [reviewer]
+    gates: [docs]
+    rules:
+      - A measured regression fails this stage. It is not a note for later.
+      - A number with no command is a slogan. Delete it, or produce the command.
+      - Record the number in docs/benchmarks.md, with the machine and the date.
+
+  - id: drive
+    phase: prove
+    role: controller
+    agents_md_step: 11
+    produces:
+      commands: {type: list, evidence: real-output-per-command}
+      failure_paths: {type: list, must_include: [absent-file, denied-permission, the-same-thing-twice]}
+      providers: {type: list, note: Every provider the change touches. One is not every one.}
+      defects: {type: list, evidence: filed-and-fixed-or-recorded-as-known}
+      verification_path: {type: path, evidence: docs/verification/}
+    dod_authored_by: template
+    reviewed_by: [reviewer]
+    gates: [full]
+    rules:
+      - Build with `cargo build --release -p rho-cli`, then run the real binary.
+      - No fixture catches a defect in the request. Only a live call does.
+
+  - id: land
+    phase: prove
+    role: [devops, documenter]
+    agents_md_step: 12,13
+    inputs:
+      defects: drive.defects
+    inputs_when:
+      docs-only:                              # nothing ran, so reconcile against the facts
+        settled: recon.decisions_that_apply
+    produces:
+      guards: {type: list, evidence: broken-on-purpose-and-it-tripped}
+      spec_amended: {type: list, evidence: spec-matches-the-code-that-shipped}
+      features_row: {type: list, evidence: status-crate-and-extension-point}
+      claims_deleted: {type: list, note: Every claim no test or benchmark proves.}
+      decisions: {type: list, evidence: '.rho-work/decisions/<ts>-D-<slug>.md'}
+    dod_authored_by: template
+    reviewed_by: [reviewer]
+    gates: [full]
+
+# ---------------------------------------------------------------------------
+# Gate kinds. Reusable review shapes. A stage names one, and never retypes it.
+# ---------------------------------------------------------------------------
+gate_kinds:
+
+  review-gate:
+    applies_to: every stage
+    passes:
+      - name: self-check
+        by: role
+        requires: The owning role states each DoD item as met or not met, with proof.
+      - name: independent-review
+        by: reviewer
+        requires: >
+          The reviewer reads the artifacts, runs the gate commands, and returns findings
+          with severity blocker, major, or minor. A blocker or a major finding fails the
+          stage. The brief must state the defect history. The reviewer must answer one
+          question in writing: which public items have no test?
+      - name: controller-verify
+        by: controller
+        requires: >
+          The controller re-runs every gate command, reads the diff, greps for a stub,
+          and runs the product for real. A report is a claim, not a result.
+    fail_action: Re-run the owning role with the findings as the brief.
+    escalate_after: 3
+
+  critic-panel:
+    applies_to: a stage whose output a user judges by taste
+    rule: >
+      A critic never wrote the code it judges. A critic scores the work against a named
+      competitor, on evidence it gathered itself, and it returns `top-peak` or `not-yet`
+      with the exact reason. The stage ends only when every critic returns `top-peak` in
+      the same round.
+    panel:
+      - id: beauty
+        role: designer
+        judges: Layout, rhythm, colour, contrast, the header, the motion, and the empty state.
+      - id: usability
+        role: reviewer
+        judges: >
+          Whether a first-time user reaches a first answer without the docs, and whether
+          a wrong key is recoverable.
+      - id: performance
+        role: devops
+        judges: >
+          Time to first frame, frame time under a streaming turn, resident memory, and
+          binary size, each against docs/benchmarks.md. A measured regression fails the round.
+      - id: accessibility
+        role: reviewer
+        judges: >
+          Contrast against WCAG, behaviour with no colour, behaviour at 80 and at 40
+          columns, and motion with the animation switched off.
+    rounds:
+      max: 5
+      on_not_yet: >
+        The controller turns every finding into a task, dispatches a developer, and runs
+        the panel again. A finding with no fix is recorded as a known limit with a reason,
+        and the critic must accept the record.
+
+# ---------------------------------------------------------------------------
+# Rules. Five of them. Each comes from a measured defect, not from taste.
+# ---------------------------------------------------------------------------
+rules:
+  - id: R-1
+    rule: An unfilled slot is a blocker. It never takes a default.
+    detail: A missing lane resolves to the strictest lane, never the loosest.
+    evidence: >
+      `ToolKind::Other` shipped as a fail-open variant, and a read-only policy then
+      approved any tool that forgot its kind. See D-plugin-does-not-classify-itself
+      and D-config-fails-closed.
+  - id: R-2
+    rule: Every filled slot carries evidence.
+    detail: Evidence is a command with its exit code, or a `file:line`. Nothing else counts.
+    evidence: >
+      Two false claims are on record. One measured prose at the wrong limit. One reported
+      no `todo!()` while three remained, and one was the path-confinement boundary.
+  - id: R-3
+    rule: No stage may hold more than four items.
+    detail: The controller rejects a five-item stage before dispatch, not after a wasted run.
+    evidence: >
+      Six of sixteen dispatches in sprints 1 and 2 hit a turn limit, and three of eight
+      in sprint 3. The recorded lesson: a brief with more than about four fix items will
+      not finish. See `.rho-work/progress.md`.
+  - id: R-4
+    rule: A skipped stage must name the lane that permits the skip.
+    detail: The controller checks the `lanes` map permits it. There is no "not applicable".
+    evidence: A free-form skip is the escape hatch every agent reaches for.
+  - id: R-5
+    rule: A generated stage may not remove or reorder a frame or a prove stage.
+    detail: The build phase is the only writable region.
+    evidence: >
+      Sprint 1 and sprint 3 both dropped the mutation stage, and both shipped a vacuous
+      test family. See D-bash-line-cap.
+
+forbids:
+  - No per-sprint agentic workflow file. Not one, ever again.
+  - No agent authors the DoD it is scored against.
+  - No unfilled slot, and no defaulted slot.
+  - No optional slot. A slot exists in a lane, or it does not exist at all.
+  - No slot without evidence.
+  - No stage with more than four items.
+  - No generated stage that touches the frame phase or the prove phase.
+  - No track recursion past depth two.
+  - No prose-only slot. Every slot has a type.
+  - No second definition of the gate. `gates` above is the only one.
+  - No second mechanism that skips a stage. `lanes.<lane>.skips` is the only one.
+  - No stage kind invented in a track. Add it here, with its review, or do not add it.
+
+# ---------------------------------------------------------------------------
+# Spawn contract. What the controller sends a subagent, and what comes back.
+#
+# `.rho-work/BRIEF.md` stays the shared preamble that every role reads. A per-stage
+# prompt holds slots only. Keep it short. jcode's whole system prompt is about 670
+# tokens, and a prompt that balloons defeats its own purpose.
+# ---------------------------------------------------------------------------
+spawn:
+  preamble: .rho-work/BRIEF.md
+  checklist: AGENTS.md
+  prompt_sections:
+    - name: Inputs
+      holds: Slots bound by name from a prior handover. The controller resolves them.
+    - name: Do
+      holds: The steps for this stage kind, from `stage_kinds`. Nothing else.
+    - name: Return
+      holds: The exact `produces` schema, with a type and an evidence field per slot.
+  prompt_max_words: 600
+  binding:
+    - Resolve every input at spawn time. A missing upstream slot fails before the run starts.
+    - State that everything needed is already on disk. No web research unless the brief says so.
+    - Name the exact paths. A subagent that hunts for a file stalls.
+  subagent_limits:
+    - A subagent must never run a git command that writes. See D-no-git-writes-by-a-subagent.
+    - A subagent must never restore a file with `git checkout`. See D-jcode-bash-lessons.
+    - A subagent works on its assigned stage only.
+  handover:
+    path: .rho-work/tracks/<track>/handovers/<stage>.yaml
+    report_sections: [Stage, DoD, Gate commands, Files, Findings, Open questions]
+    max_words: 400
+    note: The same six sections as `.rho-work/BRIEF.md` section 7, with types.
+  review_handover:
+    path: .rho-work/tracks/<track>/handovers/<stage>.review.yaml
+    reference_form: <stage>.review.<slot>
+    note: >
+      Every reviewed stage yields a second handover, written by its reviewer. So a later
+      stage binds a finding by name, and `plan.review.findings` resolves.
+    produces:
+      findings: {type: list, evidence: 'severity blocker, major, or minor, plus file:line'}
+      public_items_with_no_test: {type: list}
+      verdict: {type: enum, values: [pass, fail]}
+
+# ---------------------------------------------------------------------------
+# Monitoring. Subagents stall, so the controller babysits them.
+# ---------------------------------------------------------------------------
+monitoring:
+  heartbeat_seconds: 90
+  stall_signals:
+    - No tool call for two consecutive heartbeats.
+    - The same tool call repeated three times.
+    - The agent reports it cannot find a file the controller knows exists.
+    - The agent asks a question instead of acting.
+  actions:
+    on_stall: steer_subagent with the exact missing fact or file path.
+    on_second_stall: Kill it, and re-run with a narrower brief and explicit paths.
+    on_third_stall: The controller does the task inline, and records the reason.
+  max_reruns_per_task: 3
+  ledger: .rho-work/progress.md
+
+# ---------------------------------------------------------------------------
+# Track. The instance shape. A track is one contract and one red-to-green pair.
+#
+# A feature is the natural size. A sprint is a schedule, not a unit of work. The
+# template recurses exactly once, and depth two is the cap. A third level is where a
+# DoD becomes vacuous.
+# ---------------------------------------------------------------------------
+track:
+  path: .rho-work/tracks/<yyyymmdd-hhmmss>-<slug>/track.yaml
+  kinds:
+    task: A feature, a bug fix, or a refactor. Its stages are stage kinds.
+    epic: What you used to call a sprint. Its stages are track references.
+  epic_rule: >
+    An epic's DoD is the mechanical union of its tasks' DoDs. It may add no item of its
+    own, so an epic cannot hide work behind a summary.
+  id_rule: A stage id is a slug. Never a counter, and never a letter suffix. See D-slug-ids.
+  status: [open, frozen]
+  frozen_rule: A frozen track records the git sha, and it is checked for internal consistency only.
+  example_stage:
+    - kind: green
+      id: acp-frontend-green
+      role: developer
+      depends_on: [acp-frontend-red]
+      gates: [rust, minimal-build]
+      gate_extra: ["cargo test -p rho-acp --all-features"]
+      dod:
+        - text: Every red test passes, with no test edited.
+          evidence: "cargo test -p rho-acp --all-features; exit 0"
+
+# ---------------------------------------------------------------------------
+# Release policy. The repository is private until the first release.
+# ---------------------------------------------------------------------------
+release_policy:
+  visibility_now: private
+  visibility_at_release: public
+  checklist: docs/release-checklist.md
+  rules:
+    - Do not publish the website before the repository is public.
+    - Do not announce the project before the repository is public.
+    - Scan the tracked files and the whole history for a secret before you go public.
+  go_public_command: >
+    gh repo edit leduckhc/rho --visibility public
+    --accept-visibility-change-consequences
+
+out_of_scope:
+  - "`.github/workflows/`. Those are the CI workflows, and another agent owns them."
+  - A runner. No code executes this file. The controller is the executor.
+  - A sprint goal. A goal belongs to a track, not to the template.
+  - A record of finished work. `.rho-work/progress.md` holds that.

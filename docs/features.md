@@ -13,9 +13,9 @@ This document is the contract for all later stages. The architect writes specs a
   older spec still names it, and a dangling reference is worse than a history note. The
   row says which feature replaced it.
 
-A status states what the code proves, not what a plan intends. `workflow-sprint-2.yaml`
-holds the current sprint. Sprint 2 is at work on config (`rho-config`), the session log,
-and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
+A status states what the code proves, not what a plan intends. `agentic-workflow.yaml`
+holds the template that every unit of work follows. A filled copy lives in
+`.rho-work/tracks/`, and `.rho-work/progress.md` records what each sprint delivered.
 
 **Extension point** describes how a third party replaces or extends the feature without forking rho.
 

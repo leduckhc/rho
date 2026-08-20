@@ -13,7 +13,8 @@ that make it public. Do the steps in order.
 
 ## Before you go public
 
-1. Confirm the sprint definition of done in `workflow.yaml` is complete.
+1. Confirm every open track in `.rho-work/tracks/` meets its definition of done.
+   `agentic-workflow.yaml` states what a track must prove.
 2. Run the gate. All four commands must exit 0.
 
    ```sh

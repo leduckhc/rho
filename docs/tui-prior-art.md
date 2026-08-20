@@ -1,6 +1,7 @@
 # Prior art for the terminal interface
 
-Stage U0 of sprint 3. See `workflow-sprint-3.yaml`.
+The recon stage of the terminal interface work, in sprint 3. `agentic-workflow.yaml` holds
+that stage kind now.
 
 Every claim here names the file it came from. A claim with no source was deleted, and a
 claim that the source contradicted is recorded as a correction, because a plausible memory
