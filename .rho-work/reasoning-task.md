@@ -68,6 +68,12 @@ the first place to look for a wrong assumption.
 - **I11.** The gate covers a command credential, `skill-paths`, and `mcp-config`. S6 named
   the probe's mitigation, and those are the three keys the probe named.
 
+### Built after this, and verified
+
+- **I12 to I14, and I16, are built.** `--profile` exists, the flag fields are `Option`, no
+  `clap` `env` attribute remains, and the load happens once per process. See
+  `docs/verification/config-call-site.md`.
+
 ### Chosen but not yet built
 
 - **I12.** `--profile` must exist. Layer 4 selects a profile, and `Cli` has no such flag,
@@ -117,7 +123,7 @@ I cannot decide these. Each needs one choice from you.
 
 ## State of the tree
 
-HEAD is `bea3295`. Three commits landed in this branch beyond the rescue commit.
+HEAD is the call-site commit. Four commits landed beyond the rescue commit.
 
 | Commit | What it did |
 | --- | --- |
@@ -125,15 +131,15 @@ HEAD is `bea3295`. Three commits landed in this branch beyond the rescue commit.
 | `2f807c4` | R6: an unknown reasoning mode is refused at every source |
 | `01cd81c` | the config call-site contract, reviewed before any code |
 | `bea3295` | config discovery, and the project trust gate |
+| `68f451d` | U3 answered, and the layer 6 blocker recorded |
 
 The gate passes at **874 tests**, and it was re-run rather than trusted. `fmt`, `clippy`,
 the minimal build, and `check-ids` all pass.
 
-**The trust gate of `bea3295` is not reachable yet.** Nothing in production calls
-`Config::load`, `ConfigPaths::discover`, or `Sources::from_paths`. That is the whole point of
-the remaining work, and it also settles U1: option (b), "park the config work now that the
-security gate is in", rested on a false premise, because the gate protects nothing until the
-call site exists.
+**The `skill-paths` and `mcp-config` half of the trust gate is now reachable.** The
+command-credential half is not, and the reason is below. U1 was settled by evidence: option
+(b), "park the config work now that the security gate is in", rested on a false premise,
+because the gate protected nothing until the call site existed.
 
 **Step 7 found two of my own tests worthless, and that is the day's most useful result.**
 Three deliberate breaks caught only one failure at first.
@@ -153,32 +159,40 @@ break downgraded the refusal to an empty literal, which is the exact silent drop
 `AGENTS.md` names. `an_untrusted_project_command_never_runs_the_command` proves the gate by
 running a real command and checking that the marker file is absent.
 
-## The layer 6 work, written and then set aside
+## The call site landed
 
-`.rho-work/wip-flag-layer.patch` holds it. It is **not** committed, and the tree is green
-without it. It carries the `Cli` type changes of I13 and I14, the `--profile` flag of I12,
-`flag_layer`, and six tests. Five deliberate breaks were run against those six tests, and
-**every break failed a test**, including the source guard.
+`D-the-merge-cannot-name-a-values-source` took candidate 1: each source is validated before
+the merge, so a refusal still names the flag, the variable, or the key. All three were driven
+for real.
 
-It was set aside for one reason, recorded as `D-the-merge-cannot-name-a-values-source`.
-Once reasoning parses inside `Config::load`, a refusal says "the merged configuration"
-rather than "the --reasoning flag is wrong", so two committed tests from the S3 ruling would
-have to be weakened. That needs a ruling, not a quiet edit.
+The gate passes at **901 tests**, up from 874. Eight deliberate breaks were run against the
+new tests, and **every break failed a test**: the global file unread, the source validation
+skipped, layer 6 dropped, `RHO_SESSION_ROOT` ignored, the project always trusted, `--profile`
+dropped, `Ask` downgraded to allow-all, and the `approval` key ignored.
 
-Two facts found while writing it, both worth keeping:
+`rho run` was then driven against live Bedrock. A config file alone drives a real turn, which
+is the defect this branch opened with.
 
-- **Dropping the clap `env` attributes kills `RHO_MODEL` and `RHO_PROVIDER`,** and no test
-  notices. `RHO_LOG` survives, because `main.rs` reads it directly. `resolve_provider_name`
-  takes an env argument and every production caller passes `None`, so that variable reached
-  the product only through clap. The merge has to land in the same commit that removes the
-  attributes.
-- **An unused `flag_layer` fails `clippy -D warnings`.** So layer 6 cannot land as its own
-  commit. The call site has to come with it.
+## What driving it for real found
+
+- **The command-credential gate is still unreachable.** Run 7 of the verification passed
+  `--trust-project` and the command still did not run. No provider resolves through
+  `Config::resolve_credential`, because `provider.rs` still uses
+  `std::env::var(...).unwrap_or_default()` in five places. That is I15, and it is next. The
+  refusal is tested and waiting for a caller, so I15 must land with its gate already wired.
+- **A refusal from a file prints a malformed sentence.** "cannot parse the config file the
+  merged configuration". It names the key and the value, so it is wrong prose, not a wrong
+  answer. The clean fix edits the error taxonomy, which is a reviewed contract, so it did not
+  ride along.
+- **Two variables were dead for a while, with a green suite.** Dropping the clap `env`
+  attribute from `--model` killed `RHO_MODEL`, and `resolve_provider_name` takes an env
+  argument that every production caller passes as `None`, which killed `RHO_PROVIDER`. Both
+  now have named regression guards.
 
 ## Next step
 
-`D-the-merge-cannot-name-a-values-source` needs a ruling, and candidate 1 is the small one.
-Then the call site lands with layer 6 in one commit.
+I15: the providers resolve a credential through `Config`, and `unwrap_or_default` goes. That
+also makes the command-credential gate reachable for the first time.
 
-U2 and U4 are still open and still unanswered. U4 blocks behaviour rules 4, 7, and 8, because
-`Config` has no field to carry a notice, so those three rules stay unbuilt on purpose.
+U2 and U4 are still open. U4 blocks behaviour rules 4, 7, and 8, because `Config` has no field
+to carry a notice, so those three rules stay unbuilt on purpose.

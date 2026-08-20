@@ -1,6 +1,8 @@
 # SPEC-config-call-site — the config files reach the product
 
-Status: draft, awaiting the step 9 contract review and the step 9 security review.
+Status: the call site is built and driven for real. See
+`docs/verification/config-call-site.md`. Rules 4, 7, and 8 stay unbuilt while question U4
+of `.rho-work/reasoning-task.md` is open, and item I15, the provider credentials, is next.
 
 Owner crates: `rho-config` owns discovery and the merge. `rho-cli` owns the one call.
 
@@ -119,7 +121,18 @@ fn flag_layer(cli: &Cli) -> rho_config::ConfigLayer;
 
 /// Load the configuration once for this process. Every later reader takes `&Config`.
 fn load_config(cli: &Cli) -> anyhow::Result<rho_config::Config>;
+
+/// Refuse a bad reasoning mode at its own source, before the merge.
+///
+/// `merge` keeps a winning value and drops where it came from, so a refusal raised after the
+/// merge can only say "the merged configuration". The flag and the variable are checked here
+/// so each refusal still names its own source. See `D-the-merge-cannot-name-a-values-source`.
+fn validate_reasoning_sources(cli: &Cli, env: &[(String, String)]) -> anyhow::Result<()>;
 ```
+
+`build_config` takes `&Config` and no longer takes `&Cli`, because every value it needs now
+arrives through the merge. `build_session` takes both, because `--trust-project` stays a flag:
+a file cannot grant itself trust.
 
 ### The error taxonomy
 
@@ -243,6 +256,30 @@ Named, with the assertion each one proves.
 - `no_clap_env_attribute_remains` — a source guard, because the second precedence is the
   defect `SPEC-config` section 2 forbids.
 - `an_absent_credential_is_an_error_not_an_empty_key` — replaces `unwrap_or_default()`.
+
+Added while building it, each one for a reason the list above did not hold:
+
+- `the_environment_beats_the_config_file` — layer 5 over layer 3 with no flag. Without it the
+  full chain could pass while the environment was ignored.
+- `an_unknown_mode_in_a_file_is_refused_and_names_the_key` — the third source of the S3 ruling.
+- `the_model_variable_still_chooses_the_model` and
+  `the_provider_variable_still_chooses_the_provider` — regression guards. Dropping the clap
+  `env` attribute made both variables dead while all 874 tests still passed.
+- `the_model_flag_beats_the_model_variable` — the flag half of the same pair.
+- `the_root_flag_beats_the_session_root_variable` and
+  `an_empty_session_root_variable_is_ignored` — the two branches of `bootstrap_root` that the
+  named test above does not reach.
+- `a_negated_read_only_flag_writes_nothing` and `an_empty_skill_list_writes_nothing` — rule 6
+  for the two cases where an absent value could still send one.
+- `a_project_file_reaches_the_product` — the gate of `bea3295` only matters once a project
+  file is read at all.
+- `an_untrusted_project_file_loses_skill_paths` — rule 8, through the call site rather than the
+  merge alone, and it proves the flag restores the key.
+- `a_config_file_can_deny_a_mutating_tool` and `the_read_only_flag_beats_an_allow_all_file` —
+  the `approval` key reaching a real policy, and the U3 ruling end to end.
+- `an_ask_approval_mode_is_refused_here` — `approval = "ask"` has no interactive gate in this
+  path, so it is refused rather than downgraded in silence.
+- `every_reasoning_mode_still_resolves` — all four names, after the resolver moved.
 
 ### The project trust gate, in `rho-config`
 

@@ -28,9 +28,16 @@ refusal say "the merged configuration" where it used to say "the --reasoning fla
 
 ## The decision
 
-**Not decided. The work stops here and the owner picks.** No code landed for it.
+**Candidate 1. Each source is validated before the merge.** The owner said "Go" without
+picking, so the option that keeps every existing message was taken, because it is the only one
+of the three that weakens nothing.
 
-The three candidates, with the cost of each:
+`validate_reasoning_sources` in `rho-cli` refuses a bad `--reasoning` and names the flag, then
+refuses a bad `RHO_TUI_REASONING` and names the variable. `Config::load` keeps its own check
+for a value that came from a file, and names the key. All three refusals were driven for real,
+and each names its own source. See `docs/verification/config-call-site.md`, runs 4 and 5.
+
+The three candidates were:
 
 1. **Validate at the source, before the merge.** `flag_layer` refuses a bad `--reasoning`
    and names the flag. `ConfigLayer::from_env` already refuses and names the variable.
@@ -53,9 +60,26 @@ worse refusal, and naming the source was the point of the ruling that created th
 Candidate 1 looks right and small. It is still the owner's call, because it puts a validation
 in `rho-cli` that `SPEC-config-call-site` currently assigns to `rho-config`.
 
+## What is still wrong, and stays wrong for now
+
+A refusal that comes from a file prints an ungrammatical sentence:
+
+```
+cannot parse the config file the merged configuration: the tui-reasoning key value "loud" ...
+```
+
+`ConfigError::Parse` always prints `cannot parse the config file {path}`, and after the merge
+there is no real path, so `parse_reasoning` passes a fake one. The message still names the key
+and the bad value, so this is wrong prose and not a wrong answer.
+
+The clean fix is candidate 2's smaller cousin: an error variant for a bad value with no file.
+That edits the error taxonomy, which is part of a reviewed contract, so it does not ride along
+inside this change.
+
 ## What this rules out
 
-- **No weakening of a committed refusal in silence.** The message names its source until a
-  ruling says otherwise.
-- **No deletion of `resolve_reasoning` yet.** It holds the flag and variable messages that
-  the merge cannot yet produce.
+- **No weakening of a committed refusal in silence.** A refusal names its source.
+- **No validation only after the merge.** A check that runs only on the merged layer cannot
+  name a flag or a variable, and two committed tests require that it does.
+- **No provenance field in `ConfigLayer`,** for now. Candidate 2 stays available, and it is
+  the general fix if a third key ever needs the same treatment.
