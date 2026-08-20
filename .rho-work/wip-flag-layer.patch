@@ -1,0 +1,322 @@
+diff --git a/crates/rho-cli/src/cli.rs b/crates/rho-cli/src/cli.rs
+index b386449..2e0a2c5 100644
+--- a/crates/rho-cli/src/cli.rs
++++ b/crates/rho-cli/src/cli.rs
+@@ -22,7 +22,7 @@ use rho_core::{
+ };
+ 
+ use crate::extensions;
+-use crate::provider::{self, MODEL_ENV, PROVIDER_ENV};
++use crate::provider::{self, MODEL_ENV};
+ use crate::subagents;
+ 
+ /// The exit code for a run that failed.
+@@ -32,14 +32,23 @@ const EXIT_FAILURE: i32 = 1;
+ #[derive(Debug, Parser)]
+ #[command(name = "rho", version, about = "A composable coding agent harness.")]
+ pub struct Cli {
+-    /// The provider to use. Overrides the RHO_PROVIDER variable.
+-    #[arg(long, global = true, env = PROVIDER_ENV)]
++    /// The provider to use. It beats the RHO_PROVIDER variable, through the merge.
++    ///
++    /// No `env` attribute here. Layer 5 belongs to the merge, and a clap `env` would be a
++    /// second precedence beside it. See `SPEC-config` section 2.
++    #[arg(long, global = true)]
+     pub provider: Option<String>,
+ 
+-    /// The model id to send. Overrides the RHO_MODEL variable.
+-    #[arg(long, global = true, env = MODEL_ENV)]
++    /// The model id to send. It beats the RHO_MODEL variable, through the merge.
++    #[arg(long, global = true)]
+     pub model: Option<String>,
+ 
++    /// The profile to apply. A profile is a named block in a config file.
++    ///
++    /// Layer 4 selects a profile, so without this flag no file profile is reachable.
++    #[arg(long, global = true, value_name = "NAME")]
++    pub profile: Option<String>,
++
+     /// The session root. Tools cannot touch a path outside it. Defaults to the
+     /// current directory.
+     #[arg(long, global = true)]
+@@ -47,15 +56,24 @@ pub struct Cli {
+ 
+     /// Deny every tool that can change state. rho then reads, searches, and
+     /// thinks, but it does not write, edit, or run a command.
+-    #[arg(long, global = true)]
+-    pub read_only: bool,
++    ///
++    /// It is `Option<bool>` so that an unpassed flag writes nothing into layer 6. A plain
++    /// `bool` would send `false` and beat an `approval` key in a file. It maps onto
++    /// `approval = "read-only"`, so the flag wins by the merge order and needs no
++    /// special case.
++    #[arg(long, global = true, num_args = 0..=1, default_missing_value = "true")]
++    pub read_only: Option<bool>,
+ 
+     /// The `bash` confinement mode. `off` runs a command unconfined, which is the
+     /// default. `confined` limits writes to the session root and the scratch
+     /// directory. `strict` also denies the network. When confinement is asked for
+     /// and no OS sandbox is available, `bash` refuses the command. See SPEC-bash-sandbox.
+-    #[arg(long, global = true, value_enum, default_value_t = SandboxArg::Off)]
+-    pub sandbox: SandboxArg,
++    ///
++    /// It carries no `default_value_t`. A clap default would always yield `Off`, so layer 6
++    /// would beat a file asking for `sandbox = "strict"`. That is a fail-open inside the
++    /// merge built to prevent one. The default now lives in `Config::defaults`.
++    #[arg(long, global = true, value_enum)]
++    pub sandbox: Option<SandboxArg>,
+ 
+     /// Let the TUI capture the mouse, so the wheel scrolls the band and a click
+     /// selects a list row.
+@@ -63,8 +81,8 @@ pub struct Cli {
+     /// Off by default, because capture takes drag-select away from the terminal. With
+     /// capture off, the wheel, a drag, and the terminal search all work on the
+     /// transcript. See decision D-native-selection-is-the-default.
+-    #[arg(long, global = true)]
+-    pub mouse: bool,
++    #[arg(long, global = true, num_args = 0..=1, default_missing_value = "true")]
++    pub mouse: Option<bool>,
+ 
+     /// How the TUI draws reasoning: `off`, `summary`, `full`, or `live`.
+     ///
+@@ -86,15 +104,15 @@ pub struct Cli {
+     pub skills: Vec<PathBuf>,
+ 
+     /// Do not search the skill directories. An explicit --skill still loads.
+-    #[arg(long, global = true)]
+-    pub no_skills: bool,
++    #[arg(long, global = true, num_args = 0..=1, default_missing_value = "true")]
++    pub no_skills: Option<bool>,
+ 
+     /// Read MCP servers from this file instead of ~/.rho/mcp.json.
+     #[arg(long, global = true, value_name = "PATH")]
+     pub mcp_config: Option<PathBuf>,
+ 
+-    /// The log filter, for example "info" or "rho_core=debug". Overrides RHO_LOG.
+-    #[arg(long, global = true, env = "RHO_LOG")]
++    /// The log filter, for example "info" or "rho_core=debug". It beats RHO_LOG.
++    #[arg(long, global = true)]
+     pub log: Option<String>,
+ 
+     #[command(subcommand)]
+@@ -182,13 +200,14 @@ fn build_config(cli: &Cli) -> anyhow::Result<SessionConfig> {
+     //
+     // A future release adds an interactive approval gate for the TUI. Until then
+     // `--read-only` is the way to run rho against a repository you do not trust.
+-    let approval: Arc<dyn ApprovalPolicy> = if cli.read_only {
++    let approval: Arc<dyn ApprovalPolicy> = if cli.read_only.unwrap_or(false) {
+         Arc::new(ReadOnlyPolicy)
+     } else {
+         Arc::new(AllowAllPolicy)
+     };
+ 
+-    Ok(SessionConfig::new(model, root, approval).with_sandbox(cli.sandbox.into()))
++    Ok(SessionConfig::new(model, root, approval)
++        .with_sandbox(cli.sandbox.unwrap_or(SandboxArg::Off).into()))
+ }
+ 
+ /// Build a session from the config and the chosen provider.
+@@ -209,7 +228,7 @@ async fn build_session(
+         &config.session_root,
+         cli.trust_project,
+         &cli.skills,
+-        !cli.no_skills,
++        !cli.no_skills.unwrap_or(false),
+         cli.mcp_config.as_deref(),
+     )
+     .await;
+@@ -232,7 +251,7 @@ async fn build_session(
+     let (spawn_tool, subagents) = subagents::load(subagents::LoadRequest {
+         session_root: config.session_root.clone(),
+         trust_project: cli.trust_project,
+-        discover: !cli.no_skills,
++        discover: !cli.no_skills.unwrap_or(false),
+         parent_config: config.clone(),
+         provider: Arc::clone(&provider),
+         hooks: Arc::clone(&hooks),
+@@ -407,6 +426,44 @@ fn rho_env_vars() -> Vec<(String, String)> {
+         .collect()
+ }
+ 
++/// Turn the parsed flags into layer 6, the strongest layer.
++///
++/// A flag the user did not pass must not write a value, so every field stays `None`
++/// unless the user passed it. That covers a `bool` and an enum with a clap default, which
++/// is the harder half. See `SPEC-config-call-site` rule 6.
++///
++/// `--read-only` maps onto `approval = "read-only"`. The flag then beats a file's
++/// `approval` key by the merge order, and no special case is needed.
++fn flag_layer(cli: &Cli) -> rho_config::ConfigLayer {
++    rho_config::ConfigLayer {
++        provider: cli.provider.clone(),
++        model: cli.model.clone(),
++        session_root: cli.root.clone(),
++        // `--read-only` is one bool over a three-valued enum, so only the true case has a
++        // single target. `--read-only=false` says "do not force read-only", and it does not
++        // name which of `ask` or `allow-all` the user wants, so it writes nothing.
++        approval: match cli.read_only {
++            Some(true) => Some("read-only".to_string()),
++            Some(false) | None => None,
++        },
++        // The name comes from `SandboxMode`, so the flag and the file key cannot drift.
++        sandbox: cli
++            .sandbox
++            .map(|arg| SandboxMode::from(arg).as_str().to_string()),
++        tui_mouse: cli.mouse,
++        tui_reasoning: cli.reasoning.clone(),
++        no_skills: cli.no_skills,
++        mcp_config: cli.mcp_config.clone(),
++        // An empty `--skill` list is no request at all, so it writes nothing.
++        skill_paths: if cli.skills.is_empty() {
++            None
++        } else {
++            Some(cli.skills.clone())
++        },
++        ..rho_config::ConfigLayer::default()
++    }
++}
++
+ /// Whether the TUI captures the mouse. The flag wins, then the environment, then off.
+ ///
+ /// `--mouse` and `RHO_TUI_MOUSE` both reach this. The config file does not, because no
+@@ -452,7 +509,7 @@ async fn run_interactive(cli: &Cli) -> i32 {
+     let provider_name = provider::resolve_provider_name(cli.provider.as_deref(), None)
+         .unwrap_or_else(|_| String::new());
+     // The interface reads one switch. The flag wins, then the environment, then off.
+-    let mouse = resolve_mouse(cli.mouse, &rho_env_vars());
++    let mouse = resolve_mouse(cli.mouse.unwrap_or(false), &rho_env_vars());
+     let reasoning = match resolve_reasoning(cli.reasoning.as_deref(), &rho_env_vars()) {
+         Ok(mode) => mode,
+         Err(error) => return fail(error),
+@@ -557,7 +614,7 @@ mod tests {
+         // prompt. The choice is stated in `build_config`, not hidden in a
+         // constructor. See decision D-no-four-argument-session-new.
+         let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
+-        assert!(!cli.read_only);
++        assert_eq!(cli.read_only, None, "an unpassed flag must write nothing");
+         let config = build_config(&cli).unwrap();
+         let decision = futures::executor::block_on(config.approval.approve(
+             "write",
+@@ -571,7 +628,7 @@ mod tests {
+     fn read_only_flag_denies_a_mutating_tool() {
+         // `--read-only` is the way to run rho against a repository you do not trust.
+         let cli = Cli::try_parse_from(["rho", "--model", "m", "--read-only"]).unwrap();
+-        assert!(cli.read_only);
++        assert_eq!(cli.read_only, Some(true));
+         let config = build_config(&cli).unwrap();
+         for kind in [
+             rho_core::ToolKind::Edit,
+@@ -616,13 +673,111 @@ mod tests {
+ 
+     #[test]
+     fn sandbox_flag_defaults_to_off() {
+-        // The default is stated in the flag definition, not hidden. See D-no-four-argument-session-new.
++        // The flag itself now writes nothing, because a clap default would beat a file.
++        // The effective default is still `Off`, and it comes from the merge.
+         let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
+-        assert_eq!(cli.sandbox, SandboxArg::Off);
++        assert_eq!(cli.sandbox, None, "an unpassed enum flag must write nothing");
+         let config = build_config(&cli).unwrap();
+         assert_eq!(config.sandbox, rho_core::SandboxMode::Off);
+     }
+ 
++    #[test]
++    fn an_unset_flag_does_not_beat_a_file() {
++        // Rule 6. A `bool` flag the user never passed must leave layer 6 empty, so a file
++        // value survives the merge. A plain `bool` would send `false` and win.
++        let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
++        let layer = flag_layer(&cli);
++        assert_eq!(layer.approval, None, "--read-only was not passed");
++        assert_eq!(layer.tui_mouse, None, "--mouse was not passed");
++        assert_eq!(layer.no_skills, None, "--no-skills was not passed");
++    }
++
++    #[test]
++    fn the_sandbox_flag_default_does_not_beat_a_file() {
++        // The enum half of rule 6, and the fail-open the review found. `--sandbox` used to
++        // carry `default_value_t`, so layer 6 always held `off` and a file asking for
++        // `strict` could never win.
++        let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
++        assert_eq!(flag_layer(&cli).sandbox, None);
++    }
++
++    #[test]
++    fn flag_layer_maps_each_passed_flag() {
++        // A wrong mapping is otherwise silent, because both fields are `Option<String>`.
++        let cli = Cli::try_parse_from([
++            "rho",
++            "--provider",
++            "bedrock",
++            "--model",
++            "claude",
++            "--sandbox",
++            "strict",
++            "--reasoning",
++            "full",
++            "--read-only",
++            "--mouse",
++            "--no-skills",
++            "--root",
++            "/tmp/root",
++            "--mcp-config",
++            "/tmp/mcp.json",
++            "--skill",
++            "/tmp/skill-one",
++        ])
++        .unwrap();
++        let layer = flag_layer(&cli);
++        assert_eq!(layer.provider.as_deref(), Some("bedrock"));
++        assert_eq!(layer.model.as_deref(), Some("claude"));
++        assert_eq!(layer.sandbox.as_deref(), Some("strict"));
++        assert_eq!(layer.tui_reasoning.as_deref(), Some("full"));
++        assert_eq!(
++            layer.approval.as_deref(),
++            Some("read-only"),
++            "--read-only maps onto the approval key"
++        );
++        assert_eq!(layer.tui_mouse, Some(true));
++        assert_eq!(layer.no_skills, Some(true));
++        assert_eq!(layer.session_root, Some(PathBuf::from("/tmp/root")));
++        assert_eq!(layer.mcp_config, Some(PathBuf::from("/tmp/mcp.json")));
++        assert_eq!(
++            layer.skill_paths.as_deref(),
++            Some([PathBuf::from("/tmp/skill-one")].as_slice())
++        );
++    }
++
++    #[test]
++    fn a_negated_read_only_flag_writes_nothing() {
++        // `--read-only=false` does not name which of `ask` or `allow-all` the user wants,
++        // so it must not weaken an `approval` key that a file set.
++        let cli = Cli::try_parse_from(["rho", "--model", "m", "--read-only=false"]).unwrap();
++        assert_eq!(cli.read_only, Some(false));
++        assert_eq!(flag_layer(&cli).approval, None);
++    }
++
++    #[test]
++    fn an_empty_skill_list_writes_nothing() {
++        // An absent `--skill` must not send an empty list, because an empty list would beat
++        // a file's `skill-paths` and drop every skill in silence.
++        let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
++        assert_eq!(flag_layer(&cli).skill_paths, None);
++    }
++
++    #[test]
++    fn no_clap_env_attribute_remains() {
++        // A source guard. A clap `env` is a second precedence beside layer 5, which
++        // `SPEC-config` section 2 forbids. The needle is built at run time, so this test
++        // does not match its own source.
++        let needle = ["env", "="].join(" ");
++        let offenders: Vec<&str> = include_str!("cli.rs")
++            .lines()
++            .filter(|line| line.contains("#[arg(") && line.contains(&needle))
++            .collect();
++        assert!(
++            offenders.is_empty(),
++            "a clap env attribute is a second precedence: {offenders:?}"
++        );
++    }
++
+     #[test]
+     fn sandbox_flag_sets_confined() {
+         let cli = Cli::try_parse_from(["rho", "--model", "m", "--sandbox", "confined"]).unwrap();

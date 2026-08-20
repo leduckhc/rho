@@ -99,8 +99,11 @@ I cannot decide these. Each needs one choice from you.
   set your approval mode and your sandbox mode. Pick one: **(a)** leave them trusted, as
   S5 says; **(b)** add them to the gate of S6.
 
-- **U3. `--read-only` against an `approval` key.** Both exist, and only the flag is read
-  today. One must win, and no ruling names which.
+- **U3. `--read-only` against an `approval` key.** **Answered**, and not by a new rule.
+  `--read-only` writes `approval = "read-only"` into layer 6, so the flag beats a file by the
+  merge order that already governs every key. `--read-only=false` writes nothing, because one
+  boolean over a three-valued enum has no single target for its false case. See
+  `D-read-only-maps-onto-approval`.
 
 - **U4. The stderr announcements.** Rules 4, 7, and 8 say rho reports a loaded file, an
   absent global path, and a dropped capability. No named test asserts any of that text, and
@@ -114,17 +117,23 @@ I cannot decide these. Each needs one choice from you.
 
 ## State of the tree
 
-HEAD is `01cd81c`. Two commits landed in this branch beyond the rescue commit.
+HEAD is `bea3295`. Three commits landed in this branch beyond the rescue commit.
 
 | Commit | What it did |
 | --- | --- |
 | `e08b190` | rescued 1668 unreviewed lines, and vouched for none of them |
 | `2f807c4` | R6: an unknown reasoning mode is refused at every source |
 | `01cd81c` | the config call-site contract, reviewed before any code |
+| `bea3295` | config discovery, and the project trust gate |
 
-Uncommitted, and gate-green at **874 tests**: config discovery and the project trust gate.
-That is `ConfigPaths::discover`, `ProjectTrust`, the `Sources` builder, and
-`CredentialSource::RefusedProjectCommand`, with 17 new tests in two files.
+The gate passes at **874 tests**, and it was re-run rather than trusted. `fmt`, `clippy`,
+the minimal build, and `check-ids` all pass.
+
+**The trust gate of `bea3295` is not reachable yet.** Nothing in production calls
+`Config::load`, `ConfigPaths::discover`, or `Sources::from_paths`. That is the whole point of
+the remaining work, and it also settles U1: option (b), "park the config work now that the
+security gate is in", rested on a false premise, because the gate protects nothing until the
+call site exists.
 
 **Step 7 found two of my own tests worthless, and that is the day's most useful result.**
 Three deliberate breaks caught only one failure at first.
@@ -144,6 +153,32 @@ break downgraded the refusal to an empty literal, which is the exact silent drop
 `AGENTS.md` names. `an_untrusted_project_command_never_runs_the_command` proves the gate by
 running a real command and checking that the marker file is absent.
 
+## The layer 6 work, written and then set aside
+
+`.rho-work/wip-flag-layer.patch` holds it. It is **not** committed, and the tree is green
+without it. It carries the `Cli` type changes of I13 and I14, the `--profile` flag of I12,
+`flag_layer`, and six tests. Five deliberate breaks were run against those six tests, and
+**every break failed a test**, including the source guard.
+
+It was set aside for one reason, recorded as `D-the-merge-cannot-name-a-values-source`.
+Once reasoning parses inside `Config::load`, a refusal says "the merged configuration"
+rather than "the --reasoning flag is wrong", so two committed tests from the S3 ruling would
+have to be weakened. That needs a ruling, not a quiet edit.
+
+Two facts found while writing it, both worth keeping:
+
+- **Dropping the clap `env` attributes kills `RHO_MODEL` and `RHO_PROVIDER`,** and no test
+  notices. `RHO_LOG` survives, because `main.rs` reads it directly. `resolve_provider_name`
+  takes an env argument and every production caller passes `None`, so that variable reached
+  the product only through clap. The merge has to land in the same commit that removes the
+  attributes.
+- **An unused `flag_layer` fails `clippy -D warnings`.** So layer 6 cannot land as its own
+  commit. The call site has to come with it.
+
 ## Next step
 
-Blocked on U1.
+`D-the-merge-cannot-name-a-values-source` needs a ruling, and candidate 1 is the small one.
+Then the call site lands with layer 6 in one commit.
+
+U2 and U4 are still open and still unanswered. U4 blocks behaviour rules 4, 7, and 8, because
+`Config` has no field to carry a notice, so those three rules stay unbuilt on purpose.
