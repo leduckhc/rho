@@ -165,3 +165,39 @@ the match is ASCII case-insensitive.
 `SandboxedRunner` applies the environment. The recorded administrative directory is never
 re-derived from the worktree `.git` file, because that file is the attack. That amends a contract
 `SPEC-agent-tasks` owns, so this spec states the amendment rather than assuming it.
+
+## Round three: two limits of the environment form
+
+Date: 2026-08-20, after a fourth review pass. Both claims below were probed by a reviewer and then
+re-run by the controller, because AGENTS.md says to verify rather than trust a report.
+
+### A nested tool that renumbers `GIT_CONFIG_COUNT` defeats the guard
+
+```sh
+git config core.hooksPath "$PWD/evilhooks"     # the repository config, outside the worktree
+env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null \
+  sh -c 'export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=tool
+         git add b.txt; git commit -qm second; git config --show-origin core.hooksPath'
+# file:.git/config	/tmp/p4/repo/evilhooks
+cat /tmp/p4/FIRED
+# HOOK_FIRED
+```
+
+The nested tool reused index zero, so rho's guard was overwritten and the hook ran. The guard is
+therefore best-effort. The contract now says so, and it adds two stronger steps that do not depend
+on the environment.
+
+### A forced `GIT_DIR` redirects a nested git in another repository
+
+```sh
+cd /tmp/p4/vendored && git describe --tags
+# v1.0
+env GIT_DIR=/tmp/p4/repo/.git GIT_WORK_TREE=/tmp/p4/repo git describe --tags
+# fatal: No names found, cannot describe anything.
+env GIT_DIR=/tmp/p4/repo/.git GIT_WORK_TREE=/tmp/p4/repo git rev-parse --git-dir
+# /tmp/p4/repo/.git
+```
+
+So a gate check that runs a build whose script asks git about a vendored dependency would read
+rho's repository instead. The contract no longer forces `GIT_DIR` on a check. It repairs the
+worktree pointer before the gate instead, which is safe because the child has already stopped.

@@ -69,8 +69,16 @@ pub enum Admission {
 /// child uses. Its `CancelToken` and its `MessageQueue` exist now, so a steer buffers
 /// and a cancel lands before the child ever runs.
 pub struct QueuedChild {
-    /* private: id, agent, depth, ancestors, cancel, queue, the permit future, a
-       per-parent `sequence`, and a `handed_out` flag that `Drop` reads. */
+    /* private:
+       - `registry: AgentRegistry`, a clone, because `position`, `cancel`, and
+         `started` all read or change `RegistryState`. Without it the struct cannot
+         back its own methods, and a cold implementer found exactly that.
+       - `id`, `agent`, `depth`, `ancestors`, `cancel`, `queue`, `sequence`.
+       - `child_permits: Arc<Semaphore>`, the parent's semaphore. `started` creates
+         the `acquire_owned` future inside itself, so a cancel drops the future and
+         takes no permit. A stored future would need a different field type and would
+         make `Drop` harder.
+       - `handed_out: bool`, which `Drop` reads. */
 }
 
 impl QueuedChild {
@@ -104,10 +112,16 @@ impl QueuedChild {
 /// child. See decision D-a-queued-child-lives-in-the-registry.
 ///
 /// **Rust forbids a partial move out of a type that implements `Drop`.** So
-/// `started` cannot move the permit future or the queue out of `self`. It wraps
-/// those fields in an `Option`, takes them, and sets `handed_out`. `Drop` then
-/// removes the entry only when `handed_out` is false. An implementer who misses
-/// this fights the borrow checker and may delete the guard to escape it.
+/// `started` cannot move the queue or the permits out of `self`. It wraps those
+/// fields in an `Option` and takes them. `Drop` removes the entry only when
+/// `handed_out` is false. An implementer who misses this fights the borrow checker
+/// and may delete the guard to escape it.
+///
+/// **`handed_out` becomes true at one moment only: after the process-wide permit is
+/// held and the live handle is inserted.** Setting it earlier, when the fields are
+/// taken, would skip the removal on the `ProcessWideFull` and `Cancelled` exits, and
+/// the entry would then answer "queued" for ever. That is the leak this flag exists
+/// to prevent, reintroduced by an ordering mistake. A fourth reviewer found it here.
 impl Drop for QueuedChild {
     fn drop(&mut self) { /* remove the queued entry, unless it was handed out */ }
 }
@@ -129,6 +143,14 @@ pub enum Dequeued {
     /// D-the-process-wide-cap-still-refuses.
     ProcessWideFull { limit: usize },
 }
+```
+
+The `ProcessWideFull` text, verbatim, so nobody has to invent it:
+
+```text
+a slot freed for this child, and the process-wide limit of {limit} live agents was reached
+first. The work was not started. Run it again when a child finishes, or ask the user to raise
+--max-live-agents.
 ```
 
 ### 2.2a A permit, not a counter
@@ -212,9 +234,22 @@ struct RegistryState {
     /// map, and that map would need its own cleanup.
     next_sequence: u64,
     /// The reports of children that finished, oldest first, bounded at 64.
+    /// `FinishedAgent` is the existing private type in `tree.rs`, unchanged.
     finished: VecDeque<FinishedAgent>,
     /// The derived handles and the aliases, by tree root. See section 3.
     handles: HashMap<AgentId, HandleTable>,
+}
+
+/// One tree's names. A handle is derived, an alias is chosen, and neither may
+/// shadow the other. Keyed by tree root, so a name never crosses a tree.
+struct HandleTable {
+    /// The derived handle of each child in this tree, by id. `explore`, `explore-2`.
+    derived: HashMap<u64, String>,
+    /// How many children of each agent name this tree has ever numbered. It only
+    /// grows, so a number is never reused while a report is remembered.
+    counts: HashMap<String, u32>,
+    /// The caller-chosen alias of each child, by id.
+    aliases: HashMap<u64, String>,
 }
 
 /// A queued child's entry. The ancestor chain sits beside it, exactly as the finished
@@ -249,6 +284,25 @@ would only make those races rarer. See decision D-one-registry-state-lock.
 **Registration and handle allocation happen together.** `admit_child` takes the state lock once.
 It inserts the queued entry, derives the handle against all three indexes, and stores the
 binding. So two concurrent admissions of one agent name cannot pick one handle.
+
+**The order inside `admit_child` is: check, then allocate.** It checks the depth limit, the cycle
+guard, the process-wide live cap, **the per-parent wait line, then the process wait line**, before
+it takes an id or a sequence number. So a refused admission burns neither. The two wait-line checks
+are ordered on purpose: the per-parent limit is the tighter and more actionable one, so a caller
+that trips both is told about its own line first. Without a stated order, two implementers would
+report different scopes for the same call.
+
+**Both wait-line counts are derived from the map, never stored.** The process count is the size of
+`queued`. A parent's count is the number of entries whose `ancestors.last()` matches that parent.
+Both are read under the state lock. So the removal in `started` and in `Drop` **is** the decrement,
+and no separate counter exists to drift. A stored counter would need decrementing on four exits: a
+start, a cancel, a parent cancel, and a drop without an await. A leaked count is worse than a
+leaked entry, because it refuses work for ever with no visible cause.
+
+**`admit_child` is synchronous, and that is what makes the allocation atomic.** It takes a
+`std::sync::Mutex` and returns without awaiting. So no other task can observe a half-registered
+child, and no test can inject itself into the critical section. The earlier draft promised a
+barrier test, and there is no seam for one.
 
 **The handout is one step.** `QueuedChild::started` takes the state lock after it holds both
 permits. It removes the queued entry and inserts the live handle before it releases the lock. So
@@ -338,9 +392,10 @@ the safe outcome. A silent fall-through is impossible.
 
 **A newer reader meets no older record, because rho never serialises `AgentStatus`.** The
 only persisted subagent record is `AgentReport`, and a queued child has no report yet. So a
-queued state is never written and never read back. `AgentReport` keeps its forward
-compatibility through `#[serde(default)]` on `gate` and `claims`, and this spec adds no
-serialised field.
+queued state is never written and never read back. `AgentReport` keeps its forward compatibility
+through `#[serde(default)]`, and **this** spec adds no serialised field.
+`SPEC-subagent-worktree-isolation` adds one, `isolation`, with the same `#[serde(default)]` rule.
+The two specs share that record, so neither may claim it is frozen.
 
 **`AgentStatus` gains no catch-all variant.** A catch-all is the fail-open shape decision
 D-plugin-does-not-classify-itself warns against. So `AgentStatus` stays not serialised
@@ -502,8 +557,10 @@ all three indexes, and it happens **inside the same state lock as the registrati
 concurrent admissions cannot choose one name. Without that rule one name binds two children, and
 `resolve` picks one of them in silence. Two tests name it:
 `a_handle_is_not_reused_while_a_finished_child_is_remembered` and
-`two_concurrent_admissions_never_pick_one_handle`. The second forces the interleave with a
-barrier, because a race test that can pass by luck is the failure AGENTS.md step 7 exists to stop.
+`sixteen_threads_admitting_one_agent_name_get_sixteen_distinct_handles`. The second races real
+threads and asserts the set size, because `admit_child` is synchronous and offers no seam for a
+barrier. An earlier draft promised a barrier, and a cold implementer proved there is nowhere to put
+one.
 
 ```rust
 impl AgentRegistry {
@@ -785,6 +842,8 @@ The slot queue, in `crates/rho-core/tests/subagent_slots.rs`:
   all three run. A lost wakeup would fail this and pass every other test here.
 - `a_queued_child_refuses_when_the_process_wide_cap_filled_while_it_waited` —
   `Dequeued::ProcessWideFull`, and the parent continues.
+- `a_process_wide_refusal_leaves_no_queued_entry_behind` — the `handed_out` flag must still be
+  false on that exit, so the drop guard runs. An ordering mistake here reintroduces the leak.
 - `a_refused_queued_child_releases_its_per_parent_permit` — its sibling starts straight after, so
   a waiter that gives up blocks nobody.
 - `a_queued_child_starts_before_a_later_one_under_one_parent` — per-parent order is kept.
@@ -826,8 +885,9 @@ Named handles, in `crates/rho-core/tests/subagent_handles.rs`:
 - `a_handle_is_derived_from_the_agent_name` — the first `explore` is `explore`.
 - `a_second_child_of_one_name_is_numbered` — the second `explore` is `explore-2`.
 - `a_handle_is_unique_per_tree_not_per_process` — two trees each hold `explore`.
-- `two_concurrent_admissions_never_pick_one_handle` — a barrier forces the interleave, so the test
-  cannot pass by luck.
+- `sixteen_threads_admitting_one_agent_name_get_sixteen_distinct_handles` — the set size is the
+  assertion, so the test proves the invariant rather than one lucky interleave. It fails if the
+  handle is derived outside the registration lock.
 - `resolve_reads_an_integer_id` — the old shape still resolves.
 - `resolve_reads_a_digits_only_string_as_an_id` — a numeric string reaches the same child.
 - `a_digits_only_name_resolves_as_an_id_and_never_as_a_handle` — an agent called `42` keeps

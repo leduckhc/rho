@@ -153,10 +153,20 @@ use std::path::{Path, PathBuf};
 pub trait Workspace: Send + Sync {
     /// Make an isolated root for a child under `parent_root`.
     ///
+    /// `agent` names the definition and `id` is the child's registry id. Both reach
+    /// the name: the directory and the branch carry a slug of `agent`, then `id`,
+    /// then a UTC timestamp. Without `id` the implementation cannot build the name
+    /// this spec requires in section 10.
+    ///
     /// The returned path becomes the child's session root. It must be a
     /// directory that `confine` can canonicalise. It must live outside
     /// `parent_root`, so a confined child cannot reach the parent tree.
-    async fn create(&self, parent_root: &Path, agent: &str) -> Result<Isolated, WorkspaceError>;
+    async fn create(
+        &self,
+        parent_root: &Path,
+        agent: &str,
+        id: AgentId,
+    ) -> Result<Isolated, WorkspaceError>;
 
     /// Reclaim the child's root after the child stops and the gate has run.
     ///
@@ -251,16 +261,24 @@ a child that can already write outside its root can reach it. Such a child alrea
 reach, so this is defence in depth rather than a fresh hole. rho still neutralises the attributes
 file, because the cost is one flag.
 
-**The child may not write `.git` inside its root, and that rule has an owner, a limit, and a case
-rule.** The write path enforces it: `write` and `edit` both resolve through `confine`, at
-`crates/rho-tools/src/write.rs` and `crates/rho-tools/src/edit.rs`, and both deny a path whose
-components match `.git`. **The match is ASCII case-insensitive.** A probe on this project's own
-macOS filesystem wrote `.GIT/config` and read the result back from `.git/config`, so a
-case-sensitive comparison is evaded by one keystroke. The rule is **write-only**, so reading
-`.git/HEAD` still works. **`bash` cannot enforce it**, because `bash` calls `confine` nowhere: its
-boundary is the approval policy and the OS sandbox. So a child with `bash` and no sandbox can
-still rewrite the pointer, and rule 2 is what makes that harmless. This rule is depth, and rule 2
-is the boundary.
+**The child may not write `.git` inside its root. That rule has an owner, a limit, a case rule, and
+an order.** `write` and `edit` both resolve through `confine`, at `crates/rho-tools/src/write.rs`
+and `crates/rho-tools/src/edit.rs`, and both gain the denial. Four details decide whether it works:
+
+- **It inspects the raw components, before canonicalisation.** `confine` canonicalises, and a
+  symlink named `.git` canonicalises to its target, so a check after canonicalisation reads the
+  target's name and misses the escape. A reviewer probed the symlink case.
+- **The match is ASCII case-insensitive.** A probe on this project's own macOS filesystem wrote
+  `.GIT/config` and read it back from `.git/config`.
+- **Only ASCII case needs folding.** The same probe created `.git.`, `.git` with a trailing space,
+  and two Unicode look-alikes, and every one was a distinct file rather than an alias. So the rule
+  does not chase Unicode confusables, and the spec says why rather than leaving it open.
+- **It is write-only**, so reading `.git/HEAD` still works.
+
+**`bash` cannot enforce it**, because `bash` calls `confine` nowhere: its boundary is the approval
+policy and the OS sandbox. So a child with `bash` and no sandbox can still rewrite the pointer, and
+the gate's repair step is what makes that harmless. This rule is depth, and the repair is the
+boundary.
 
 **A nested repository is named, not swallowed.** A child may create its own repository inside
 the worktree. `git add -A` then records a gitlink, and the nested content is **not** kept. The
@@ -323,18 +341,87 @@ pub struct GateContext {
     /// Present only for an isolated child. `None` keeps today's behaviour exactly.
     pub isolated_git: Option<GitEnv>,
 }
+
+impl GateContext {
+    /// The only way the spawn wiring builds one.
+    ///
+    /// `isolation` decides **both** the root and the git environment, so the two
+    /// cannot disagree and neither can be forgotten alone. Pass an `Isolated` and the
+    /// context holds a worktree root and a `Some(GitEnv)`. Pass `None` and it holds
+    /// the parent root and no git environment. A field a caller fills separately is
+    /// the fail-open shape: one forgotten line would run the gate unhardened, and
+    /// nothing would say so.
+    pub fn for_child(
+        parent_root: &Path,
+        isolation: Option<&Isolated>,
+        cancel: CancelToken,
+        runner: Arc<dyn CommandRunner>,
+    ) -> Self;
+}
 ```
 
-`SandboxedRunner` builds the command, so it applies the environment. When `isolated_git` is
-`Some`, every check runs with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_CONFIG_NOSYSTEM=1`, and
-`core.hooksPath` neutralised through `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_0`, and
-`GIT_CONFIG_VALUE_0`.
+**The gate repairs the pointer. It does not force `GIT_DIR` on a check.** A first draft forced
+`GIT_DIR` and `GIT_WORK_TREE` on every gate command, and a probe measured the cost. In a vendored
+repository, `git describe --tags` answered `fatal: No names found` instead of `v1.0`, because a
+forced `GIT_DIR` beats a `cd` and beats `git -C`. So a check that runs `cargo test`, with a build
+script that asks git about a vendored dependency, would silently read rho's repository. Hardening
+that breaks a real build is hardening nobody keeps.
 
-**The environment form is deliberate, and it was probed.** A check is a shell string, so rho
-cannot add a flag to a git call it never names. The `GIT_CONFIG_*` form reaches a nested git that
-a build tool spawns, and `GIT_DIR` survives a `cd` into a subdirectory and beats `git -C`. The
-probe output is in `docs/verification/worktree-git-probe.md`. See decision
-D-the-gate-obeys-the-git-rules-too.
+The child has **already stopped** when the gate runs. That is what makes a better answer safe:
+
+1. Before any check runs, rho rewrites the worktree `.git` file back to the recorded
+   administrative directory. That recorded value is the only trusted source. Nothing can rewrite
+   it again, because the child is gone.
+2. rho then reads the repository configuration for `core.hooksPath` and for any `filter.*` driver.
+   **If either is set, a `Command` check is refused**, with a named reason and the key that caused
+   it. A `File` check still runs. This is fail-closed: rho declines a command it cannot make safe,
+   rather than run it and hope.
+3. Each check then runs with hooks neutralised through `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_0`, and
+   `GIT_CONFIG_VALUE_0`, and with `GIT_CONFIG_NOSYSTEM=1`. `GIT_DIR` is **not** forced, so a nested
+   git against another repository behaves normally.
+
+**The environment guard is best-effort, and the limit is measured.** A probe set rho's guard and
+then let a nested tool set its own `GIT_CONFIG_COUNT=1`. That overwrote rho's variables, the
+child's `core.hooksPath` came back, and the hook fired. So step 3 alone is not a boundary. Step 1
+removes the pointer attack. Step 2 removes the hook and the filter attack. Step 3 is the cheap last
+layer.
+
+**The channel, stated in code, because prose already failed here once.** `CommandRunner::run`
+takes a command, a root, and a cancel token, and `DefaultGate` passes exactly those three. So the
+git environment cannot travel through a call. It travels with the runner instance:
+
+```rust
+// In `rho-tools`. The constructor is where the environment enters.
+impl SandboxedRunner {
+    /// Today's constructor. No isolation, and no git environment.
+    pub fn new(sandbox: SandboxMode) -> Self;
+    /// The isolated form. Every command this runner starts carries the guard.
+    pub fn with_git_env(sandbox: SandboxMode, git: GitEnv) -> Self;
+}
+```
+
+`GateContext::for_child` builds that runner from the same `Isolated` it reads the root from, so one
+value has one source and the gate cannot hold a hardened root with an unhardened runner.
+
+**The credential scrub already covers a gate command.** A reviewer traced it: a gate command goes
+through `build_gate_command`, then `build_command`, then `scrub_environment`. So rule 3 of section
+4a is satisfied on this path today, and the contract only has to keep it.
+
+**rho appends to `GIT_CONFIG_*`. It never assumes index zero is free.** A probe showed that a count
+which does not match the keys makes git fail hard: `error: missing config key GIT_CONFIG_KEY_1`,
+then `fatal: unable to parse command-line config`. So rho reads any existing `GIT_CONFIG_COUNT`,
+writes its key at the next free index, and raises the count by one. Overwriting index zero would
+discard a caller's own configuration and could break a build for a reason nobody could find.
+
+**Reclaim keeps the explicit form.** rho names those commands itself, so `--git-dir` and
+`--work-tree` cost nothing there and remove every doubt.
+
+**A note is a line in the tool result, not a new type.** An ignored isolation request, a rejected
+alias, and a dropped tool name all reach the parent the same way: the spawn path appends a
+`[note: ...]` line to the result text, as it does today at
+`crates/rho-tools/src/subagent.rs:414`. So nothing new is needed, and a test asserts on that text.
+
+See decision D-the-gate-obeys-the-git-rules-too.
 
 **Reclaim runs after the gate.** The gate must read the child's files. So reclaim cannot run
 first. A deleted tree has no files to check.
@@ -347,6 +434,7 @@ pair of loose fields would grow one per question. See `SPEC-subagents` section 6
 shape, and decision D-no-four-argument-session-new for the pattern this avoids.
 
 ```rust
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentReport {
     pub agent: String,
     pub outcome: AgentOutcome,
@@ -364,7 +452,13 @@ pub struct AgentReport {
 
 /// The facts about one isolated run. Every one is rho's own observation, never a
 /// child's claim, so it sits beside `gate` and not beside `claims`.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+///
+/// **It derives `PartialEq`, because `AgentReport` does.** A cold implementer
+/// transcribed this spec into a scratch crate and hit `error[E0369]: binary
+/// operation == cannot be applied to Option<IsolationReport>`. Dropping `PartialEq`
+/// from `AgentReport` instead would break every existing test that compares a
+/// report.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IsolationReport {
     /// The child's own root while it ran.
     pub root: PathBuf,
@@ -642,11 +736,29 @@ The hardened git call, in `rho-tools`:
 - `a_gate_command_reads_the_recorded_git_directory` — a check that shells to git cannot follow
   the child's pointer.
 - `a_gate_check_inherits_the_git_environment_from_the_context` — `GateContext.isolated_git` reaches
-  `SandboxedRunner`, so the rule has a channel and not only a sentence.
-- `a_nested_git_inside_a_check_still_sees_the_neutralised_hooks_path` — the `GIT_CONFIG_*` form
-  reaches a git that rho never names.
+  the runner, so the rule has a channel and not only a sentence.
+- `an_isolated_spawn_end_to_end_produces_a_gate_context_with_a_git_env` — a real spawn, not a
+  hand-built context. This is the test that fails red if the wiring forgets one line, which is the
+  only way `Option` could fail open.
+- `the_gate_repairs_the_worktree_git_pointer_before_any_check_runs` — the child rewrote it, and the
+  recorded value wins.
+- `a_command_check_is_refused_when_the_repository_sets_a_hooks_path` — fail-closed, and the reason
+  names the key.
+- `a_command_check_is_refused_when_the_repository_defines_a_filter_driver` — the same rule, the
+  other door.
+- `a_file_check_still_runs_when_a_command_check_is_refused` — the refusal is scoped to commands.
+- `a_gate_command_can_still_run_git_against_a_vendored_repository` — `GIT_DIR` is not forced, so
+  `git describe` in a vendored repository answers about that repository. A probe showed the forced
+  form breaks this.
+- `a_nested_tool_that_renumbers_git_config_count_defeats_the_env_guard` — the measured limit, held
+  as a test so nobody promises more than step 3 gives.
 - `a_child_cannot_write_dot_git_in_any_letter_case` — `.GIT` is `.git` on a case-insensitive
   filesystem, and a probe proved it.
+- `a_dot_git_symlink_is_denied_before_canonicalisation` — the raw component is what the rule reads.
+- `the_git_config_guard_appends_and_never_overwrites_index_zero` — a mismatched count makes git fail
+  hard, and a caller's own configuration survives.
+- `a_gate_runner_built_for_an_isolated_child_carries_the_git_env` — the channel is the runner
+  instance, because `CommandRunner::run` cannot carry it.
 - `the_git_subprocess_environment_holds_no_credential` — the same scrub `bash` applies.
 - `a_commit_succeeds_with_no_configured_git_identity` — rho passes its own identity.
 - `a_child_cannot_write_dot_git_inside_its_root_with_write_or_edit` — the write path denies it.
