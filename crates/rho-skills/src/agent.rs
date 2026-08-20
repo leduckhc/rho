@@ -4,12 +4,12 @@
 //! frontmatter, then free-form instructions. It names the agent, describes when
 //! to use it, and may narrow its tools, choose its model, cap its turns, and
 //! narrow its sandbox. The loader is shared with the skill loader, because the
-//! shape is the same. See `docs/specs/SPEC-11-subagents.md` section 5.
+//! shape is the same. See `docs/specs/20260818-000223-SPEC-subagents.md` section 5.
 //!
-//! Discovery follows `SPEC-08` exactly, including its trust rule. A project
+//! Discovery follows `SPEC-skills` exactly, including its trust rule. A project
 //! agent is withheld until the user trusts the session root. An agent definition
 //! is instructions plus a tool list plus a model choice, and it runs unattended,
-//! so decision D-022 applies with more force here, not less.
+//! so decision D-project-skill-needs-trust applies with more force here, not less.
 
 use std::path::{Path, PathBuf};
 
@@ -52,7 +52,7 @@ impl AgentDefinition {
     /// Resolve this definition's tool request against the parent's set.
     ///
     /// A name the parent does not hold is dropped and reported. This is the tool
-    /// half of the security core. See `SPEC-11` section 3 and decision D-036.
+    /// half of the security core. See `SPEC-subagents` section 3 and decision D-child-confined-by-composition.
     pub fn resolve_tools(&self, parent_tools: &[String]) -> ToolIntersection {
         intersect_tools(parent_tools, self.tools.as_deref())
     }

@@ -36,7 +36,7 @@ pub enum PluginError {
 /// What the host will agree to launch.
 ///
 /// A plugin is a program the host executes, so the decision to run one is a trust
-/// decision. State it once, at construction, rather than at each call. Decision D-011
+/// decision. State it once, at construction, rather than at each call. Decision D-session-config
 /// records why a security-relevant value belongs in a constructor.
 #[derive(Clone, Debug, Default)]
 pub struct PluginPolicy {
@@ -149,7 +149,7 @@ pub struct PluginHost {
 impl PluginHost {
     /// Build a host with an explicit trust policy.
     ///
-    /// There is no `new()` without a policy on purpose. Decision D-013 deleted a
+    /// There is no `new()` without a policy on purpose. Decision D-no-four-argument-session-new deleted a
     /// convenience constructor that hid a security choice, and this is the same
     /// shape: a host that will run any program must say so.
     pub fn new(policy: PluginPolicy) -> Self {
@@ -169,7 +169,7 @@ impl PluginHost {
     }
 
     /// Load a schema cache. The host advertises the cached tools before the
-    /// plugin connects, so the prompt prefix is stable from turn one. See F-43.
+    /// plugin connects, so the prompt prefix is stable from turn one. See F-plugin-schema-cache.
     pub fn load_cache(&mut self, cache: PluginCache) {
         self.cached.push(cache);
     }
@@ -219,5 +219,5 @@ impl PluginHost {
 // There is deliberately no `Default` impl for `PluginHost`.
 //
 // A default would have to pick a trust policy, and the only policy that works without
-// context is the permissive one. Decision D-013 deleted a constructor that hid exactly
+// context is the permissive one. Decision D-no-four-argument-session-new deleted a constructor that hid exactly
 // that kind of choice. A caller states its policy.

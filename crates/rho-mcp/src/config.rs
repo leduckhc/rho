@@ -2,7 +2,7 @@
 //!
 //! The config is the public shape of one server. Its fingerprint keys the shared
 //! pool and the schema cache. Change any field and the fingerprint changes, so a
-//! stale cache entry is ignored. See `SPEC-09` sections 4 and 7.
+//! stale cache entry is ignored. See `SPEC-mcp` sections 4 and 7.
 
 use std::collections::BTreeMap;
 

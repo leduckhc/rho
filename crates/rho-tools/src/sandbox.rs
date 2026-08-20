@@ -1,4 +1,4 @@
-//! The sandbox planner for the `bash` tool. See `SPEC-10`.
+//! The sandbox planner for the `bash` tool. See `SPEC-bash-sandbox`.
 //!
 //! A pattern list is not a boundary. A shell has many routes to one effect: a
 //! variable, a here-document, `base64 -d`, an alias, a script file, an `$IFS`
@@ -20,7 +20,7 @@ pub enum Backend {
     ///
     /// `sandbox-exec` is deprecated by Apple but still present and still works.
     /// The whole macOS path is behind [`macos_plan`], so a replacement is a small
-    /// change. See `SPEC-10` section 4.
+    /// change. See `SPEC-bash-sandbox` section 4.
     SandboxExec,
     /// Linux `bwrap` (bubblewrap), which needs no privilege.
     Bwrap,
@@ -62,7 +62,7 @@ impl std::error::Error for SandboxUnavailable {}
 /// Detect a confinement backend on this host. `None` means none is available.
 ///
 /// macOS uses `sandbox-exec`. Linux prefers `bwrap`. A host with only `unshare`
-/// returns `None` on purpose; see `SPEC-10` section 6 for why a partial `unshare`
+/// returns `None` on purpose; see `SPEC-bash-sandbox` section 6 for why a partial `unshare`
 /// confinement is not shipped.
 pub fn detect_backend() -> Option<Backend> {
     #[cfg(target_os = "macos")]
@@ -187,7 +187,7 @@ fn sbpl_path(path: &Path) -> String {
 ///
 /// Verified in two halves, because `bwrap` does not run on macOS. The argument sequence
 /// below was run against real `bwrap` 0.11.0 in a Debian container, and the unit tests in
-/// this module pin that rho emits exactly that sequence. `SPEC-10` records the container
+/// this module pin that rho emits exactly that sequence. `SPEC-bash-sandbox` records the container
 /// command and its output.
 ///
 /// The ordering rule is the one to protect: the read-only bind of `/` must come **before**
@@ -321,7 +321,7 @@ mod tests {
     // because the sequence itself was verified against real `bwrap` 0.11.0 in a Debian
     // container, and the two together are the whole verification chain: the container run
     // proves the arguments confine correctly, and these tests prove rho emits those
-    // arguments. See `SPEC-10` section 6 for the container command and its output.
+    // arguments. See `SPEC-bash-sandbox` section 6 for the container command and its output.
 
     #[test]
     fn bwrap_plan_binds_the_system_read_only_then_the_root_read_write() {

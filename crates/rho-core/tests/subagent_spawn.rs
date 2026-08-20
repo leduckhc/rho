@@ -1,7 +1,7 @@
 //! Tests for the subagent spawner: limits, the cycle guard, the retry cap, and
 //! the result contract.
 //!
-//! See `docs/specs/SPEC-11-subagents.md` sections 6, 7, and 8.
+//! See `docs/specs/20260818-000223-SPEC-subagents.md` sections 6, 7, and 8.
 
 mod common;
 

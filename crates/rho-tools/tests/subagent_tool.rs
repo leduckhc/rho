@@ -1,4 +1,4 @@
-//! Tests for the `spawn_agent` tool. See `SPEC-11` sections 3 and 6.
+//! Tests for the `spawn_agent` tool. See `SPEC-subagents` sections 3 and 6.
 //!
 //! These prove the parent receives only the summary, and that a dropped tool
 //! name is reported to the caller.

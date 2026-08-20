@@ -32,12 +32,12 @@ Do not change a colour, a size, or a spacing value in
 
 - `web/design/DESIGN.md` — tokens, type scale, table and code-block rules.
 - `web/design/RECOMMENDATION.md` — the page outline and the chosen direction.
-- `web/design/mockup-c-parts.html` — the frozen reference mockup (D-004).
+- `web/design/mockup-c-parts.html` — the frozen reference mockup (D-website-direction).
 - `web/src/styles/site.css` — the one stylesheet. It copies the tokens.
 
 ## Content rules
 
-- No rho performance number appears on the site (decision D-003).
+- No rho performance number appears on the site (decision D-benchmarks-owner).
   Unmeasured rho values render as `to be measured` and link to
   `docs/benchmarks.md`.
 - Every number about another harness carries its source and sample date.

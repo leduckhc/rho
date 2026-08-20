@@ -2,7 +2,7 @@
 //!
 //! The wire-to-event mapping is a set of pure functions. A test drives them
 //! against recorded `ConverseStream` event payloads, with no AWS client and no
-//! network. See `SPEC-02` section 5.
+//! network. See `SPEC-provider-interface` section 5.
 //!
 //! The real `Provider::stream` uses `aws-sdk-bedrockruntime` and signs with
 //! SigV4 from the standard credential chain. It converts each SDK event into the
@@ -137,7 +137,7 @@ pub struct BedrockMapState {
 }
 
 /// Map one `ConverseStream` event to zero or more normalised events. See
-/// `SPEC-02` section 5.
+/// `SPEC-provider-interface` section 5.
 ///
 /// The function never panics on decoded input. A malformed tool-use buffer maps
 /// to a JSON null, so a bad chunk cannot crash the caller.
@@ -231,7 +231,7 @@ pub fn map_converse_event(
             cache_read_tokens: metadata.usage.cache_read_input_tokens,
             cache_write_tokens: metadata.usage.cache_write_input_tokens,
             // Bedrock reports no charge on the stream, so the field stays empty rather
-            // than guessing from a price table. See decision D-032.
+            // than guessing from a price table. See decision D-measured-cost-and-cache.
             cost_usd: None,
         }));
     }
@@ -239,7 +239,7 @@ pub fn map_converse_event(
     out
 }
 
-/// Map a Bedrock exception name to a provider error. See `SPEC-02` section 5.
+/// Map a Bedrock exception name to a provider error. See `SPEC-provider-interface` section 5.
 ///
 /// The match ignores case, because the recorded fixtures use a lower-first name
 /// such as `throttlingException`, but the SDK reports a upper-first name such as
@@ -542,7 +542,7 @@ fn sdk_event_to_mirror(
 }
 
 /// Build the SDK message list from the normalised messages. Sprint 1 sends text
-/// and tool calls. See `SPEC-02` section 8 for the out-of-scope block kinds.
+/// and tool calls. See `SPEC-provider-interface` section 8 for the out-of-scope block kinds.
 pub fn build_messages(messages: &[Message]) -> Vec<aws_sdk_bedrockruntime::types::Message> {
     use aws_sdk_bedrockruntime::types::{
         ContentBlock as SdkBlock, ConversationRole, Message as SdkMessage, ToolResultBlock,

@@ -1,5 +1,5 @@
 //! Reducer tests. The reducer is pure, so these tests need no terminal.
-//! See `SPEC-05` section 7.
+//! See `SPEC-tui` section 7.
 
 use rho_core::{AgentEvent, AgentStopReason, StreamEvent, ToolKind, ToolOutput};
 use rho_tui::{ActivityState, Row, ToolRowStatus, TuiState};
@@ -18,9 +18,9 @@ fn text_delta(delta: &str) -> AgentEvent {
 #[test]
 fn reducer_text_delta_appends_to_assistant_row() {
     let mut state = TuiState::default();
-    state.apply(&text_start());
-    state.apply(&text_delta("Hello, "));
-    state.apply(&text_delta("world"));
+    state.apply(&text_start(), 0);
+    state.apply(&text_delta("Hello, "), 0);
+    state.apply(&text_delta("world"), 0);
 
     assert_eq!(state.rows.len(), 1);
     assert_eq!(
@@ -34,11 +34,17 @@ fn reducer_text_delta_appends_to_assistant_row() {
 #[test]
 fn reducer_thinking_delta_builds_thinking_row() {
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::Stream(StreamEvent::ThinkingStart { index: 0 }));
-    state.apply(&AgentEvent::Stream(StreamEvent::ThinkingDelta {
-        index: 0,
-        delta: "step one".to_string(),
-    }));
+    state.apply(
+        &AgentEvent::Stream(StreamEvent::ThinkingStart { index: 0 }),
+        0,
+    );
+    state.apply(
+        &AgentEvent::Stream(StreamEvent::ThinkingDelta {
+            index: 0,
+            delta: "step one".to_string(),
+        }),
+        0,
+    );
 
     assert_eq!(
         state.rows[0],
@@ -51,15 +57,21 @@ fn reducer_thinking_delta_builds_thinking_row() {
 #[test]
 fn reducer_tool_call_end_pushes_pending_tool_row() {
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::Stream(StreamEvent::ToolCallStart {
-        index: 0,
-        id: "call-1".to_string(),
-        name: "read".to_string(),
-    }));
-    state.apply(&AgentEvent::Stream(StreamEvent::ToolCallEnd {
-        index: 0,
-        arguments: serde_json::json!({"path": "a.txt"}),
-    }));
+    state.apply(
+        &AgentEvent::Stream(StreamEvent::ToolCallStart {
+            index: 0,
+            id: "call-1".to_string(),
+            name: "read".to_string(),
+        }),
+        0,
+    );
+    state.apply(
+        &AgentEvent::Stream(StreamEvent::ToolCallEnd {
+            index: 0,
+            arguments: serde_json::json!({"path": "a.txt"}),
+        }),
+        0,
+    );
 
     assert_eq!(state.rows.len(), 1);
     match &state.rows[0] {
@@ -77,20 +89,29 @@ fn reducer_tool_call_end_pushes_pending_tool_row() {
 #[test]
 fn reducer_tool_start_sets_running() {
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::Stream(StreamEvent::ToolCallStart {
-        index: 0,
-        id: "call-1".to_string(),
-        name: "read".to_string(),
-    }));
-    state.apply(&AgentEvent::Stream(StreamEvent::ToolCallEnd {
-        index: 0,
-        arguments: serde_json::json!({}),
-    }));
-    state.apply(&AgentEvent::ToolStart {
-        id: "call-1".to_string(),
-        name: "read".to_string(),
-        kind: ToolKind::Read,
-    });
+    state.apply(
+        &AgentEvent::Stream(StreamEvent::ToolCallStart {
+            index: 0,
+            id: "call-1".to_string(),
+            name: "read".to_string(),
+        }),
+        0,
+    );
+    state.apply(
+        &AgentEvent::Stream(StreamEvent::ToolCallEnd {
+            index: 0,
+            arguments: serde_json::json!({}),
+        }),
+        0,
+    );
+    state.apply(
+        &AgentEvent::ToolStart {
+            id: "call-1".to_string(),
+            name: "read".to_string(),
+            kind: ToolKind::Read,
+        },
+        0,
+    );
 
     match &state.rows[0] {
         Row::Tool { status, kind, .. } => {
@@ -104,18 +125,24 @@ fn reducer_tool_start_sets_running() {
 #[test]
 fn reducer_tool_end_error_sets_failed() {
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::ToolStart {
-        id: "call-1".to_string(),
-        name: "bash".to_string(),
-        kind: ToolKind::Execute,
-    });
-    state.apply(&AgentEvent::ToolEnd {
-        id: "call-1".to_string(),
-        output: ToolOutput {
-            content: vec![],
-            is_error: true,
+    state.apply(
+        &AgentEvent::ToolStart {
+            id: "call-1".to_string(),
+            name: "bash".to_string(),
+            kind: ToolKind::Execute,
         },
-    });
+        0,
+    );
+    state.apply(
+        &AgentEvent::ToolEnd {
+            id: "call-1".to_string(),
+            output: ToolOutput {
+                content: vec![],
+                is_error: true,
+            },
+        },
+        0,
+    );
 
     match &state.rows[0] {
         Row::Tool { status, .. } => assert_eq!(*status, ToolRowStatus::Failed),
@@ -126,15 +153,21 @@ fn reducer_tool_end_error_sets_failed() {
 #[test]
 fn reducer_tool_update_sets_preview() {
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::ToolStart {
-        id: "call-1".to_string(),
-        name: "bash".to_string(),
-        kind: ToolKind::Execute,
-    });
-    state.apply(&AgentEvent::ToolUpdate {
-        id: "call-1".to_string(),
-        output: "line two".to_string(),
-    });
+    state.apply(
+        &AgentEvent::ToolStart {
+            id: "call-1".to_string(),
+            name: "bash".to_string(),
+            kind: ToolKind::Execute,
+        },
+        0,
+    );
+    state.apply(
+        &AgentEvent::ToolUpdate {
+            id: "call-1".to_string(),
+            output: "line two".to_string(),
+        },
+        0,
+    );
 
     match &state.rows[0] {
         Row::Tool { preview, .. } => assert_eq!(preview, "line two"),
@@ -145,11 +178,14 @@ fn reducer_tool_update_sets_preview() {
 #[test]
 fn reducer_agent_end_sets_idle_and_stop() {
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::TurnStart);
+    state.apply(&AgentEvent::TurnStart, 0);
     assert_eq!(state.activity, ActivityState::Running);
-    state.apply(&AgentEvent::AgentEnd {
-        stop_reason: AgentStopReason::EndTurn,
-    });
+    state.apply(
+        &AgentEvent::AgentEnd {
+            stop_reason: AgentStopReason::EndTurn,
+        },
+        0,
+    );
 
     assert_eq!(state.activity, ActivityState::Idle);
     assert_eq!(state.last_stop, Some(AgentStopReason::EndTurn));
@@ -171,16 +207,16 @@ fn reducer_is_pure_same_events_same_state() {
     let mut first = TuiState::default();
     let mut second = TuiState::default();
     for event in &events {
-        first.apply(event);
+        first.apply(event, 0);
     }
     for event in &events {
-        second.apply(event);
+        second.apply(event, 0);
     }
 
     assert_eq!(first, second);
 }
 
-// --- Background task rows, from SPEC-07 ------------------------------------
+// --- Background task rows, from SPEC-background-tasks ------------------------------------
 
 fn task_id(text: &str) -> rho_core::TaskId {
     rho_core::TaskId(text.to_string())
@@ -189,11 +225,14 @@ fn task_id(text: &str) -> rho_core::TaskId {
 #[test]
 fn task_start_adds_a_task_row() {
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::TaskStart {
-        id: task_id("t1"),
-        command: "cargo test".to_string(),
-        reason: rho_core::BackgroundReason::KnownLongRunning,
-    });
+    state.apply(
+        &AgentEvent::TaskStart {
+            id: task_id("t1"),
+            command: "cargo test".to_string(),
+            reason: rho_core::BackgroundReason::KnownLongRunning,
+        },
+        0,
+    );
     assert!(
         state.rows.iter().any(|row| matches!(
             row,
@@ -207,20 +246,26 @@ fn task_start_adds_a_task_row() {
 #[test]
 fn task_progress_updates_the_row_in_place() {
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::TaskStart {
-        id: task_id("t1"),
-        command: "cargo test".to_string(),
-        reason: rho_core::BackgroundReason::KnownLongRunning,
-    });
-    state.apply(&AgentEvent::TaskProgressed {
-        id: task_id("t1"),
-        progress: rho_core::TaskProgress {
-            percent: Some(42),
-            message: Some("compiling".to_string()),
-            done: Some(6),
-            total: Some(10),
+    state.apply(
+        &AgentEvent::TaskStart {
+            id: task_id("t1"),
+            command: "cargo test".to_string(),
+            reason: rho_core::BackgroundReason::KnownLongRunning,
         },
-    });
+        0,
+    );
+    state.apply(
+        &AgentEvent::TaskProgressed {
+            id: task_id("t1"),
+            progress: rho_core::TaskProgress {
+                percent: Some(42),
+                message: Some("compiling".to_string()),
+                done: Some(6),
+                total: Some(10),
+            },
+        },
+        0,
+    );
     let count = state
         .rows
         .iter()
@@ -242,16 +287,22 @@ fn task_end_marks_success_and_failure_differently() {
         (rho_core::TaskState::Canceled, true),
     ] {
         let mut state = TuiState::default();
-        state.apply(&AgentEvent::TaskStart {
-            id: task_id("t1"),
-            command: "x".to_string(),
-            reason: rho_core::BackgroundReason::ModelRequested,
-        });
-        state.apply(&AgentEvent::TaskEnd {
-            id: task_id("t1"),
-            state: state_value.clone(),
-            output_tail: String::new(),
-        });
+        state.apply(
+            &AgentEvent::TaskStart {
+                id: task_id("t1"),
+                command: "x".to_string(),
+                reason: rho_core::BackgroundReason::ModelRequested,
+            },
+            0,
+        );
+        state.apply(
+            &AgentEvent::TaskEnd {
+                id: task_id("t1"),
+                state: state_value.clone(),
+                output_tail: String::new(),
+            },
+            0,
+        );
         let row = state
             .rows
             .iter()
@@ -272,17 +323,26 @@ fn a_task_row_survives_the_turn_ending() {
     // The point of a background task. It outlives the turn that started it, so its row
     // must not be cleared when the turn ends or when the run settles.
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::TaskStart {
-        id: task_id("t1"),
-        command: "cargo test".to_string(),
-        reason: rho_core::BackgroundReason::KnownLongRunning,
-    });
-    state.apply(&AgentEvent::TurnEnd {
-        stop_reason: rho_core::StopReason::EndTurn,
-    });
-    state.apply(&AgentEvent::AgentEnd {
-        stop_reason: rho_core::AgentStopReason::EndTurn,
-    });
+    state.apply(
+        &AgentEvent::TaskStart {
+            id: task_id("t1"),
+            command: "cargo test".to_string(),
+            reason: rho_core::BackgroundReason::KnownLongRunning,
+        },
+        0,
+    );
+    state.apply(
+        &AgentEvent::TurnEnd {
+            stop_reason: rho_core::StopReason::EndTurn,
+        },
+        0,
+    );
+    state.apply(
+        &AgentEvent::AgentEnd {
+            stop_reason: rho_core::AgentStopReason::EndTurn,
+        },
+        0,
+    );
     assert!(
         state.rows.iter().any(|row| matches!(
             row,
@@ -299,20 +359,26 @@ fn a_task_row_survives_the_turn_ending() {
 fn a_task_progress_message_cannot_corrupt_the_display() {
     // A child prints whatever it likes, so a progress message is untrusted input.
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::TaskStart {
-        id: task_id("t1"),
-        command: "evil\u{1b}[2Jcommand".to_string(),
-        reason: rho_core::BackgroundReason::ModelRequested,
-    });
-    state.apply(&AgentEvent::TaskProgressed {
-        id: task_id("t1"),
-        progress: rho_core::TaskProgress {
-            percent: None,
-            message: Some("step\u{1b}[31m one\r\n".to_string()),
-            done: None,
-            total: None,
+    state.apply(
+        &AgentEvent::TaskStart {
+            id: task_id("t1"),
+            command: "evil\u{1b}[2Jcommand".to_string(),
+            reason: rho_core::BackgroundReason::ModelRequested,
         },
-    });
+        0,
+    );
+    state.apply(
+        &AgentEvent::TaskProgressed {
+            id: task_id("t1"),
+            progress: rho_core::TaskProgress {
+                percent: None,
+                message: Some("step\u{1b}[31m one\r\n".to_string()),
+                done: None,
+                total: None,
+            },
+        },
+        0,
+    );
     let text = format!("{:?}", state.rows);
     assert!(
         !text.contains('\u{1b}'),
@@ -324,19 +390,25 @@ fn a_task_progress_message_cannot_corrupt_the_display() {
 fn a_task_event_for_an_unknown_id_is_ignored() {
     // A late event must not panic and must not invent a row.
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::TaskProgressed {
-        id: task_id("ghost"),
-        progress: rho_core::TaskProgress::default(),
-    });
-    state.apply(&AgentEvent::TaskEnd {
-        id: task_id("ghost"),
-        state: rho_core::TaskState::Exited { code: 0 },
-        output_tail: String::new(),
-    });
+    state.apply(
+        &AgentEvent::TaskProgressed {
+            id: task_id("ghost"),
+            progress: rho_core::TaskProgress::default(),
+        },
+        0,
+    );
+    state.apply(
+        &AgentEvent::TaskEnd {
+            id: task_id("ghost"),
+            state: rho_core::TaskState::Exited { code: 0 },
+            output_tail: String::new(),
+        },
+        0,
+    );
     assert!(state.rows.is_empty(), "no row must be invented");
 }
 
-// --- Subagent rows, from SPEC-11 section 9 ---------------------------------
+// --- Subagent rows, from SPEC-subagents section 9 ---------------------------------
 
 fn agent_id(n: u64) -> rho_core::AgentId {
     rho_core::AgentId(n)
@@ -360,11 +432,14 @@ fn report(outcome: rho_core::AgentOutcome) -> rho_core::AgentReport {
 #[test]
 fn a_spawned_agent_adds_a_row() {
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::AgentSpawned {
-        id: agent_id(1),
-        agent: "scout".to_string(),
-        depth: 1,
-    });
+    state.apply(
+        &AgentEvent::AgentSpawned {
+            id: agent_id(1),
+            agent: "scout".to_string(),
+            depth: 1,
+        },
+        0,
+    );
     assert!(
         state.rows.iter().any(|row| matches!(
             row,
@@ -378,20 +453,26 @@ fn a_spawned_agent_adds_a_row() {
 #[test]
 fn agent_progress_updates_the_row_in_place() {
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::AgentSpawned {
-        id: agent_id(1),
-        agent: "scout".to_string(),
-        depth: 0,
-    });
-    state.apply(&AgentEvent::AgentProgressed {
-        id: agent_id(1),
-        turns: 2,
-        usage: rho_core::Usage {
-            input_tokens: 2500,
-            output_tokens: 100,
-            ..Default::default()
+    state.apply(
+        &AgentEvent::AgentSpawned {
+            id: agent_id(1),
+            agent: "scout".to_string(),
+            depth: 0,
         },
-    });
+        0,
+    );
+    state.apply(
+        &AgentEvent::AgentProgressed {
+            id: agent_id(1),
+            turns: 2,
+            usage: rho_core::Usage {
+                input_tokens: 2500,
+                output_tokens: 100,
+                ..Default::default()
+            },
+        },
+        0,
+    );
     let count = state
         .rows
         .iter()
@@ -416,15 +497,21 @@ fn a_finished_agent_marks_success_and_failure_differently() {
         ),
     ] {
         let mut state = TuiState::default();
-        state.apply(&AgentEvent::AgentSpawned {
-            id: agent_id(1),
-            agent: "scout".to_string(),
-            depth: 0,
-        });
-        state.apply(&AgentEvent::AgentFinished {
-            id: agent_id(1),
-            report: report(outcome.clone()),
-        });
+        state.apply(
+            &AgentEvent::AgentSpawned {
+                id: agent_id(1),
+                agent: "scout".to_string(),
+                depth: 0,
+            },
+            0,
+        );
+        state.apply(
+            &AgentEvent::AgentFinished {
+                id: agent_id(1),
+                report: report(outcome.clone()),
+            },
+            0,
+        );
         let row = state
             .rows
             .iter()
@@ -442,19 +529,25 @@ fn a_finished_agent_marks_success_and_failure_differently() {
 
 #[test]
 fn an_agent_summary_never_reaches_the_transcript_rows() {
-    // The core promise of SPEC-11 section 6, checked at the frontend too. The row shows
+    // The core promise of SPEC-subagents section 6, checked at the frontend too. The row shows
     // the cost and the outcome. The child's answer belongs in the parent's tool result,
     // not as an assistant row that would read as the parent's own words.
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::AgentSpawned {
-        id: agent_id(1),
-        agent: "scout".to_string(),
-        depth: 0,
-    });
-    state.apply(&AgentEvent::AgentFinished {
-        id: agent_id(1),
-        report: report(rho_core::AgentOutcome::Done),
-    });
+    state.apply(
+        &AgentEvent::AgentSpawned {
+            id: agent_id(1),
+            agent: "scout".to_string(),
+            depth: 0,
+        },
+        0,
+    );
+    state.apply(
+        &AgentEvent::AgentFinished {
+            id: agent_id(1),
+            report: report(rho_core::AgentOutcome::Done),
+        },
+        0,
+    );
     assert!(
         !state
             .rows
@@ -469,17 +562,23 @@ fn an_agent_summary_never_reaches_the_transcript_rows() {
 fn a_failure_reason_with_an_escape_sequence_is_sanitised() {
     // A reason can carry any bytes, because a child's failure may quote a file.
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::AgentSpawned {
-        id: agent_id(1),
-        agent: "sc\u{1b}[2Jout".to_string(),
-        depth: 0,
-    });
-    state.apply(&AgentEvent::AgentFinished {
-        id: agent_id(1),
-        report: report(rho_core::AgentOutcome::Failed {
-            reason: "boom\u{1b}[31m".to_string(),
-        }),
-    });
+    state.apply(
+        &AgentEvent::AgentSpawned {
+            id: agent_id(1),
+            agent: "sc\u{1b}[2Jout".to_string(),
+            depth: 0,
+        },
+        0,
+    );
+    state.apply(
+        &AgentEvent::AgentFinished {
+            id: agent_id(1),
+            report: report(rho_core::AgentOutcome::Failed {
+                reason: "boom\u{1b}[31m".to_string(),
+            }),
+        },
+        0,
+    );
     let text = format!("{:?}", state.rows);
     assert!(!text.contains('\u{1b}'), "no escape may survive: {text}");
 }
@@ -487,10 +586,13 @@ fn a_failure_reason_with_an_escape_sequence_is_sanitised() {
 #[test]
 fn an_agent_event_for_an_unknown_id_is_ignored() {
     let mut state = TuiState::default();
-    state.apply(&AgentEvent::AgentProgressed {
-        id: agent_id(99),
-        turns: 1,
-        usage: rho_core::Usage::default(),
-    });
+    state.apply(
+        &AgentEvent::AgentProgressed {
+            id: agent_id(99),
+            turns: 1,
+            usage: rho_core::Usage::default(),
+        },
+        0,
+    );
     assert!(state.rows.is_empty(), "no row must be invented");
 }

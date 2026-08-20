@@ -2,7 +2,7 @@
 //!
 //! rho advertises tools from an on-disk cache at turn one, so a late connection
 //! never rewrites the stable prompt prefix. The entry is keyed by the config
-//! fingerprint, and a live list always wins. See `SPEC-09` section 4.
+//! fingerprint, and a live list always wins. See `SPEC-mcp` section 4.
 
 mod common;
 

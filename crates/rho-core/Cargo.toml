@@ -12,12 +12,21 @@ description = "Composable agent runtime core: sessions, agent loop, provider and
 [dependencies]
 async-trait = "0.1.92"
 futures = "0.3.34"
+rho-redact.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sonic-rs = { version = "0.5.8", optional = true }
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "io-util", "process", "fs"] }
 tracing = "0.1.44"
 
 [dev-dependencies]
+rho-redact.workspace = true
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["full", "test-util"] }
+tracing-subscriber = "0.3.23"
+
+[features]
+default = []
+# The faster JSONL codec. Off by default. See docs/adr/20260818-014343-ADR-jsonl-codec.md.
+fast-json = ["dep:sonic-rs"]

@@ -1,7 +1,7 @@
 //! The Azure OpenAI provider.
 //!
 //! It maps the Azure OpenAI `/responses` SSE stream onto the normalised
-//! `StreamEvent` model. See `SPEC-02` section 6.
+//! `StreamEvent` model. See `SPEC-provider-interface` section 6.
 
 use async_stream::stream;
 use async_trait::async_trait;
@@ -22,12 +22,12 @@ pub const AZURE_ENTRA_AUDIENCE: &str = "https://cognitiveservices.azure.com/";
 /// The Responses path on the resource base URL.
 const RESPONSES_PATH: &str = "/openai/v1/responses";
 
-// `Secret` lives in `rho-core`. See decision D-014. This crate once defined its
+// `Secret` lives in `rho-core`. See decision D-secret-in-core. This crate once defined its
 // own copy with no `Debug` mask at all, while the OpenRouter copy masked itself.
 // That drift is why the type now has one home.
 pub use rho_core::{RetryPolicy, Secret};
 
-/// The two Azure auth modes. See `SPEC-02` section 6.
+/// The two Azure auth modes. See `SPEC-provider-interface` section 6.
 #[derive(Clone, Debug)]
 pub enum AzureAuth {
     /// API-key mode. It sets the `api-key` header.
@@ -311,7 +311,7 @@ struct AzureUsage {
     ///
     /// The field names come from a live probe of the endpoint, not from memory:
     /// `usage.input_tokens_details.cached_tokens` and `cache_write_tokens`. rho used to
-    /// report zero for both. See decision D-032.
+    /// report zero for both. See decision D-measured-cost-and-cache.
     #[serde(default)]
     input_tokens_details: Option<AzureInputTokenDetails>,
 }
@@ -494,7 +494,7 @@ fn parse_arguments(buffer: &str) -> Result<Value, ProviderError> {
 
 // --- The request body. ---------------------------------------------------
 
-/// Build the Responses request body. See `SPEC-02` section 6.
+/// Build the Responses request body. See `SPEC-provider-interface` section 6.
 pub fn build_request_body(request: &CompletionRequest, deployment: &str) -> Value {
     let mut input = Vec::new();
     if let Some(system) = &request.system {

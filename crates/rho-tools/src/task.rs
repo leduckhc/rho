@@ -5,7 +5,7 @@
 //! a read-only policy allows a probe. The kill action lives in a separate
 //! `task_cancel` tool, which declares `ToolKind::Execute`, so a read-only policy
 //! denies a kill. A single tool cannot vary its kind per call, so the split is
-//! required. See `SPEC-07` section 7 and decision D-012.
+//! required. See `SPEC-background-tasks` section 7 and decision D-todo-in-a-green-stage.
 
 use std::sync::Arc;
 use std::time::Duration;

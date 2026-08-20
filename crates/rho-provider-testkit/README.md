@@ -9,7 +9,7 @@ You do not need to fork rho, and you do not need to copy a test file.
 
 rho's claim is that a third party writes a provider without forking. A third party
 cannot run a test file that is private to `rho-core`. So the assertions live here, in
-a normal crate you can depend on. See decision D-010.
+a normal crate you can depend on. See decision D-provider-contract-crate.
 
 ## Use it
 

@@ -1,8 +1,8 @@
 //! Tests for the approval policy wired into tool dispatch.
 //!
 //! A denied call must never run the tool. It must produce an error tool result,
-//! so the model sees the denial and can change course. See SPEC-01 section 9 and
-//! SPEC-03 section 5.
+//! so the model sees the denial and can change course. See SPEC-core-runtime section 9 and
+//! SPEC-tool-interface section 5.
 
 mod common;
 
@@ -117,7 +117,7 @@ async fn approval_denied_mutating_call_never_runs_the_tool() {
 async fn approval_denied_result_carries_the_denied_variant_message() {
     // The denial must flow through the typed `ToolError::Denied` variant. This
     // test pins the message to the variant, so the wiring cannot be removed in
-    // silence. See SPEC-03 section 5.
+    // silence. See SPEC-tool-interface section 5.
     let tool = Arc::new(KindedTool::new("write", ToolKind::Edit));
     let session = session_read_only(tool);
 

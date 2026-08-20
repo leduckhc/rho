@@ -3,7 +3,7 @@
 //! `tools_for` advertises tools from the schema cache, so the first provider
 //! request already carries them. It returns at once and does not wait for a
 //! handshake. Each tool holds a pooled handle, so a call connects on first use.
-//! See `SPEC-09` sections 4, 5, and 6.
+//! See `SPEC-mcp` sections 4, 5, and 6.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,8 +43,8 @@ impl Tool for McpTool {
         // and a server's own opinion would not be trustworthy if it had one. So
         // every MCP tool reports `Other`, which `ToolKind::is_read_only` treats
         // as mutating. A read-only policy denies it, and any session needs an
-        // explicit approval for it. This follows decision D-024, which applies
-        // decision D-017 to a second source. A later feature may let the user's
+        // explicit approval for it. This follows decision D-mcp-does-not-classify-itself, which applies
+        // decision D-plugin-does-not-classify-itself to a second source. A later feature may let the user's
         // configuration grant a kind to a named MCP tool.
         ToolKind::Other
     }

@@ -179,7 +179,7 @@ impl ProviderHarness for OpenRouterHarness {
                 let server = rho_provider_testkit::StagedHttpServer::start(
                     head,
                     tail,
-                    Duration::from_secs(30),
+                    Duration::from_secs(5),
                 )
                 .await
                 .expect("staged server started");
@@ -228,7 +228,7 @@ impl ProviderHarness for OpenRouterHarness {
 ///
 /// The shape is copied from a live probe of `POST /api/v1/chat/completions`, not from
 /// memory. That probe is what showed rho was reporting zero for both cache fields. See
-/// decision D-032.
+/// decision D-measured-cost-and-cache.
 pub fn sse_usage_with_cache_and_cost() -> String {
     let mut body = String::new();
     body.push_str(&frame(
@@ -249,7 +249,7 @@ pub fn sse_usage_with_cache_and_cost() -> String {
 /// This is the real order. A live probe of the API showed `finish_reason` in one chunk and
 /// the whole `usage` object in the next, before `[DONE]`. rho used to end the stream at
 /// the finish chunk, so it never saw usage at all: no tokens, no cost, no cache, for every
-/// OpenRouter call. See decision D-032.
+/// OpenRouter call. See decision D-measured-cost-and-cache.
 pub fn sse_usage_after_finish() -> String {
     let mut body = String::new();
     body.push_str(&frame(

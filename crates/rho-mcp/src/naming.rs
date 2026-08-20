@@ -4,7 +4,7 @@
 //! dispatch name is `mcp__<server>__<tool>`. A hyphen becomes an underscore,
 //! since some providers reject a hyphen in a tool name. A tool name from a
 //! server is untrusted, so it is validated before it becomes a registry key. See
-//! `SPEC-09` sections 5 and 6.
+//! `SPEC-mcp` sections 5 and 6.
 
 use crate::error::McpError;
 

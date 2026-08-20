@@ -1,4 +1,4 @@
-//! Frontmatter validation from SPEC-08 section 4.
+//! Frontmatter validation from SPEC-skills section 4.
 
 mod common;
 

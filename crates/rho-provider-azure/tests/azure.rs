@@ -1,4 +1,4 @@
-//! Azure-specific tests, from `SPEC-02` section 7.
+//! Azure-specific tests, from `SPEC-provider-interface` section 7.
 //!
 //! Every test uses a mock server or a pure header builder. No test reaches the
 //! network.
@@ -286,7 +286,7 @@ fn build_request_body_keeps_plain_text_messages_as_messages() {
 #[tokio::test]
 async fn provider_azure_reports_cache_tokens() {
     // The shape is copied from a live probe of the Responses endpoint, not from memory:
-    // `usage.input_tokens_details.cached_tokens`. rho used to report zero. See D-032.
+    // `usage.input_tokens_details.cached_tokens`. rho used to report zero. See D-measured-cost-and-cache.
     let body = concat!(
         "event: response.completed\n",
         "data: {\"type\":\"response.completed\",\"response\":{\"usage\":",

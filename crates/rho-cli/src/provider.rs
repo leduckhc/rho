@@ -3,7 +3,7 @@
 //! A provider is a cargo feature. A build without a provider must fail with a
 //! clear message, not a panic. A missing API key must name the environment
 //! variable to set. Every function here states its choices, so no credential or
-//! session boundary is set by accident. See `SPEC-01` decisions D-011 and D-013.
+//! session boundary is set by accident. See `SPEC-core-runtime` decisions D-session-config and D-no-four-argument-session-new.
 
 use std::sync::Arc;
 
@@ -81,13 +81,26 @@ pub fn default_provider() -> Option<&'static str> {
 /// default.
 /// The default model for a provider, when the caller names no model.
 ///
-/// **Each default is verified through rho, not taken from a table.** The Bedrock entry was
-/// chosen by sweeping the 54 models that a separate harness reported as working, and running
-/// each candidate through `rho run` for a plain answer, a single tool call, and two tool
-/// calls in one turn. `amazon.nova-micro-v1:0` passed a tool call four times out of four and
-/// is the smallest that did. See `docs/verification/models.md`.
+/// **Each default is verified through rho, not taken from a table.**
 ///
-/// **A default model is a convenience, not a security choice.** Decision D-013 removed
+/// The Bedrock entry is the latest Haiku, on the **global** inference profile. Three ids were
+/// run through `rho run` against live Bedrock, and the result decided the choice:
+///
+/// | id | result |
+/// | --- | --- |
+/// | `anthropic.claude-haiku-4-5-20251001-v1:0` | 400. A Claude 4.5 model has no on-demand throughput |
+/// | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | works in `us-east-1`, **400 in `eu-west-1`** |
+/// | `global.anthropic.claude-haiku-4-5-20251001-v1:0` | works in both |
+///
+/// So a Claude 4.5 model needs an inference profile, and the profile has to be the global one. A
+/// `us.` default would fail for every caller outside a US region.
+///
+/// The previous default was `amazon.nova-micro-v1:0`, chosen when it was the smallest model that
+/// called a tool four times out of four. It is still alive, and it was not replaced because it
+/// broke: a coding agent wants a model that handles tools and long context well, and Haiku 4.5
+/// is that. See `docs/verification/models.md` and `D-bedrock-default-is-the-global-haiku`.
+///
+/// **A default model is a convenience, not a security choice.** Decision D-no-four-argument-session-new removed
 /// hidden defaults for the session root and the approval policy, because a wrong value there
 /// is a breach. A wrong model id is a bad answer and a small bill, so a default is safe here.
 /// It is still reported, so the choice is never silent.
@@ -95,8 +108,8 @@ pub fn default_provider() -> Option<&'static str> {
 /// A caller overrides it with `--model`, or with the `RHO_MODEL` variable.
 pub fn default_model(provider: &str) -> Option<&'static str> {
     match provider {
-        // Smallest Bedrock model that reliably calls tools.
-        "bedrock" => Some("amazon.nova-micro-v1:0"),
+        // The latest Haiku, on the global inference profile so it works in any region.
+        "bedrock" => Some("global.anthropic.claude-haiku-4-5-20251001-v1:0"),
         // A small, cheap, widely available model on OpenRouter.
         "openrouter" => Some("anthropic/claude-haiku-4.5"),
         // Azure names a deployment, not a model, and only the account owner knows the
@@ -235,6 +248,44 @@ mod tests {
         let message = expect_err(build_provider("nope")).to_string();
         assert!(message.contains("openrouter"), "message was: {message}");
         assert!(message.contains("--provider"), "message was: {message}");
+    }
+
+    #[test]
+    fn the_bedrock_default_is_the_latest_haiku_on_a_global_profile() {
+        // Measured, not chosen from a table. Three ids were run through `rho run` against live
+        // Bedrock:
+        //
+        //   anthropic.claude-haiku-4-5-20251001-v1:0       -> 400, no on-demand throughput
+        //   us.anthropic.claude-haiku-4-5-20251001-v1:0    -> works in us-east-1, 400 in eu-west-1
+        //   global.anthropic.claude-haiku-4-5-20251001-v1:0 -> works in both
+        //
+        // So a Claude 4.5 model needs an inference profile, and the profile must be the global
+        // one. A `us.` default would be a default that fails for anyone outside a US region.
+        let model = default_model("bedrock").expect("bedrock has a default");
+        assert!(
+            model.contains("haiku-4-5"),
+            "the default is the latest haiku: {model}"
+        );
+        assert!(
+            model.starts_with("global."),
+            "and it is region portable, so it must be the global inference profile: {model}"
+        );
+    }
+
+    #[test]
+    fn no_default_names_a_bare_claude_45_model() {
+        // A bare Claude 4.5 foundation id has no on-demand throughput and returns 400. Any
+        // default that names one would break on the first prompt.
+        for provider in ["bedrock", "openrouter", "azure"] {
+            if let Some(model) = default_model(provider) {
+                let bare_claude_45 =
+                    model.starts_with("anthropic.claude") && model.contains("-4-5-");
+                assert!(
+                    !bare_claude_45,
+                    "{provider} default {model} is a bare Claude 4.5 id, which Bedrock rejects"
+                );
+            }
+        }
     }
 
     #[test]

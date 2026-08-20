@@ -2,7 +2,7 @@
 //!
 //! An MCP server is semi-trusted. Its kind claim is refused, a read-only policy
 //! denies it, approval runs before a call, the environment is scrubbed, and the
-//! output is sanitised. See `SPEC-09` section 6 and decisions D-019 and D-024.
+//! output is sanitised. See `SPEC-mcp` section 6 and decisions D-bash-scrubs-credentials and D-mcp-does-not-classify-itself.
 
 mod common;
 
@@ -51,7 +51,7 @@ fn ctx() -> ToolContext {
 #[tokio::test]
 async fn every_mcp_tool_reports_tool_kind_other() {
     // An MCP server never classifies its own tools. Whatever a server claims,
-    // every MCP tool reports `Other`. This is decision D-024.
+    // every MCP tool reports `Other`. This is decision D-mcp-does-not-classify-itself.
     let pool = McpPool::with_factory(test_limits(), Arc::new(common::FakeFactory));
     let server = config("srv");
     let mut cache = McpSchemaCache::new();
@@ -137,7 +137,7 @@ async fn approval_runs_before_the_call_reaches_the_server() {
 #[tokio::test]
 async fn a_stdio_server_does_not_inherit_a_credential_variable() {
     // Set a credential-shaped variable in the parent. The stdio server must not
-    // see it, because the client scrubs the environment. See decision D-019.
+    // see it, because the client scrubs the environment. See decision D-bash-scrubs-credentials.
     // SAFETY: the variable name is unique to this test, so no parallel test
     // reads it, and it is set before the child is spawned.
     unsafe {

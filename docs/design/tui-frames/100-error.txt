@@ -1,0 +1,26 @@
+```
+ρ rho  ~/Work/Vibe/rho · main · sonnet-4.5 · openrouter                                             
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+❯ send the report to the tracker                                                                    
+                                                                                                    
+✗ error · openrouter returned 429, too many requests                                                
+     retry-after: 20                                                                                
+     the turn stopped after 3.1s, and the transcript is kept                                        
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Type a prompt. / for commands. ? for help.                                                        
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  done · error · 3.1s                                             enter send · / commands · ? help  
+```

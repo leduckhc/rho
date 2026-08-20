@@ -1,6 +1,6 @@
 //! A credential that cannot reach a log.
 //!
-//! See `SPEC-02` section 2 and decision D-014.
+//! See `SPEC-provider-interface` section 2 and decision D-secret-in-core.
 //!
 //! This type lives in `rho-core` on purpose. It once existed twice, once in the
 //! OpenRouter crate and once in the Azure crate, and the two copies already

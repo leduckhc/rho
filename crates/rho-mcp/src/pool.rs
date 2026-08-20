@@ -7,8 +7,8 @@
 //!
 //! So a server is shared by default, keyed by the config fingerprint, and
 //! reference counted. The last session to release it stops it. A server that
-//! sets `shared: false` starts one process per session. See `SPEC-09` sections 1
-//! and 7, and decision D-025.
+//! sets `shared: false` starts one process per session. See `SPEC-mcp` sections 1
+//! and 7, and decision D-mcp-shared-by-default.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

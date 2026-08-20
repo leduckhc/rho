@@ -77,7 +77,7 @@ rho-core: AgentLoop
     │       • full tool list (stable, set once)
     │       • message history
     │
-    ├─3─► Hook::before_request (optional, planned F-41)
+    ├─3─► Hook::before_request (optional, planned F-lifecycle-hook-points)
     │
     ├─4─► Provider::stream(&Context) ──► HTTP SSE ──► provider API
     │                                                    │
@@ -91,16 +91,16 @@ rho-core: AgentLoop
     │
     ├─6─► if tool_call event:
     │       │
-    │       ├─► Hook::before_tool_call (optional, planned F-41)
+    │       ├─► Hook::before_tool_call (optional, planned F-lifecycle-hook-points)
     │       │
-    │       ├─► ApprovalGate (optional, planned F-29)
+    │       ├─► ApprovalGate (optional, planned F-tool-approval-gate)
     │       │
     │       ├─► ToolSet::dispatch(tool_name, input)
     │       │     │
     │       │     ├── rho-tools built-in
     │       │     └── rho-plugin out-of-process (stdio JSON-RPC)
     │       │
-    │       ├─► Hook::after_tool_result (optional, planned F-41)
+    │       ├─► Hook::after_tool_result (optional, planned F-lifecycle-hook-points)
     │       │
     │       └─► append tool result to Context, loop to step 3
     │
@@ -144,7 +144,7 @@ process start
     │
     ├─7─► AgentLoop.run(prompt)
     │       • see request/response data flow above
-    │       • on each turn end: append all new entries to JSONL file (F-50)
+    │       • on each turn end: append all new entries to JSONL file (F-append-only-session-log)
     │
     ├─8─► after turn: frontend returns to step 6
     │
@@ -174,5 +174,5 @@ process start
 1. What is the exact shape of the `Provider` trait? In particular, does it return `impl Stream<Item = Event>` or take a callback? The choice affects cancellation and backpressure.
 2. What is the exact shape of the `Tool` trait? Does `execute` take an `AbortSignal` equivalent, and how does streaming output flow back?
 3. How does the event channel type the sender and receiver? `tokio::sync::mpsc`, `flume`, or `async-channel`?
-4. Settled by decision D-001. The session JSONL format is rho's own. The first record carries a version field. rho does not copy the pi format. A one-way converter is feature F-54, and it is `planned`.
-5. Settled by decision D-002. `rho-acp` speaks the real Agent Client Protocol. The authoritative JSON schema is on disk at `~/Work/Vibe/acp-docs/schema/`. The architect reads that schema. The architect does not spike a private wire format. See `docs/specs/SPEC-06-acp.md`.
+4. Settled by decision D-own-session-format. The session JSONL format is rho's own. The first record carries a version field. rho does not copy the pi format. A one-way converter is feature F-pi-session-import, and it is `planned`.
+5. Settled by decision D-acp-is-real-acp. `rho-acp` speaks the real Agent Client Protocol. The authoritative JSON schema is on disk at `~/Work/Vibe/acp-docs/schema/`. The architect reads that schema. The architect does not spike a private wire format. See `docs/specs/20260817-170455-SPEC-acp.md`.

@@ -1,7 +1,7 @@
 //! Tests for background tasks in `rho-core`.
 //!
 //! No test sleeps to synchronise. A wait test uses `tokio::time` pause and a
-//! `Notify` signal, so it is deterministic and fast. See `SPEC-07` section 10.
+//! `Notify` signal, so it is deterministic and fast. See `SPEC-background-tasks` section 10.
 
 use std::sync::Arc;
 use std::time::Duration;

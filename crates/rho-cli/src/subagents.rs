@@ -61,7 +61,7 @@ pub struct Subagents {
 /// Returns `None` when no definition loaded. **A tool with nothing to spawn is worse than
 /// no tool**, because it costs context in every request and can only ever refuse.
 ///
-/// `trust_project` follows decision D-022, and it matters more here than for a skill. A
+/// `trust_project` follows decision D-project-skill-needs-trust, and it matters more here than for a skill. A
 /// repository skill is instructions. A repository agent definition is instructions plus a
 /// tool list plus a model, and it runs unattended.
 pub struct LoadRequest {

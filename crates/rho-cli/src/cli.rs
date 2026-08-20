@@ -4,7 +4,7 @@
 //! answer on stdout, and `rho` for the interactive TUI. This module parses the
 //! arguments, builds a `SessionConfig` explicitly, and runs the chosen mode.
 //!
-//! The session config is stated out loud here. Decision D-013 deleted a
+//! The session config is stated out loud here. Decision D-no-four-argument-session-new deleted a
 //! convenience constructor because it hid a fake model id, an accidental session
 //! root, and a policy that approved every tool call. So this module names the
 //! model, the session root, and the approval policy in the calling code.
@@ -53,14 +53,32 @@ pub struct Cli {
     /// The `bash` confinement mode. `off` runs a command unconfined, which is the
     /// default. `confined` limits writes to the session root and the scratch
     /// directory. `strict` also denies the network. When confinement is asked for
-    /// and no OS sandbox is available, `bash` refuses the command. See SPEC-10.
+    /// and no OS sandbox is available, `bash` refuses the command. See SPEC-bash-sandbox.
     #[arg(long, global = true, value_enum, default_value_t = SandboxArg::Off)]
     pub sandbox: SandboxArg,
+
+    /// Let the TUI capture the mouse, so the wheel scrolls the transcript and a click
+    /// selects a list row.
+    ///
+    /// On by default. rho owns the alternate screen, which has no scrollback, so the wheel
+    /// is the only way to scroll. Pass `--no-mouse` to give the mouse back to the terminal.
+    /// Option and drag still selects text in Ghostty and in iTerm2. See decision
+    /// D-the-wheel-needs-capture.
+    #[arg(long, global = true)]
+    pub mouse: bool,
+
+    /// Give the mouse back to the terminal, so a drag selects text without a modifier.
+    ///
+    /// It wins over `--mouse`, over the config, and over the environment. The wheel then
+    /// does nothing, because the alternate screen has no scrollback. See decision
+    /// D-the-wheel-needs-capture.
+    #[arg(long = "no-mouse", global = true, conflicts_with = "mouse")]
+    pub no_mouse: bool,
 
     /// Load skills that live in this repository.
     ///
     /// A skill can instruct the model and can carry scripts, so a skill from the
-    /// repository under edit is off by default. See decision D-022.
+    /// repository under edit is off by default. See decision D-project-skill-needs-trust.
     #[arg(long, global = true)]
     pub trust_project: bool,
 
@@ -116,11 +134,30 @@ pub enum Command {
     },
 }
 
-/// Build a `SessionConfig` from the parsed arguments. State every choice.
+/// Build a `SessionConfig` from the parsed arguments, and print any notice.
+///
+/// This is the wrapper the non-interactive paths use, where a print is the right channel.
+/// The interactive path calls `build_config_with_notices`, because a print there lands on
+/// the primary screen and rho then opens the alternate screen over it.
 fn build_config(cli: &Cli) -> anyhow::Result<SessionConfig> {
+    let mut notices = Vec::new();
+    let config = build_config_with_notices(cli, &mut notices)?;
+    for notice in notices {
+        eprintln!("rho: {notice}");
+    }
+    Ok(config)
+}
+
+/// Build a `SessionConfig`, and collect every notice instead of printing it. State every
+/// choice. A notice is data here, so a frontend can draw it where the user is looking.
+/// See `D-a-notice-reaches-the-transcript`.
+fn build_config_with_notices(
+    cli: &Cli,
+    notices: &mut Vec<String>,
+) -> anyhow::Result<SessionConfig> {
     // A model comes from the flag, then the environment, then the provider's default.
     //
-    // The default is a convenience, not a security choice. Decision D-013 removed hidden
+    // The default is a convenience, not a security choice. Decision D-no-four-argument-session-new removed hidden
     // defaults for the session root and the approval policy, because a wrong value there is
     // a breach. A wrong model id is a bad answer and a small bill.
     //
@@ -130,10 +167,10 @@ fn build_config(cli: &Cli) -> anyhow::Result<SessionConfig> {
         Some(model) => model,
         None => match provider::default_model(&provider_name) {
             Some(model) => {
-                eprintln!(
-                    "rho: no model given, so using the default for {provider_name}: {model}. \
+                notices.push(format!(
+                    "no model given, so using the default for {provider_name}: {model}. \
                      Set --model or {MODEL_ENV} to choose another."
-                );
+                ));
                 model.to_string()
             }
             None => {
@@ -154,13 +191,13 @@ fn build_config(cli: &Cli) -> anyhow::Result<SessionConfig> {
             .map_err(|error| anyhow::anyhow!("cannot read the current directory: {error}"))?,
     };
 
-    // State the approval policy out loud. See decision D-013, which deleted a
+    // State the approval policy out loud. See decision D-no-four-argument-session-new, which deleted a
     // constructor that hid this choice.
     //
     // The default approves every tool call, so a headless run never stops for a
     // prompt. `--read-only` swaps in a policy that denies every mutating tool. That
     // policy is fail-closed: it allows only a kind it names, so a tool with an
-    // undeclared kind is denied. See decision D-012, and D-017 for plugin tools,
+    // undeclared kind is denied. See decision D-todo-in-a-green-stage, and D-plugin-does-not-classify-itself for plugin tools,
     // which always count as mutating.
     //
     // A future release adds an interactive approval gate for the TUI. Until then
@@ -230,7 +267,7 @@ async fn build_session(
 
     // The skills block joins the stable prefix, never the dynamic part. The skill set
     // is fixed for a session, so the prefix stays byte-identical and the provider
-    // prompt cache survives. See SPEC-01 section 1 and SPEC-08 section 6.
+    // prompt cache survives. See SPEC-core-runtime section 1 and SPEC-skills section 6.
     let mut prompt = system_prompt();
     if !extensions.skills_prompt.is_empty() {
         prompt.push_str("\n\n");
@@ -271,9 +308,9 @@ struct SessionExtras {
     mcp_pool: Option<std::sync::Arc<rho_mcp::McpPool>>,
 }
 
-/// The short system prompt. A short prompt keeps the prefix small. See F-64.
+/// The short system prompt. A short prompt keeps the prefix small. See F-short-system-prompt.
 fn system_prompt() -> String {
-    // The prompt stays short on purpose. See F-64. It says only what the model cannot
+    // The prompt stays short on purpose. See F-short-system-prompt. It says only what the model cannot
     // work out from the tool schemas, and background behaviour is exactly that: the
     // model needs to know that a long command returns a task id, and that it should
     // wait on an event rather than sleep.
@@ -356,14 +393,80 @@ async fn run_headless(cli: &Cli, prompt: String) -> i32 {
     if failed { EXIT_FAILURE } else { 0 }
 }
 
+/// The working directory, with the home directory shortened to `~`.
+#[cfg(feature = "tui")]
+fn display_cwd() -> String {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let text = cwd.to_string_lossy().to_string();
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && text.starts_with(&home) => text.replacen(&home, "~", 1),
+        _ => text,
+    }
+}
+
+/// The current git branch, or an empty string outside a repository.
+///
+/// A failed command is not an error here. The banner simply omits the field, because a
+/// session outside a repository is normal.
+#[cfg(feature = "tui")]
+fn git_branch() -> String {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// The `RHO_*` variables, as the config layer wants them.
+///
+/// This is the one place the process environment is read for the interface. A test never
+/// reads the real environment, because `resolve_mouse` takes the list as data.
+#[cfg(feature = "tui")]
+fn rho_env_vars() -> Vec<(String, String)> {
+    std::env::vars()
+        .filter(|(name, _)| name.starts_with("RHO_"))
+        .collect()
+}
+
+/// Whether the TUI captures the mouse. The flag wins, then the environment, then off.
+///
+/// `--mouse` and `RHO_TUI_MOUSE` both reach this. The config file does not, because no
+/// binary reads a config file yet. See decision D-the-layered-config-has-no-caller.
+/// Whether the TUI captures the mouse. `--no-mouse` wins, then `--mouse`, then the
+/// environment, then the default, which is on.
+///
+/// The default flipped with `D-the-wheel-needs-capture`. rho owns the alternate screen, and
+/// that screen has no scrollback, so with capture off the wheel does nothing at all.
+#[cfg(feature = "tui")]
+fn resolve_mouse(flag: bool, no_flag: bool, env: &[(String, String)]) -> bool {
+    if no_flag {
+        return false;
+    }
+    if flag {
+        return true;
+    }
+    rho_config::ConfigLayer::from_env(env)
+        .tui_mouse
+        .unwrap_or(true)
+}
+
 /// Run the interactive TUI. Return a non-zero code on failure.
 #[cfg(feature = "tui")]
 async fn run_interactive(cli: &Cli) -> i32 {
-    let config = match build_config(cli) {
+    // Collect the notices instead of printing them. A print here lands on the primary
+    // screen, and rho opens the alternate screen over it a few milliseconds later.
+    let mut notices: Vec<String> = Vec::new();
+    let config = match build_config_with_notices(cli, &mut notices) {
         Ok(config) => config,
         Err(error) => return fail(error),
     };
     let model = config.model.clone();
+    let provider_name = provider::resolve_provider_name(cli.provider.as_deref(), None)
+        .unwrap_or_else(|_| String::new());
+    // The interface reads one switch. The flag wins, then the environment, then off.
+    let mouse = resolve_mouse(cli.mouse, cli.no_mouse, &rho_env_vars());
     // Hold `_tasks` and `_extras` for the whole run. Dropping the task registry kills
     // every background task, and dropping the MCP pool stops every server, so an early
     // drop would end work the model is still waiting on.
@@ -371,12 +474,21 @@ async fn run_interactive(cli: &Cli) -> i32 {
         Ok(triple) => triple,
         Err(error) => return fail(error),
     };
-    for notice in &extras.notices {
-        eprintln!("rho: {notice}");
-    }
+    // The notices go to the interface, not to stderr. rho used to print them here and then
+    // open the alternate screen over them, so the user never read one. One of them says a
+    // project skill stays unloaded until the user trusts it, which is a security notice.
+    // See `D-a-notice-reaches-the-transcript`.
+    notices.extend(extras.notices.iter().cloned());
     let _extras = extras;
 
-    let mut app = rho_tui::App::new(session, model);
+    // The banner names where this session runs. Without it the banner drew separators
+    // around three empty fields, because nothing ever wrote them.
+    let cwd = display_cwd();
+    let branch = git_branch();
+    let mut app = rho_tui::App::new(session, model)
+        .with_mouse(mouse)
+        .with_context(cwd, branch, provider_name)
+        .with_notices(notices);
     match app.run().await {
         Ok(()) => 0,
         Err(error) => fail(anyhow::anyhow!(error)),
@@ -406,6 +518,31 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn the_default_model_notice_is_data_and_not_a_print() {
+        // The notice used to reach the user only through `eprintln!`, so the interactive
+        // path printed it to the terminal and then opened the alternate screen over it.
+        // A notice the interface can draw has to be a value the caller can carry.
+        // See `D-a-notice-reaches-the-transcript`.
+        let cli = Cli::try_parse_from(["rho", "--provider", "openrouter"]).unwrap();
+        let mut notices = Vec::new();
+        let config = build_config_with_notices(&cli, &mut notices).expect("a default model");
+        assert_eq!(config.model, "anthropic/claude-haiku-4.5");
+        assert!(
+            notices.iter().any(|line| line.contains("no model given")),
+            "the default-model choice must arrive as data: {notices:?}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_model_raises_no_notice() {
+        // rho must not narrate a choice the user already made.
+        let cli = Cli::try_parse_from(["rho", "--model", "openai/gpt-4o"]).unwrap();
+        let mut notices = Vec::new();
+        build_config_with_notices(&cli, &mut notices).expect("an explicit model");
+        assert!(notices.is_empty(), "no notice was needed: {notices:?}");
     }
 
     #[test]
@@ -455,7 +592,7 @@ mod tests {
     fn build_config_defaults_to_approving_every_tool() {
         // The default is permissive on purpose, so a headless run never stops for a
         // prompt. The choice is stated in `build_config`, not hidden in a
-        // constructor. See decision D-013.
+        // constructor. See decision D-no-four-argument-session-new.
         let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
         assert!(!cli.read_only);
         let config = build_config(&cli).unwrap();
@@ -477,7 +614,7 @@ mod tests {
             rho_core::ToolKind::Edit,
             rho_core::ToolKind::Delete,
             rho_core::ToolKind::Execute,
-            // An undeclared kind counts as mutating, so it is denied too. See D-012.
+            // An undeclared kind counts as mutating, so it is denied too. See D-todo-in-a-green-stage.
             rho_core::ToolKind::Other,
         ] {
             let decision = futures::executor::block_on(config.approval.approve(
@@ -516,7 +653,7 @@ mod tests {
 
     #[test]
     fn sandbox_flag_defaults_to_off() {
-        // The default is stated in the flag definition, not hidden. See D-013.
+        // The default is stated in the flag definition, not hidden. See D-no-four-argument-session-new.
         let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
         assert_eq!(cli.sandbox, SandboxArg::Off);
         let config = build_config(&cli).unwrap();
@@ -541,5 +678,60 @@ mod tests {
     fn sandbox_flag_rejects_an_unknown_mode() {
         let result = Cli::try_parse_from(["rho", "--model", "m", "--sandbox", "loose"]);
         assert!(result.is_err(), "an unknown mode must be rejected");
+    }
+}
+
+// `resolve_mouse` only exists in a build with the interface, so its tests follow it.
+// Without this the minimal test build fails to compile, and the gate does not catch that,
+// because the gate builds the minimal profile and never tests it.
+#[cfg(all(test, feature = "tui"))]
+mod mouse_tests {
+    use super::resolve_mouse;
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn the_mouse_is_on_by_default() {
+        // The default flipped with `D-the-wheel-needs-capture`. The alternate screen has no
+        // scrollback, so with capture off the wheel does nothing at all.
+        assert!(resolve_mouse(false, false, &[]));
+    }
+
+    #[test]
+    fn the_no_mouse_flag_gives_the_mouse_back() {
+        assert!(!resolve_mouse(false, true, &[]));
+    }
+
+    #[test]
+    fn the_no_mouse_flag_wins_over_the_env_var() {
+        assert!(!resolve_mouse(
+            false,
+            true,
+            &env(&[("RHO_TUI_MOUSE", "true")])
+        ));
+    }
+
+    #[test]
+    fn the_env_var_can_turn_the_mouse_off() {
+        assert!(!resolve_mouse(
+            false,
+            false,
+            &env(&[("RHO_TUI_MOUSE", "false")])
+        ));
+    }
+
+    #[test]
+    fn a_bad_env_value_keeps_the_default() {
+        // The layer omits an unaccepted boolean, so the resolution keeps the default.
+        assert!(resolve_mouse(
+            false,
+            false,
+            &env(&[("RHO_TUI_MOUSE", "yes please")])
+        ));
     }
 }

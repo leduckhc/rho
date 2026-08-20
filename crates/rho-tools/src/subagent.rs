@@ -3,13 +3,13 @@
 //! A subagent is another `Session` on the same runtime. This tool spawns one, so
 //! the model can delegate work that would otherwise fill its own context. Only a
 //! summary comes back; the child's transcript is written to disk and never enters
-//! the parent's context. See `docs/specs/SPEC-11-subagents.md`.
+//! the parent's context. See `docs/specs/20260818-000223-SPEC-subagents.md`.
 //!
 //! The security core is enforced here by composition. The child's approval
 //! policy is `BothPolicies(parent, child)`, so a child can only be more
 //! restrictive. The child's tool set is the parent's set intersected with the
 //! definition's list. The session root is inherited and never overridable. The
-//! sandbox mode may only narrow. See decision D-036.
+//! sandbox mode may only narrow. See decision D-child-confined-by-composition.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -125,7 +125,7 @@ impl Tool for SpawnAgentTool {
 
         // Reserve a slot in the tree. A refusal names the limit and what to do.
         // The slot frees when it drops at the end of this call. A failed spawn is
-        // a result, so the model can choose again. See decision D-032.
+        // a result, so the model can choose again. See decision D-measured-cost-and-cache.
         let (child_node, _slot) = match env.node.spawn_child() {
             Ok(pair) => pair,
             Err(refusal) => return Ok(error_result(refusal.to_string())),
@@ -179,7 +179,7 @@ impl Tool for SpawnAgentTool {
         );
 
         // The child runs under the parent's cancel token, so cancelling the
-        // parent cancels every descendant. See SPEC-11 section 8.
+        // parent cancels every descendant. See SPEC-subagents section 8.
         let cancel = ctx.cancel.clone();
         let transcript = env.transcript_dir.join(format!("{}.log", child_node.id()));
         let timeout = env.node.limits().child_timeout;
@@ -206,7 +206,7 @@ impl Tool for SpawnAgentTool {
 }
 
 /// A tool result that carries a plain-text reason for the model. A subagent
-/// failure is a result, not the end of the parent's run. See decision D-032.
+/// failure is a result, not the end of the parent's run. See decision D-measured-cost-and-cache.
 fn error_result(reason: impl Into<String>) -> ToolOutput {
     ToolOutput {
         content: vec![rho_core::ContentBlock::Text {

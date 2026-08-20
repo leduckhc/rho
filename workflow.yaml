@@ -144,14 +144,14 @@ stages:
       - docs/comparison.md               # what we take from pi, jcode, agentsdk.build, and why
       - docs/non-goals.md
     dod:
-      - Every feature has an ID (F-nn), a one-line outcome, a status, and an owning crate.
+      - Every feature has an id, a one-line outcome, a status, and an owning crate.
       - Every feature states how a third party replaces or extends it.
       - Feature list covers: providers, tools, hooks, plugins, sessions, context, TUI, ACP, config, telemetry, memory footprint.
       - Prose passes ASD-STE100 review: active voice, sentences of 20 words or fewer.
       - No feature claims a benchmark number that no test produces.
     gate:
       - test -s docs/features.md
-      - grep -qE 'F-0?1' docs/features.md
+      - grep -qE 'F-agent-loop' docs/features.md   # ids migrated to slugs; see docs/ids.md
 
   - id: S2
     name: Core architecture spec and ADRs
@@ -159,14 +159,14 @@ stages:
     reviewer: reviewer
     depends_on: [S1]
     artifacts:
-      - docs/specs/SPEC-01-core-runtime.md
-      - docs/specs/SPEC-02-provider-interface.md
-      - docs/specs/SPEC-03-tool-interface.md
-      - docs/specs/SPEC-04-hooks-and-plugins.md
-      - docs/specs/SPEC-05-tui.md
-      - docs/adr/ADR-001-plugin-mechanism.md
-      - docs/adr/ADR-002-async-runtime-and-footprint.md
-      - docs/adr/ADR-003-streaming-event-model.md
+      - docs/specs/20260817-164906-SPEC-core-runtime.md
+      - docs/specs/20260817-164906-SPEC-provider-interface.md
+      - docs/specs/20260817-164906-SPEC-tool-interface.md
+      - docs/specs/20260817-170455-SPEC-hooks-and-plugins.md
+      - docs/specs/20260817-170455-SPEC-tui.md
+      - docs/adr/20260817-170455-ADR-plugin-mechanism.md
+      - docs/adr/20260817-170455-ADR-footprint.md
+      - docs/adr/20260817-170455-ADR-event-model.md
     dod:
       - Each spec defines public Rust types and trait signatures verbatim.
       - Each spec lists the test cases that prove it, by name.
@@ -176,8 +176,8 @@ stages:
       - Plugin ADR chooses in-tree traits plus stdio JSON-RPC subprocesses, and records why not WASM in sprint 1.
       - Every spec has an explicit "out of scope for sprint 1" section.
     gate:
-      - test -s docs/specs/SPEC-01-core-runtime.md
-      - test -s docs/adr/ADR-001-plugin-mechanism.md
+      - test -s docs/specs/20260817-164906-SPEC-core-runtime.md
+      - test -s docs/adr/20260817-170455-ADR-plugin-mechanism.md
 
   - id: S3
     name: Core runtime, red tests
@@ -205,7 +205,7 @@ stages:
       - crates/rho-core/src/**
     dod:
       - All S3 tests pass with no test edited to fit the implementation.
-      - Public API matches SPEC-01 exactly.
+      - Public API matches SPEC-core-runtime exactly.
       - No panics on the happy path. Errors are typed with thiserror.
       - Cancellation drops in-flight work without leaking a task.
       - rho-core has no HTTP dependency.
@@ -281,7 +281,7 @@ stages:
     reviewer: reviewer
     depends_on: [S4, S6, S7]
     artifacts:
-      - docs/specs/SPEC-05-tui.md
+      - docs/specs/20260817-170455-SPEC-tui.md
       - crates/rho-tui/tests/*.rs
       - crates/rho-tui/src/**
       - crates/rho-cli/src/**

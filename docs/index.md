@@ -24,9 +24,12 @@ Moved here from `AGENTS.md`, which keeps the development flow and the binding ru
 | --- | --- |
 | `crates/` | All Rust crates. |
 | `docs/` | Internal docs and the feature catalogue. |
-| `docs/specs/` | Numbered specs. A spec defines the public API verbatim. |
-| `docs/adr/` | Architecture decision records. |
+| `docs/specs/` | Specs, named by a timestamp and a slug. A spec defines the public API verbatim. |
+| `docs/adr/` | Architecture decision records, named the same way. |
+| `docs/ids.md` | How an artifact is named, and every old numeric id it replaces. |
 | `web/` | The `getrho.dev` static site. |
 | `bench/` | Footprint and start-up measurement scripts. |
-| `workflow.yaml` | The sprint workflow, stage artifacts, and definition of done. |
+| `workflow.yaml` | The sprint-1 workflow. A record of a finished sprint. |
+| `workflow-sprint-2.yaml` | The sprint-2 workflow, stage artifacts, and definition of done. |
 | `.rho-work/` | Controller notes and the progress ledger. Not shipped. |
+| `.rho-work/decisions/` | One decision, one file. A shared file clashed between worktrees. |

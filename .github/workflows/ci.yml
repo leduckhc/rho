@@ -35,6 +35,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p rho-cli --no-default-features --features minimal
+      # Compile the minimal tests too. Building the minimal profile is not enough: a
+      # `#[cfg(feature = "tui")]` on a helper once left its test module behind, and the
+      # build stayed green while the minimal test build broke.
+      - run: cargo test -p rho-cli --no-default-features --features minimal --no-run
       - run: cargo tree -p rho-cli --no-default-features --features minimal --depth 1
 
   web:
@@ -110,6 +114,32 @@ jobs:
       - run: |
           python3 bench/check-prose.py $(find docs -name '*.md') | tee prose.txt
           grep -q '^VIOLATIONS 0$' prose.txt
+
+  pty-harness:
+    name: pty harness teardown guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # These guards come from a shipped defect. A pty benchmark harness sent
+      # SIGKILL while it still held the pty master open, and then waited with
+      # `os.waitpid(pid, 0)`. The child stayed blocked in a terminal write, so the
+      # kill never finished, and the unbounded wait held one agent session for 30
+      # minutes. See docs/verification/pty-harness-teardown.md.
+      - run: timeout 60 python3 bench/test_ptyharness.py
+      # A test cannot see a harness that never calls the shared helper. So the
+      # source is grepped for the unbounded form. `os.waitpid(pid, 0)` is banned in
+      # bench/. Two exceptions, both deliberate: bench/test_ptyharness.py reaps its
+      # own fixtures, and prose inside backticks names the defect on purpose.
+      - run: |
+          hits=$(grep -rns --include='*.py' --exclude='test_ptyharness.py' \
+              -E 'waitpid\([^)]*,[[:space:]]*0[[:space:]]*\)' bench/ \
+              | grep -v '`' || true)
+          if [ -n "$hits" ]; then
+            echo "$hits" >&2
+            echo "found an unbounded os.waitpid in bench/. Call ptyharness.teardown instead." >&2
+            exit 1
+          fi
+          echo "no unbounded os.waitpid in bench/"
 
   footprint:
     name: footprint benchmark (linux)

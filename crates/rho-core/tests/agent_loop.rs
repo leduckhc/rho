@@ -102,7 +102,7 @@ async fn agent_loop_runs_tool_then_continues() {
 
 #[tokio::test]
 async fn agent_loop_appends_assistant_and_tool_messages() {
-    // SPEC-01 names this test against the context. `Session` exposes no context
+    // SPEC-core-runtime names this test against the context. `Session` exposes no context
     // reader, so this asserts the same ordering through the observable event
     // stream: the assistant tool call comes first, then the tool result.
     let mut tools = ToolRegistry::new();

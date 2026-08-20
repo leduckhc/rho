@@ -1,4 +1,4 @@
-//! The prompt block from SPEC-08 section 6.
+//! The prompt block from SPEC-skills section 6.
 
 mod common;
 

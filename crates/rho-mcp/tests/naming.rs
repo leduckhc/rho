@@ -1,7 +1,7 @@
 //! Naming tests for `rho-mcp`, all offline.
 //!
 //! A tool name is namespaced and validated before it becomes a registry key.
-//! See `SPEC-09` sections 5 and 6.
+//! See `SPEC-mcp` sections 5 and 6.
 
 mod common;
 

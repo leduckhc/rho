@@ -4,7 +4,7 @@
 //! measures the cost of that first frame with a `ratatui` `TestBackend`, so it
 //! runs with no real terminal. It prints the elapsed time from the start of
 //! `main` to the completed first render. Wrap the whole run in `/usr/bin/time`
-//! to include process start and dynamic linking. See `SPEC-05` section 6.
+//! to include process start and dynamic linking. See `SPEC-tui` section 6.
 
 use std::time::Instant;
 

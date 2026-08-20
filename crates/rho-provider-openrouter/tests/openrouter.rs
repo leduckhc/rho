@@ -1,4 +1,4 @@
-//! OpenRouter-specific tests, from `SPEC-02` section 7.
+//! OpenRouter-specific tests, from `SPEC-provider-interface` section 7.
 //!
 //! Every test uses a mock server or the staged server. No test reaches the
 //! network.
@@ -135,7 +135,7 @@ async fn provider_openrouter_maps_finish_reason_tool_calls_to_tool_use() {
     assert_eq!(done, StopReason::ToolUse);
 }
 
-// --- Retry policy, from SPEC-02 section 3. -------------------------------
+// --- Retry policy, from SPEC-provider-interface section 3. -------------------------------
 
 #[tokio::test]
 async fn retry_policy_backs_off_on_server_error() {
@@ -172,7 +172,7 @@ async fn retry_policy_honours_retry_after() {
     assert_eq!(delay, Duration::from_millis(2000));
 }
 
-// --- Secret redaction, from SPEC-02 section 2. ---------------------------
+// --- Secret redaction, from SPEC-provider-interface section 2. ---------------------------
 
 #[test]
 fn secret_debug_is_redacted() {
@@ -198,7 +198,7 @@ fn openrouter_config_debug_does_not_leak_key() {
 async fn provider_openrouter_reports_cache_tokens_and_cost() {
     // rho used to report zero for both cache fields, so a user could not see the saving
     // that the append-only context rule works to earn. The shape here is copied from a
-    // live probe of the API. See decision D-032.
+    // live probe of the API. See decision D-measured-cost-and-cache.
     let (stream, _server) = stream_body(sse_usage_with_cache_and_cost()).await;
     let events = drain(stream).await;
     let usage = events

@@ -1,6 +1,6 @@
 //! A stub plugin for the `rho-plugin` host tests.
 //!
-//! It speaks the SPEC-04 stdio JSON-RPC protocol, one JSON object per line. The
+//! It speaks the SPEC-hooks-and-plugins stdio JSON-RPC protocol, one JSON object per line. The
 //! first command-line argument selects a behaviour, so one binary drives every
 //! host test: the normal path, a crash, a hang, a malformed line, and an
 //! enormous line. No test reaches the network.

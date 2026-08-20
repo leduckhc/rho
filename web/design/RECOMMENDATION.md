@@ -1,6 +1,6 @@
 # Recommendation — getrho.dev home page
 
-Status: decided. The controller confirmed this direction as decision D-004
+Status: decided. The controller confirmed this direction as decision D-website-direction
 in `.rho-work/DECISIONS.md`. Do not re-open it.
 
 ## 1. The winner
@@ -65,7 +65,7 @@ eyebrow label in mono, `--fs-caption`, `--accent`.
 7. Footer: licence, GitHub, Docs, and the sentence "Every number on this
    site links to the test that produced it."
 
-Per D-003: no rho performance number appears anywhere until S11 fills
+Per D-benchmarks-owner: no rho performance number appears anywhere until S11 fills
 `docs/benchmarks.md`.
 
 ## 3. What is deliberately left out

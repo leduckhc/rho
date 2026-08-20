@@ -8,7 +8,7 @@ This document lists what rho will not do and the reason for each decision. Read 
 
 **What rho will not do:** rho will not load WebAssembly modules as plugins in sprint 1.
 
-**Reason:** WASM sandboxing requires a runtime (`wasmtime` or `wasmer`), which adds binary size, compile time, and a new security surface. The Tier 1 (compiled Rust traits) and Tier 2 (stdio JSON-RPC) plugin model covers all known use cases. WASM can be added in a later sprint if a compelling use case appears. See `docs/adr/ADR-001-plugin-mechanism.md` (written in stage S2).
+**Reason:** WASM sandboxing requires a runtime (`wasmtime` or `wasmer`), which adds binary size, compile time, and a new security surface. The Tier 1 (compiled Rust traits) and Tier 2 (stdio JSON-RPC) plugin model covers all known use cases. WASM can be added in a later sprint if a compelling use case appears. See `docs/adr/20260817-170455-ADR-plugin-mechanism.md` (written in stage S2).
 
 ---
 
@@ -32,7 +32,7 @@ This document lists what rho will not do and the reason for each decision. Read 
 
 **What rho will not do:** rho will not ship a built-in local embedding model or semantic vector store.
 
-**Reason:** An embedding model adds 100 MB or more to the binary and requires GPU or CPU inference setup. This conflicts directly with the memory footprint goal. A third party can implement semantic memory as an out-of-process plugin (F-42).
+**Reason:** An embedding model adds 100 MB or more to the binary and requires GPU or CPU inference setup. This conflicts directly with the memory footprint goal. A third party can implement semantic memory as an out-of-process plugin (F-out-of-process-plugin-tier-2).
 
 ---
 
@@ -56,7 +56,7 @@ This document lists what rho will not do and the reason for each decision. Read 
 
 **What rho will not do:** rho will not send usage data, crash reports, or analytics to any remote service.
 
-**Reason:** rho is MIT-licensed infrastructure. Users run it in private environments. Opt-in telemetry adds a network dependency to the critical path and a privacy concern for enterprise users. Operators who want usage data can attach a `tracing::Subscriber` that exports to their own endpoint (F-100).
+**Reason:** rho is MIT-licensed infrastructure. Users run it in private environments. Opt-in telemetry adds a network dependency to the critical path and a privacy concern for enterprise users. Operators who want usage data can attach a `tracing::Subscriber` that exports to their own endpoint (F-structured-tracing).
 
 ---
 

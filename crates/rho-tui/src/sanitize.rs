@@ -4,7 +4,7 @@
 //! This module once carried its own copy, and the three copies in the workspace had
 //! already drifted. This one replaced each unsafe character, which was safe but left
 //! visible rubbish: `red\x1b[31mtext` rendered as `red\u{fffd}[31mtext`. The shared
-//! filter drops the whole sequence, so it renders as `redtext`. Decision D-026 records
+//! filter drops the whole sequence, so it renders as `redtext`. Decision D-one-redaction-home records
 //! the consolidation.
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -15,6 +15,32 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// escape sequence in any of them can move the cursor or clear the screen.
 pub fn sanitize_line(input: &str) -> String {
     rho_redact::sanitize_line(input)
+}
+
+/// The spaces one tab becomes in block text.
+const TAB_WIDTH: usize = 4;
+
+/// Sanitise a block of untrusted text, and keep its line breaks.
+///
+/// Use this for text whose shape carries meaning: an assistant answer, a user message, a
+/// tool body. `sanitize_line` folds every newline into a space, which turned a markdown
+/// list and a fenced code block into one flowed paragraph. Mangling a code block matters,
+/// because rho is a coding agent.
+///
+/// **The escape filter is unchanged.** A newline survives, and every escape sequence is
+/// still dropped whole, because model output and tool output are untrusted. An escape here
+/// could clear the screen, move the cursor to fake an approval prompt, or write the
+/// clipboard through OSC 52.
+///
+/// A tab becomes spaces. A tab has no defined width in a terminal cell, so it would break
+/// the column arithmetic that every row depends on, and spaces keep the indent that a code
+/// line needs. See `D-block-text-keeps-its-shape`.
+pub fn sanitize_block(input: &str) -> String {
+    let safe = rho_redact::sanitize_text(input);
+    if !safe.contains('\t') {
+        return safe;
+    }
+    safe.replace('\t', &" ".repeat(TAB_WIDTH))
 }
 
 /// The glyph that marks a cut line.

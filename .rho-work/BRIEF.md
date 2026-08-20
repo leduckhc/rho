@@ -105,7 +105,7 @@ your report instead.
    - Tier 1: in-tree Rust traits (`Provider`, `Tool`, `Hook`) for compiled
      extensions. Zero overhead.
    - Tier 2: out-of-process plugins over stdio JSON-RPC, any language.
-   - **No WASM in sprint 1.** Record the reason in `ADR-001`.
+   - **No WASM in sprint 1.** Record the reason in `ADR-plugin-mechanism`.
 3. **Providers for sprint 1, in priority order**: OpenRouter, AWS Bedrock,
    Azure OpenAI. Each is its own crate behind a cargo feature.
    - OpenRouter: `POST /api/v1/chat/completions`, SSE streaming, tool calls,
@@ -127,7 +127,7 @@ your report instead.
   agent keeps the repository private before release. That agent edits `AGENTS.md`,
   `docs/release-checklist.md`, `docs/index.md`, and `.github/workflows/` without
   committing. So prefer a small anchored edit over a whole-section rewrite, and never
-  assume a file is as you left it. See decision D-028.
+  assume a file is as you left it. See decision D-shared-working-tree.
 
 - **TDD.** A failing test lands before production logic. Red, green, refactor.
   If you are a `tester`, you must leave the suite red. If you are a

@@ -4,7 +4,7 @@
 //! one JSON object per line, LF framing. This crate launches the subprocess,
 //! runs the handshake, lists the plugin tools, and serves each call. A plugin
 //! runs in its own process, so a crash cannot take down the session. See
-//! `SPEC-04`.
+//! `SPEC-hooks-and-plugins`.
 
 mod cache;
 mod host;

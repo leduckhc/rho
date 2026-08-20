@@ -4,7 +4,7 @@
 //! one test suite. This crate once carried its own copy, and the three copies in the
 //! workspace had already drifted: this one dropped whole escape sequences while the
 //! others replaced single characters. So the same hostile output rendered differently
-//! depending on which path carried it. Decision D-026 records the consolidation.
+//! depending on which path carried it. Decision D-one-redaction-home records the consolidation.
 
 /// Sanitise output from a server.
 ///
