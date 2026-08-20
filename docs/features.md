@@ -262,6 +262,7 @@ are proposed, and neither is built.
 |----|------|---------|--------------|--------|-----------------|
 | F-subagent-workspace-isolation | Subagent workspace isolation | A child works in its own tree, so a fan-out that writes files is safe. Only a trusted caller grants isolation. A definition and the model may refuse it, and neither may demand it. | `rho-core` | `planned` | Implement the `Workspace` trait and install it in `SpawnEnv`. `rho-tools` ships the git one. |
 | F-child-work-kept-on-a-branch | Child work kept on a branch | A child's changes are committed to a named branch when it stops, including after a cancel or a timeout. An unchanged tree leaves no branch, and a failed commit leaves the tree on disk. | `rho-tools` | `planned` | Implement `Workspace::reclaim` differently. Read `AgentReport.branch` and `AgentReport.isolation_root`. |
+| F-isolation-orphan-recovery | Isolation orphan recovery | A worktree and its branch carry the agent, the id, and a UTC timestamp. So a crash leftover is unique and findable. A later run lists an orphan and never deletes it. | `rho-tools` | `planned` | Not pluggable. The naming is a recovery contract a human relies on. |
 
 `docs/specs/20260819-102750-SPEC-agent-tasks.md` owns the four rows below. A child carries a
 task, and rho verifies the result. See decision D-a-child-does-not-grade-itself.
