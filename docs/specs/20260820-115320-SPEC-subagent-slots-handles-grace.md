@@ -498,8 +498,12 @@ process-wide slot waits on another tree.
 | `max_live_total` | refuse at once | only another tree can free it, so a wait is not bounded |
 | `max_depth` | refuse at once | waiting adds no depth |
 | the cycle guard | refuse at once | waiting breaks no cycle |
-| `max_queued_per_parent` | refuse at once | this parent's wait line is full |
-| `max_queued_total` | refuse at once | the process wait line is full |
+| `max_queued_per_parent` | refuse at once, checked first | this parent's wait line is full |
+| `max_queued_total` | refuse at once, checked second | the process wait line is full |
+
+**The check order decides which scope a caller hears.** A call that trips both wait lines is told
+about its own line, because that is the tighter and more actionable bound. The order is stated here
+and in section 2.2b, so two implementers report the same `QueueScope` for the same call.
 
 **One cap refuses twice.** `max_live_total` refuses at admission, and it refuses again at the
 start, through `Dequeued::ProcessWideFull`. A queued child holds no process-wide permit while it
