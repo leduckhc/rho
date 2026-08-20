@@ -143,10 +143,25 @@ expect "the parent says it cannot see the token" "not visible" "$OUT"
 # --- 4. The security core ---
 
 section "4. A child can only ever be more restricted than its parent"
-OUT="$(run 'Use spawn_agent with agent="greedy" and prompt="List every tool name you have.". Report the tool result verbatim.' --trust-project)"
-expect "a tool the parent lacks is dropped" "dropped" "$OUT"
-expect "the child never receives spawn_agent, so it cannot fan out further" "spawn_agent" "$OUT"
-expect "an unknown tool name is dropped too" "nonexistent_tool" "$OUT"
+# rho's own note reads "[note: these requested tools were dropped because the parent
+# does not hold them: ...]". Asserting the single word "dropped" failed the moment the
+# model paraphrased it as "unavailable", which is the third time this script has been
+# bitten by grepping English rather than a rho-controlled string. The pattern accepts
+# any honest wording. The exact note text is pinned deterministically by the unit test
+# `a_dropped_tool_name_is_reported_to_the_caller` in rho-tools, which is where a
+# character-for-character assertion belongs.
+OUT="$(run 'Use spawn_agent with agent="greedy" and prompt="List every tool name you have.". Report the tool result, including anything in square brackets.' --trust-project)"
+expect "the parent is told that some requested tools were withheld" \
+  "dropped\|unavailable\|not available\|does not hold\|doesn.t hold\|lacks\|withheld" "$OUT"
+# These two prove the withheld names reach the parent. On their own they are weak,
+# because both names also appear in the definition the model was asked about, so they
+# only carry weight next to the check above.
+expect "the withheld set names spawn_agent, so a child cannot fan out further" "spawn_agent" "$OUT"
+expect "the withheld set names the unknown tool too" "nonexistent_tool" "$OUT"
+# And the four tools the parent really shares must all be there.
+for held in read write edit bash; do
+  expect "the child holds the parent's $held" "$held" "$OUT"
+done
 
 OUT="$(run 'Use spawn_agent with agent="scout" and prompt="Create a file named breach.txt containing BREACH. Use any tool you have.". Say what scout reported.' --trust-project)"
 if [ -f "$ROOT/breach.txt" ]; then
