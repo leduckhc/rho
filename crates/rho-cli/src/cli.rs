@@ -422,20 +422,23 @@ fn resolve_mouse(flag: bool, env: &[(String, String)]) -> bool {
 
 /// How the TUI draws reasoning. The flag wins, then the environment, then `summary`.
 ///
-/// `--reasoning` and `RHO_TUI_REASONING` both reach this. An unknown name falls back to
-/// the default `summary`, because a display mode is not a security switch, and a bad
-/// value must not hide reasoning by accident.
-fn resolve_reasoning(flag: Option<&str>, env: &[(String, String)]) -> rho_core::ReasoningDisplay {
+/// `--reasoning` and `RHO_TUI_REASONING` both reach this. An unknown name is an error that
+/// names its source, so rho never draws a mode the user did not ask for. See decision
+/// D-a-bad-reasoning-mode-is-refused.
+fn resolve_reasoning(
+    flag: Option<&str>,
+    env: &[(String, String)],
+) -> anyhow::Result<rho_core::ReasoningDisplay> {
     use std::str::FromStr;
-    if let Some(name) = flag
-        && let Ok(mode) = rho_core::ReasoningDisplay::from_str(name)
-    {
-        return mode;
+    if let Some(name) = flag {
+        return rho_core::ReasoningDisplay::from_str(name)
+            .map_err(|error| anyhow::anyhow!("the --reasoning flag is wrong: {error}"));
     }
-    rho_config::ConfigLayer::from_env(env)
-        .tui_reasoning
-        .and_then(|name| rho_core::ReasoningDisplay::from_str(&name).ok())
-        .unwrap_or_default()
+    match rho_config::ConfigLayer::from_env(env).tui_reasoning {
+        Some(name) => rho_core::ReasoningDisplay::from_str(&name)
+            .map_err(|error| anyhow::anyhow!("the RHO_TUI_REASONING variable is wrong: {error}")),
+        None => Ok(rho_core::ReasoningDisplay::default()),
+    }
 }
 
 /// Run the interactive TUI. Return a non-zero code on failure.
@@ -450,7 +453,10 @@ async fn run_interactive(cli: &Cli) -> i32 {
         .unwrap_or_else(|_| String::new());
     // The interface reads one switch. The flag wins, then the environment, then off.
     let mouse = resolve_mouse(cli.mouse, &rho_env_vars());
-    let reasoning = resolve_reasoning(cli.reasoning.as_deref(), &rho_env_vars());
+    let reasoning = match resolve_reasoning(cli.reasoning.as_deref(), &rho_env_vars()) {
+        Ok(mode) => mode,
+        Err(error) => return fail(error),
+    };
     // Hold `_tasks` and `_extras` for the whole run. Dropping the task registry kills
     // every background task, and dropping the MCP pool stops every server, so an early
     // drop would end work the model is still waiting on.
@@ -688,18 +694,24 @@ mod reasoning_tests {
 
     #[test]
     fn reasoning_defaults_to_summary() {
-        assert_eq!(resolve_reasoning(None, &[]), ReasoningDisplay::Summary);
+        assert_eq!(
+            resolve_reasoning(None, &[]).unwrap(),
+            ReasoningDisplay::Summary
+        );
     }
 
     #[test]
     fn the_flag_sets_the_mode() {
-        assert_eq!(resolve_reasoning(Some("full"), &[]), ReasoningDisplay::Full);
+        assert_eq!(
+            resolve_reasoning(Some("full"), &[]).unwrap(),
+            ReasoningDisplay::Full
+        );
     }
 
     #[test]
     fn the_env_var_sets_the_mode() {
         assert_eq!(
-            resolve_reasoning(None, &env(&[("RHO_TUI_REASONING", "live")])),
+            resolve_reasoning(None, &env(&[("RHO_TUI_REASONING", "live")])).unwrap(),
             ReasoningDisplay::Live
         );
     }
@@ -707,18 +719,51 @@ mod reasoning_tests {
     #[test]
     fn the_flag_wins_over_the_env_var() {
         assert_eq!(
-            resolve_reasoning(Some("off"), &env(&[("RHO_TUI_REASONING", "full")])),
+            resolve_reasoning(Some("off"), &env(&[("RHO_TUI_REASONING", "full")])).unwrap(),
             ReasoningDisplay::Off
         );
     }
 
     #[test]
-    fn a_bad_flag_value_falls_back_to_summary() {
-        // A display mode is not a security switch, so an unknown name reverts to the
-        // honest default rather than hiding reasoning.
-        assert_eq!(
-            resolve_reasoning(Some("loud"), &[]),
-            ReasoningDisplay::Summary
+    fn an_unknown_reasoning_mode_is_refused() {
+        // The owner ruled that a wrong value is an error, never a silent default. This
+        // replaces a_bad_flag_value_falls_back_to_summary, which asserted the opposite of
+        // the spec. See decision D-a-bad-reasoning-mode-is-refused.
+        let error = resolve_reasoning(Some("loud"), &[])
+            .expect_err("an unknown mode name must not resolve")
+            .to_string();
+        assert!(error.contains("--reasoning"), "names the source: {error}");
+        assert!(error.contains("loud"), "names the bad value: {error}");
+        assert!(
+            error.contains("off") && error.contains("live"),
+            "names the valid modes: {error}"
         );
+    }
+
+    #[test]
+    fn an_unknown_mode_in_the_environment_is_refused() {
+        // The same rule for the variable, because the fallback was one shared call and a
+        // fix to one path would have left the other silent.
+        let error = resolve_reasoning(None, &env(&[("RHO_TUI_REASONING", "loud")]))
+            .expect_err("an unknown mode name must not resolve")
+            .to_string();
+        assert!(
+            error.contains("RHO_TUI_REASONING"),
+            "names the source: {error}"
+        );
+        assert!(error.contains("loud"), "names the bad value: {error}");
+    }
+
+    #[test]
+    fn a_valid_mode_still_resolves_after_a_refusal_path_exists() {
+        // A guard against fixing the error path by refusing everything.
+        for (name, want) in [
+            ("off", ReasoningDisplay::Off),
+            ("summary", ReasoningDisplay::Summary),
+            ("full", ReasoningDisplay::Full),
+            ("live", ReasoningDisplay::Live),
+        ] {
+            assert_eq!(resolve_reasoning(Some(name), &[]).unwrap(), want);
+        }
     }
 }

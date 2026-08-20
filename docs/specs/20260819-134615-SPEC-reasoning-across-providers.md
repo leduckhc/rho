@@ -252,7 +252,9 @@ wording was untestable. The rule is now stated against real events: `Live` colla
 first `TextDelta` that follows the reasoning block, or on a `ToolCallStart`, whichever comes
 first. Both are observable, so a test can assert the exact frame.
 
-Config key `tui.reasoning`, values `off`, `summary`, `full`, `live`. CLI `--reasoning <mode>`.
+Config key `tui-reasoning`, values `off`, `summary`, `full`, `live`. CLI `--reasoning <mode>`.
+An unknown value is an error at every source, and rho draws nothing. See decision
+D-a-bad-reasoning-mode-is-refused.
 
 ## 6. The behaviour rules
 
@@ -368,9 +370,16 @@ delta at a time, so "the first non-space text" is unknown until enough text has 
 
 ### The configuration
 
-- `the_reasoning_mode_parses_every_value` — `off`, `summary`, `full`, and `live`.
-- `an_unknown_reasoning_mode_is_refused` — it does not fall back in silence.
-- `the_flag_beats_the_config_and_the_environment`.
+- `every_name_round_trips` — `off`, `summary`, `full`, and `live` each parse and print back.
+  This is the tree's name for what an earlier draft called
+  `the_reasoning_mode_parses_every_value`.
+- `an_unknown_name_is_an_error` in `rho-core`, and `an_unknown_reasoning_mode_is_refused`
+  plus `an_unknown_mode_in_the_environment_is_refused` in `rho-cli`. A wrong value never
+  falls back in silence, at any source. See decision D-a-bad-reasoning-mode-is-refused.
+- `a_bad_reasoning_value_fails_closed` in `rho-config` — the same rule for a file key.
+- `the_flag_beats_the_config_and_the_environment` — the config leg needs a call site that
+  reads a file, so this test moved to `SPEC-config-call-site`. `rho-cli` proves the two legs
+  it has today with `the_flag_wins_over_the_env_var`.
 
 ### The persisted format
 
