@@ -108,3 +108,60 @@ requires reclaim to find every nested `.git` and name it in the report.
 `SPEC-subagent-worktree-isolation` section 4a now states four rules for every git call: hooks
 off, an explicit recorded git directory, a scrubbed environment, and an explicit committer
 identity. See decision D-a-workspace-hardens-every-git-call.
+
+## Round two: the gate, the environment form, and the case rule
+
+Date: 2026-08-20, after a third review pass. A reviewer found that the gate hardening named a
+value the gate cannot reach, and it raised two questions about the mechanism. Both were probed,
+plus a filesystem question the reviewer asked about. Every output below is real.
+
+### A hook still runs when nothing guards the call
+
+```sh
+git worktree add -q ../wt -b probe2 && cd ../wt
+printf '#!/bin/sh\necho HOOK_RAN >> /tmp/gate-probe/HOOK\n' > .evilhooks/pre-commit
+chmod +x .evilhooks/pre-commit && git config core.hooksPath "$PWD/.evilhooks"
+git add b.txt && git commit -qm second
+cat /tmp/gate-probe/HOOK
+# HOOK_RAN
+```
+
+### The environment form works, and it reaches a git that rho never names
+
+A gate check is a shell string, so rho cannot add a flag to a git call inside it. The
+`GIT_CONFIG_*` form is the answer, and it survives a nested shell:
+
+```sh
+env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null \
+  sh -c 'git add c.txt && git commit -qm third; git config --show-origin core.hooksPath'
+# command line:	/dev/null
+# (no hook ran, even through the nested shell)
+```
+
+### `GIT_DIR` holds across a directory change, and beats `git -C`
+
+```sh
+cd /tmp/gate-probe/wt/sub
+env GIT_DIR=$ADMIN GIT_WORK_TREE=/tmp/gate-probe/wt git status --porcelain   # ok
+env GIT_DIR=$ADMIN GIT_WORK_TREE=/tmp/gate-probe/wt git -C /tmp rev-parse --git-dir
+# /tmp/gate-probe/repo/.git/worktrees/wt
+```
+
+### `.GIT` is `.git` on this filesystem
+
+```sh
+mkdir .git && echo real > .git/config
+echo pwned > .GIT/config
+cat .git/config
+# pwned
+```
+
+So a case-sensitive component check for `.git` is evaded by one keystroke. The contract now says
+the match is ASCII case-insensitive.
+
+### What this changed in the contract
+
+`GateContext` gains `isolated_git: Option<GitEnv>`, filled by the spawn wiring from `Isolated`.
+`SandboxedRunner` applies the environment. The recorded administrative directory is never
+re-derived from the worktree `.git` file, because that file is the attack. That amends a contract
+`SPEC-agent-tasks` owns, so this spec states the amendment rather than assuming it.

@@ -251,13 +251,16 @@ a child that can already write outside its root can reach it. Such a child alrea
 reach, so this is defence in depth rather than a fresh hole. rho still neutralises the attributes
 file, because the cost is one flag.
 
-**The child may not write `.git` inside its root, and that rule has an owner and a limit.** The
-write path enforces it: `write` and `edit` both resolve through `confine`, at
+**The child may not write `.git` inside its root, and that rule has an owner, a limit, and a case
+rule.** The write path enforces it: `write` and `edit` both resolve through `confine`, at
 `crates/rho-tools/src/write.rs` and `crates/rho-tools/src/edit.rs`, and both deny a path whose
-components hold `.git`. The rule is **write-only**, so reading `.git/HEAD` still works. **`bash`
-cannot enforce it**, because `bash` calls `confine` nowhere: its boundary is the approval policy
-and the OS sandbox. So a child with `bash` and no sandbox can still rewrite the pointer, and rule
-2 is what makes that harmless. This rule is depth, and rule 2 is the boundary.
+components match `.git`. **The match is ASCII case-insensitive.** A probe on this project's own
+macOS filesystem wrote `.GIT/config` and read the result back from `.git/config`, so a
+case-sensitive comparison is evaded by one keystroke. The rule is **write-only**, so reading
+`.git/HEAD` still works. **`bash` cannot enforce it**, because `bash` calls `confine` nowhere: its
+boundary is the approval policy and the OS sandbox. So a child with `bash` and no sandbox can
+still rewrite the pointer, and rule 2 is what makes that harmless. This rule is depth, and rule 2
+is the boundary.
 
 **A nested repository is named, not swallowed.** A child may create its own repository inside
 the worktree. `git add -A` then records a gitlink, and the nested content is **not** kept. The
@@ -284,19 +287,54 @@ construction.
 parent root, is a defect. It cannot happen here, because the gate root is always the child's
 root. The gate never sees the parent root for an isolated child.
 
-**The gate obeys the same four rules.** The gate runs **before** reclaim, and
-`SPEC-agent-tasks` runs an `ArtifactSpec::Command` check through `SandboxedRunner` with the
-child's root as the working directory. So a check that runs git, directly or through a build
-tool, would read the worktree `.git` file that the child may have rewritten. The probe in
+**The gate obeys the same four rules, and the contract must carry the value that makes them
+possible.** The gate runs **before** reclaim, and `SPEC-agent-tasks` runs an
+`ArtifactSpec::Command` check through `SandboxedRunner` with the child's root as its working
+directory. So a check that runs git, directly or through a build tool, would read the worktree
+`.git` file that the child may have rewritten. The probe in
 `docs/verification/worktree-git-probe.md` shows what happens then: the child's hook runs as rho,
 before reclaim, with rho's environment. The trusted-author rule covers the command **string**,
 not the child's rewrite of a pointer at run time.
 
-So for an isolated child, the gate runs every check with `GIT_DIR` set to the recorded
-administrative directory, `GIT_WORK_TREE` set to the worktree, `GIT_CONFIG_NOSYSTEM=1`, and
-`core.hooksPath` neutralised through the environment. A check then cannot reach a pointer or a
-hook the child controls, whatever it shells out to. This is one rule with two enforcement points,
-and the spec states both rather than trusting reclaim alone.
+**A first draft of this rule was prose only, and it named a value the gate cannot reach.** A
+reviewer found it. `GateContext` carries `session_root`, `cancel`, and `runner`, and
+`CommandRunner::run` takes a command, a root, and a cancel token. None of them carries the
+recorded administrative directory, which lives in `Isolated.handle`. So the runner could not set
+`GIT_DIR`, and it must never re-derive the value by reading the worktree `.git` file, because that
+file is the attack.
+
+**So this spec amends a contract that `SPEC-agent-tasks` owns.**
+
+```rust
+/// Where an isolated child's git state really lives. The spawn wiring fills it from
+/// `Isolated`, and it is the only trusted source for these two paths.
+#[derive(Clone, Debug)]
+pub struct GitEnv {
+    /// The administrative directory, recorded at create time.
+    pub git_dir: PathBuf,
+    /// The child's worktree.
+    pub work_tree: PathBuf,
+}
+
+pub struct GateContext {
+    pub session_root: PathBuf,
+    pub cancel: CancelToken,
+    pub runner: Arc<dyn CommandRunner>,
+    /// Present only for an isolated child. `None` keeps today's behaviour exactly.
+    pub isolated_git: Option<GitEnv>,
+}
+```
+
+`SandboxedRunner` builds the command, so it applies the environment. When `isolated_git` is
+`Some`, every check runs with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_CONFIG_NOSYSTEM=1`, and
+`core.hooksPath` neutralised through `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_0`, and
+`GIT_CONFIG_VALUE_0`.
+
+**The environment form is deliberate, and it was probed.** A check is a shell string, so rho
+cannot add a flag to a git call it never names. The `GIT_CONFIG_*` form reaches a nested git that
+a build tool spawns, and `GIT_DIR` survives a `cd` into a subdirectory and beats `git -C`. The
+probe output is in `docs/verification/worktree-git-probe.md`. See decision
+D-the-gate-obeys-the-git-rules-too.
 
 **Reclaim runs after the gate.** The gate must read the child's files. So reclaim cannot run
 first. A deleted tree has no files to check.
@@ -603,6 +641,12 @@ The hardened git call, in `rho-tools`:
   rules.
 - `a_gate_command_reads_the_recorded_git_directory` — a check that shells to git cannot follow
   the child's pointer.
+- `a_gate_check_inherits_the_git_environment_from_the_context` — `GateContext.isolated_git` reaches
+  `SandboxedRunner`, so the rule has a channel and not only a sentence.
+- `a_nested_git_inside_a_check_still_sees_the_neutralised_hooks_path` — the `GIT_CONFIG_*` form
+  reaches a git that rho never names.
+- `a_child_cannot_write_dot_git_in_any_letter_case` — `.GIT` is `.git` on a case-insensitive
+  filesystem, and a probe proved it.
 - `the_git_subprocess_environment_holds_no_credential` — the same scrub `bash` applies.
 - `a_commit_succeeds_with_no_configured_git_identity` — rho passes its own identity.
 - `a_child_cannot_write_dot_git_inside_its_root_with_write_or_edit` — the write path denies it.
