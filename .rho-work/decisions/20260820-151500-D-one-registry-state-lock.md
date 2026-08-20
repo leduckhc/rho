@@ -27,6 +27,14 @@ await.
 its permits first and takes the lock afterwards. A lock held across an await would stop every
 `agent_status` call in the process.
 
+**One discipline, stated so nobody rediscovers it.** Never drop a `ChildSpawn`, a `ChildSlot`, or
+a `QueuedChild` while the state lock is held. Each has a `Drop` that takes that lock, and a
+`std::sync::Mutex` is not reentrant, so a drop inside the critical section would deadlock. The
+design never needs to. The values inside `RegistryState` are a `LiveAgent`, a `QueuedEntry`, a
+`FinishedAgent`, and a `HandleTable`, and none of their drops re-enters the registry. A third
+reviewer traced this and found it safe. The rule is written down because the next change might not
+be.
+
 **The cost, stated.** One lock is coarser than three. Every operation here is a hash-map insert, a
 remove, or a small scan, and the process-wide live cap is 32. So contention is bounded and small.
 A finer design that is wrong is worse than a coarse design that is right.

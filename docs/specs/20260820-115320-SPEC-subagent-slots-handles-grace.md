@@ -69,7 +69,8 @@ pub enum Admission {
 /// child uses. Its `CancelToken` and its `MessageQueue` exist now, so a steer buffers
 /// and a cancel lands before the child ever runs.
 pub struct QueuedChild {
-    /* private: id, agent, depth, ancestors, cancel, queue, permit future */
+    /* private: id, agent, depth, ancestors, cancel, queue, the permit future, a
+       per-parent `sequence`, and a `handed_out` flag that `Drop` reads. */
 }
 
 impl QueuedChild {
@@ -101,6 +102,12 @@ impl QueuedChild {
 /// every model-driven spawn, and `agent_status` keeps answering "queued" for a
 /// child that will never run. `ChildSlot` already does exactly this for a live
 /// child. See decision D-a-queued-child-lives-in-the-registry.
+///
+/// **Rust forbids a partial move out of a type that implements `Drop`.** So
+/// `started` cannot move the permit future or the queue out of `self`. It wraps
+/// those fields in an `Option`, takes them, and sets `handed_out`. `Drop` then
+/// removes the entry only when `handed_out` is false. An implementer who misses
+/// this fights the borrow checker and may delete the guard to escape it.
 impl Drop for QueuedChild {
     fn drop(&mut self) { /* remove the queued entry, unless it was handed out */ }
 }
@@ -116,7 +123,9 @@ pub enum Dequeued {
     /// A queued child holds no process-wide permit while it waits, so the cap can
     /// fill between the admission and the start. rho refuses rather than wait,
     /// because a wait on that cap is a wait on another tree. The refusal names the
-    /// limit and its flag, exactly as `TooManyLiveAgents` does. See decision
+    /// limit and `--max-live-agents`, which is the flag `TooManyLiveAgents` names.
+    /// It cannot share that message, because `TooManyLiveAgents` also interpolates
+    /// `current` and this variant does not carry it. See decision
     /// D-the-process-wide-cap-still-refuses.
     ProcessWideFull { limit: usize },
 }
@@ -196,6 +205,12 @@ struct RegistryState {
     live: HashMap<u64, LiveAgent>,
     /// Every child that holds an id and no slot.
     queued: HashMap<u64, QueuedEntry>,
+    /// The next queue sequence, for the whole registry.
+    ///
+    /// One counter is enough. `position()` filters by parent, and a subset of a
+    /// monotonic sequence keeps its order. A counter per parent would need its own
+    /// map, and that map would need its own cleanup.
+    next_sequence: u64,
     /// The reports of children that finished, oldest first, bounded at 64.
     finished: VecDeque<FinishedAgent>,
     /// The derived handles and the aliases, by tree root. See section 3.
@@ -212,12 +227,15 @@ struct QueuedEntry {
     ancestors: Vec<AgentId>,
     cancel: CancelToken,
     queue: MessageQueue,
-    /// A monotonic number, per parent, taken when the child queued.
+    /// A monotonic number, taken from `RegistryState::next_sequence` when the child
+    /// queued.
     ///
     /// The place in the line is **not** stored. The children ahead leave, and nothing
     /// would renumber the rest. A stored place goes stale, and a wrong number is worse
     /// than none, because a model acts on it. `position()` computes the place under the
-    /// state lock: one, plus every entry of the same parent with a smaller sequence.
+    /// state lock: one, plus every entry with the same immediate parent and a smaller
+    /// sequence. The immediate parent is `ancestors.last()`, so siblings are
+    /// identifiable from the entry alone.
     sequence: u64,
 }
 ```
@@ -356,7 +374,7 @@ construction. The test names it: `a_queued_child_does_not_spend_its_timeout_whil
 shipped one. A queued child holds a cancel token and a message queue, so an unbounded line
 grows without limit.
 
-`SubagentLimits` gains one field:
+`SubagentLimits` gains two fields:
 
 ```rust
 pub struct SubagentLimits {
@@ -367,13 +385,20 @@ pub struct SubagentLimits {
     pub max_tool_calls: u32,
     /// How many children one parent may queue for a slot. A full line refuses.
     pub max_queued_per_parent: usize,
+    /// How many children may wait in the whole process. A full process refuses.
+    ///
+    /// A per-parent cap alone does not bound the process. A session root holds no
+    /// live-child slot, so `max_live_total` does not cap the number of roots, and a
+    /// host may run many sessions in one process. Without this field the waiting
+    /// total is the per-parent cap times an unbounded number of roots.
+    pub max_queued_total: usize,
     /// Turns of warning before the child's turn cap. See section 4.
     pub grace_turns: u32,
 }
 ```
 
-The default `max_queued_per_parent` is 16, flag `--max-queued-per-parent`. A full line
-refuses at once:
+The default `max_queued_per_parent` is 16, flag `--max-queued-per-parent`. The default
+`max_queued_total` is 128, flag `--max-queued-total`. Either line, once full, refuses at once:
 
 ```rust
 pub enum SubagentError {
@@ -384,8 +409,14 @@ pub enum SubagentError {
     WeakerSandbox { parent: SandboxMode, requested: SandboxMode },
     CycleDetected,
     RetryCapReached { deaths: u32, limit: u32 },
-    /// The wait line for this parent is full. Wait, or cancel a queued child.
-    QueueFull { limit: usize },
+    /// A wait line is full. The message names which line, its limit, and its flag.
+    QueueFull { scope: QueueScope, limit: usize },
+}
+
+/// Which line filled up. A reader must know which flag to raise.
+pub enum QueueScope {
+    Parent,
+    Process,
 }
 ```
 
@@ -393,12 +424,13 @@ pub enum SubagentError {
 `TooManyLiveAgents` stays for both forms, because the process-wide cap refuses in both. See
 decision D-bounded-slot-queue.
 
-**The process-wide ceiling, stated as a product.** One parent queues at most
-`max_queued_per_parent` children, which is 16 by default. A parent must hold a live slot
-itself, so the number of parents is bounded by `max_live_total`, which is 32, plus the session
-roots. Each queued child holds a `CancelToken` and a `MessageQueue` of 32 messages. So the
-ceiling is about 16 thousand queued messages across the process. That is bounded, and it is
-the number a reviewer should check against a memory budget.
+**The process-wide ceiling, and it is a real bound now.** A first draft multiplied 16 waiters by
+32 parents and called the result bounded. That arithmetic was wrong, because a session root holds
+no live-child slot, so `max_live_total` bounds neither the number of roots nor the number of
+lines. A reviewer found it. `max_queued_total` fixes it: at most 128 children wait in the process,
+each holding a `CancelToken` and a `MessageQueue` of 32 messages, so the ceiling is about four
+thousand queued messages. That number is bounded by a limit rho owns, not by how many sessions a
+host decides to open.
 
 ### 2.7 Which caps still refuse
 
@@ -411,7 +443,12 @@ process-wide slot waits on another tree.
 | `max_live_total` | refuse at once | only another tree can free it, so a wait is not bounded |
 | `max_depth` | refuse at once | waiting adds no depth |
 | the cycle guard | refuse at once | waiting breaks no cycle |
-| `max_queued_per_parent` | refuse at once | the wait line itself is full |
+| `max_queued_per_parent` | refuse at once | this parent's wait line is full |
+| `max_queued_total` | refuse at once | the process wait line is full |
+
+**One cap refuses twice.** `max_live_total` refuses at admission, and it refuses again at the
+start, through `Dequeued::ProcessWideFull`. A queued child holds no process-wide permit while it
+waits, so the cap can fill in between. Both refusals name the same limit and the same flag.
 
 Each refusal names the limit and its value. See decision D-caps-that-cannot-wait-refuse and
 decision D-the-process-wide-cap-still-refuses.
@@ -465,7 +502,8 @@ all three indexes, and it happens **inside the same state lock as the registrati
 concurrent admissions cannot choose one name. Without that rule one name binds two children, and
 `resolve` picks one of them in silence. Two tests name it:
 `a_handle_is_not_reused_while_a_finished_child_is_remembered` and
-`two_concurrent_admissions_never_pick_one_handle`.
+`two_concurrent_admissions_never_pick_one_handle`. The second forces the interleave with a
+barrier, because a race test that can pass by luck is the failure AGENTS.md step 7 exists to stop.
 
 ```rust
 impl AgentRegistry {
@@ -758,9 +796,14 @@ The slot queue, in `crates/rho-core/tests/subagent_slots.rs`:
 - `steering_a_queued_child_buffers_until_it_starts` — the first boundary delivers it.
 - `depth_beyond_the_cap_refuses_and_never_queues` — waiting adds no depth.
 - `a_cycle_refuses_and_never_queues` — waiting breaks no cycle.
-- `a_full_wait_line_refuses_and_names_the_limit` — the queue itself is bounded.
+- `a_full_wait_line_refuses_and_names_the_limit` — one parent's line is bounded, and the message
+  names `--max-queued-per-parent`.
+- `a_full_process_wait_line_refuses_and_names_the_other_limit` — many roots, each with one waiter,
+  and `--max-queued-total` stops them. A per-parent cap alone would not.
 - `the_wait_line_does_not_grow_without_a_bound` — a thousand tasks do not queue a thousand.
-- `a_queued_entry_leaves_the_map_when_the_child_starts` — no id is in two maps at once.
+- `a_queued_entry_leaves_the_map_when_the_child_starts` — proved through capacity and position, not
+  through `status`. `status` prefers the live answer, so it would pass with a stale entry still in
+  the map.
 - `a_queued_entry_leaves_the_map_when_the_child_is_cancelled` — the drop guard runs.
 - `a_dropped_queued_child_leaves_no_entry_behind` — a caller that never awaits leaks nothing.
 
@@ -783,6 +826,8 @@ Named handles, in `crates/rho-core/tests/subagent_handles.rs`:
 - `a_handle_is_derived_from_the_agent_name` — the first `explore` is `explore`.
 - `a_second_child_of_one_name_is_numbered` — the second `explore` is `explore-2`.
 - `a_handle_is_unique_per_tree_not_per_process` — two trees each hold `explore`.
+- `two_concurrent_admissions_never_pick_one_handle` — a barrier forces the interleave, so the test
+  cannot pass by luck.
 - `resolve_reads_an_integer_id` — the old shape still resolves.
 - `resolve_reads_a_digits_only_string_as_an_id` — a numeric string reaches the same child.
 - `a_digits_only_name_resolves_as_an_id_and_never_as_a_handle` — an agent called `42` keeps
