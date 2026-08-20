@@ -85,16 +85,40 @@ impl QueuedChild {
     pub fn queue(&self) -> MessageQueue;
     /// Wait for a permit, then return the live spawn.
     ///
-    /// It resolves `Err` when the child was cancelled while it waited, alone or
-    /// with its parent. It never returns a cap error, because the wait is the
-    /// answer to a full cap.
+    /// It resolves `Err(Dequeued::Cancelled)` when the child was cancelled while it
+    /// waited, alone or with its parent. It resolves
+    /// `Err(Dequeued::ProcessWideFull)` when a slot freed under this parent and the
+    /// process-wide cap was full at that moment. It never waits on the
+    /// process-wide cap, because that is a wait on another tree.
     pub async fn started(self) -> Result<ChildSpawn, Dequeued>;
 }
 
+/// Dropping a queued child removes its registry entry.
+///
+/// Every path that is not a successful handout runs this: a cancel, a parent
+/// cancel, a full process-wide cap, and a caller that drops the value without ever
+/// awaiting `started`. Without it the entry stays in the map, the map grows with
+/// every model-driven spawn, and `agent_status` keeps answering "queued" for a
+/// child that will never run. `ChildSlot` already does exactly this for a live
+/// child. See decision D-a-queued-child-lives-in-the-registry.
+impl Drop for QueuedChild {
+    fn drop(&mut self) { /* remove the queued entry, unless it was handed out */ }
+}
+
 /// Why a queued child never started.
+///
+/// Both variants are results the parent can act on, and neither ends the run.
 pub enum Dequeued {
     /// The child was cancelled while it waited, alone or with its parent.
     Cancelled,
+    /// A slot freed under this parent, and the process-wide cap was full by then.
+    ///
+    /// A queued child holds no process-wide permit while it waits, so the cap can
+    /// fill between the admission and the start. rho refuses rather than wait,
+    /// because a wait on that cap is a wait on another tree. The refusal names the
+    /// limit and its flag, exactly as `TooManyLiveAgents` does. See decision
+    /// D-the-process-wide-cap-still-refuses.
+    ProcessWideFull { limit: usize },
 }
 ```
 
@@ -135,13 +159,20 @@ section 2.9 comes from the primitive, not from a second structure that could dis
 - `QueuedChild::started` calls `acquire_owned` on the per-parent semaphore, then
   `try_acquire_owned` on the process-wide one. It selects on the child's `CancelToken`, so a
   cancel resolves the wait at once.
+- **When the process-wide try fails, the child releases its per-parent permit and refuses.** It
+  resolves `Err(Dequeued::ProcessWideFull)`. It must release first, because a waiter that keeps a
+  per-parent permit while it gives up blocks a sibling for ever. It must not retry, because a
+  retry with no wake source is the spin this design removed. It must not await, because that is
+  the cross-tree wait section 2.1 forbids.
 - **The acquire order is per-parent first, then process-wide.** A per-parent permit is
   contended only by one parent's own children, and each of those is either running, and so
   will finish, or queued behind this child in one line. So the order cannot deadlock. A
   waiter that holds a per-parent permit does hold it while it takes the second one, and that
   is deliberate: it keeps one parent's start order stable.
+- **`acquire_owned` is cancel-safe.** Dropping the future takes no permit, and a permit taken
+  and then dropped returns to the semaphore. So the cancel branch of the select leaks nothing.
 
-### 2.2b A queued child lives in the registry
+### 2.2b A queued child lives in the registry, under one state lock
 
 **A queued child is registered, and every lookup that finds it is scoped.** Without this,
 "addressable by id" is false: the tools reach a child only through
@@ -151,29 +182,66 @@ finished ring. A `QueuedChild` held by the spawning task alone appears in neithe
 See decision D-a-queued-child-lives-in-the-registry.
 
 ```rust
-/// Inside `RegistryInner`. Every child that holds an id and no slot.
-///
-/// The ancestor chain is stored beside each entry, exactly as the finished ring
-/// stores it. A lookup without it would let one tree reach another tree's queued
-/// child, which is the escape decision D-a-caller-addresses-only-its-own forbids.
-queued: Mutex<HashMap<u64, QueuedEntry>>,
+struct RegistryInner {
+    limits: SubagentLimits,
+    /// The process-wide live cap. `max_live_total` permits.
+    live_permits: Arc<tokio::sync::Semaphore>,
+    next_id: AtomicU64,
+    /// Every index, under one lock. Never held across an await.
+    state: Mutex<RegistryState>,
+}
 
+struct RegistryState {
+    /// Every live child, by id.
+    live: HashMap<u64, LiveAgent>,
+    /// Every child that holds an id and no slot.
+    queued: HashMap<u64, QueuedEntry>,
+    /// The reports of children that finished, oldest first, bounded at 64.
+    finished: VecDeque<FinishedAgent>,
+    /// The derived handles and the aliases, by tree root. See section 3.
+    handles: HashMap<AgentId, HandleTable>,
+}
+
+/// A queued child's entry. The ancestor chain sits beside it, exactly as the finished
+/// ring stores it, because the live handle that would carry it does not exist yet. A
+/// lookup without the chain would let one tree reach another tree's queued child. That
+/// is the escape decision D-a-caller-addresses-only-its-own forbids.
 struct QueuedEntry {
     agent: String,
     depth: u32,
     ancestors: Vec<AgentId>,
     cancel: CancelToken,
     queue: MessageQueue,
-    /// The place in the parent's line, counted from one.
-    position: usize,
+    /// A monotonic number, per parent, taken when the child queued.
+    ///
+    /// The place in the line is **not** stored. The children ahead leave, and nothing
+    /// would renumber the rest. A stored place goes stale, and a wrong number is worse
+    /// than none, because a model acts on it. `position()` computes the place under the
+    /// state lock: one, plus every entry of the same parent with a smaller sequence.
+    sequence: u64,
 }
 ```
 
-The scoped accessors consult three structures now, in this order: live, queued, then
-finished. `descendant` returns `None` for a queued child, because a `LiveAgent` cancels and
-steers a running child. `status`, `cancel_descendant`, and `resolve` all answer for a queued
-child. `admit_child` registers the entry, and `started` removes it when it hands out the
-slot, in one lock, so no id is ever in both maps.
+**One mutex holds every index, and nothing holds it across an await.** Two reviewers reached
+this independently. The reason is that the move from queued to live must be one step. With
+separate locks a lookup can find an id in both indexes or in neither, a cancel can report failure
+while the child starts, and two concurrent admissions can derive one handle. A stated lock order
+would only make those races rarer. See decision D-one-registry-state-lock.
+
+**Registration and handle allocation happen together.** `admit_child` takes the state lock once.
+It inserts the queued entry, derives the handle against all three indexes, and stores the
+binding. So two concurrent admissions of one agent name cannot pick one handle.
+
+**The handout is one step.** `QueuedChild::started` takes the state lock after it holds both
+permits. It removes the queued entry and inserts the live handle before it releases the lock. So
+no id is ever in both indexes, and none is ever in neither.
+
+**`status` prefers the live answer**, because it is the newer truth.
+
+The scoped accessors read three indexes, in this order: live, queued, then finished.
+`descendant` returns `None` for a queued child, because a `LiveAgent` cancels and steers a
+running child. `status`, `cancel_descendant`, and `resolve` all answer for a queued child. So
+`cancel_descendant` gains a queued branch, rather than routing only through `descendant`.
 
 **Steering a queued child goes through the registry too.** `AgentRegistry::steer_scoped`
 pushes into the live handle's queue, or into the queued entry's queue, whichever holds the
@@ -390,12 +458,14 @@ child.** rho derives a handle from the agent name. It numbers a collision. A fir
 are two different children. The registry keys a handle by the tree root, so the numbering
 never crosses a tree. See decision D-handle-is-a-second-address.
 
-**The number counts a live child and a remembered one.** A finished child stays reportable
-while its report is in the 64-deep ring, and its handle still resolves. So a new `explore`
-must not take a name that a remembered `explore` still answers to. The numbering therefore
-reads the live map, the queued map, and the finished ring. Without that rule one name binds
-two children, and `resolve` picks one of them silently. The test names it:
-`a_handle_is_not_reused_while_a_finished_child_is_remembered`.
+**The number counts a live child, a queued one, and a remembered one.** A finished child stays
+reportable while its report is in the 64-deep ring, and its handle still resolves. So a new
+`explore` must not take a name that a remembered `explore` still answers to. The numbering reads
+all three indexes, and it happens **inside the same state lock as the registration**. So two
+concurrent admissions cannot choose one name. Without that rule one name binds two children, and
+`resolve` picks one of them in silence. Two tests name it:
+`a_handle_is_not_reused_while_a_finished_child_is_remembered` and
+`two_concurrent_admissions_never_pick_one_handle`.
 
 ```rust
 impl AgentRegistry {
@@ -666,12 +736,22 @@ child's warning. The default stays 5 for a subagent, and 0 for a plain session.
 proves. Every test uses a scripted fake provider. No network, and no `sleep`.
 
 The slot queue, in `crates/rho-core/tests/subagent_slots.rs`:
-- `admit_child_over_the_per_parent_cap_queues_and_returns_an_id` — a concurrency cap queues.
-- `admit_child_over_the_process_wide_cap_queues_and_returns_an_id` — the second cap queues.
-- `a_queued_child_starts_when_a_slot_frees` — dropping a live slot wakes the next in line.
+- `admit_child_over_the_per_parent_cap_queues_and_returns_an_id` — the per-parent cap queues.
+- `admit_child_with_a_free_slot_starts_at_once` — the `Started` arm.
+- `admission_reports_started_when_a_slot_was_free_and_queued_when_it_was_not` — both `Admission`
+  variants, and every `QueuedChild` accessor.
+- `admit_child_over_the_process_wide_cap_refuses_and_names_the_limit` — no cross-tree wait is
+  offered, and the message names `--max-live-agents`.
+- `a_queued_child_starts_when_a_slot_frees` — releasing a permit grants the next waiter.
+- `every_waiter_eventually_starts_when_slots_free_one_at_a_time` — three waiters, one slot, and
+  all three run. A lost wakeup would fail this and pass every other test here.
+- `a_queued_child_refuses_when_the_process_wide_cap_filled_while_it_waited` —
+  `Dequeued::ProcessWideFull`, and the parent continues.
+- `a_refused_queued_child_releases_its_per_parent_permit` — its sibling starts straight after, so
+  a waiter that gives up blocks nobody.
 - `a_queued_child_starts_before_a_later_one_under_one_parent` — per-parent order is kept.
 - `spawn_child_still_refuses_over_a_cap` — the bypass form never queues.
-- `two_racing_starts_cannot_both_pass_a_cap_of_one` — the compare-and-swap property holds.
+- `two_racing_starts_cannot_both_pass_a_cap_of_one` — the permit count holds under a race.
 - `a_queued_child_does_not_spend_its_timeout_while_it_waits` — the clock starts at start.
 - `cancelling_a_queued_child_resolves_started_with_cancelled` — a cancel frees the place.
 - `cancelling_a_parent_dequeues_every_queued_child` — three waiters resolve cancelled.
@@ -680,10 +760,20 @@ The slot queue, in `crates/rho-core/tests/subagent_slots.rs`:
 - `a_cycle_refuses_and_never_queues` — waiting breaks no cycle.
 - `a_full_wait_line_refuses_and_names_the_limit` — the queue itself is bounded.
 - `the_wait_line_does_not_grow_without_a_bound` — a thousand tasks do not queue a thousand.
+- `a_queued_entry_leaves_the_map_when_the_child_starts` — no id is in two maps at once.
+- `a_queued_entry_leaves_the_map_when_the_child_is_cancelled` — the drop guard runs.
+- `a_dropped_queued_child_leaves_no_entry_behind` — a caller that never awaits leaks nothing.
 
-The queued status, in `crates/rho-core/tests/subagent_slots.rs`:
+A queued child is addressable, and only by its owner, in `crates/rho-core/tests/subagent_slots.rs`
+and `crates/rho-tools/tests/subagent_tool.rs`:
 - `status_reports_a_queued_child_with_its_position` — the third variant answers.
+- `a_queued_position_is_computed_and_never_stale` — the child ahead starts, and the place moves
+  from two to one.
 - `status_reports_running_after_a_queued_child_starts` — the state moves on start.
+- `one_tree_cannot_reach_another_queued_child_by_id` — the scope guard covers the new map.
+- `agent_status_answers_for_a_queued_child` — the tool path, not only the type.
+- `cancel_agent_stops_a_queued_child` — the tool path, through the new queued branch.
+- `steer_agent_buffers_for_a_queued_child` — the tool path, and the message survives the start.
 
 The fan-out with the queue, in `crates/rho-tools/tests/subagent_tool.rs`:
 - `a_fan_out_over_the_cap_queues_the_extra_tasks_and_runs_them_all`
@@ -712,6 +802,15 @@ The handle tools, in `crates/rho-tools/tests/subagent_tool.rs`:
 - `cancel_agent_accepts_a_handle`
 - `agent_status_accepts_a_handle`
 - `spawn_agent_sets_an_alias_from_its_argument`
+- `spawn_agent_reports_a_rejected_alias_without_failing_the_spawn` — the work outlives the label.
+- `a_fan_out_gives_one_name_to_one_child_and_notes_the_other` — one name, one owner.
+- `an_alias_of_exactly_the_cap_is_accepted_and_one_more_is_refused` — the boundary, counted in
+  characters, so 64 emoji pass and 65 do not.
+- `an_alias_with_a_newline_or_a_control_character_is_refused` — no forged output line.
+- `a_malformed_agent_ref_names_both_accepted_shapes` — a boolean, a float, a negative number,
+  `null`, and an object each teach what to send instead.
+- `a_number_beyond_u64_is_refused_as_no_id` — serde reads it as a float, so it is not an id.
+- `an_empty_agent_ref_name_is_an_ordinary_not_found`
 
 Grace turns, in `crates/rho-core/tests/subagent_grace.rs`:
 - `a_child_is_warned_five_turns_before_its_cap` — the default fires at the right boundary.
@@ -723,17 +822,29 @@ Grace turns, in `crates/rho-core/tests/subagent_grace.rs`:
 - `a_child_that_ignores_the_warning_still_reports_out_of_turns` — the outcome keeps meaning.
 - `the_tool_call_budget_gets_no_grace_warning` — the budget keeps its hard stop.
 - `grace_turns_zero_disables_the_warning` — a caller turns it off.
+- `a_non_zero_grace_window_reaches_the_child_and_zero_does_not` — the builder boundary.
 - `a_definition_cannot_set_grace_turns` — a project file cannot change it.
+- `a_plain_session_gets_no_warning_by_default` — `SessionConfig::new` sets zero.
+- `the_driver_reads_the_grace_window_from_the_session_config` — the one copy site works.
 
 ## 6. What this spec forbids, and the extension points
 
 **What it forbids.**
 
-- A queue that grows without a bound. The wait line is capped.
+- A queue that grows without a bound. The wait line is capped, and the product is stated.
+- A queued entry that outlives its child, on any path.
+- A wait on the process-wide cap, because it would let one tree hold another tree.
+- A queued child that no lookup can reach, and an unscoped lookup that reaches one.
+- A counter plus a notify as the wait primitive, because it loses a waiter.
+- A stored place in the line, because nothing renumbers it and a wrong number misleads a model.
+- A waiter that gives up while it still holds a per-parent permit.
 - A blocked tool call with no id for the pending child.
 - A handle that replaces the id, or that resolves across trees.
-- An alias that shadows a derived handle.
-- A breaking change to the `id` argument shape.
+- A handle that binds to two children, including a remembered one.
+- An alias that shadows a derived handle, or that is unbounded, or that holds a control
+  character.
+- An alias failure that fails the spawn.
+- A breaking change to the `id` argument shape, and a refusal that names neither shape.
 - A second grace warning, or a warning that drops a user message.
 - A grace warning that overstates the turns that remain.
 - A serialised `AgentStatus`, and any catch-all variant on it.
@@ -744,6 +855,12 @@ Grace turns, in `crates/rho-core/tests/subagent_grace.rs`:
 - A host tunes the queue and the grace window through `SubagentLimits` and its flags.
 - A caller sets a memorable alias through `AgentRegistry::set_alias`.
 - A caller disables the grace warning through `SessionConfig::with_grace_turns`.
+
+**What is closed, on purpose.** The start order and the resolution order are policy, not
+third-party surface. A priority queue edits the order rule. A second naming scheme edits
+`resolve`. A per-agent grace value edits `SubagentLimits` and `build_child`. Each is a knob for
+this project to turn, and none is a case a third party adds behind a trait. Saying so here is
+better than implying an openness that does not exist.
 
 ## 7. Out of scope
 
