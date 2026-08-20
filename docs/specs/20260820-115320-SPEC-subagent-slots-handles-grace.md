@@ -450,6 +450,18 @@ impl SessionConfig {
 `max_turns - 1`, so the warning fires before the last turn. This mirrors how
 `cap_tool_calls` flows the tool-call budget into the child.
 
+**Three types hold the value, and the flow has one direction, so no two can disagree.** The
+same three types already hold `max_tool_calls`, and the existing flow is the pattern to copy.
+`SessionConfig::new` seeds its caps from `AgentConfig::default()`, at
+`crates/rho-core/src/agent.rs:201`. `Session::run` then builds the driver's `AgentConfig` from
+the session config, at `crates/rho-core/src/agent.rs:346`. So `SubagentLimits` states the
+subagent policy, `SessionConfig` states one session's shape, and the driver's `AgentConfig`
+holds the per-run caps it enforces. There is one copy site per hop, and no back edge.
+
+**Do not collapse the field into `SubagentLimits` alone.** A subagent is not the only session
+that may want a warning, and the driver enforces the cap. A single owner would make the driver
+reach into a subagent type, and a plain session could never opt in.
+
 ### 4.2 The delivery path
 
 **The warning is delivered through the steering queue.** The driver pushes it, and the same
