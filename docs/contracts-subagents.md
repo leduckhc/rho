@@ -61,13 +61,21 @@ pub struct AgentDefinition {
 | --- | --- | --- |
 | `name` | yes | The same character rules as a skill. |
 | `description` | yes | The model reads it to choose. Without it the definition does not load. |
-| `tools` | no | Intersected with the parent's set. `None` inherits. An empty list means no tools. |
+| `tools` | no | Intersected with the parent's set. `None` inherits. `all` and `*` also inherit. `none` means no tools. An empty list means no tools. |
 | `model` | no | Overrides the inherited model. The provider is never overridable. |
 | `max_turns` | no | Capped by the parent's. |
 | `sandbox` | no | May only narrow. |
 
 **Every optional field can lower a limit and none can raise one.** `warnings` carries a
 dropped tool name, so a mistake in a definition is visible rather than silent.
+
+**The three tool keywords.** `tools: all` and `tools: *` inherit the parent's whole set, which is
+what an absent field already means. `tools: none` is an empty set, stated on purpose. A keyword
+must stand alone: a line that mixes `all` with a real name drops the keyword, keeps the name, and
+warns. The narrow reading wins every time, because a wrong widening is an escalation and a wrong
+narrowing is a visible failure. The keyword is resolved by the loader in `rho-skills`, never by
+`intersect_tools`, so the security core keeps one literal meaning. See decision
+D-a-tool-keyword-stands-alone.
 
 ## 2. Confinement: a child is never more permissive than its parent
 
@@ -236,6 +244,10 @@ pub struct SubagentLimits {
 
 The CLI depth is 1 and has no flag, because a command-line child receives no spawn tool and no
 flag could change that. See decision D-cli-depth-is-zero.
+
+**A flag is the only way to change a limit today.** `rho-config` parses a `[subagents]` layer,
+and no binary reads the resolved config yet. So a config file changes no limit here. The gap
+covers the whole config crate, and decision D-the-layered-config-has-no-caller records it.
 
 Both reservations use a compare-and-swap loop, so two racing spawns cannot both pass a cap of
 one. A turn cap counts provider round trips, so `max_tool_calls` exists to bound a single turn

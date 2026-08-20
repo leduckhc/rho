@@ -115,3 +115,110 @@ async fn an_unknown_tool_name_in_a_definition_is_dropped_with_a_warning() {
         "the unknown tool is dropped and reported"
     );
 }
+
+// --- The `all` and `none` keywords. See `SPEC-subagents` section 5. ---
+
+#[tokio::test]
+async fn the_all_keyword_inherits_the_whole_parent_set() {
+    // `tools: all` used to be read as a tool literally named "all". The
+    // intersection then dropped it and the child ran with no tools at all. The
+    // keyword now means the same as omitting the field: inherit everything.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "scout.md",
+        "---\nname: scout\ndescription: Recon.\ntools: all\n---\nbody\n",
+    );
+    let def = load_definition(&path, SkillOrigin::User)
+        .await
+        .expect("the definition loads");
+    assert_eq!(def.tools, None, "`all` inherits, so it holds no list");
+    assert!(
+        def.warnings.is_empty(),
+        "a keyword that stands alone is not a mistake: {:?}",
+        def.warnings
+    );
+
+    let parent_tools = vec!["read".to_string(), "glob".to_string()];
+    let intersection = def.resolve_tools(&parent_tools);
+    assert_eq!(intersection.allowed, parent_tools);
+    assert!(intersection.dropped.is_empty());
+}
+
+#[tokio::test]
+async fn the_star_keyword_is_the_same_as_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "scout.md",
+        "---\nname: scout\ndescription: Recon.\ntools: \"*\"\n---\nbody\n",
+    );
+    let def = load_definition(&path, SkillOrigin::User)
+        .await
+        .expect("the definition loads");
+    assert_eq!(def.tools, None);
+}
+
+#[tokio::test]
+async fn the_none_keyword_gives_a_child_no_tools() {
+    // Unrepresentable before: an empty list was the only way, and a reader could
+    // not tell it from a mistake. `none` says it on purpose.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "talker.md",
+        "---\nname: talker\ndescription: Thinks aloud.\ntools: none\n---\nbody\n",
+    );
+    let def = load_definition(&path, SkillOrigin::User)
+        .await
+        .expect("the definition loads");
+    assert_eq!(
+        def.tools.as_deref(),
+        Some(&[][..]),
+        "`none` is an empty set"
+    );
+
+    let intersection = def.resolve_tools(&["read".to_string()]);
+    assert!(intersection.allowed.is_empty(), "no tool reaches the child");
+    assert!(intersection.dropped.is_empty(), "nothing was asked for");
+}
+
+#[tokio::test]
+async fn a_keyword_mixed_with_a_tool_name_is_dropped_and_warns() {
+    // `all, read` is a contradiction. The keyword is ignored and the explicit
+    // names stand, because that narrows. Widening on an ambiguous line would be
+    // the fail-open shape.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "scout.md",
+        "---\nname: scout\ndescription: Recon.\ntools: all, read\n---\nbody\n",
+    );
+    let def = load_definition(&path, SkillOrigin::User)
+        .await
+        .expect("the definition loads");
+    assert_eq!(
+        def.tools.as_deref(),
+        Some(&["read".to_string()][..]),
+        "the named tool stands and the keyword is gone"
+    );
+    let warning = def.warnings.join(" ");
+    assert!(
+        warning.contains("all"),
+        "the warning must name the keyword it dropped: {warning}"
+    );
+}
+
+#[tokio::test]
+async fn a_keyword_is_recognised_whatever_its_case() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "scout.md",
+        "---\nname: scout\ndescription: Recon.\ntools: ALL\n---\nbody\n",
+    );
+    let def = load_definition(&path, SkillOrigin::User)
+        .await
+        .expect("the definition loads");
+    assert_eq!(def.tools, None);
+}
