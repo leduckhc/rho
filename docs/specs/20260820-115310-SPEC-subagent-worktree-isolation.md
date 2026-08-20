@@ -45,11 +45,34 @@ worktree. See `SPEC-subagents` section 3 for the parent rule.
   D-the-layered-config-has-no-caller. Ship the flag, and add the key when that call site exists.
 
 **A definition or the model may refuse, and never grant.** This follows pi. A definition
-sets `isolation: off` in its frontmatter. The model passes `isolate: false` to a spawn
-tool. Both only decline a worktree. Neither can demand one.
+sets `isolation: off` in its frontmatter. The model sends `isolation: "off"` to a spawn tool.
+Both only decline a worktree. Neither can demand one.
 
-A definition that asks for isolation when the caller did not enable it is ignored. rho adds
-a warning, the same way it reports a dropped tool name. See `SPEC-subagents` section 3.
+**Granting is unrepresentable on both sides, not merely refused.** A definition parses into a
+type with one variant, and the tool schema offers one value. So a request to grant cannot be
+expressed, and no check has to catch it.
+
+```rust
+/// What a definition or a model may ask for. There is no `On` variant, so neither side
+/// can grant isolation. Only a caller grants it. See D-isolation-granted-only-by-caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IsolationRequest {
+    /// Run in the parent tree, even when the caller enabled isolation.
+    Off,
+}
+
+// `AgentDefinition` gains one field. `None` accepts the caller's choice.
+pub isolation: Option<IsolationRequest>,
+```
+
+The `spawn_agent` and `spawn_agents` schemas gain one property, and it holds one value:
+
+```json
+{ "isolation": { "type": "string", "enum": ["off"],
+                 "description": "Send \"off\" to keep this child in the parent tree." } }
+```
+
+A definition that asks for isolation cannot be written, so nothing is ignored silently.
 
 **Why refusing never widens.** A refused child runs in the parent tree. The parent tree is
 the parent's own reach. A child is never more permissive than its parent, so a child in the
@@ -175,6 +198,45 @@ pub struct SpawnEnv {
 }
 ```
 
+## 4a. Every git call is hardened, and the hardening is proved
+
+A `Workspace` that shells out is another process that trusts its parent. A worktree also holds a
+`.git` **file** that names its administrative directory, and that file sits inside the child's
+own root. So `confine` allows the child to rewrite it. `confine` has no concept of `.git`, and a
+boundary that lives only in prose is the defect family this project knows best.
+
+**A live probe proved the attack, and then proved the fix.** The commands and the real output
+are in `docs/verification/worktree-git-probe.md`. A child rewrote its own `.git` to name a
+repository it controlled. rho's `git commit` then ran the child's `post-commit` hook as the rho
+process, and the hook saw four `AWS_` variables. The commit also landed in the child's fake
+repository, so a report that claimed a branch would have been a lie.
+
+**Four rules. Each one alone stops the attack.**
+
+1. **Hooks are off for every git call.** rho passes `-c core.hooksPath=/dev/null`, and
+   `--no-verify` where a command accepts it. The probe shows no hook then runs.
+2. **The administrative directory is recorded at create time, and passed explicitly.** Every
+   later call uses `--git-dir <recorded>` and `--work-tree <worktree>`. So a rewritten `.git`
+   file is never read. The probe shows the commit then lands on the real branch.
+3. **The environment is scrubbed.** An implementation must apply the same scrub `bash` applies,
+   at `crates/rho-tools/src/bash.rs:621`. A credential must not reach a git subprocess, exactly
+   as it must not reach a model-written command. See decision D-bash-scrubs-credentials.
+4. **The committer identity is explicit.** rho passes `-c user.name` and `-c user.email`. A
+   machine with no configured identity then still keeps the child's work. Without this the
+   commit fails and the work is lost.
+
+rho also sets `GIT_TERMINAL_PROMPT=0`, so a git call never waits for a human. See decision
+D-a-workspace-hardens-every-git-call.
+
+**The child may not write `.git` inside its root.** The rules above make a rewritten pointer
+harmless, and this rule stops the child from trying. The child's write path denies a path whose
+components hold `.git`. This is defence in depth. Rule 2 is the load-bearing one.
+
+**A nested repository is named, not swallowed.** A child may create its own repository inside
+the worktree. `git add -A` then records a gitlink, and the nested content is **not** kept. The
+probe showed git's own warning for this. So reclaim finds every nested `.git` and lists it in the
+report. Silent partial work loss is worse than a named one.
+
 ## 5. Ordering with the gate
 
 The gate checks a child's declared artifacts. See `SPEC-agent-tasks`. A worktree may be
@@ -200,8 +262,10 @@ first. A deleted tree has no files to check.
 
 ## 6. The persisted contract
 
-The branch name and the isolation root must reach the parent. So `AgentReport` gains two
-fields. See `SPEC-subagents` section 6 for the current shape.
+The branch name and the isolation facts must reach the parent. So `AgentReport` gains **one**
+field, not a field per fact. A struct behind one optional field stays open for extension, and a
+pair of loose fields would grow one per question. See `SPEC-subagents` section 6 for the current
+shape, and decision D-no-four-argument-session-new for the pattern this avoids.
 
 ```rust
 pub struct AgentReport {
@@ -214,27 +278,50 @@ pub struct AgentReport {
     pub claims: ChildClaims,
     pub transcript: Option<PathBuf>,
 
-    /// The branch that holds the child's kept changes. `None` when the child
-    /// was not isolated, or left no change.
+    /// What isolation did. `None` means the child shared the parent root.
     #[serde(default)]
-    pub branch: Option<String>,
+    pub isolation: Option<IsolationReport>,
+}
 
-    /// The child's own root while it ran. The worktree path when isolated.
-    /// `None` when the child shared the parent root.
+/// The facts about one isolated run. Every one is rho's own observation, never a
+/// child's claim, so it sits beside `gate` and not beside `claims`.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct IsolationReport {
+    /// The child's own root while it ran.
+    pub root: PathBuf,
+    /// The branch that holds the kept changes. `None` when nothing changed, or
+    /// when the commit failed.
     #[serde(default)]
-    pub isolation_root: Option<PathBuf>,
+    pub kept_at: Option<String>,
+    /// The commit the worktree started from.
+    pub base: String,
+    /// True when the parent tree held uncommitted changes at create time. So a
+    /// caller can assert on it, rather than read a sentence.
+    #[serde(default)]
+    pub parent_was_dirty: bool,
+    /// Every nested repository found in the worktree. Their content is not kept.
+    #[serde(default)]
+    pub nested_repositories: Vec<PathBuf>,
+    /// The tree still on disk, when reclaim could not finish.
+    #[serde(default)]
+    pub left_on_disk: Option<PathBuf>,
 }
 ```
 
-**Both new fields carry `#[serde(default)]`.** This keeps the persisted format compatible.
+**`parent_was_dirty` is a field and not a sentence.** A prose notice in a tool result is
+advice a model may ignore. A field lets a caller, a test, and a frontend all assert the same
+fact. See section 9.
 
-**A newer reader with an older record.** `#[serde(default)]` fills both fields with `None`.
-`None` reads as "not isolated". That is the honest reading. A record from before this feature
-describes a child that shared the parent root.
+**One field carries the future.** A later question, such as the number of commits or the size of
+the change, becomes a field on `IsolationReport`. `AgentReport` does not grow again.
 
-**An older reader with a newer record.** serde ignores an unknown field by default. So an
-older reader drops `branch` and `isolation_root`. It reads every other field. It loses only
-the isolation facts, which it could not use.
+**A newer reader with an older record.** `#[serde(default)]` fills `isolation` with `None`, and
+`None` reads as "not isolated". That is the honest reading of a record written before this
+feature.
+
+**An older reader with a newer record.** serde ignores an unknown field, so an older reader drops
+`isolation` and reads every other field. It loses only the isolation facts, which it could not
+use.
 
 ## 7. The failure set
 
@@ -257,6 +344,12 @@ pub enum WorkspaceError {
     ReclaimFailed { path: PathBuf, detail: String },
     /// A worktree was left on disk by a crash. A later run reports it.
     Orphaned { path: PathBuf },
+    /// Too many orphans already sit on disk. rho refuses a new worktree rather
+    /// than fill the disk. See section 10.
+    TooManyOrphans { limit: usize, found: usize },
+    /// The agent name cannot become a path or a branch, and the id alone was
+    /// also unusable. See section 10.
+    NameNotUsable { agent: String },
 }
 ```
 
@@ -286,10 +379,13 @@ it when it finds a leftover worktree. See section 10.
 Four children live in four worktrees. They share one git repository. git takes an index lock
 and a refs lock. Two concurrent `git worktree add` calls race on those locks. One would fail.
 
-**The work is serialised, not retried.** The `GitWorktreeWorkspace` owns one async mutex.
-`create` takes the mutex, runs `git worktree add`, and releases it. `reclaim` takes the same
-mutex, because a commit updates a shared ref. A retry loop on a lock is a thundering herd. A
-mutex is deterministic and simple.
+**The work is serialised, not retried, and the lock is keyed by repository.** A
+`GitWorktreeWorkspace` holds a map from the git common directory to one async mutex. `create`
+and `reclaim` both take the mutex for that repository. So two sessions in one process that share
+a repository serialise, and two sessions on two repositories do not wait for each other. A
+per-instance mutex would fail both cases: two instances on one repository would still race the
+index lock, and two repositories would serialise for nothing. A retry loop on a lock is a
+thundering herd, and a mutex is deterministic.
 
 **Only the git command is serialised.** The child runs after `create` returns. So the
 children still run at the same time. The mutex holds for milliseconds per child.
@@ -310,8 +406,9 @@ the current files. The child sees only the last commit. So a model would be surp
 **The rule.** rho bases the worktree on `HEAD`. The child sees the committed state. The child
 does not see the parent's uncommitted edits.
 
-**The message the parent gets.** When the parent tree is dirty, the isolated spawn returns
-this notice in its tool result:
+**The fact is a field, and the sentence is extra.** `IsolationReport.parent_was_dirty` records
+it, so a caller, a test, and a frontend can all assert it. A model may ignore prose, and a field
+lets a strict caller refuse the result. The tool result also carries this notice:
 
 ```text
 The parent tree has uncommitted changes. The isolated child sees the last commit.
@@ -327,20 +424,40 @@ leaves that choice to the caller and the model.
 it after the child stops and the gate runs. It calls it for every terminal state. A drop
 guard runs reclaim even when the child failed, timed out, or was cancelled.
 
+**Removal goes through git, never through a recursive delete.** Reclaim runs
+`git worktree remove`, which refuses a tree that git does not know, and which refuses a dirty or
+a locked tree. A bare recursive delete would follow a symlink the child created, and this project
+has already destroyed a parallel worker's files once. So the removal path validates the target by
+asking git, and it never deletes a path git does not list. See decision D-no-git-writes-by-a-subagent.
+
 **A later run and an orphan.** A crash can leave a worktree on disk. A later run never
-deletes it. Auto-deletion could destroy unrecovered work. This project already lost a
-parallel worker's files once. See D-no-git-writes-by-a-subagent. A later run lists an orphan
-and reports it. A human removes it.
+deletes it. Auto-deletion could destroy unrecovered work. A later run lists an orphan and
+reports it. A human removes it.
 
-**The naming scheme.** An orphan must be identifiable. It must never collide. So both names
-carry the agent name, the agent id, and a UTC timestamp:
+**An orphan count is bounded, because a disk is bounded.** rho counts the orphans under
+`.rho/worktrees/` before it creates a new tree. Past `MAX_ISOLATION_ORPHANS`, which is 32, it
+refuses with `TooManyOrphans` and names the directory to clean. Never deleting and never counting
+would grow without a limit, which is the family that already cost this project 805 MB. So rho
+keeps the work and refuses to add more. See decision D-an-orphan-is-capped-not-deleted.
 
-- Worktree directory: `<git-common-parent>/.rho/worktrees/<agent>-<agent_id>-<yyyymmdd-hhmmss>`
-- Branch: `rho/agent/<agent>-<agent_id>-<yyyymmdd-hhmmss>`
+**The naming scheme, and it never trusts the agent name.** A name in a definition only warns
+when it breaks the character rule, and a bad name still loads. `sanitize` strips control
+characters and keeps `/`, `..`, a space, and a leading dash. A user-scope definition needs no
+`--trust-project`. So the raw name must never reach a path or a git ref.
+
+rho builds a slug from the name: it keeps `[a-z0-9-]`, lowercases the rest, drops every other
+character, trims a leading or trailing dash, and truncates to 32 characters. An empty result
+falls back to `agent`. Then:
+
+- Worktree directory: `<git-common-parent>/.rho/worktrees/<slug>-<agent_id>-<yyyymmdd-hhmmss>`
+- Branch: `rho/agent/<slug>-<agent_id>-<yyyymmdd-hhmmss>`
+
+The `agent_id` and the timestamp make each name unique, so the slug is a label and never the
+identity. A name of `../../../../tmp/x` therefore becomes `tmp-x`, inside the intended directory.
+See decision D-a-path-slug-never-trusts-an-agent-name.
 
 The worktree directory lives outside the parent session root. So a confined child cannot
-reach it, and a confined parent cannot reach it either. The agent id and the timestamp make
-each name unique across runs and across concurrent children. The `rho/agent/` prefix makes an
+reach it, and a confined parent cannot reach it either. The `rho/agent/` prefix makes an
 orphan easy to find:
 
 ```sh
@@ -355,12 +472,12 @@ uncommitted work. Losing that work silently is the worse failure. So rho decides
 
 **Reclaim always keeps the child's changes.** On cancel or timeout, reclaim still runs. It
 commits whatever the child wrote to the branch. It returns the branch name in the report. The
-outcome stays `Canceled` or `OutOfTurns`. The `branch` and `isolation_root` fields point at
-the kept work.
+outcome stays `Canceled` or `OutOfTurns`. `IsolationReport.kept_at` and `IsolationReport.root`
+point at the kept work.
 
-**When a commit is not safe, rho leaves the tree on disk.** It sets `isolation_root` to the
-worktree path. It sets `branch` to `None`. The summary names the leftover tree. A human
-recovers it.
+**When a commit is not safe, rho leaves the tree on disk.** It sets
+`IsolationReport.left_on_disk` to the worktree path, and `kept_at` stays `None`. The summary
+names the leftover tree. A human recovers it.
 
 **Why.** A cancelled child may have done useful work. A silent delete would waste that work
 and hide it. A named branch or a named tree lets the parent inspect the result. This matches
@@ -369,14 +486,19 @@ D-worktree-keeps-a-cancelled-childs-work.
 
 ## 12. What this contract forbids
 
-- The model may not grant isolation.
-- A definition may not grant isolation. A definition may only refuse it.
+- The model may not grant isolation, and the schema offers no value that would.
+- A definition may not grant isolation. Its type holds one variant, `Off`.
 - `rho-core` may not depend on git.
+- A git call may not run a hook, and it may not trust the worktree `.git` pointer.
+- A git subprocess may not inherit a credential.
+- A raw agent name may not reach a path or a git ref.
 - The gate may not check a worktree artifact against the parent root.
-- A child may not set its own session root.
+- A child may not set its own session root, and it may not write `.git` inside it.
 - An isolation failure may not fall back to the shared tree without consent.
 - Cancel may not discard the child's changes. A timeout may not discard the child's changes.
-- A later run may not auto-delete an orphan.
+- Reclaim may not delete a path git does not list as a worktree.
+- A later run may not auto-delete an orphan, and orphans may not grow without a count.
+- A nested repository may not be dropped in silence.
 
 ## 13. The extension point a third party uses
 
@@ -413,9 +535,30 @@ Ordering with the gate, in `rho-tools`:
 - `an_artifact_written_in_the_worktree_passes_the_gate` — the child root reaches the gate context.
 
 The persisted contract, in `rho-core`:
-- `a_report_without_the_isolation_fields_reads_as_not_isolated` — an older record fills `None`.
-- `a_newer_report_round_trips_the_branch_and_the_root` — the two new fields serialise and read back.
-- `an_older_reader_drops_the_isolation_fields` — an unknown field never fails the read.
+- `a_report_without_the_isolation_field_reads_as_not_isolated` — an older record fills `None`.
+- `a_newer_report_round_trips_the_isolation_report` — every field serialises and reads back.
+- `an_older_reader_drops_the_isolation_field` — an unknown field never fails the read.
+- `the_isolation_report_defaults_every_optional_field` — a partial record still reads.
+
+The hardened git call, in `rho-tools`:
+- `a_rewritten_worktree_git_pointer_cannot_redirect_rho` — the recorded git directory wins, and
+  the commit lands on the real branch.
+- `a_child_hook_never_runs_during_reclaim` — hooks are off, proved with a hook that would write
+  a file.
+- `the_git_subprocess_environment_holds_no_credential` — the same scrub `bash` applies.
+- `a_commit_succeeds_with_no_configured_git_identity` — rho passes its own identity.
+- `a_child_cannot_write_dot_git_inside_its_root` — the write path denies it.
+- `a_nested_repository_is_named_in_the_report` — its content is not kept, and the report says so.
+
+The naming slug, in `rho-tools`:
+- `an_agent_name_with_a_path_traversal_becomes_a_safe_slug` — `../../../../tmp/x` stays inside.
+- `an_agent_name_with_a_leading_dash_is_not_a_git_option` — no ref injection.
+- `an_unusable_name_falls_back_and_still_spawns` — the id carries the identity.
+
+Orphans and removal, in `rho-tools`:
+- `reclaim_removes_a_tree_through_git_and_not_by_deleting_a_path`
+- `reclaim_refuses_a_path_git_does_not_list` — a symlink swap changes nothing.
+- `too_many_orphans_refuses_a_new_worktree_and_names_the_directory`
 
 The failure set, in `rho-tools`:
 - `a_non_git_root_fails_the_isolated_spawn_as_a_result` — `NotAGitRepo`, and the parent continues.
@@ -432,7 +575,12 @@ Concurrency, in `rho-tools`:
 
 A dirty parent tree, in `rho-tools`:
 - `a_dirty_parent_tree_warns_the_parent` — the child sees `HEAD`, not the uncommitted edits.
+- `a_dirty_parent_tree_sets_parent_was_dirty` — the fact is a field a caller can assert.
 - `an_isolated_child_does_not_see_the_parent_uncommitted_work` — the worktree is based on `HEAD`.
+
+The repository lock, in `rho-tools`:
+- `two_sessions_on_one_repository_share_one_lock` — the lock is keyed by the git common directory.
+- `two_repositories_do_not_wait_for_each_other` — a per-instance mutex would fail this.
 
 Cleanup and orphans, in `rho-tools`:
 - `a_finished_child_worktree_is_reclaimed` — reclaim runs on the normal path.
