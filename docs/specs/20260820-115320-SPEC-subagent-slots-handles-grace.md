@@ -32,24 +32,29 @@ Two rules from `SPEC-subagents` hold throughout, and this spec never weakens the
 
 ### 2.1 Where the waiting happens
 
-**A concurrency cap queues the child. It does not refuse.** The spawn returns a live id at
+**The per-parent cap queues the child. It does not refuse.** The spawn returns a live id at
 once. The child starts when a slot frees. rho does the waiting, not the model. See decision
 D-queue-over-refuse.
+
+**The process-wide cap still refuses.** It is shared by every tree in the process, so a wait
+on it would let one session's children hold another session's fan-out for as long as they run.
+The old refusal always made progress, and a cross-tree wait does not. So only the cap that one
+parent controls may queue. See decision D-the-process-wide-cap-still-refuses.
 
 The alternative was a tool call that blocks the model until a slot frees. rho rejects it.
 A blocked model holds no id, so it cannot poll, steer, or cancel the pending child. A
 queued id gives the model all three, exactly as a background spawn does.
 
-This still obeys the rule that a refusal must teach. A concurrency cap is not a refusal any
-more, because the work is admissible. It only cannot start yet. The caps that stay a
-refusal still teach. See section 2.7.
+This still obeys the rule that a refusal must teach. A per-parent cap is not a refusal any
+more, because the work is admissible under one parent. It only cannot start yet. The caps that
+stay a refusal still teach. See section 2.7.
 
 ### 2.2 The admission contract
 
 ```rust
-/// The result of admitting a child when a concurrency cap may be full.
+/// The result of admitting a child when the per-parent cap may be full.
 ///
-/// A concurrency cap no longer refuses. It queues. So a caller must handle both a
+/// The per-parent cap no longer refuses. It queues. So a caller must handle both a
 /// slot that was free and one that was not. See decision D-queue-over-refuse.
 pub enum Admission {
     /// A slot was free. The child holds it and may start now.
@@ -60,11 +65,11 @@ pub enum Admission {
 
 /// A child that holds an id but not yet a slot.
 ///
-/// It is addressable while it waits. A caller may poll it, steer it, or cancel it,
-/// all by the same id a started child uses. Its `CancelToken` and its `MessageQueue`
-/// exist now, so a steer buffers and a cancel lands before the child ever runs.
+/// It is addressable while it waits, through the registry, by the same id a started
+/// child uses. Its `CancelToken` and its `MessageQueue` exist now, so a steer buffers
+/// and a cancel lands before the child ever runs.
 pub struct QueuedChild {
-    /* private: id, agent, depth, ancestors, cancel, queue, sequence */
+    /* private: id, agent, depth, ancestors, cancel, queue, permit future */
 }
 
 impl QueuedChild {
@@ -78,12 +83,11 @@ impl QueuedChild {
     pub fn is_cancelled(&self) -> bool;
     /// The queue the child reads once it starts. A steer buffers here meanwhile.
     pub fn queue(&self) -> MessageQueue;
-    /// Wait for a slot, reserve it, and return the live spawn.
+    /// Wait for a permit, then return the live spawn.
     ///
-    /// It reserves the per-parent slot and the process-wide slot with the same
-    /// compare-and-swap loop `spawn_child` uses, so two racing starts cannot both
-    /// pass a cap of one. It resolves `Err` when the child was cancelled while it
-    /// waited, alone or with its parent.
+    /// It resolves `Err` when the child was cancelled while it waited, alone or
+    /// with its parent. It never returns a cap error, because the wait is the
+    /// answer to a full cap.
     pub async fn started(self) -> Result<ChildSpawn, Dequeued>;
 }
 
@@ -94,16 +98,97 @@ pub enum Dequeued {
 }
 ```
 
+### 2.2a A permit, not a counter
+
+**The reservation becomes a semaphore permit. The compare-and-swap counters go.** A counter
+cannot be waited on. A wait built on a counter plus a notify loses a waiter: a task that
+fails its retry, and then reaches its next `await`, misses a `notify_waiters` that fired in
+between. Then it sleeps until the next child happens to finish, and it hangs when none does.
+See decision D-permits-not-counters.
+
+```rust
+/// Inside `AgentRegistry`. One permit is one live child.
+struct RegistryInner {
+    limits: SubagentLimits,
+    /// The process-wide live cap. `max_live_total` permits.
+    live_permits: Arc<tokio::sync::Semaphore>,
+    // ... the id counter, the live map, the finished ring, and the queued map ...
+}
+
+/// Inside `AgentNode`. One semaphore per parent, shared by that parent's clones.
+struct NodeInner {
+    /// The per-parent cap. `max_children_per_parent` permits.
+    child_permits: Arc<tokio::sync::Semaphore>,
+}
+
+/// The reservation. Dropping it frees both permits and deregisters the handle.
+pub struct ChildSlot {
+    /* private: two OwnedSemaphorePermit values, plus the registry handle */
+}
+```
+
+`tokio::sync::Semaphore` grants permits in first-in-first-out order. So the queue order in
+section 2.9 comes from the primitive, not from a second structure that could disagree with it.
+
+- `spawn_child` calls `try_acquire_owned` on both semaphores. A failure is the same refusal it
+  returns today, so the immediate form is unchanged for every caller.
+- `QueuedChild::started` calls `acquire_owned` on the per-parent semaphore, then
+  `try_acquire_owned` on the process-wide one. It selects on the child's `CancelToken`, so a
+  cancel resolves the wait at once.
+- **The acquire order is per-parent first, then process-wide.** A per-parent permit is
+  contended only by one parent's own children, and each of those is either running, and so
+  will finish, or queued behind this child in one line. So the order cannot deadlock. A
+  waiter that holds a per-parent permit does hold it while it takes the second one, and that
+  is deliberate: it keeps one parent's start order stable.
+
+### 2.2b A queued child lives in the registry
+
+**A queued child is registered, and every lookup that finds it is scoped.** Without this,
+"addressable by id" is false: the tools reach a child only through
+`AgentRegistry::descendant` and `AgentRegistry::status`, which read the live map and the
+finished ring. A `QueuedChild` held by the spawning task alone appears in neither, so
+`steer_agent`, `cancel_agent`, and `agent_status` would all answer "no subagent with id N".
+See decision D-a-queued-child-lives-in-the-registry.
+
+```rust
+/// Inside `RegistryInner`. Every child that holds an id and no slot.
+///
+/// The ancestor chain is stored beside each entry, exactly as the finished ring
+/// stores it. A lookup without it would let one tree reach another tree's queued
+/// child, which is the escape decision D-a-caller-addresses-only-its-own forbids.
+queued: Mutex<HashMap<u64, QueuedEntry>>,
+
+struct QueuedEntry {
+    agent: String,
+    depth: u32,
+    ancestors: Vec<AgentId>,
+    cancel: CancelToken,
+    queue: MessageQueue,
+    /// The place in the parent's line, counted from one.
+    position: usize,
+}
+```
+
+The scoped accessors consult three structures now, in this order: live, queued, then
+finished. `descendant` returns `None` for a queued child, because a `LiveAgent` cancels and
+steers a running child. `status`, `cancel_descendant`, and `resolve` all answer for a queued
+child. `admit_child` registers the entry, and `started` removes it when it hands out the
+slot, in one lock, so no id is ever in both maps.
+
+**Steering a queued child goes through the registry too.** `AgentRegistry::steer_scoped`
+pushes into the live handle's queue, or into the queued entry's queue, whichever holds the
+id. One entry point, so a queued child and a live child cannot drift apart.
+
 The new entry point on `AgentNode`:
 
 ```rust
 impl AgentNode {
-    /// Reserve a slot now, or queue when a concurrency cap is full.
+    /// Reserve a slot now, or queue when the per-parent cap is full.
     ///
     /// It refuses at once for a cap that waiting cannot fix: the depth limit, the
-    /// cycle guard, and a full wait line. It queues for a concurrency cap: the
-    /// per-parent child cap and the process-wide live cap. The tools call this. See
-    /// decision D-queue-over-refuse and decision D-caps-that-cannot-wait-refuse.
+    /// cycle guard, the process-wide live cap, and a full wait line. It queues for
+    /// the per-parent child cap alone. The tools call this. See decision
+    /// D-queue-over-refuse and decision D-caps-that-cannot-wait-refuse.
     pub fn admit_child(
         &self,
         agent: impl Into<String>,
@@ -130,10 +215,9 @@ impl AgentNode {
 }
 ```
 
-**The wake path.** `ChildSlot::drop` already frees both counts. It now also wakes the wait
-line. It notifies the parent's own line first, then the process-wide waiters. Each woken
-starter retries the compare-and-swap loop. The retry keeps the tested race property, and
-the notify only decides who retries first.
+**The wake path.** `ChildSlot::drop` releases both permits. The semaphore then grants the
+next waiter in line, and no notify is involved. So a waiter cannot miss a wake, and a lost
+wakeup is unrepresentable rather than tested.
 
 ### 2.3 A queued state for status
 
@@ -237,44 +321,62 @@ pub enum SubagentError {
 }
 ```
 
-`TooManyChildren` and `TooManyLiveAgents` stay in the enum, because `spawn_child` still
-returns them. `admit_child` never returns them, because it queues instead. See decision
-D-bounded-slot-queue.
+`TooManyChildren` stays in the enum, because `spawn_child` still returns it.
+`TooManyLiveAgents` stays for both forms, because the process-wide cap refuses in both. See
+decision D-bounded-slot-queue.
+
+**The process-wide ceiling, stated as a product.** One parent queues at most
+`max_queued_per_parent` children, which is 16 by default. A parent must hold a live slot
+itself, so the number of parents is bounded by `max_live_total`, which is 32, plus the session
+roots. Each queued child holds a `CancelToken` and a `MessageQueue` of 32 messages. So the
+ceiling is about 16 thousand queued messages across the process. That is bounded, and it is
+the number a reviewer should check against a memory budget.
 
 ### 2.7 Which caps still refuse
 
-Waiting frees a concurrency slot. Waiting adds no depth and breaks no cycle. So:
+Waiting frees a per-parent slot. Waiting adds no depth and breaks no cycle. Waiting on a
+process-wide slot waits on another tree.
 
 | Cap | `admit_child` behaviour | Why |
 | --- | --- | --- |
-| `max_children_per_parent` | queue | a live child frees a slot |
-| `max_live_total` | queue | a live child frees a slot |
+| `max_children_per_parent` | queue | this parent's own child frees a slot |
+| `max_live_total` | refuse at once | only another tree can free it, so a wait is not bounded |
 | `max_depth` | refuse at once | waiting adds no depth |
 | the cycle guard | refuse at once | waiting breaks no cycle |
 | `max_queued_per_parent` | refuse at once | the wait line itself is full |
 
-Each refusal names the limit and its value. See decision D-caps-that-cannot-wait-refuse.
+Each refusal names the limit and its value. See decision D-caps-that-cannot-wait-refuse and
+decision D-the-process-wide-cap-still-refuses.
 
 ### 2.8 The fan-out and the queue
 
 **`spawn_agents` uses the queue.** A task over the per-parent cap now queues instead of a
-per-task refusal. Every task runs, in the end, unless the wait line is full.
+per-task refusal. Every task runs, in the end, unless the wait line is full or the
+process-wide cap is reached. Those two remain per-task refusals, and each names its limit.
 
 **The result order is unchanged.** `spawn_agents` collects with `join_all`, which keeps the
 results in request order whatever the start order. So the request-order promise holds. The
 prompt prefix stays stable and the provider cache stays warm. See decision
 D-per-parent-fifo-start-order.
 
+**A task that waits long still gets its full budget.** The `child_timeout` clock starts when
+the child starts, so a task that waited does not arrive with less time. The retry ledger counts
+a death, and a wait is not a death, so waiting cannot consume a retry.
+
 ### 2.9 Fairness and order
 
-**Start order is first-in-first-out per parent.** A child that queued earlier under one
-parent starts before a later one under that parent. Order between two parents is
+**Start order is first-in-first-out per parent, and the semaphore provides it.**
+`tokio::sync::Semaphore` grants permits in the order tasks began to wait. So no second
+ordering structure exists to disagree with the first. Order between two parents is
 unspecified.
 
-A single fan-out cares that its own tasks start in the order it asked. Two independent
-library callers share no clock. A global order would need a central scheduler, and the
-compare-and-swap design avoids a central lock on purpose. See decision
-D-per-parent-fifo-start-order.
+A single fan-out cares that its own tasks start in the order it asked. Two independent library
+callers share no clock. A global order would need a central scheduler, and this design avoids
+one on purpose.
+
+**The order is a policy, and it is closed.** A priority queue would edit this rule rather than
+add an impl. That is deliberate, because a start order is not third-party surface. Section 6
+says so plainly. See decision D-per-parent-fifo-start-order.
 
 ## 3. Named handles
 
@@ -287,6 +389,13 @@ child.** rho derives a handle from the agent name. It numbers a collision. A fir
 **A handle is unique per tree, not per process.** Tree A's `explore` and tree B's `explore`
 are two different children. The registry keys a handle by the tree root, so the numbering
 never crosses a tree. See decision D-handle-is-a-second-address.
+
+**The number counts a live child and a remembered one.** A finished child stays reportable
+while its report is in the 64-deep ring, and its handle still resolves. So a new `explore`
+must not take a name that a remembered `explore` still answers to. The numbering therefore
+reads the live map, the queued map, and the finished ring. Without that rule one name binds
+two children, and `resolve` picks one of them silently. The test names it:
+`a_handle_is_not_reused_while_a_finished_child_is_remembered`.
 
 ```rust
 impl AgentRegistry {
@@ -331,8 +440,30 @@ pub enum AliasError {
     Taken { name: String },
     /// The id names no child of this caller.
     Unknown { id: AgentId },
+    /// The name is longer than `MAX_ALIAS_LENGTH`.
+    TooLong { limit: usize, length: usize },
+    /// The name holds a character an alias may not hold.
+    NotPrintable { name: String },
+    /// The name is only digits, so an id would always win.
+    DigitsOnly { name: String },
 }
+
+/// The longest alias, in characters. The same rule as an agent name.
+pub const MAX_ALIAS_LENGTH: usize = 64;
 ```
+
+**An alias is bounded and printable, because the model writes it.** A model is
+prompt-injectable, and an alias is echoed into the parent's tool output beside the list of
+running children. So an alias holds at most 64 characters, and it holds no control character
+and no newline. A newline in an alias could forge a line that looks like rho's own output, and
+an unbounded alias is stored per child. See decision D-an-alias-is-bounded-and-printable.
+
+**A refused alias never fails the spawn.** The child is already admitted, and the work matters
+more than the label. `spawn_agent` reports the refusal as a note in its result, names the
+reason, and gives the id and the derived handle instead. In a fan-out, two tasks that ask for
+one name give the name to the first and a note to the second. The tests name both:
+`spawn_agent_reports_a_rejected_alias_without_failing_the_spawn` and
+`a_fan_out_gives_one_name_to_one_child_and_notes_the_other`.
 
 `resolve` checks a derived handle before an alias. So the shadow rule holds at read time
 too, not only at write time.
@@ -352,16 +483,32 @@ already writes integers, and a hard switch to a string would reject them.
 ```rust
 /// A model-facing reference to a child: an id, or a name.
 ///
-/// `serde` reads a JSON number as `Id` and a JSON string as `Name`. A digits-only
+/// A JSON number reads as `Id` and a JSON string reads as `Name`. A digits-only
 /// name is resolved as an id, so a model that sends `"42"` reaches the same child as
 /// one that sends `42`. See decision D-agent-ref-accepts-id-or-name.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
+///
+/// The `Deserialize` impl is written by hand, not derived with `untagged`. An
+/// untagged enum answers a boolean, a float, a negative number, `null`, or an object
+/// with serde's own message, "data did not match any variant". That message teaches
+/// nothing, and a refusal must teach. The hand-written impl names both accepted
+/// shapes and shows what arrived.
+#[derive(Clone, Debug)]
 pub enum AgentRef {
     Id(u64),
     Name(String),
 }
 ```
+
+The refusal text, verbatim:
+
+```text
+the id must be a subagent id, such as 7, or a handle, such as "explore-2". This call sent
+{arrived}. Call agent_status with no argument to list what is running.
+```
+
+An empty string is a name that matches no child, so it is an ordinary not-found result. A
+negative number, a float, a boolean, `null`, and an object are all refusals with the text
+above.
 
 The schema of `id` on `steer_agent`, `agent_status`, and `cancel_agent` becomes:
 
@@ -601,6 +748,9 @@ Grace turns, in `crates/rho-core/tests/subagent_grace.rs`:
 ## 7. Out of scope
 
 - A global start order across two parents. Order is per parent only.
+- A wait on the process-wide live cap. That cap refuses, as it does today.
+- A size cap on one steering message. The queue holds 32 messages, and a per-message size cap
+  belongs to `SPEC-steering`.
 - A handle for a nested grandchild. A child gets a handle inside its own tree only.
 - A grace warning for the tool-call budget. The budget keeps its hard stop.
 - A grace warning for a plain top-level session by default. It stays opt-in there.
