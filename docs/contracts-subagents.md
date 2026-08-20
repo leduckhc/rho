@@ -13,6 +13,7 @@ page is a defect.
 | The agent definition on disk | `SPEC-subagents` section 5 |
 | Confinement | `SPEC-subagents` section 3 |
 | The spawn tree and its limits | `SPEC-subagents` section 7 |
+| A live child, and polling a background one | `SPEC-subagents` section 7a |
 | The task and the gate | `SPEC-agent-tasks` |
 | The result | `SPEC-subagents` section 6 |
 | Steering | `SPEC-steering` |
@@ -123,19 +124,16 @@ pub struct AgentId(pub u64);
 pub struct AgentRegistry { /* private */ }
 impl AgentRegistry {
     pub fn new(limits: SubagentLimits) -> Self;
-    pub fn root(&self) -> AgentNode;
+    pub fn new_tree(&self) -> AgentNode;
     pub fn limits(&self) -> &SubagentLimits;
     pub fn live_total(&self) -> usize;
 
-    // Scoped. A tool uses these.
+    // Scoped, and there is no unscoped form.
     pub fn live_under(&self, caller: &AgentNode) -> Vec<LiveAgent>;
     pub fn descendant(&self, caller: &AgentNode, id: AgentId) -> Option<LiveAgent>;
     pub fn cancel_descendant(&self, caller: &AgentNode, id: AgentId) -> bool;
-
-    // Process-wide. A host that owns the process uses these.
-    pub fn live(&self) -> Vec<LiveAgent>;
-    pub fn handle(&self, id: AgentId) -> Option<LiveAgent>;
-    pub fn cancel(&self, id: AgentId) -> bool;
+    pub fn status(&self, caller: &AgentNode, id: AgentId) -> Option<AgentStatus>;
+    pub fn record_report(&self, caller: &AgentNode, id: AgentId, report: AgentReport);
 }
 
 pub struct AgentNode { /* private */ }
@@ -153,8 +151,11 @@ impl AgentNode {
 }
 ```
 
-**The registry is process-wide, so a scoped lookup is mandatory for a tool.** A bare id
-resolved against the whole registry let one session cancel another session's child. See
+**The registry is process-wide, so every lookup is scoped.** A bare id resolved against the
+whole registry let one session cancel another session's child. The unscoped `live` and `handle`
+views are now private, because a doc comment is not a boundary: the `agent_status` tool reached
+for the unscoped view first. `new_tree` is a constructor and not an accessor, so two calls give
+two unrelated trees in one registry, which is what makes the cross-tree test possible. See
 decision D-a-caller-addresses-only-its-own.
 
 ```rust
@@ -164,6 +165,7 @@ pub struct ChildSpawn {
 }
 impl ChildSpawn {
     pub fn queue(&self) -> MessageQueue;
+    pub fn progress_sender(&self) -> watch::Sender<AgentProgress>;
     pub fn publish(&self, progress: AgentProgress);
 }
 
@@ -190,6 +192,27 @@ pub struct AgentProgress {
 A `LiveAgent` exists only while its child runs. `spawn_child` registers it and
 `ChildSlot::drop` removes it. A handle to a finished child would cancel nothing, so none is
 handed out.
+
+### A finished child still answers
+
+```rust
+pub enum AgentStatus {
+    Running { agent: String, depth: u32, progress: AgentProgress, queued: usize },
+    Finished { report: AgentReport },
+}
+```
+
+A background child usually finishes while its parent is busy, and `ChildSlot::drop` removes the
+live handle at once. A lookup that knew only live children would lose every result the parent
+asked for. So `record_report` keeps the report and `status` answers from it.
+
+The registry keeps the **last 64** reports, oldest dropped first. The bound is deliberate,
+because a report holds a summary the model wrote, and an unbounded store keyed by model output
+is the shape that already cost this project 805 MB once. See decision D-bash-line-cap.
+
+A remembered report is scoped by the ancestor chain kept beside it, not by the id alone.
+`AgentReport` carries no id, and a match on ancestors alone would answer with some other
+child's report. That is worse than answering nothing.
 
 ## 4. The limits
 
@@ -417,6 +440,15 @@ An ancestor cancelling stops every descendant. A descendant cancelling leaves it
 running. A shared token gave the second behaviour, and a child timeout then ended the whole
 session. `cancel` uses `notify_waiters`, so a parent cancel wakes every parked sibling.
 
+### Upward: polling
+
+A background child reports through one call, `agent_status`. It answers for a running child and
+for a finished one, and the finished answer is the same `AgentReport` a blocking spawn returns.
+An unknown id is a **result**, not a fault.
+
+Polling and events are both offered on purpose. An event needs a frontend that watches a
+stream. A poll needs nothing, so the model itself can use it inside one turn.
+
 ### Upward: events
 
 ```rust
@@ -448,14 +480,26 @@ the tool returns. That final drain carries `AgentFinished`.
 
 ## 8. The model-facing tools
 
-Four tools, and each is `ToolKind::Execute`, so `--read-only` denies all four.
+Five tools. Four are `ToolKind::Execute`, so `--read-only` denies them. `agent_status` is
+`ToolKind::Read`, because reading a child's progress changes nothing.
 
-| Tool | Arguments | Notes |
-| --- | --- | --- |
-| `spawn_agent` | `agent`, `prompt`, `artifacts` | `agent` is a schema `enum` of the loaded names |
-| `spawn_agents` | `tasks`, at least one | one fan-out per call, results in request order |
-| `steer_agent` | `id`, `message` | scoped to the caller's own descendants |
-| `cancel_agent` | `id` | siblings and the parent keep running |
+| Tool | Arguments | Kind | Notes |
+| --- | --- | --- | --- |
+| `spawn_agent` | `agent`, `prompt`, `artifacts`, `background` | Execute | `agent` is a schema `enum` of the loaded names |
+| `spawn_agents` | `tasks`, at least one | Execute | one fan-out per call, results in request order |
+| `steer_agent` | `id`, `message` | Execute | scoped to the caller's own descendants |
+| `agent_status` | `id` | Read | answers for a running child and a finished one |
+| `cancel_agent` | `id` | Execute | siblings and the parent keep running |
+
+**`background` is the difference between waiting and polling.** The default is false, and the
+call then blocks until the child stops, so the parent can never poll it. With `background: true`
+the tool waits for the id only, never for the work, and returns the id with the three calls that
+act on it. A limit refused before the child began still comes back as an ordinary tool result.
+
+**A fan-out cannot be backgrounded.** `spawn_agents` runs every task at the same time and
+blocks until all of them finish. Its results come back in request order, so the prompt prefix
+stays stable and the provider cache stays warm. A parent that wants to work beside its children
+calls `spawn_agent` with `background: true`, once per child.
 
 The `agent` property is an `enum` because a free-text field made the model invent names. Each
 agent's `description` reaches the model in the tool description, which is the only way the
