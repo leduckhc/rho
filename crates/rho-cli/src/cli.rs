@@ -93,6 +93,20 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "SECONDS")]
     pub child_timeout_secs: Option<u64>,
 
+    /// How many children one parent may queue for a slot. Defaults to 16.
+    ///
+    /// Over the per-parent child cap, rho queues a child instead of refusing it. This
+    /// bounds that line, because a waiting child holds a cancel token and a queue.
+    #[arg(long, global = true, value_name = "COUNT")]
+    pub max_queued_per_parent: Option<usize>,
+
+    /// How many children may wait for a slot in the whole process. Defaults to 128.
+    ///
+    /// A session root holds no live-child slot, so --max-live-agents bounds neither
+    /// the number of sessions nor the number of wait lines. This bounds the total.
+    #[arg(long, global = true, value_name = "COUNT")]
+    pub max_queued_total: Option<usize>,
+
     /// Turns of warning before a subagent's turn cap. `0` turns the warning off.
     ///
     /// A child that runs out of turns has nobody to ask, so rho tells it to write
@@ -517,6 +531,10 @@ fn subagent_limits(cli: &Cli) -> rho_core::SubagentLimits {
         max_live_total: cli.max_live_agents.unwrap_or(stated.max_live_total),
         max_tool_calls: cli.max_agent_tool_calls.unwrap_or(stated.max_tool_calls),
         grace_turns: cli.agent_grace_turns.unwrap_or(stated.grace_turns),
+        max_queued_per_parent: cli
+            .max_queued_per_parent
+            .unwrap_or(stated.max_queued_per_parent),
+        max_queued_total: cli.max_queued_total.unwrap_or(stated.max_queued_total),
         child_timeout: cli
             .child_timeout_secs
             .map(std::time::Duration::from_secs)

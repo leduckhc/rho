@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,17 @@ impl std::fmt::Display for AgentId {
 /// result is consumed.
 #[derive(Clone, Debug)]
 pub enum AgentStatus {
+    /// Queued for a slot. It has an id, and it has not started.
+    ///
+    /// The place is computed on read, never stored, because the children ahead leave
+    /// and nothing would renumber a stored one. See
+    /// `SPEC-subagent-slots-handles-grace` section 2.2b.
+    Queued {
+        agent: String,
+        depth: u32,
+        /// The place in the parent's wait line, counted from one.
+        position: usize,
+    },
     /// Still working. The numbers come from the live handle.
     Running {
         agent: String,
@@ -193,17 +204,54 @@ pub struct AgentRegistry {
 #[derive(Debug)]
 struct RegistryInner {
     limits: SubagentLimits,
-    live_total: AtomicUsize,
     next_id: AtomicU64,
+    /// The process-wide live cap, as permits. One permit is one live child.
+    ///
+    /// A counter cannot be waited on. A counter plus a notify loses a wake that fires
+    /// between a failed retry and the next await, and the safety tests still pass
+    /// while liveness breaks. See decision D-permits-not-counters.
+    live_permits: Arc<tokio::sync::Semaphore>,
+    /// Every index, under one lock, and never held across an await.
+    ///
+    /// The move from queued to live has to be one step. With a lock per index a
+    /// lookup can find an id in both or in neither, a cancel can report failure while
+    /// the child starts, and two admissions can derive one handle. See decision
+    /// D-one-registry-state-lock.
+    state: Mutex<RegistryState>,
+}
+
+#[derive(Debug, Default)]
+struct RegistryState {
     /// Every live child, by id. A count cannot be cancelled or watched, so the
     /// registry holds the handles too.
-    live: Mutex<std::collections::HashMap<u64, LiveAgent>>,
+    live: std::collections::HashMap<u64, LiveAgent>,
+    /// Every child that holds an id and no slot.
+    queued: std::collections::HashMap<u64, QueuedEntry>,
+    /// The next wait-line sequence, for the whole registry. `position` filters by
+    /// parent, and a subset of a monotonic sequence keeps its order.
+    next_sequence: u64,
     /// The reports of children that finished, oldest first, bounded.
     ///
     /// A background child finishes while the parent is busy, so its outcome has to
     /// outlive its handle. The ancestor chain is kept beside the report, because the
     /// handle that carried it is gone and a read still has to be scoped.
-    finished: Mutex<std::collections::VecDeque<FinishedAgent>>,
+    finished: std::collections::VecDeque<FinishedAgent>,
+}
+
+/// A queued child's entry. The ancestor chain sits beside it, exactly as the
+/// finished ring stores it, because the live handle that would carry it does not
+/// exist yet. A lookup without the chain would let one tree reach another tree's
+/// queued child. See decision D-a-caller-addresses-only-its-own.
+#[derive(Clone, Debug)]
+struct QueuedEntry {
+    agent: String,
+    depth: u32,
+    ancestors: Vec<AgentId>,
+    cancel: CancelToken,
+    queue: crate::MessageQueue,
+    /// The immediate parent, so siblings are identifiable from the entry alone.
+    parent: AgentId,
+    sequence: u64,
 }
 
 impl AgentRegistry {
@@ -211,11 +259,10 @@ impl AgentRegistry {
     pub fn new(limits: SubagentLimits) -> Self {
         Self {
             inner: Arc::new(RegistryInner {
+                live_permits: Arc::new(tokio::sync::Semaphore::new(limits.max_live_total)),
                 limits,
-                live_total: AtomicUsize::new(0),
                 next_id: AtomicU64::new(0),
-                live: Mutex::new(std::collections::HashMap::new()),
-                finished: Mutex::new(std::collections::VecDeque::new()),
+                state: Mutex::new(RegistryState::default()),
             }),
         }
     }
@@ -227,7 +274,15 @@ impl AgentRegistry {
 
     /// The number of agents live in the whole process now.
     pub fn live_total(&self) -> usize {
-        self.inner.live_total.load(Ordering::SeqCst)
+        self.state().live.len()
+    }
+
+    /// The one lock. Never hold it across an await.
+    fn state(&self) -> std::sync::MutexGuard<'_, RegistryState> {
+        self.inner
+            .state
+            .lock()
+            .expect("the registry state lock is poisoned")
     }
 
     /// Every live child in the process, in id order. Private on purpose.
@@ -237,12 +292,7 @@ impl AgentRegistry {
     /// one", and a doc comment is not a boundary: the `agent_status` tool reached for
     /// this one first. See decision D-a-caller-addresses-only-its-own.
     fn live(&self) -> Vec<LiveAgent> {
-        let live = self
-            .inner
-            .live
-            .lock()
-            .expect("the live agent lock is poisoned");
-        let mut handles: Vec<LiveAgent> = live.values().cloned().collect();
+        let mut handles: Vec<LiveAgent> = self.state().live.values().cloned().collect();
         handles.sort_by_key(|handle| handle.id.0);
         handles
     }
@@ -280,7 +330,8 @@ impl AgentRegistry {
                 handle.cancel();
                 true
             }
-            None => false,
+            // A queued child is addressable too, and it holds no live handle.
+            None => self.cancel_queued_descendant(caller, id),
         }
     }
 
@@ -288,12 +339,7 @@ impl AgentRegistry {
     ///
     /// [`AgentRegistry::descendant`] is the scoped form every caller uses.
     fn handle(&self, id: AgentId) -> Option<LiveAgent> {
-        self.inner
-            .live
-            .lock()
-            .expect("the live agent lock is poisoned")
-            .get(&id.0)
-            .cloned()
+        self.state().live.get(&id.0).cloned()
     }
 
     /// Remember a finished child's report, so a parent can still read it.
@@ -309,15 +355,11 @@ impl AgentRegistry {
             // The handle is already gone, so trust the caller's own chain.
             ancestors = vec![caller.id()];
         }
-        let mut finished = self
-            .inner
-            .finished
-            .lock()
-            .expect("the finished agent lock is poisoned");
-        if finished.len() >= MAX_REMEMBERED_REPORTS {
-            finished.pop_front();
+        let mut state = self.state();
+        if state.finished.len() >= MAX_REMEMBERED_REPORTS {
+            state.finished.pop_front();
         }
-        finished.push_back(FinishedAgent {
+        state.finished.push_back(FinishedAgent {
             id,
             ancestors,
             report,
@@ -337,12 +379,22 @@ impl AgentRegistry {
                 queued: handle.queued(),
             });
         }
-        let finished = self
-            .inner
+        let state = self.state();
+        // A queued child answers too, or "pollable by id" is false for it. The place
+        // is computed here, under the lock, so it is never stale.
+        if let Some(entry) = state
+            .queued
+            .get(&id.0)
+            .filter(|entry| entry.ancestors.contains(&caller.id()))
+        {
+            return Some(AgentStatus::Queued {
+                agent: entry.agent.clone(),
+                depth: entry.depth,
+                position: position_in_line(&state, entry),
+            });
+        }
+        state
             .finished
-            .lock()
-            .expect("the finished agent lock is poisoned");
-        finished
             .iter()
             .rev()
             .find(|entry| entry.id == id && entry.ancestors.contains(&caller.id()))
@@ -353,20 +405,64 @@ impl AgentRegistry {
 
     /// Register a live child. Called by `spawn_child`, which cannot forget.
     fn register(&self, handle: LiveAgent) {
-        self.inner
-            .live
-            .lock()
-            .expect("the live agent lock is poisoned")
-            .insert(handle.id.0, handle);
+        self.state().live.insert(handle.id.0, handle);
     }
 
     /// Deregister a child. Called by `ChildSlot::drop`, which cannot forget.
     fn deregister(&self, id: AgentId) {
-        self.inner
-            .live
-            .lock()
-            .expect("the live agent lock is poisoned")
-            .remove(&id.0);
+        self.state().live.remove(&id.0);
+    }
+
+    /// Cancel one queued descendant of `caller`. Returns true when it found one.
+    ///
+    /// A queued child holds no live handle, so `descendant` cannot reach it. Without
+    /// this branch `cancel_agent` would answer "no such subagent" for a child the
+    /// model was just told about.
+    fn cancel_queued_descendant(&self, caller: &AgentNode, id: AgentId) -> bool {
+        let state = self.state();
+        match state
+            .queued
+            .get(&id.0)
+            .filter(|entry| entry.ancestors.contains(&caller.id()))
+        {
+            Some(entry) => {
+                let token = entry.cancel.clone();
+                drop(state);
+                token.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Steer one descendant of `caller`, whether it runs or waits.
+    ///
+    /// One entry point, so a queued child and a live child cannot drift apart. A
+    /// message pushed into a queued child buffers, and its first turn boundary
+    /// delivers it. `None` means the id names no child of this caller.
+    pub fn steer_descendant(
+        &self,
+        caller: &AgentNode,
+        id: AgentId,
+        message: Vec<crate::ContentBlock>,
+    ) -> Option<Result<usize, crate::QueueError>> {
+        if let Some(handle) = self.descendant(caller, id) {
+            return Some(handle.steer(message));
+        }
+        let queue = {
+            let state = self.state();
+            state
+                .queued
+                .get(&id.0)
+                .filter(|entry| entry.ancestors.contains(&caller.id()))
+                .map(|entry| entry.queue.clone())
+        }?;
+        Some(queue.push(message))
+    }
+
+    /// Remove a queued entry. Called by `QueuedChild::drop` and by a handout.
+    fn dequeue(&self, id: AgentId) {
+        self.state().queued.remove(&id.0);
     }
 
     /// Allocate a fresh, unique agent id.
@@ -389,24 +485,31 @@ impl AgentRegistry {
             depth: 0,
             ancestors: Vec::new(),
             registry: self.clone(),
-            children: Arc::new(AtomicUsize::new(0)),
+            child_permits: Arc::new(tokio::sync::Semaphore::new(
+                self.limits().max_children_per_parent,
+            )),
         }
     }
 }
 
 /// One agent's place in the spawn tree.
 ///
+/// A clone shares the same parent permits and the same registry, so a queued child
+/// can hold its parent and still count against one cap.
+///
 /// The root session holds the root node. A successful [`AgentNode::spawn_child`]
 /// returns a child node and a live-agent guard. The guard decrements both the
 /// per-parent count and the process-wide count when it drops, so a finished
 /// child frees its slot.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct AgentNode {
     id: AgentId,
     depth: u32,
     ancestors: Vec<AgentId>,
     registry: AgentRegistry,
-    children: Arc<AtomicUsize>,
+    /// This parent's own cap, as permits. A clone of the node shares them, so a
+    /// clone cannot exceed the cap its original obeys.
+    child_permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl AgentNode {
@@ -430,7 +533,10 @@ impl AgentNode {
 
     /// The number of live children this node runs now.
     pub fn live_children(&self) -> usize {
-        self.children.load(Ordering::SeqCst)
+        self.registry
+            .limits()
+            .max_children_per_parent
+            .saturating_sub(self.child_permits.available_permits())
     }
 
     /// The limits this node's tree enforces.
@@ -454,7 +560,7 @@ impl AgentNode {
         agent: impl Into<String>,
         cancel: CancelToken,
     ) -> Result<ChildSpawn, SubagentError> {
-        let limits = self.registry.limits();
+        let limits = *self.registry.limits();
         let child_depth = self.depth + 1;
         if child_depth > limits.max_depth {
             return Err(SubagentError::DepthExceeded {
@@ -463,125 +569,438 @@ impl AgentNode {
             });
         }
 
-        // Reserve the per-parent slot with a compare-and-swap loop, for the same
-        // reason as the process-wide slot below.
-        //
-        // The comment here used to claim the read and the add happened "under the
-        // atomic", and they did not: a load, then a check, then a later `fetch_add`
-        // leaves a window where two racing spawns both pass a cap of one. A review
-        // found the false comment. The loop makes the comment true rather than
-        // deleting it.
-        loop {
-            let current_children = self.children.load(Ordering::SeqCst);
-            if current_children >= limits.max_children_per_parent {
-                return Err(SubagentError::TooManyChildren {
-                    limit: limits.max_children_per_parent,
-                    current: current_children,
-                });
-            }
-            if self
-                .children
-                .compare_exchange(
-                    current_children,
-                    current_children + 1,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                )
-                .is_ok()
-            {
-                break;
-            }
-        }
-
-        // Reserve the process-wide slot with a compare-and-swap loop, so two
-        // parents cannot both pass a cap of one. This is the case a per-parent
-        // cap misses.
-        let live = &self.registry.inner.live_total;
-        loop {
-            let current = live.load(Ordering::SeqCst);
-            if current >= limits.max_live_total {
-                // The per-parent slot is already held, so release it before refusing.
-                self.children.fetch_sub(1, Ordering::SeqCst);
-                return Err(SubagentError::TooManyLiveAgents {
-                    limit: limits.max_live_total,
-                    current,
-                });
-            }
-            if live
-                .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                break;
-            }
-        }
+        // Take the per-parent permit, then the process-wide one. A permit is atomic,
+        // so two racing spawns cannot both pass a cap of one, and the counter loops
+        // this replaced could not be waited on. See decision D-permits-not-counters.
+        let child_permit = Arc::clone(&self.child_permits)
+            .try_acquire_owned()
+            .map_err(|_| SubagentError::TooManyChildren {
+                limit: limits.max_children_per_parent,
+                current: limits.max_children_per_parent,
+            })?;
+        let live_permit = Arc::clone(&self.registry.inner.live_permits)
+            .try_acquire_owned()
+            .map_err(|_| SubagentError::TooManyLiveAgents {
+                limit: limits.max_live_total,
+                current: limits.max_live_total,
+            })?;
 
         let mut ancestors = self.ancestors.clone();
         ancestors.push(self.id);
         // The tree cannot cycle by construction, so a duplicate id means a bug.
         // The guard costs one small set and stops an infinite loop inside a lock.
-        if let Err(error) = check_no_cycle(&ancestors) {
-            // Release both reserved slots before the refusal returns.
-            self.children.fetch_sub(1, Ordering::SeqCst);
-            live.fetch_sub(1, Ordering::SeqCst);
-            return Err(error);
+        check_no_cycle(&ancestors)?;
+
+        let (spawn, handle) = self.build_child(self.child_build(
+            agent.into(),
+            cancel,
+            ancestors,
+            child_permit,
+            live_permit,
+        ));
+        self.registry.register(handle);
+        Ok(spawn)
+    }
+
+    /// Reserve a slot now, or queue when this parent's cap is full.
+    ///
+    /// It refuses at once for a cap that waiting cannot fix: the depth limit, the
+    /// cycle guard, the process-wide live cap, and either wait line. It queues for the
+    /// per-parent child cap alone. The tools call this. See decision
+    /// D-queue-over-refuse and decision D-caps-that-cannot-wait-refuse.
+    pub fn admit_child(
+        &self,
+        agent: impl Into<String>,
+        cancel: CancelToken,
+    ) -> Result<Admission, SubagentError> {
+        let limits = *self.registry.limits();
+        let child_depth = self.depth + 1;
+        if child_depth > limits.max_depth {
+            return Err(SubagentError::DepthExceeded {
+                limit: limits.max_depth,
+                attempted: child_depth,
+            });
+        }
+        let mut ancestors = self.ancestors.clone();
+        ancestors.push(self.id);
+        check_no_cycle(&ancestors)?;
+
+        let agent = agent.into();
+        // A free per-parent slot needs the process-wide slot too, and that cap always
+        // refuses rather than queues, because waiting on it is waiting on another tree.
+        if let Ok(child_permit) = Arc::clone(&self.child_permits).try_acquire_owned() {
+            let live_permit = Arc::clone(&self.registry.inner.live_permits)
+                .try_acquire_owned()
+                .map_err(|_| SubagentError::TooManyLiveAgents {
+                    limit: limits.max_live_total,
+                    current: limits.max_live_total,
+                })?;
+            let (spawn, handle) = self.build_child(self.child_build(
+                agent,
+                cancel,
+                ancestors,
+                child_permit,
+                live_permit,
+            ));
+            self.registry.register(handle);
+            return Ok(Admission::Started(spawn));
         }
 
-        let child = AgentNode {
-            id: self.registry.allocate_id(),
+        // The parent is full, so the child waits. Both wait lines are checked here,
+        // and the registration happens in the same critical section as the id, so no
+        // other task can observe a half-admitted child. Per-parent is checked first,
+        // because it is the tighter and more actionable bound.
+        let id = self.registry.allocate_id();
+        let queue = crate::MessageQueue::new();
+        {
+            let mut state = self.registry.state();
+            let waiting_here = state
+                .queued
+                .values()
+                .filter(|entry| entry.parent == self.id)
+                .count();
+            if waiting_here >= limits.max_queued_per_parent {
+                return Err(SubagentError::QueueFull {
+                    scope: crate::QueueScope::Parent,
+                    limit: limits.max_queued_per_parent,
+                });
+            }
+            if state.queued.len() >= limits.max_queued_total {
+                return Err(SubagentError::QueueFull {
+                    scope: crate::QueueScope::Process,
+                    limit: limits.max_queued_total,
+                });
+            }
+            let sequence = state.next_sequence;
+            state.next_sequence += 1;
+            state.queued.insert(
+                id.0,
+                QueuedEntry {
+                    agent: agent.clone(),
+                    depth: child_depth,
+                    ancestors: ancestors.clone(),
+                    cancel: cancel.clone(),
+                    queue: queue.clone(),
+                    parent: self.id,
+                    sequence,
+                },
+            );
+        }
+
+        Ok(Admission::Queued(QueuedChild {
+            id,
+            agent,
             depth: child_depth,
             ancestors,
+            cancel,
+            queue,
+            parent: self.clone(),
+            handed_out: false,
+        }))
+    }
+
+    /// Everything one child needs to start. A named struct, not eight arguments.
+    ///
+    /// Clippy refused the eight-argument form, and it was right: a four-argument
+    /// `Session::new` once hid a fake model id and an approve-all policy here. See
+    /// decision D-no-four-argument-session-new.
+    fn child_build(
+        &self,
+        agent: String,
+        cancel: CancelToken,
+        ancestors: Vec<AgentId>,
+        child_permit: tokio::sync::OwnedSemaphorePermit,
+        live_permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> ChildBuild {
+        ChildBuild {
+            agent,
+            cancel,
+            ancestors,
+            child_permit,
+            live_permit,
+            id: None,
+            queue: None,
+        }
+    }
+
+    /// Build the child node and its handle. It registers nothing.
+    ///
+    /// The caller inserts the handle under the state lock, so a handout can remove the
+    /// queued entry and insert the live one in one critical section. A version of this
+    /// that registered internally forced three separate locks, and the spec's promise
+    /// of one step was then false. See decision D-one-registry-state-lock.
+    fn build_child(&self, build: ChildBuild) -> (ChildSpawn, LiveAgent) {
+        let ChildBuild {
+            agent,
+            cancel,
+            ancestors,
+            child_permit,
+            live_permit,
+            id,
+            queue,
+        } = build;
+        let child = AgentNode {
+            id: id.unwrap_or_else(|| self.registry.allocate_id()),
+            depth: self.depth + 1,
+            ancestors,
             registry: self.registry.clone(),
-            children: Arc::new(AtomicUsize::new(0)),
+            child_permits: Arc::new(tokio::sync::Semaphore::new(
+                self.registry.limits().max_children_per_parent,
+            )),
         };
-        // Register here, and deregister in `ChildSlot::drop`. Both sides live in
-        // this file, so a caller cannot forget either one.
+        let child_id = child.id;
         let (progress_tx, progress_rx) = tokio::sync::watch::channel(AgentProgress::default());
-        let queue = crate::MessageQueue::new();
-        self.registry.register(LiveAgent {
+        let queue = queue.unwrap_or_default();
+        let handle = LiveAgent {
             id: child.id,
-            agent: agent.into(),
+            agent,
             depth: child.depth,
             ancestors: child.ancestors.clone(),
             cancel,
             progress: progress_rx,
             queue: queue.clone(),
-        });
-
-        let slot = ChildSlot {
-            parent_children: Arc::clone(&self.children),
-            registry: self.registry.clone(),
-            id: child.id,
         };
-        Ok(ChildSpawn {
+        let spawn = ChildSpawn {
             node: child,
-            slot,
+            slot: ChildSlot {
+                registry: self.registry.clone(),
+                id: child_id,
+                _child_permit: child_permit,
+                _live_permit: live_permit,
+            },
             progress: progress_tx,
             queue,
-        })
+        };
+        (spawn, handle)
     }
 }
 
-/// A live-agent reservation. It holds one per-parent slot and one process-wide
-/// slot. Both free when it drops, so a finished child always frees its slot.
+/// Everything one child needs to start.
+///
+/// `id` and `queue` are `None` for a fresh spawn. A handout fills both, because a
+/// queued child already owns an id the model was told and a queue a steer may have
+/// filled.
+#[derive(Debug)]
+struct ChildBuild {
+    agent: String,
+    cancel: CancelToken,
+    ancestors: Vec<AgentId>,
+    child_permit: tokio::sync::OwnedSemaphorePermit,
+    live_permit: tokio::sync::OwnedSemaphorePermit,
+    id: Option<AgentId>,
+    queue: Option<crate::MessageQueue>,
+}
+
+/// A live-agent reservation. It holds one per-parent permit and one process-wide
+/// permit. Both return when it drops, so a finished child always frees its slot, and
+/// the semaphore grants the next waiter in line.
 #[derive(Debug)]
 pub struct ChildSlot {
-    parent_children: Arc<AtomicUsize>,
     registry: AgentRegistry,
     /// The child this slot holds, so dropping the slot drops the handle too.
     id: AgentId,
+    /// Dropped with the slot. The name says it is never read.
+    _child_permit: tokio::sync::OwnedSemaphorePermit,
+    _live_permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl Drop for ChildSlot {
     fn drop(&mut self) {
-        self.parent_children.fetch_sub(1, Ordering::SeqCst);
-        self.registry
-            .inner
-            .live_total
-            .fetch_sub(1, Ordering::SeqCst);
         // The handle goes with the slot. A registry that kept a finished child
-        // would leak, and it would hand out a handle that cancels nothing.
+        // would leak, and it would hand out a handle that cancels nothing. The two
+        // permits return as they drop, which grants the next waiter directly.
         self.registry.deregister(self.id);
     }
+}
+
+/// The result of admitting a child when this parent's cap may be full.
+///
+/// The per-parent cap no longer refuses. It queues. So a caller must handle both a
+/// slot that was free and one that was not. See decision D-queue-over-refuse.
+#[derive(Debug)]
+pub enum Admission {
+    /// A slot was free. The child holds it and may start now.
+    Started(ChildSpawn),
+    /// No slot was free. The child has an id and waits in its parent's line.
+    Queued(QueuedChild),
+}
+
+/// Why a queued child never started. Both are results a parent can act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dequeued {
+    /// The child was cancelled while it waited, alone or with its parent.
+    Cancelled,
+    /// A slot freed under this parent, and the process-wide cap was full by then.
+    ///
+    /// A queued child holds no process-wide permit while it waits, so the cap can
+    /// fill between the admission and the start. rho refuses rather than wait,
+    /// because a wait on that cap is a wait on another tree.
+    ProcessWideFull { limit: usize },
+}
+
+impl std::fmt::Display for Dequeued {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Dequeued::Cancelled => f.write_str("the queued subagent was cancelled before it ran."),
+            Dequeued::ProcessWideFull { limit } => write!(
+                f,
+                "a slot freed for this child, and the process-wide limit of {limit} live agents \
+                 was reached first. The work was not started. Run it again when a child \
+                 finishes, or ask the user to raise --max-live-agents."
+            ),
+        }
+    }
+}
+
+/// A child that holds an id but not yet a slot.
+///
+/// It is addressable while it waits, through the registry, by the same id a started
+/// child uses. Its `CancelToken` and its `MessageQueue` exist now, so a steer buffers
+/// and a cancel lands before the child ever runs.
+#[derive(Debug)]
+pub struct QueuedChild {
+    id: AgentId,
+    agent: String,
+    depth: u32,
+    ancestors: Vec<AgentId>,
+    cancel: CancelToken,
+    queue: crate::MessageQueue,
+    /// The parent, for its permits and its registry. A clone shares both.
+    parent: AgentNode,
+    /// True once the child holds a slot and a live handle exists.
+    ///
+    /// It flips at one moment only: after the process-wide permit is held and the
+    /// live handle is inserted. Setting it when the fields are taken would skip the
+    /// removal on the refusal exits, and the entry would answer "queued" for ever.
+    handed_out: bool,
+}
+
+impl QueuedChild {
+    /// This child's id, allocated at admission.
+    pub fn id(&self) -> AgentId {
+        self.id
+    }
+
+    /// The agent definition it will run.
+    pub fn agent(&self) -> &str {
+        &self.agent
+    }
+
+    /// How deep it will sit in the spawn tree.
+    pub fn depth(&self) -> u32 {
+        self.depth
+    }
+
+    /// The child's place in its parent's wait line, counted from one.
+    ///
+    /// Computed on read, under the state lock, so it is never stale. A stored place
+    /// goes wrong the moment a child ahead leaves.
+    pub fn position(&self) -> usize {
+        let state = self.parent.registry.state();
+        match state.queued.get(&self.id.0) {
+            Some(entry) => position_in_line(&state, entry),
+            None => 0,
+        }
+    }
+
+    /// Give up the place. Then `started` resolves `Err(Dequeued::Cancelled)`.
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+
+    /// True when this child, or an ancestor, was cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    /// The queue the child reads once it starts. A steer buffers here meanwhile.
+    pub fn queue(&self) -> crate::MessageQueue {
+        self.queue.clone()
+    }
+
+    /// Wait for a permit, then return the live spawn.
+    ///
+    /// It waits on the per-parent permit only. When that arrives it takes the
+    /// process-wide permit without waiting, because waiting on that cap is waiting on
+    /// another tree. A failure there releases the per-parent permit first, so a
+    /// waiter that gives up blocks no sibling.
+    pub async fn started(mut self) -> Result<ChildSpawn, Dequeued> {
+        let limits = *self.parent.registry.limits();
+        let permits = Arc::clone(&self.parent.child_permits);
+        let child_permit = tokio::select! {
+            // `acquire_owned` is cancel-safe: dropping the future takes no permit,
+            // and a permit taken on a lost race returns as it drops.
+            permit = permits.acquire_owned() => match permit {
+                Ok(permit) => permit,
+                Err(_) => return Err(Dequeued::Cancelled),
+            },
+            () = self.cancel.cancelled() => return Err(Dequeued::Cancelled),
+        };
+        if self.cancel.is_cancelled() {
+            return Err(Dequeued::Cancelled);
+        }
+
+        let live_permit =
+            match Arc::clone(&self.parent.registry.inner.live_permits).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    // Release the per-parent permit by dropping it, then refuse.
+                    drop(child_permit);
+                    return Err(Dequeued::ProcessWideFull {
+                        limit: limits.max_live_total,
+                    });
+                }
+            };
+
+        let (spawn, handle) = self.parent.build_child(ChildBuild {
+            // The id the caller already holds. A fresh one here would strand the id the
+            // model was told, and every later steer and cancel with it.
+            id: Some(self.id),
+            // And the queue a steer may already have filled.
+            queue: Some(self.queue.clone()),
+            ..self.parent.child_build(
+                self.agent.clone(),
+                self.cancel.clone(),
+                self.ancestors.clone(),
+                child_permit,
+                live_permit,
+            )
+        });
+
+        // One critical section moves the id from the queued index to the live one, so
+        // no lookup finds it in both or in neither.
+        {
+            let mut state = self.parent.registry.state();
+            state.queued.remove(&self.id.0);
+            state.live.insert(handle.id.0, handle);
+        }
+        self.handed_out = true;
+        Ok(spawn)
+    }
+}
+
+impl Drop for QueuedChild {
+    fn drop(&mut self) {
+        // Every path that is not a successful handout runs this: a cancel, a parent
+        // cancel, a full process-wide cap, and a caller that drops the value without
+        // ever awaiting `started`. Without it the entry stays, the map grows with
+        // every spawn, and `agent_status` answers "queued" for a child that will never
+        // run. `ChildSlot` does exactly this for a live child.
+        if !self.handed_out {
+            self.parent.registry.dequeue(self.id);
+        }
+    }
+}
+
+/// One plus every entry of the same parent that queued earlier.
+///
+/// The place is derived, so a child ahead leaving moves everyone behind it up.
+fn position_in_line(state: &RegistryState, entry: &QueuedEntry) -> usize {
+    1 + state
+        .queued
+        .values()
+        .filter(|other| other.parent == entry.parent && other.sequence < entry.sequence)
+        .count()
 }
 
 /// Walk an ancestor chain and refuse a cycle.

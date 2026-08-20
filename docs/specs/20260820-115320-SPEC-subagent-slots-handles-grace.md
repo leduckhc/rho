@@ -308,6 +308,18 @@ barrier test, and there is no seam for one.
 permits. It removes the queued entry and inserts the live handle before it releases the lock. So
 no id is ever in both indexes, and none is ever in neither.
 
+**That forced one shape on the builder.** A first implementation registered the handle inside the
+function that builds a child, which meant three separate locks and made this promise false. So the
+builder now returns the node and the handle, and each caller registers under its own lock.
+`build_child` takes a named `ChildBuild`, because clippy refused eight arguments and decision
+D-no-four-argument-session-new says the same thing.
+
+**A handout reuses the id and the queue the caller already holds.** Two tests found this the hard
+way: the first implementation allocated a fresh id, so the id the model was told went nowhere, and
+it built a fresh queue, so a steer the caller had been told was accepted was silently dropped. See
+`the_started_child_keeps_the_id_the_caller_was_given` and
+`steering_a_queued_child_buffers_until_it_starts`.
+
 **`status` prefers the live answer**, because it is the newer truth.
 
 The scoped accessors read three indexes, in this order: live, queued, then finished.
@@ -844,7 +856,8 @@ child's warning. The default stays 5 for a subagent, and 0 for a plain session.
 **This spec describes unwritten code.** Every test below is new. Each names the assertion it
 proves. Every test uses a scripted fake provider. No network, and no `sleep`.
 
-The slot queue, in `crates/rho-core/tests/subagent_slots.rs`:
+The slot queue, in `crates/rho-core/tests/subagent_slots.rs`. **This section is built**, and every
+name below is a test that exists:
 - `admit_child_over_the_per_parent_cap_queues_and_returns_an_id` — the per-parent cap queues.
 - `admit_child_with_a_free_slot_starts_at_once` — the `Started` arm.
 - `admission_reports_started_when_a_slot_was_free_and_queued_when_it_was_not` — both `Admission`
@@ -879,6 +892,13 @@ The slot queue, in `crates/rho-core/tests/subagent_slots.rs`:
   the map.
 - `a_queued_entry_leaves_the_map_when_the_child_is_cancelled` — the drop guard runs.
 - `a_dropped_queued_child_leaves_no_entry_behind` — a caller that never awaits leaks nothing.
+- `a_process_wide_refusal_leaves_no_queued_entry_behind` — the `handed_out` flag must still be
+  false on that exit. A deliberate break that set it early failed only this test.
+- `the_started_child_keeps_the_id_the_caller_was_given` — a handout reuses the id, so every steer
+  and cancel the model already holds still lands.
+- `a_position_counts_only_its_own_siblings` — two parents with waiters. A break that counted every
+  waiter in the process passed every other test.
+- `one_tree_cannot_steer_another_queued_child` — the scope guard covers the steer path too.
 
 A queued child is addressable, and only by its owner, in `crates/rho-core/tests/subagent_slots.rs`
 and `crates/rho-tools/tests/subagent_tool.rs`:

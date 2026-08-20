@@ -6,6 +6,18 @@ use crate::sandbox::SandboxMode;
 /// and what to do. See `SPEC-subagents` section 7.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum SubagentError {
+    #[error(
+        "the wait line is full. {}",
+        match scope {
+            QueueScope::Parent =>
+                format!("This parent already has {limit} children waiting for a slot. Wait, \
+                         cancel one, or ask the user to raise --max-queued-per-parent."),
+            QueueScope::Process =>
+                format!("{limit} children are already waiting in this process. Wait, cancel \
+                         one, or ask the user to raise --max-queued-total."),
+        }
+    )]
+    QueueFull { scope: QueueScope, limit: usize },
     #[error("a task needs a goal. Say what the child must achieve, not only which agent to run.")]
     EmptyGoal,
     #[error(
@@ -42,4 +54,17 @@ pub enum SubagentError {
          Report the failure to the user rather than retry the same work."
     )]
     RetryCapReached { deaths: u32, limit: u32 },
+}
+
+/// Which wait line filled up. A reader must know which flag to raise.
+///
+/// It is matched, never serialised, and it has no catch-all. A third scope would be
+/// a compile error in the message renderer rather than a silent pass. See decision
+/// D-bounded-slot-queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueScope {
+    /// One parent's own line.
+    Parent,
+    /// Every line in the process.
+    Process,
 }

@@ -189,6 +189,16 @@ impl Tool for AgentStatusTool {
         };
 
         let text = match status {
+            // A queued child has an id and no slot. The place is the one number a
+            // model can act on: it says whether waiting is worth it.
+            rho_core::AgentStatus::Queued {
+                agent, position, ..
+            } => format!(
+                "{agent} (id {}) is queued, at place {position} in its parent's line. It has \
+                 not started, and it will start when a sibling finishes. Cancel it with \
+                 cancel_agent, or steer it now and it reads the message on its first turn.",
+                args.id
+            ),
             rho_core::AgentStatus::Running {
                 agent,
                 progress,

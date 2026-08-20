@@ -20,6 +20,15 @@ pub struct SubagentLimits {
     /// A turn cap counts provider round trips, so it does not bound a child that
     /// makes forty tool calls inside one turn. This does.
     pub max_tool_calls: u32,
+    /// How many children one parent may queue for a slot. A full line refuses.
+    pub max_queued_per_parent: usize,
+    /// How many children may wait in the whole process. A full process refuses.
+    ///
+    /// A per-parent cap alone does not bound the process. A session root holds no
+    /// live-child slot, so `max_live_total` caps neither the number of roots nor the
+    /// number of wait lines, and a host may run many sessions in one process. See
+    /// `SPEC-subagent-slots-handles-grace` section 2.6.
+    pub max_queued_total: usize,
     /// Turns of warning before a child's turn cap. Zero disables the warning.
     ///
     /// A child that runs out of turns has nobody to ask for more, so it is warned
@@ -43,6 +52,8 @@ impl SubagentLimits {
             max_live_total: 32,
             child_timeout: Duration::from_secs(600),
             max_tool_calls: 64,
+            max_queued_per_parent: 16,
+            max_queued_total: 128,
             grace_turns: DEFAULT_SUBAGENT_GRACE_TURNS,
         }
     }
