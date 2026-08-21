@@ -15,8 +15,10 @@ dropped it, for a reason that was true. This decision reverses the second one.
 **rho enters the alternate screen when it starts, and it owns the whole terminal.** The
 owner decided it, and the evidence below says the cost is payable.
 
-`ctrl-p` leaves the alternate screen, writes the whole transcript into the terminal's own
-scrollback, and returns. So the terminal's search and its copy still reach every row.
+**Nothing is sacrificed, and no dump is needed.** The owner tested iTerm2 and Ghostty, and
+the terminal's own search reaches the alternate screen in both. An earlier draft of the spec
+gave `ctrl-p` a dump into the real scrollback, and a spike proved the dump works. It is not
+built, because the need it served does not exist.
 
 rho turns mouse capture **on** by default, because in the alternate screen the wheel is the
 only way to scroll, and a terminal offers no scrollback to fall back on.
@@ -63,9 +65,8 @@ produced one defect that this spec has to repair, which is the reducer dropping 
 that names a frozen row. Every future panel, every resize, and every repaint has to ask the
 same question about every row.
 
-The alternate screen deletes the question. rho owns every row, so any row can be repainted,
-and `ctrl-p` hands the whole transcript to the terminal when the user wants it. One owner,
-one invariant, and a spike proved the cost is payable.
+The alternate screen deletes the question. rho owns every row, so any row can be repainted.
+One owner, and one invariant.
 
 ## What this rules out
 

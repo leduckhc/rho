@@ -109,7 +109,24 @@ fn a_command_child_inherits_only_the_allowlist() {
     // it looked only for SECRET_TOKEN, which lives in the in-memory map and never in
     // the real process environment, so an implementation that forwarded the whole
     // process environment to the child passed against the very bug it should catch.
-    let probe = ["TERM", "SHELL", "LANG", "USER"]
+    //
+    // **The probe must be a variable a shell cannot invent.** `SHELL` and `TERM` are not.
+    // Measured on macOS, where `/bin/sh` is bash, with a fully cleared environment:
+    //
+    // ```
+    // env -i /bin/sh -c 'printf %s "$SHELL"'  ->  /bin/zsh   (read from the password database)
+    // env -i /bin/sh -c 'printf %s "$TERM"'   ->  dumb
+    // env -i /bin/sh -c 'printf %s "$USER"'   ->  (empty)
+    // env -i /bin/sh -c 'printf %s "$LANG"'   ->  (empty)
+    // ```
+    //
+    // So a child prints the parent's `SHELL` with no leak at all, and for `SHELL` a real
+    // leak cannot be told apart from the invention. This test used `SHELL` and failed on
+    // the macOS CI runner, which is non-interactive and sets no `TERM`, so the probe fell
+    // through to `SHELL`. It passed on a developer machine only because `TERM` was set
+    // there and happened to differ from `dumb`. The failure was a false alarm, and the
+    // fault was in the probe.
+    let probe = ["USER", "LOGNAME", "LANG", "GITHUB_ACTIONS", "CI"]
         .into_iter()
         .find_map(|name| {
             std::env::var(name)
@@ -123,6 +140,22 @@ fn a_command_child_inherits_only_the_allowlist() {
         eprintln!("skipping the real-environment leak check: no probe variable is set");
         return;
     };
+    // Prove the probe is sound before trusting it. A shell that invents this name would
+    // make the check below meaningless, so measure a cleared child first. This keeps the
+    // test honest if somebody adds a name like `SHELL` to the list above.
+    let baseline = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("printf '%s' \"${{{probe_name}}}\""))
+        .env_clear()
+        .env("PATH", path.as_str())
+        .output()
+        .expect("the baseline command runs");
+    let invented = String::from_utf8_lossy(&baseline.stdout).to_string();
+    assert!(
+        !invented.contains(&probe_value),
+        "the probe {probe_name} is unusable: a shell with a cleared environment already \
+         prints {invented:?}, so this test could never tell a leak from an invention"
+    );
     // The in-memory environment does not name the probe variable, and pass_env does
     // not either. Only a child that inherited the real process environment could see
     // it. A correct child cannot.

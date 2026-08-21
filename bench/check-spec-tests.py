@@ -13,8 +13,10 @@ test name must exist as `fn <name>` somewhere under `crates/`.
 
 **Only a delivered spec is enforced.** A draft spec names the tests its feature will
 have, and that is the point of writing a spec first. So the guard reads the `Status:`
-line: a spec that says `draft` is exempt, and a spec that says `delivered` must keep
-every promise. Marking a single line `planned` exempts that line in any spec.
+line: a spec that says `draft`, `planned`, or `superseded` is exempt, and a spec that says
+`delivered` must keep every promise. Marking a single line `planned` exempts that line in
+any spec. Only the first word of the status counts, so prose after it cannot switch the
+guard off.
 
 Run it from the repository root:
 
@@ -86,14 +88,21 @@ def is_delivered(spec: pathlib.Path) -> bool:
     explained that one line was marked planned exempted itself entirely. The guard read
     as green while it checked nothing, which is the fail-open shape this project keeps
     paying for. A status is a state, not prose, so only the state is read.
+
+    **A superseded spec is exempt too.** It names the tests its feature would have had,
+    and the feature was abandoned, so those names were never written and never will be.
+    `SPEC-tui-scroll-copy-composer` is the case: a spike proved its premise false the day
+    after it was written. Holding it to its test list would demand tests for a design the
+    project rejected. The replacement spec carries the promises now.
     """
     match = STATUS.search(spec.read_text())
     if match is None:
         # No status line, so treat it as due. A spec should say where it stands.
         return True
     status = match.group(1).strip().lower()
-    state = re.split(r"[\s.,;:]+", status, maxsplit=1)[0]
-    return state not in {"draft", "planned"}
+    # A status may be emphasised, as in `**superseded on ...**`, so the markers go first.
+    state = re.split(r"[\s.,;:]+", status.lstrip("*_"), maxsplit=1)[0]
+    return state not in {"draft", "planned", "superseded"}
 
 
 def main() -> int:

@@ -1,7 +1,8 @@
 # rho — shared subagent brief
 
 Read this file first. Then read **`AGENTS.md`**, which holds the development flow as a
-checklist. Then read `workflow.yaml`. Then do only your assigned stage.
+checklist. Then read `agentic-workflow.yaml`, which holds your stage kind, its inputs, and
+the exact slots you must return. Then do only your assigned stage.
 
 `AGENTS.md` is the short version of everything below, and every step in it exists
 because skipping it cost this project a real defect. Steps 5, 7, 11, and 13 are the ones
@@ -146,10 +147,9 @@ your report instead.
 - **No secret in a log**, including at `trace` level. Redact by construction,
   not by a filter at the end.
 - **Conventional commits.** Commit as you go. Small commits.
-- Gate commands must pass before you report done:
-  - `cargo fmt --all --check`
-  - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-  - `cargo test --workspace --all-features`
+- Gate commands must pass before you report done. `AGENTS.md` `## Gate` lists them, and
+  `agentic-workflow.yaml` `gate_sets.full` holds the same list. Read one of those two, and
+  never a copy. Four files once defined this gate, and three were wrong.
 
 ## 6. Skills you may use
 
@@ -250,7 +250,7 @@ End your run with exactly these sections. Keep it under 400 words.
 <stage id and name>
 
 ## DoD
-<one line per DoD item from workflow.yaml: MET or NOT MET, plus proof>
+<one line per DoD item from your stage in the track: MET or NOT MET, plus proof>
 
 ## Gate commands
 <command, then exit code, then the last relevant line of output>

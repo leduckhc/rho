@@ -43,5 +43,6 @@ the terminal height, and not for the composer. A fourteen-row band cannot hold a
 draft, a seven-row panel, and a footer, and the arithmetic forced the help screen to draw a
 window and forced an approval to consider dropping a row.
 
-`ctrl-p` pays back the scrollback, and a spike proved it recovers every row. See
+The terminal's own search reaches the alternate screen in iTerm2 and in Ghostty, so the
+scrollback is not lost the way this decision assumed. rho writes no dump. See
 `docs/verification/alt-screen-spike.md`.

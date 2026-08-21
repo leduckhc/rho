@@ -5,9 +5,10 @@
 //! display width, the exact row count, and the absence of a character that would break
 //! a monospace grid.
 //!
-//! The frames now describe the inline band of `SPEC-tui-inline-and-composer`. The band
-//! has no header row and no rule row, and it is `BAND_ROWS` rows tall. The banner is a
-//! separate one-row fixture, because it freezes above the band. See section 4.1.
+//! The frames now describe the full screen of `SPEC-tui-alternate-screen`. rho owns the
+//! whole terminal, so a frame is `FRAME_ROWS` rows tall: the banner at the top, the
+//! transcript, the composer, and the footer. The banner is also kept as a separate one-row
+//! fixture, because `banner_line` still renders it on its own.
 //!
 //! **Why a display width and not a length.** A box character such as `─` is three bytes
 //! and one column. The controller's first check of these frames used a byte length and
@@ -18,8 +19,8 @@ use std::path::{Path, PathBuf};
 
 use unicode_width::UnicodeWidthStr;
 
-/// The rows a band frame holds. It matches the band height rho asks for.
-const FRAME_ROWS: usize = 14;
+/// The rows a full-screen frame holds. rho owns the whole terminal now.
+const FRAME_ROWS: usize = 24;
 
 fn frames_dir() -> PathBuf {
     // The tests run with the crate root as the working directory.
@@ -633,12 +634,10 @@ fn frame_40_streaming_renders_at_40_columns() {
 }
 
 // ---------------------------------------------------------------------------
-// Height degradation. The transcript is the last region to lose a row. Below the
-// height where everything fits, chrome drops in a stated order: the rule, then
-// the header, then the footer, then the composer border. The composer input line
-// and the transcript are the last two survivors, and at a height of one only the
-// transcript renders. The controller ruled this the design after the six-row
-// blank-frame defect. These tests pin it.
+// Height degradation. The transcript is anchored to the newest row, above the
+// composer. As the screen shrinks the transcript loses rows first, then below the
+// startup minimum the screen draws what fits in the section 7 order: the composer's
+// draft row, then the footer, then the transcript. These tests pin that.
 // ---------------------------------------------------------------------------
 
 /// A state with one visible tool row, whose payload is easy to find.
@@ -654,40 +653,40 @@ fn one_tool_state() -> TuiState {
     state
 }
 
+/// Render `state` at an exact height, one string per row.
+fn render_at(state: &TuiState, width: u16, height: u16) -> Vec<String> {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("build test terminal");
+    terminal
+        .draw(|frame| render(state, frame))
+        .expect("draw frame");
+    let buffer = terminal.backend().buffer().clone();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect()
+}
+
 #[test]
-fn transcript_survives_a_six_row_frame() {
-    // At 60 by 6 the old layout showed nothing but chrome. The transcript must keep
-    // at least one row, so the tool row is visible.
-    let state = one_tool_state();
-    let rows = render_rows(&state, 60);
-    let visible = &rows[..6];
+fn the_transcript_survives_a_six_row_frame() {
+    // At 60 by 6 the transcript keeps one row, so the tool row is visible.
+    let rows = render_at(&one_tool_state(), 60, 6);
     assert!(
-        visible
-            .iter()
+        rows.iter()
             .any(|line| line.contains("cargo build --release")),
         "the tool row was not visible in a six-row frame:\n{}",
-        visible.join("\n")
+        rows.join("\n")
     );
 }
 
 #[test]
-fn transcript_survives_a_three_row_frame() {
-    // At 60 by 3 the composer border drops, but the transcript still shows content.
-    let backend = TestBackend::new(60, 3);
-    let mut terminal = Terminal::new(backend).expect("build test terminal");
-    let state = one_tool_state();
-    terminal
-        .draw(|frame| render(&state, frame))
-        .expect("draw frame");
-    let buffer = terminal.backend().buffer().clone();
-    let mut rows = Vec::new();
-    for y in 0..3u16 {
-        let mut line = String::new();
-        for x in 0..60u16 {
-            line.push_str(buffer[(x, y)].symbol());
-        }
-        rows.push(line);
-    }
+fn the_transcript_survives_a_three_row_frame() {
+    // At 60 by 3 the screen is too small for the rules, and it draws the draft row, the
+    // footer, and one transcript row. The transcript still shows content.
+    let rows = render_at(&one_tool_state(), 60, 3);
     assert!(
         rows.iter()
             .any(|line| line.contains("cargo build --release")),
@@ -697,29 +696,25 @@ fn transcript_survives_a_three_row_frame() {
 }
 
 #[test]
-fn a_one_row_frame_renders_the_transcript() {
-    // At 60 by 1 only the transcript survives: the single row carries transcript
-    // content and no chrome.
-    let backend = TestBackend::new(60, 1);
-    let mut terminal = Terminal::new(backend).expect("build test terminal");
-    let state = one_tool_state();
-    terminal
-        .draw(|frame| render(&state, frame))
-        .expect("draw frame");
-    let buffer = terminal.backend().buffer().clone();
-    let mut line = String::new();
-    for x in 0..60u16 {
-        line.push_str(buffer[(x, 0)].symbol());
-    }
+fn a_one_row_frame_shows_the_composer_draft_row() {
+    // At 60 by 1 the section 7 order keeps the composer's draft row first, and nothing
+    // else. This replaces the inline test that showed the transcript, because the
+    // priority order changed with the full screen. See the report.
+    let rows = render_at(&one_tool_state(), 60, 1);
+    let line = &rows[0];
     assert!(
-        line.contains("cargo build --release"),
-        "the one-row frame did not carry transcript content: {line:?}"
+        line.contains("Type a prompt"),
+        "the one-row frame must show the composer draft row: {line:?}"
     );
-    // No chrome: no rule, no composer border, no footer hints.
     assert!(
         !line.contains('─'),
         "a rule leaked into the one-row frame: {line:?}"
     );
-    assert!(!line.contains('│'), "a composer border leaked in: {line:?}");
-    assert!(!line.contains("help"), "footer hints leaked in: {line:?}");
+    // The footer carries an activity word and right-aligned hints. Checking for the word
+    // "help" cannot work here, because the composer placeholder itself ends with "? for
+    // help.". So this looks for the footer's own marks instead.
+    assert!(
+        !line.contains("ready") && !line.contains("enter send"),
+        "the footer leaked into the one-row frame: {line:?}"
+    );
 }

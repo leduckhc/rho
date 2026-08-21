@@ -93,7 +93,8 @@ was unusable, because any missing file ended the session.
 
 ## Sprint 2 stage results
 
-`workflow-sprint-2.yaml` drives this sprint. The scope is config, the session log,
+Sprint 2 ran from `workflow-sprint-2.yaml`, which `agentic-workflow.yaml` replaced. The
+scope is config, the session log,
 and the ACP frontend. ACP is the point of the project, because makit needs a cheap
 ACP backend.
 
@@ -259,7 +260,8 @@ gets skipped.
 
 ## Sprint 3, the terminal interface
 
-`workflow-sprint-3.yaml` drives this sprint. The goal is an interface a critic ranks at or
+Sprint 3 ran from `workflow-sprint-3.yaml`, which `agentic-workflow.yaml` replaced. The
+goal is an interface a critic ranks at or
 above pi, codex, claude code, and jcode, in a binary that stays the fastest of them.
 
 The sprint has one rule that the earlier sprints did not. **A critic panel must agree.** Four
@@ -452,6 +454,227 @@ and no caller uses it. The old F-token-and-cost-accounting row claimed the total
    gate fails for reasons that have nothing to do with the stage.
 6. **Verify a CI guard by breaking the rule on purpose.** Each of the three new
    guards was confirmed to fail on a real violation, not merely to pass today.
+
+## Handover, and a new controller
+
+A new controller session took over the terminal interface work. The previous session was
+`01a016a4-48c9-77c7-8203-aac7b6eb36bc`. It ended mid-task, so this section states what the
+new controller verified, and what it found open. Every claim below was re-run, not read from
+a report.
+
+The tree is `/Users/le/Work/Vibe/rho-altscreen`, on branch `feat/tui-alternate-screen`, at
+commit `a72c987`.
+
+### What the gate proves today
+
+The controller ran all five gate commands itself.
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | 0 warnings |
+| `cargo test --workspace --all-features` | 815 pass, 0 fail |
+| `cargo build -p rho-cli --no-default-features --features minimal` | ok |
+| `bench/check-ids.py`, `bench/check-prose.py` | 0 violations, 0 violations |
+
+`grep -rn 'todo!\|unimplemented!' crates/*/src` finds nothing. The 815 figure in the previous
+session's report is true.
+
+### What a live run proves
+
+The controller drove the release binary through a pty, with a terminal emulator reading the
+frames. The alternate screen opens once and closes once. Mouse reporting turns on three times
+and off three times. The exit code is 0. The help panel draws all 25 key rows. `esc` returns
+to the splash and leaves no stale cell. The slash list draws clean.
+
+`TuiError::TooSmall` is correct in the product. A 2-row terminal exits 1 and prints `rho: the
+terminal is 2 rows, and rho needs at least 4`. It never opens the alternate screen. A 4-row
+terminal runs.
+
+### Open items the new controller found
+
+| Item | Evidence |
+| --- | --- |
+| The startup warnings are invisible. rho prints them, then opens the alternate screen. | The notices write at byte 5 and byte 320. The alternate screen opens at byte 535. |
+| Three `docs/features.md` rows contradict the code. | `F-inline-band` says rho never opens the alternate screen. `F-freeze-upward` claims a machinery that commit `a72c987` deleted. `F-optional-mouse` states the old default. |
+| Three tests the spec names do not exist. | `a_terminal_too_short_reports_and_does_not_draw`, `the_composer_keeps_its_ten_row_cap`, and `the_transcript_takes_the_rows_the_composer_leaves`. |
+| `plan_screen` is public and has no direct test. | `crates/rho-tui/src/lib.rs:31` exports it. No test calls it. |
+| The reasoning spec is untracked. | `../rho-reasoning` holds `20260819-134615-SPEC-reasoning-across-providers.md`, and git does not. |
+| Bedrock drops a thinking block from a request. | `crates/rho-provider-bedrock/src/lib.rs:613` is `_ => {}`. No `budget_tokens` field exists. |
+| The branch is 29 commits ahead of `origin/main`, and unpushed. | CI has seen none of this work. |
+
+The hidden warning is the one defect here that a test cannot see. It is an ordering rule
+between the notices in `rho-cli` and the screen guard in `rho-tui`. One of the hidden lines
+says a project skill stays unloaded until the owner trusts it. The owner needs to read that
+line.
+
+### What the new controller then closed
+
+| Item | State | Evidence |
+| --- | --- | --- |
+| The startup warnings are invisible | **fixed** | `d629260`. Startup writes zero bytes to the primary screen. `docs/verification/notices-live.md` |
+| Three `docs/features.md` rows contradict the code | **fixed** | `d629260`. The three are now `superseded` rows naming their replacement. Four new rows describe the code |
+| Three tests the spec names do not exist | **fixed** | `9599586`. `crates/rho-tui/tests/layout.rs`, ten tests |
+| `plan_screen` is public and has no direct test | **fixed** | `9599586`. Four deliberate breaks, and the one that tripped nothing is recorded below |
+| The reasoning spec is untracked | **fixed** | `e08b190` in `../rho-reasoning`. 1668 lines, labelled `wip`, unreviewed |
+| Bedrock drops a thinking block from a request | **open** | `crates/rho-provider-bedrock/src/lib.rs:613` is still `_ => {}` |
+| The branch is unpushed, and CI has seen none of it | **fixed** | Pushed. Pull request 1. All ten CI jobs pass, macOS included |
+
+The test count went from 815 to 838.
+
+Two defects were found after the handover, and neither by a test that existed:
+
+**A review found the notice defect again, at a narrower size.** Every render test used width
+100. The notice wrap width reached zero at width 24 or less, so the whole message vanished and
+only the label drew. The reviewer put the bound at 21, and measuring put it at 24. The estimate
+was optimistic, and the measurement decided.
+
+**The first CI run failed on macOS, and the failure was a false alarm.**
+`a_command_child_inherits_only_the_allowlist` probed `SHELL`. On macOS `/bin/sh` fills `SHELL`
+from the password database, so the child printed the parent's value with no leak at all. For
+`SHELL` a real leak cannot be told apart from the invention, so the probe could never prove
+anything. It passed on a developer machine only because `TERM` was set there and came first.
+
+### The lessons this handover adds
+
+7. **A deleted feature leaves a false row behind.** Commit `a72c987` removed the freeze
+   machinery and left `F-freeze-upward` claiming it shipped. Step 13 is not paperwork. A row
+   that outlives its code misleads the next reader.
+8. **A test that never varies one input has not tested that input.** Every render test used
+   width 100, and a notice lost its whole message below width 25. Sweep the dimension, do not
+   sample it once.
+9. **Pick the break that the guard must catch, not the break that is easy.** Deleting the
+   panel floor tripped nothing, because the test asked for a height where the floor decides
+   nothing. Find the input band where the rule binds, then break it there.
+10. **A probe a shell can invent is not a probe.** A credential leak test read `SHELL`, which
+   macOS `/bin/sh` fills from the password database. The test now measures a cleared child
+   first and refuses to run if the probe is already present.
+11. **Building a feature profile does not compile its tests.** A `#[cfg]` on a helper left its
+   test module behind, and `cargo build --features minimal` stayed green while the minimal test
+   build broke. The gate and CI now run `--no-run` on that profile.
+
+## Aug 19, 2026 — tables and inline styling, shipped
+
+Inline bold, italic, and code shipped in `a0c40af`, and tables in `909f022`. No marker reaches
+the screen. Emphasis carries a colour as well as a modifier, because a terminal may draw no
+italic and may draw bold at the same weight. 899 tests pass. CI green on both runners.
+
+### A false blocker was written here, and it is worth keeping the story
+
+A second writer added an entry to this file claiming tables were **BLOCKED**, from a transient
+state it observed mid-work. Its text said:
+
+> Table cell alignment measurement fails. Test expects width 9, gets 27. Root cause:
+> `measure_cell()` must strip alignment markers before measuring width, else padding overshoots.
+> Commit not ready: tables.rs tests written but hanging on assertion.
+
+**Every part of that was wrong.**
+
+- There is no `measure_cell()`. The function is `split_cells`, and it already strips a cell's
+  inline markers before any width is taken.
+- Nothing was hanging. One test was failing.
+- The real cause was in the **test**, not the code: it measured alignment with `str::find`, which
+  returns a byte offset, and a rule glyph is three bytes. So the rule row reported 27 where the
+  header reported 9. The columns were aligned the whole time.
+- The work was not blocked. It shipped about twenty minutes later.
+
+The controller then committed that entry **without reading its diff**, which is the exact thing
+D-shared-working-tree warns about, and swept a false claim into the ledger. It is corrected here
+rather than deleted, because the ledger's own purpose is to hold the false claims this project
+made and caught.
+
+Two lessons, and the second is the sharper one:
+
+12. **Read the diff of every file you stage, including one you did not edit.** `git add -A` in a
+   tree with more than one writer will commit another writer's work under your message.
+13. **The shared tree cuts both ways, so verify authorship before and after you commit.** The
+   controller once committed a second writer's file under its own message. Later the second writer
+   committed the controller's work under a bare subject line, with none of the reasoning: no rail
+   column cycle, no fixture regeneration, no note of the narrow-notice regression. The content was
+   right and the record was thin, and an unpushed commit can be amended, so it was. Check
+   `git log -1` before you write a commit, not only `git status`.
+14. **A blocker report written from someone else's in-flight state is a guess.** It named a
+   function that does not exist and a cause that was not the cause. A failing test is evidence;
+   an observed failing test explained by a third party is not.
+
+## Aug 19, 2026 — the critic panel on markdown rendering
+
+Four harsh critics ran in parallel on the feature: correctness, security, test quality, and design.
+Every finding below was verified by the controller before it was fixed, and three of the four reports
+had at least one claim that measurement changed.
+
+| Critic | Finding | Severity | Outcome |
+| --- | --- | --- | --- |
+| correctness | a word wider than the row lost its tail | critical | fixed, `long_words.rs` |
+| correctness | `wrap_runs` emitted rows wider than the frame | warning | fixed |
+| correctness | `styled_text` and `styled_width` had no caller anywhere | warning | deleted |
+| correctness | the long-line test used spaced words, so it never had a long word | warning | corrected in place |
+| security | the whole transcript is re-scanned every frame | high | measured and recorded, not fixed |
+| security | `scan_inline` was quadratic on a marker run | medium | fixed, 4000 backticks from 2.80 ms to 0.24 ms |
+| security | bidi overrides and `U+2028` survived the filter | medium | fixed in `rho-redact` |
+| security | a tool name reached the screen unsanitised | low | fixed |
+| test quality | four mutations survived the suite | high | all four now caught |
+| test quality | `role_none` and two `RoleStyle` fields are read by nothing | medium | claim corrected |
+| design | inline code 115 against heading 78 measured 1.07x | must fix | one hue means code |
+| design | italic 180 against warn 179 measured 1.02x | must fix | italic moved to a lavender |
+| design | no syntax highlighting, no context telemetry | must fix | recorded, owner's call |
+
+### Where measurement changed a critic's claim
+
+**The security review called the transcript re-scan a denial of service at 258 ms a frame.** In a
+release build it is 17.6 ms. The shape of the finding is right and the number came from a debug
+build, so the severity was overstated. Both numbers are in `docs/benchmarks.md`, because the next
+reader needs to know which they are looking at.
+
+**Two of the review's three flanking mutations could not be reproduced as written.** Each single rule
+is covered by another, so removing one leaves the other standing. Only a case with a space on both
+sides of the marker isolates the closing rule, and it took two attempts to build one.
+
+**The design review asked for a narrower measure and one column of side padding.** The owner had
+asked for the full width and had explicitly retracted the padding. The owner's decision stands, and
+the disagreement is recorded rather than silently resolved either way.
+
+### Two more of the controller's own tests proved nothing
+
+The count on this branch is now nine. `a_notice_survives_a_narrow_screen` passed with
+`NOTICE_MIN_TEXT` set to 1, because it asserted only that no word was lost and never asserted the
+layout the constant exists for. No test rendered a line after a **closed** fence, so a mutation that
+never reopened prose went unnoticed. Both are fixed, and both mutations now fail.
+
+### The controller found the regression the critics did not
+
+None of the four measured performance. The frame benchmark reported **107 us and 2562 allocations**
+against a documented 58 us and 300, on a transcript with no markdown at all, so the implementation was
+breaking its own spec's cost budget. A fast path for a line with no marker recovered most of it, to
+73 us and 508.
+
+15. **Run the benchmark the spec cites, not only the test suite.** A cost budget in a spec is a claim,
+   and a claim with no measurement behind it is a slogan. Four reviewers read this code and none of
+   them ran it for speed.
+
+### A false claim the controller made, and how it was caught
+
+The commit for the critic panel and `docs/benchmarks.md` both credited a `Cow` on `MarkdownLine::text`
+for part of the performance recovery. **That change is not in the code and never was committed.**
+
+It was written, it compiled, the suite passed, and it was measured. While it sat uncommitted, the
+test-quality subagent restored its own backup of `markdown.rs`, which it had snapshotted before the
+edit and restored honestly at the end of its run. The controller then wrote the claim into a commit
+message and a benchmark table without re-reading the signature.
+
+It surfaced three commits later, while gathering exact type signatures for a summary. `grep` showed
+`pub text: String` where the claim said `Cow`.
+
+The measured numbers were not affected, because the `Cow` never moved the allocation count. Only the
+attribution was wrong, and both places are corrected.
+
+16. **A subagent that restores files can undo your uncommitted work.** The brief told it to restore,
+   and it did exactly that, and it reported honestly that it had. The controller's edit was
+   uncommitted in the same file at the same time. Commit before spawning an agent that touches source,
+   or expect to lose the edit.
+17. **Verify a claim against the code, not against your memory of writing it.** Three commits and two
+   documents carried a change that no longer existed. One `grep` for the type would have caught it at
+   the time.
 
 ## Open defect, found by driving the slot queue for real
 

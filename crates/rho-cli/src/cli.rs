@@ -57,14 +57,23 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = SandboxArg::Off)]
     pub sandbox: SandboxArg,
 
-    /// Let the TUI capture the mouse, so the wheel scrolls the band and a click
+    /// Let the TUI capture the mouse, so the wheel scrolls the transcript and a click
     /// selects a list row.
     ///
-    /// Off by default, because capture takes drag-select away from the terminal. With
-    /// capture off, the wheel, a drag, and the terminal search all work on the
-    /// transcript. See decision D-native-selection-is-the-default.
+    /// On by default. rho owns the alternate screen, which has no scrollback, so the wheel
+    /// is the only way to scroll. Pass `--no-mouse` to give the mouse back to the terminal.
+    /// Option and drag still selects text in Ghostty and in iTerm2. See decision
+    /// D-the-wheel-needs-capture.
     #[arg(long, global = true)]
     pub mouse: bool,
+
+    /// Give the mouse back to the terminal, so a drag selects text without a modifier.
+    ///
+    /// It wins over `--mouse`, over the config, and over the environment. The wheel then
+    /// does nothing, because the alternate screen has no scrollback. See decision
+    /// D-the-wheel-needs-capture.
+    #[arg(long = "no-mouse", global = true, conflicts_with = "mouse")]
+    pub no_mouse: bool,
 
     /// Load skills that live in this repository.
     ///
@@ -168,8 +177,27 @@ pub enum Command {
     },
 }
 
-/// Build a `SessionConfig` from the parsed arguments. State every choice.
+/// Build a `SessionConfig` from the parsed arguments, and print any notice.
+///
+/// This is the wrapper the non-interactive paths use, where a print is the right channel.
+/// The interactive path calls `build_config_with_notices`, because a print there lands on
+/// the primary screen and rho then opens the alternate screen over it.
 fn build_config(cli: &Cli) -> anyhow::Result<SessionConfig> {
+    let mut notices = Vec::new();
+    let config = build_config_with_notices(cli, &mut notices)?;
+    for notice in notices {
+        eprintln!("rho: {notice}");
+    }
+    Ok(config)
+}
+
+/// Build a `SessionConfig`, and collect every notice instead of printing it. State every
+/// choice. A notice is data here, so a frontend can draw it where the user is looking.
+/// See `D-a-notice-reaches-the-transcript`.
+fn build_config_with_notices(
+    cli: &Cli,
+    notices: &mut Vec<String>,
+) -> anyhow::Result<SessionConfig> {
     // A model comes from the flag, then the environment, then the provider's default.
     //
     // The default is a convenience, not a security choice. Decision D-no-four-argument-session-new removed hidden
@@ -182,10 +210,10 @@ fn build_config(cli: &Cli) -> anyhow::Result<SessionConfig> {
         Some(model) => model,
         None => match provider::default_model(&provider_name) {
             Some(model) => {
-                eprintln!(
-                    "rho: no model given, so using the default for {provider_name}: {model}. \
+                notices.push(format!(
+                    "no model given, so using the default for {provider_name}: {model}. \
                      Set --model or {MODEL_ENV} to choose another."
-                );
+                ));
                 model.to_string()
             }
             None => {
@@ -409,6 +437,7 @@ async fn run_headless(cli: &Cli, prompt: String) -> i32 {
 }
 
 /// The working directory, with the home directory shortened to `~`.
+#[cfg(feature = "tui")]
 fn display_cwd() -> String {
     let cwd = std::env::current_dir().unwrap_or_default();
     let text = cwd.to_string_lossy().to_string();
@@ -422,6 +451,7 @@ fn display_cwd() -> String {
 ///
 /// A failed command is not an error here. The banner simply omits the field, because a
 /// session outside a repository is normal.
+#[cfg(feature = "tui")]
 fn git_branch() -> String {
     std::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -436,6 +466,7 @@ fn git_branch() -> String {
 ///
 /// This is the one place the process environment is read for the interface. A test never
 /// reads the real environment, because `resolve_mouse` takes the list as data.
+#[cfg(feature = "tui")]
 fn rho_env_vars() -> Vec<(String, String)> {
     std::env::vars()
         .filter(|(name, _)| name.starts_with("RHO_"))
@@ -446,19 +477,31 @@ fn rho_env_vars() -> Vec<(String, String)> {
 ///
 /// `--mouse` and `RHO_TUI_MOUSE` both reach this. The config file does not, because no
 /// binary reads a config file yet. See decision D-the-layered-config-has-no-caller.
-fn resolve_mouse(flag: bool, env: &[(String, String)]) -> bool {
+/// Whether the TUI captures the mouse. `--no-mouse` wins, then `--mouse`, then the
+/// environment, then the default, which is on.
+///
+/// The default flipped with `D-the-wheel-needs-capture`. rho owns the alternate screen, and
+/// that screen has no scrollback, so with capture off the wheel does nothing at all.
+#[cfg(feature = "tui")]
+fn resolve_mouse(flag: bool, no_flag: bool, env: &[(String, String)]) -> bool {
+    if no_flag {
+        return false;
+    }
     if flag {
         return true;
     }
     rho_config::ConfigLayer::from_env(env)
         .tui_mouse
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// Run the interactive TUI. Return a non-zero code on failure.
 #[cfg(feature = "tui")]
 async fn run_interactive(cli: &Cli) -> i32 {
-    let config = match build_config(cli) {
+    // Collect the notices instead of printing them. A print here lands on the primary
+    // screen, and rho opens the alternate screen over it a few milliseconds later.
+    let mut notices: Vec<String> = Vec::new();
+    let config = match build_config_with_notices(cli, &mut notices) {
         Ok(config) => config,
         Err(error) => return fail(error),
     };
@@ -466,7 +509,7 @@ async fn run_interactive(cli: &Cli) -> i32 {
     let provider_name = provider::resolve_provider_name(cli.provider.as_deref(), None)
         .unwrap_or_else(|_| String::new());
     // The interface reads one switch. The flag wins, then the environment, then off.
-    let mouse = resolve_mouse(cli.mouse, &rho_env_vars());
+    let mouse = resolve_mouse(cli.mouse, cli.no_mouse, &rho_env_vars());
     // Hold `_tasks` and `_extras` for the whole run. Dropping the task registry kills
     // every background task, and dropping the MCP pool stops every server, so an early
     // drop would end work the model is still waiting on.
@@ -474,9 +517,11 @@ async fn run_interactive(cli: &Cli) -> i32 {
         Ok(triple) => triple,
         Err(error) => return fail(error),
     };
-    for notice in &extras.notices {
-        eprintln!("rho: {notice}");
-    }
+    // The notices go to the interface, not to stderr. rho used to print them here and then
+    // open the alternate screen over them, so the user never read one. One of them says a
+    // project skill stays unloaded until the user trusts it, which is a security notice.
+    // See `D-a-notice-reaches-the-transcript`.
+    notices.extend(extras.notices.iter().cloned());
     let _extras = extras;
 
     // The banner names where this session runs. Without it the banner drew separators
@@ -485,7 +530,8 @@ async fn run_interactive(cli: &Cli) -> i32 {
     let branch = git_branch();
     let mut app = rho_tui::App::new(session, model)
         .with_mouse(mouse)
-        .with_context(cwd, branch, provider_name);
+        .with_context(cwd, branch, provider_name)
+        .with_notices(notices);
     match app.run().await {
         Ok(()) => 0,
         Err(error) => fail(anyhow::anyhow!(error)),
@@ -664,6 +710,31 @@ mod tests {
     }
 
     #[test]
+    fn the_default_model_notice_is_data_and_not_a_print() {
+        // The notice used to reach the user only through `eprintln!`, so the interactive
+        // path printed it to the terminal and then opened the alternate screen over it.
+        // A notice the interface can draw has to be a value the caller can carry.
+        // See `D-a-notice-reaches-the-transcript`.
+        let cli = Cli::try_parse_from(["rho", "--provider", "openrouter"]).unwrap();
+        let mut notices = Vec::new();
+        let config = build_config_with_notices(&cli, &mut notices).expect("a default model");
+        assert_eq!(config.model, "anthropic/claude-haiku-4.5");
+        assert!(
+            notices.iter().any(|line| line.contains("no model given")),
+            "the default-model choice must arrive as data: {notices:?}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_model_raises_no_notice() {
+        // rho must not narrate a choice the user already made.
+        let cli = Cli::try_parse_from(["rho", "--model", "openai/gpt-4o"]).unwrap();
+        let mut notices = Vec::new();
+        build_config_with_notices(&cli, &mut notices).expect("an explicit model");
+        assert!(notices.is_empty(), "no notice was needed: {notices:?}");
+    }
+
+    #[test]
     fn build_config_uses_the_provider_default_when_no_model_is_given() {
         // The behaviour changed on purpose. This test used to assert that a missing model
         // is an error. A provider now supplies a default, which is a convenience and not a
@@ -799,7 +870,10 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+// `resolve_mouse` only exists in a build with the interface, so its tests follow it.
+// Without this the minimal test build fails to compile, and the gate does not catch that,
+// because the gate builds the minimal profile and never tests it.
+#[cfg(all(test, feature = "tui"))]
 mod mouse_tests {
     use super::resolve_mouse;
 
@@ -811,24 +885,40 @@ mod mouse_tests {
     }
 
     #[test]
-    fn the_mouse_is_off_by_default() {
-        assert!(!resolve_mouse(false, &[]));
+    fn the_mouse_is_on_by_default() {
+        // The default flipped with `D-the-wheel-needs-capture`. The alternate screen has no
+        // scrollback, so with capture off the wheel does nothing at all.
+        assert!(resolve_mouse(false, false, &[]));
     }
 
     #[test]
-    fn the_flag_turns_the_mouse_on() {
-        assert!(resolve_mouse(true, &[]));
+    fn the_no_mouse_flag_gives_the_mouse_back() {
+        assert!(!resolve_mouse(false, true, &[]));
     }
 
     #[test]
-    fn the_env_var_turns_the_mouse_on() {
-        assert!(resolve_mouse(false, &env(&[("RHO_TUI_MOUSE", "true")])));
-    }
-
-    #[test]
-    fn a_bad_env_value_leaves_the_mouse_off() {
-        // The layer omits an unaccepted boolean, so the resolution fails closed.
+    fn the_no_mouse_flag_wins_over_the_env_var() {
         assert!(!resolve_mouse(
+            false,
+            true,
+            &env(&[("RHO_TUI_MOUSE", "true")])
+        ));
+    }
+
+    #[test]
+    fn the_env_var_can_turn_the_mouse_off() {
+        assert!(!resolve_mouse(
+            false,
+            false,
+            &env(&[("RHO_TUI_MOUSE", "false")])
+        ));
+    }
+
+    #[test]
+    fn a_bad_env_value_keeps_the_default() {
+        // The layer omits an unaccepted boolean, so the resolution keeps the default.
+        assert!(resolve_mouse(
+            false,
             false,
             &env(&[("RHO_TUI_MOUSE", "yes please")])
         ));

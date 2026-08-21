@@ -53,6 +53,26 @@ minimal = ["openrouter"]
 name = "rho"
 path = "src/main.rs"
 
+# Every example drives a real provider, and a provider is optional. Without these
+# lines `cargo test --no-run` on a profile that omits the provider still compiles
+# the example, and the build fails on a missing crate rather than skipping it.
+# Gate command five found this, on its first run against another branch.
+[[example]]
+name = "steer_subagent"
+required-features = ["bedrock"]
+
+[[example]]
+name = "idle_session"
+required-features = ["openrouter"]
+
+[[example]]
+name = "live_sessions"
+required-features = ["openrouter"]
+
+[[example]]
+name = "many_sessions"
+required-features = ["openrouter"]
+
 [dev-dependencies]
 futures = "0.3.34"
 tempfile = "3.27.0"

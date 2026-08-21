@@ -35,6 +35,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p rho-cli --no-default-features --features minimal
+      # Compile the minimal tests too. Building the minimal profile is not enough: a
+      # `#[cfg(feature = "tui")]` on a helper once left its test module behind, and the
+      # build stayed green while the minimal test build broke.
+      - run: cargo test -p rho-cli --no-default-features --features minimal --no-run
       - run: cargo tree -p rho-cli --no-default-features --features minimal --depth 1
 
   web:

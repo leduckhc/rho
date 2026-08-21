@@ -9,9 +9,10 @@ any part with your own crate.
 Status: sprint 1 delivered. The repository is private until the first release; see
 [docs/release-checklist.md](docs/release-checklist.md).
 
-Sprint 1 delivered. 224 tests. See [workflow.yaml](workflow.yaml) for the
-stages and [docs/verification/sprint-1.md](docs/verification/sprint-1.md) for what
-was actually run against real services.
+Sprint 1 delivered. 224 tests. See
+[docs/verification/sprint-1.md](docs/verification/sprint-1.md) for what was actually run
+against real services. [agentic-workflow.yaml](agentic-workflow.yaml) holds the workflow
+that agents follow to build a feature.
 
 `rho` streams answers and runs tools today, against OpenRouter and AWS Bedrock.
 Azure OpenAI is implemented and unit-tested, but nobody has yet run it live.
