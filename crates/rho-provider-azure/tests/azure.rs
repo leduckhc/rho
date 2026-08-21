@@ -173,6 +173,7 @@ fn request_with(messages: Vec<rho_core::Message>) -> rho_core::CompletionRequest
         tools: Vec::new(),
         max_tokens: None,
         temperature: None,
+        reasoning: None,
     }
 }
 

@@ -145,14 +145,20 @@ No new error type. `ConfigError` already names every case, and `rho-cli` maps it
 | malformed TOML | `ConfigError::Parse`, with the path | `rho-config` |
 | unknown key | `ConfigError::Parse`, by `deny_unknown_fields` | `rho-config` |
 | unknown profile | `ConfigError::UnknownProfile` | `rho-config` |
-| bad enum value | `ConfigError::Parse`, fail closed | `rho-config` |
-| bad boolean | `ConfigError::Parse`, fail closed | `rho-config` |
+| bad enum value | `ConfigError::Value`, fail closed | `rho-config` |
+| bad boolean | `ConfigError::Value`, fail closed | `rho-config` |
 | absent credential | `ConfigError`, never an empty string | `rho-config` |
 | untrusted project command | `ConfigError`, naming `--trust-project` | `rho-config` |
 | no working directory | `anyhow`, names the cause | `rho-cli` |
 | missing file | not an error, `Ok(None)` | `rho-config` |
 
-One new `CredentialSource` variant, and no new error type.
+One new `CredentialSource` variant, and one new error variant.
+
+`ConfigError::Value { key, value, message }` was added on 20260821. `Parse` needs a path,
+and four merged-layer parsers passed the literal "the merged configuration" as one. The run
+then printed "cannot parse the config file the merged configuration", which two live runs
+found. The merge has no file to name, so the error stops pretending. See
+`D-a-merged-value-error-names-no-file`.
 
 ### What the contract forbids
 

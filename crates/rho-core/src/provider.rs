@@ -36,6 +36,9 @@ pub struct CompletionRequest {
     pub tools: Vec<ToolSpec>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    /// How hard the model should think. `None` means the provider's own default, so the
+    /// provider sends no field. See `SPEC-reasoning-across-providers` section 9.
+    pub reasoning: Option<crate::ReasoningEffort>,
 }
 
 #[async_trait]

@@ -390,3 +390,45 @@ async fn agent_loop_pairs_every_turn_start_with_a_turn_end() {
     }
     assert_eq!(open, 0, "a turn was left open at the end of the run");
 }
+
+/// The effort level the session holds must reach the provider, or the whole feature is a
+/// setting that changes nothing. See `SPEC-reasoning-across-providers` section 9.
+#[tokio::test]
+async fn the_request_carries_the_configured_effort() {
+    let provider = Arc::new(common::RecordingProvider::new());
+    let mut config = common::test_config();
+    config = config.with_reasoning_effort(Some(rho_core::ReasoningEffort::High));
+    let session = Session::with_config(
+        config,
+        provider.clone(),
+        Arc::new(ToolRegistry::new()),
+        Arc::new(HookChain::new()),
+        Context::new(Some("system".to_string()), Vec::new()),
+    );
+    let events = session.prompt(user_input("hello"), CancelToken::new());
+    let _ = collect(events).await;
+    let seen = provider.seen.lock().expect("the lock holds");
+    assert_eq!(seen.len(), 1, "one request went out");
+    assert_eq!(
+        seen[0].reasoning,
+        Some(rho_core::ReasoningEffort::High),
+        "the level reaches the provider"
+    );
+}
+
+/// An unset level sends no field, so a host keeps its own default.
+#[tokio::test]
+async fn an_absent_effort_reaches_the_provider_as_none() {
+    let provider = Arc::new(common::RecordingProvider::new());
+    let session = Session::with_config(
+        common::test_config(),
+        provider.clone(),
+        Arc::new(ToolRegistry::new()),
+        Arc::new(HookChain::new()),
+        Context::new(Some("system".to_string()), Vec::new()),
+    );
+    let events = session.prompt(user_input("hello"), CancelToken::new());
+    let _ = collect(events).await;
+    let seen = provider.seen.lock().expect("the lock holds");
+    assert_eq!(seen[0].reasoning, None);
+}

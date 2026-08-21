@@ -26,6 +26,19 @@ pub enum ConfigError {
     /// The file is not valid TOML, or it names an unknown key.
     #[error("cannot parse the config file {path}: {message}")]
     Parse { path: PathBuf, message: String },
+    /// A merged value is not valid. The merge keeps a winning value and drops which layer
+    /// held it, so this error names the key and the value, and never a file.
+    ///
+    /// It exists because `Parse` needs a path, and four parsers passed the literal "the
+    /// merged configuration" as one. That printed "cannot parse the config file the merged
+    /// configuration", which a live run found twice. See
+    /// `D-the-merge-cannot-name-a-values-source`.
+    #[error("the {key} value \"{value}\" is not valid: {message}")]
+    Value {
+        key: &'static str,
+        value: String,
+        message: String,
+    },
     /// The user asked for a profile that no file defines.
     #[error("the profile \"{name}\" is not defined")]
     UnknownProfile { name: String },
@@ -56,6 +69,10 @@ pub struct ConfigLayer {
     /// How the TUI draws reasoning. It parses through `ReasoningDisplay::from_str`.
     /// Values are `off`, `summary`, `full`, and `live`. Default is `summary`.
     pub tui_reasoning: Option<String>,
+    /// How hard the model should think. It parses through `ReasoningEffort::from_str`.
+    /// Values are `off`, `low`, `medium`, `high`, and `xhigh`. Unset means the provider's
+    /// own default, so rho sends no field. See `SPEC-reasoning-across-providers` section 9.
+    pub reasoning_effort: Option<String>,
     /// A path to the MCP server file. See section 6.
     pub mcp_config: Option<PathBuf>,
     pub subagents: Option<SubagentLimitsLayer>,
@@ -283,6 +300,9 @@ pub struct Config {
     pub tui_mouse: bool,
     /// How the TUI draws reasoning. `Summary` by default.
     pub reasoning: rho_core::ReasoningDisplay,
+    /// How hard the model should think. `None` means the provider's own default, so rho
+    /// sends no field at all. See `SPEC-reasoning-across-providers` section 9.
+    pub reasoning_effort: Option<rho_core::ReasoningEffort>,
     pub mcp_config: Option<PathBuf>,
     pub subagents: rho_core::SubagentLimits,
     /// Credential sources, by name. A value resolves through `resolve_credential`.
@@ -303,6 +323,7 @@ impl ConfigLayer {
         self.no_skills = over.no_skills.or(self.no_skills);
         self.tui_mouse = over.tui_mouse.or(self.tui_mouse);
         self.tui_reasoning = over.tui_reasoning.or(self.tui_reasoning);
+        self.reasoning_effort = over.reasoning_effort.or(self.reasoning_effort);
         self.mcp_config = over.mcp_config.or(self.mcp_config);
         self.subagents = over.subagents.or(self.subagents);
         self.credentials = over.credentials.or(self.credentials);
@@ -334,6 +355,7 @@ impl ConfigLayer {
                 "RHO_NO_SKILLS" => layer.no_skills = parse_env_bool("no-skills", value).ok(),
                 "RHO_TUI_MOUSE" => layer.tui_mouse = parse_env_bool("tui-mouse", value).ok(),
                 "RHO_TUI_REASONING" => layer.tui_reasoning = Some(value.clone()),
+                "RHO_REASONING_EFFORT" => layer.reasoning_effort = Some(value.clone()),
                 "RHO_MCP_CONFIG" => layer.mcp_config = Some(PathBuf::from(value)),
                 _ => {}
             }
@@ -557,9 +579,10 @@ fn resolve_command(
 /// Parse the two security keys of a merged layer, and fail closed on a bad value.
 fn parse_sandbox(layer: &ConfigLayer) -> Result<SandboxMode, ConfigError> {
     match &layer.sandbox {
-        Some(value) => SandboxMode::from_str(value).map_err(|error| ConfigError::Parse {
-            path: PathBuf::from("the merged configuration"),
-            message: format!("the sandbox key value \"{value}\" is not valid: {error}"),
+        Some(value) => SandboxMode::from_str(value).map_err(|error| ConfigError::Value {
+            key: "sandbox",
+            value: value.clone(),
+            message: error.to_string(),
         }),
         None => Ok(SandboxMode::default()),
     }
@@ -570,12 +593,33 @@ fn parse_approval(layer: &ConfigLayer) -> Result<Option<ApprovalMode>, ConfigErr
         Some(value) => {
             ApprovalMode::from_str(value)
                 .map(Some)
-                .map_err(|error| ConfigError::Parse {
-                    path: PathBuf::from("the merged configuration"),
-                    message: format!("the approval key value \"{value}\" is not valid: {error}"),
+                .map_err(|error| ConfigError::Value {
+                    key: "approval",
+                    value: value.clone(),
+                    message: error.to_string(),
                 })
         }
         None => Ok(None),
+    }
+}
+
+/// Parse the reasoning effort of a merged layer, and fail closed on a bad value.
+///
+/// An absent key is `None`, and `None` means the provider's own default. So an unset key
+/// and `off` are different answers, and the type keeps them apart.
+fn parse_reasoning_effort(
+    layer: &ConfigLayer,
+) -> Result<Option<rho_core::ReasoningEffort>, ConfigError> {
+    match &layer.reasoning_effort {
+        None => Ok(None),
+        Some(value) => value
+            .parse::<rho_core::ReasoningEffort>()
+            .map(Some)
+            .map_err(|error| ConfigError::Value {
+                key: "reasoning-effort",
+                value: value.clone(),
+                message: error,
+            }),
     }
 }
 
@@ -583,9 +627,10 @@ fn parse_approval(layer: &ConfigLayer) -> Result<Option<ApprovalMode>, ConfigErr
 fn parse_reasoning(layer: &ConfigLayer) -> Result<rho_core::ReasoningDisplay, ConfigError> {
     match &layer.tui_reasoning {
         Some(value) => {
-            rho_core::ReasoningDisplay::from_str(value).map_err(|error| ConfigError::Parse {
-                path: PathBuf::from("the merged configuration"),
-                message: format!("the tui-reasoning key value \"{value}\" is not valid: {error}"),
+            rho_core::ReasoningDisplay::from_str(value).map_err(|error| ConfigError::Value {
+                key: "tui-reasoning",
+                value: value.clone(),
+                message: error,
             })
         }
         None => Ok(rho_core::ReasoningDisplay::default()),
@@ -695,6 +740,7 @@ impl Config {
         let sandbox = parse_sandbox(&merged)?;
         let approval = parse_approval(&merged)?;
         let reasoning = parse_reasoning(&merged)?;
+        let reasoning_effort = parse_reasoning_effort(&merged)?;
         let credentials = merged
             .credentials
             .unwrap_or_default()
@@ -728,6 +774,7 @@ impl Config {
             discover_skills: !merged.no_skills.unwrap_or(false),
             tui_mouse: merged.tui_mouse.unwrap_or(false),
             reasoning,
+            reasoning_effort,
             mcp_config: merged.mcp_config,
             subagents: build_subagents(merged.subagents.as_ref()),
             credentials,

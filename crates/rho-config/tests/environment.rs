@@ -84,11 +84,16 @@ fn env_sandbox_bad_value_fails_closed() {
     // `RHO_SANDBOX=loose` must stop the run with a `ConfigError::Parse` that names the
     // key and the value. An environment value must not be a softer path into the same
     // security setting than a file value. See D-plugin-does-not-classify-itself and D-config-fails-closed.
+    //
+    // The variant is `Value`, not `Parse`. A merged value has no file to name, and `Parse`
+    // needed a path, so it printed "cannot parse the config file the merged configuration".
+    // A live run found that sentence. The rule this test guards is unchanged: the run stops,
+    // and the message names the key and the value.
     let sources = empty_sources().with_env(env_vars(&[("RHO_SANDBOX", "loose")]));
     match Config::load(&sources) {
-        Err(ConfigError::Parse { message, .. }) => {
-            assert!(message.contains("sandbox"), "message: {message}");
-            assert!(message.contains("loose"), "message: {message}");
+        Err(ConfigError::Value { key, value, .. }) => {
+            assert_eq!(key, "sandbox");
+            assert_eq!(value, "loose");
         }
         other => panic!("a bad env sandbox value must fail closed, got {other:?}"),
     }
@@ -96,13 +101,14 @@ fn env_sandbox_bad_value_fails_closed() {
 
 #[test]
 fn env_approval_bad_value_fails_closed() {
-    // `RHO_APPROVAL=bananas` must stop the run with a `ConfigError::Parse` that names
+    // `RHO_APPROVAL=bananas` must stop the run with a `ConfigError::Value` that names
     // the key and the value. The environment must never widen a security key.
+    // See the note in `env_sandbox_bad_value_fails_closed` about the variant.
     let sources = empty_sources().with_env(env_vars(&[("RHO_APPROVAL", "bananas")]));
     match Config::load(&sources) {
-        Err(ConfigError::Parse { message, .. }) => {
-            assert!(message.contains("approval"), "message: {message}");
-            assert!(message.contains("bananas"), "message: {message}");
+        Err(ConfigError::Value { key, value, .. }) => {
+            assert_eq!(key, "approval");
+            assert_eq!(value, "bananas");
         }
         other => panic!("a bad env approval value must fail closed, got {other:?}"),
     }

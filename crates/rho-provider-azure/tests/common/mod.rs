@@ -27,6 +27,7 @@ pub fn sample_request() -> CompletionRequest {
         tools: Vec::new(),
         max_tokens: Some(256),
         temperature: Some(0.0),
+        reasoning: None,
     }
 }
 

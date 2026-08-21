@@ -387,6 +387,9 @@ impl Provider for BedrockProvider {
         if let Some(config) = build_inference_config(&request) {
             builder = builder.inference_config(config);
         }
+        if let Some(fields) = build_thinking_fields(&request) {
+            builder = builder.additional_model_request_fields(fields);
+        }
         if let Some(tools) = build_tool_config(&request) {
             builder = builder.tool_config(tools);
         }
@@ -644,17 +647,93 @@ pub fn build_messages(messages: &[Message]) -> Vec<aws_sdk_bedrockruntime::types
 }
 
 /// Build the inference configuration when the request sets any limit.
+/// Does this model id support Anthropic extended thinking?
+///
+/// It fails closed. Only a Claude id at version 3.7 or above answers `true`, because a
+/// field the endpoint does not know is a 400 for the whole turn. An id rho cannot read is
+/// treated as "no". See `SPEC-reasoning-across-providers` section 9 rule 1.
+fn model_supports_thinking(model: &str) -> bool {
+    let id = model.to_ascii_lowercase();
+    // A Bedrock id may carry a region prefix, as in `us.anthropic.claude-...`.
+    let Some(after) = id.split("anthropic.claude").nth(1) else {
+        return false;
+    };
+    // The first two numbers after the family name are the version. `claude-3-5-sonnet`
+    // gives 3 and 5, and `claude-haiku-4-5-2025...` gives 4 and 5.
+    //
+    // A version part is always under 100. A release date is not, and
+    // `anthropic.claude-3-haiku-20240307` read its date as minor version 20240307, which
+    // made a model without thinking claim it. The test found that, so the bound stays.
+    let mut version = after
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u32>().ok())
+        .filter(|number| *number < 100);
+    let Some(major) = version.next() else {
+        return false;
+    };
+    let minor = version.next().unwrap_or(0);
+    major > 3 || (major == 3 && minor >= 7)
+}
+
+/// Build the `additionalModelRequestFields` that ask Claude for extended thinking.
+///
+/// `None` means rho asks for nothing: no effort, `Off`, or a model that cannot think.
+fn build_thinking_fields(request: &CompletionRequest) -> Option<Document> {
+    let budget = request.reasoning?.budget_tokens()?;
+    if !model_supports_thinking(&request.model) {
+        return None;
+    }
+    let thinking = HashMap::from([
+        ("type".to_string(), Document::String("enabled".to_string())),
+        (
+            "budget_tokens".to_string(),
+            Document::Number(Number::PosInt(u64::from(budget))),
+        ),
+    ]);
+    Some(Document::Object(HashMap::from([(
+        "thinking".to_string(),
+        Document::Object(thinking),
+    )])))
+}
+
+/// The head room rho leaves for the answer above a thinking budget.
+///
+/// Anthropic rejects a request whose `max_tokens` is not above `budget_tokens`, and rho
+/// sends no `max_tokens` of its own, so the SDK default would sit below the budget.
+const ANSWER_HEAD_ROOM: u32 = 4096;
+
 fn build_inference_config(
     request: &CompletionRequest,
 ) -> Option<aws_sdk_bedrockruntime::types::InferenceConfiguration> {
-    if request.max_tokens.is_none() && request.temperature.is_none() {
+    // A thinking budget changes both numbers, so it is read first. See section 9 rules 2
+    // and 3: the budget needs room above it, and Anthropic refuses a stated temperature
+    // while it thinks.
+    let budget = match build_thinking_fields(request) {
+        Some(_) => request.reasoning.and_then(|effort| effort.budget_tokens()),
+        None => None,
+    };
+    if budget.is_none() && request.max_tokens.is_none() && request.temperature.is_none() {
         return None;
     }
     let mut builder = aws_sdk_bedrockruntime::types::InferenceConfiguration::builder();
-    if let Some(max_tokens) = request.max_tokens {
-        builder = builder.max_tokens(max_tokens as i32);
+    match (budget, request.max_tokens) {
+        // Rule 2. Keep the caller's number when it already clears the budget.
+        (Some(budget), Some(max_tokens)) if max_tokens > budget => {
+            builder = builder.max_tokens(max_tokens as i32);
+        }
+        (Some(budget), _) => {
+            builder = builder.max_tokens((budget + ANSWER_HEAD_ROOM) as i32);
+        }
+        (None, Some(max_tokens)) => {
+            builder = builder.max_tokens(max_tokens as i32);
+        }
+        (None, None) => {}
     }
-    if let Some(temperature) = request.temperature {
+    // Rule 3. A temperature travels only when rho did not ask for thinking.
+    if let Some(temperature) = request.temperature
+        && budget.is_none()
+    {
         builder = builder.temperature(temperature);
     }
     Some(builder.build())
@@ -707,5 +786,167 @@ fn json_to_document(value: &Value) -> Document {
                 .map(|(key, inner)| (key.clone(), json_to_document(inner)))
                 .collect(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod thinking_request_tests {
+    use super::*;
+    use rho_core::{ContentBlock, Message, ReasoningEffort, Role};
+
+    fn request(model: &str, effort: Option<ReasoningEffort>) -> CompletionRequest {
+        CompletionRequest {
+            model: model.to_string(),
+            system: None,
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "hello".to_string(),
+                }],
+            }],
+            tools: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            reasoning: effort,
+        }
+    }
+
+    /// The budget inside `additionalModelRequestFields`, or `None` when rho asked nothing.
+    fn asked_budget(request: &CompletionRequest) -> Option<i64> {
+        let fields = build_thinking_fields(request)?;
+        let Document::Object(root) = fields else {
+            panic!("the thinking fields are a JSON object");
+        };
+        let Some(Document::Object(thinking)) = root.get("thinking") else {
+            panic!("the fields carry a thinking object");
+        };
+        assert_eq!(
+            thinking.get("type"),
+            Some(&Document::String("enabled".to_string())),
+            "the thinking request is enabled"
+        );
+        match thinking.get("budget_tokens") {
+            Some(Document::Number(Number::PosInt(budget))) => Some(*budget as i64),
+            other => panic!("the budget is a positive integer, not {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_thinking_model_gets_the_thinking_request() {
+        // Defect 1 of section 0: without the ask, Claude writes `<thinking>` into text.
+        let request = request(
+            "anthropic.claude-haiku-4-5-20251001-v1:0",
+            Some(ReasoningEffort::Medium),
+        );
+        assert_eq!(
+            asked_budget(&request),
+            ReasoningEffort::Medium.budget_tokens().map(i64::from)
+        );
+    }
+
+    #[test]
+    fn an_unsupported_model_asks_for_nothing() {
+        // Rule 1 of section 9, against real Bedrock ids. A field the endpoint does not
+        // know is a 400 for the whole turn, so this fails closed.
+        for model in [
+            "amazon.titan-text-express-v1",
+            "anthropic.claude-3-5-sonnet-20240620-v1:0",
+            "anthropic.claude-3-haiku-20240307-v1:0",
+            "meta.llama3-70b-instruct-v1:0",
+            "",
+        ] {
+            let request = request(model, Some(ReasoningEffort::High));
+            assert!(
+                build_thinking_fields(&request).is_none(),
+                "{model} must ask for nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn every_thinking_model_family_is_recognised() {
+        for model in [
+            "anthropic.claude-3-7-sonnet-20250219-v1:0",
+            "anthropic.claude-sonnet-4-20250514-v1:0",
+            "anthropic.claude-haiku-4-5-20251001-v1:0",
+            "us.anthropic.claude-opus-4-1-20250805-v1:0",
+        ] {
+            let request = request(model, Some(ReasoningEffort::Low));
+            assert!(
+                build_thinking_fields(&request).is_some(),
+                "{model} supports extended thinking"
+            );
+        }
+    }
+
+    #[test]
+    fn an_absent_effort_asks_for_nothing() {
+        let request = request("anthropic.claude-haiku-4-5-20251001-v1:0", None);
+        assert!(build_thinking_fields(&request).is_none());
+    }
+
+    #[test]
+    fn an_off_effort_asks_for_nothing() {
+        let request = request(
+            "anthropic.claude-haiku-4-5-20251001-v1:0",
+            Some(ReasoningEffort::Off),
+        );
+        assert!(build_thinking_fields(&request).is_none());
+    }
+
+    #[test]
+    fn the_budget_leaves_room_for_the_answer() {
+        // Rule 2 of section 9. Anthropic rejects a request whose max_tokens is not above
+        // the budget, and rho sends no max_tokens of its own today.
+        let request = request(
+            "anthropic.claude-haiku-4-5-20251001-v1:0",
+            Some(ReasoningEffort::XHigh),
+        );
+        let config = build_inference_config(&request).expect("thinking sets an inference config");
+        let budget = ReasoningEffort::XHigh.budget_tokens().unwrap() as i32;
+        assert!(
+            config.max_tokens().expect("max tokens is set") > budget,
+            "max_tokens must clear the budget of {budget}"
+        );
+    }
+
+    #[test]
+    fn thinking_drops_a_temperature() {
+        // Rule 3 of section 9. Anthropic allows only the default temperature with
+        // extended thinking, so a stated temperature must not travel.
+        let mut request = request(
+            "anthropic.claude-haiku-4-5-20251001-v1:0",
+            Some(ReasoningEffort::Low),
+        );
+        request.temperature = Some(0.2);
+        let config = build_inference_config(&request).expect("an inference config exists");
+        assert_eq!(config.temperature(), None, "no temperature with thinking");
+    }
+
+    /// A source guard, because the SDK builder needs live AWS to observe. `build_thinking_fields`
+    /// can be perfect and still never reach a request, which is the wiring defect this
+    /// branch has already shipped twice.
+    #[test]
+    fn the_thinking_fields_reach_the_request() {
+        // Search the production half only. The first version of this guard searched the
+        // whole file, so it matched its own assertion string and passed against a deleted
+        // call. Step 7 caught that, and the split is the fix.
+        let source = include_str!("lib.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("a source file has a first part");
+        assert!(
+            production.contains("builder.additional_model_request_fields(fields)"),
+            "the converse builder must send the thinking fields"
+        );
+    }
+
+    #[test]
+    fn no_thinking_keeps_the_temperature() {
+        let mut request = request("anthropic.claude-haiku-4-5-20251001-v1:0", None);
+        request.temperature = Some(0.2);
+        let config = build_inference_config(&request).expect("an inference config exists");
+        assert_eq!(config.temperature(), Some(0.2));
     }
 }

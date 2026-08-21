@@ -55,6 +55,73 @@ impl FromStr for ReasoningDisplay {
     }
 }
 
+/// How hard the model should think.
+///
+/// This is the user's word, and never a wire value. A provider maps it: an
+/// OpenAI-compatible host takes a word, and an Anthropic-style host takes a token budget.
+///
+/// `Option<ReasoningEffort>` carries "unset". `None` means the provider's own default, so
+/// rho sends no field at all and the host keeps its behaviour. See
+/// `SPEC-reasoning-across-providers` section 9.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    /// Ask the model not to think. A host with a disable switch gets it. A host without one
+    /// gets no field, because rho must not invent a value.
+    Off,
+    Low,
+    Medium,
+    High,
+    XHigh,
+}
+
+/// The lowest budget Anthropic accepts. A smaller value is a 400 for the whole turn.
+pub const MIN_THINKING_BUDGET: u32 = 1024;
+
+impl ReasoningEffort {
+    /// The level name, as the config file, the flag, and the variable accept it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReasoningEffort::Off => "off",
+            ReasoningEffort::Low => "low",
+            ReasoningEffort::Medium => "medium",
+            ReasoningEffort::High => "high",
+            ReasoningEffort::XHigh => "xhigh",
+        }
+    }
+
+    /// The Anthropic-style token budget for this level. `None` for `Off`.
+    ///
+    /// The ladder starts at `MIN_THINKING_BUDGET`. The numbers are a starting point, and
+    /// section 7 of the spec says a measurement gets its own bench.
+    pub fn budget_tokens(self) -> Option<u32> {
+        match self {
+            ReasoningEffort::Off => None,
+            ReasoningEffort::Low => Some(MIN_THINKING_BUDGET),
+            ReasoningEffort::Medium => Some(4096),
+            ReasoningEffort::High => Some(16_384),
+            ReasoningEffort::XHigh => Some(32_768),
+        }
+    }
+}
+
+impl FromStr for ReasoningEffort {
+    type Err = String;
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "off" => Ok(ReasoningEffort::Off),
+            "low" => Ok(ReasoningEffort::Low),
+            "medium" => Ok(ReasoningEffort::Medium),
+            "high" => Ok(ReasoningEffort::High),
+            "xhigh" => Ok(ReasoningEffort::XHigh),
+            other => Err(format!(
+                "unknown reasoning effort \"{other}\": the valid levels are \
+                 off, low, medium, high, and xhigh"
+            )),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,5 +146,59 @@ mod tests {
     #[test]
     fn an_unknown_name_is_an_error() {
         assert!(ReasoningDisplay::from_str("loud").is_err());
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+
+    // The effort level. See SPEC-reasoning-across-providers section 9.
+
+    #[test]
+    fn every_effort_name_round_trips() {
+        for effort in [
+            ReasoningEffort::Off,
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+        ] {
+            assert_eq!(ReasoningEffort::from_str(effort.as_str()), Ok(effort));
+        }
+    }
+
+    #[test]
+    fn an_unknown_effort_name_is_an_error() {
+        let error = ReasoningEffort::from_str("hard").unwrap_err();
+        // The message names the valid levels, so a user can fix it without the docs.
+        assert!(
+            error.contains("xhigh"),
+            "the error names the levels: {error}"
+        );
+    }
+
+    #[test]
+    fn the_budget_ladder_only_grows() {
+        let ladder = [
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+        ];
+        let budgets: Vec<u32> = ladder
+            .iter()
+            .map(|effort| effort.budget_tokens().expect("a level has a budget"))
+            .collect();
+        for pair in budgets.windows(2) {
+            assert!(pair[1] > pair[0], "the ladder only grows: {budgets:?}");
+        }
+        // Anthropic refuses a budget under 1024, so the bottom rung must clear it.
+        assert!(budgets[0] >= 1024, "the lowest budget is at least 1024");
+    }
+
+    #[test]
+    fn off_has_no_budget() {
+        assert_eq!(ReasoningEffort::Off.budget_tokens(), None);
     }
 }

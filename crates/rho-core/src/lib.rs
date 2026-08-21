@@ -32,7 +32,7 @@ pub use error::{Error, ProviderError};
 pub use event::StreamEvent;
 pub use hook::{Hook, HookChain, HookOutcome, ToolCallView};
 pub use provider::{CompletionRequest, Provider, ProviderStream, ToolSpec};
-pub use reasoning::ReasoningDisplay;
+pub use reasoning::{MIN_THINKING_BUDGET, ReasoningDisplay, ReasoningEffort};
 pub use retry::RetryPolicy;
 pub use sandbox::SandboxMode;
 pub use secret::Secret;

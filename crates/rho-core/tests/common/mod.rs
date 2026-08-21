@@ -561,3 +561,48 @@ fn install_capture() {
             .expect("the capture subscriber installs once per test binary");
     });
 }
+
+/// A provider that records every request it is given, and answers one plain turn.
+///
+/// It exists because no test could see what rho actually sent. Section 9 of
+/// `SPEC-reasoning-across-providers` needs that, and so did the effort level, which the
+/// session held and never passed on.
+pub struct RecordingProvider {
+    pub seen: std::sync::Mutex<Vec<CompletionRequest>>,
+}
+
+impl RecordingProvider {
+    pub fn new() -> Self {
+        Self {
+            seen: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl Default for RecordingProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for RecordingProvider {
+    fn id(&self) -> &str {
+        "recording"
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+        _cancel: rho_core::CancelToken,
+    ) -> Result<rho_core::ProviderStream, rho_core::ProviderError> {
+        self.seen
+            .lock()
+            .expect("the recording lock is never poisoned")
+            .push(request);
+        let events = text_turn("ok");
+        Ok(Box::pin(futures::stream::iter(
+            events.into_iter().map(Ok).collect::<Vec<_>>(),
+        )))
+    }
+}

@@ -162,6 +162,10 @@ pub struct SessionConfig {
     /// default is stated here, not hidden. Use `with_sandbox` to change it. See
     /// `SPEC-bash-sandbox` and decision D-bash-os-sandbox.
     pub sandbox: SandboxMode,
+    /// How hard the model should think. `None` means the provider's own default, so rho
+    /// sends no field. `SessionConfig::new` leaves it `None`, and a caller opts in with
+    /// `with_reasoning_effort`. See `SPEC-reasoning-across-providers` section 9.
+    pub reasoning_effort: Option<crate::ReasoningEffort>,
 }
 
 impl SessionConfig {
@@ -180,6 +184,8 @@ impl SessionConfig {
             // State the default out loud. `Off` runs `bash` unconfined, which is
             // today's behaviour. A caller opts in with `with_sandbox`.
             sandbox: SandboxMode::Off,
+            // No level means no field on the wire, so a host keeps its own default.
+            reasoning_effort: None,
         }
     }
 
@@ -202,6 +208,12 @@ impl SessionConfig {
     /// Set the `bash` confinement mode. `new` leaves it `Off`. See `SPEC-bash-sandbox`.
     pub fn with_sandbox(mut self, sandbox: SandboxMode) -> Self {
         self.sandbox = sandbox;
+        self
+    }
+
+    /// Set how hard the model should think. `new` leaves it unset, which sends no field.
+    pub fn with_reasoning_effort(mut self, effort: Option<crate::ReasoningEffort>) -> Self {
+        self.reasoning_effort = effort;
         self
     }
 }
@@ -693,6 +705,7 @@ impl Driver {
             tools: self.inner.tools.specs(),
             max_tokens: None,
             temperature: None,
+            reasoning: self.inner.config.reasoning_effort,
         }
     }
 

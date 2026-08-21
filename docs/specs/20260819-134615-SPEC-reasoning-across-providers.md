@@ -478,8 +478,8 @@ delta at a time, so "the first non-space text" is unknown until enough text has 
 
 ## 7. Out of scope
 
-- **Choosing a thinking budget per model.** `ask_to_enable` says whether to ask. How many
-  tokens to ask for needs its own measurement and its own spec.
+- **Choosing the budget numbers by measurement.** Section 9 states a ladder, and it is a
+  starting point, not a measured optimum. A measurement gets its own bench and its own spec.
 - **A reasoning search.** The transcript holds the trace, and the terminal searches it.
 - **Google and Mistral provider crates.** rho has none yet. Mistral joins the
   OpenAI-compatible table as a row. **Google does not**, and section 3 says why: its reasoning
@@ -603,3 +603,97 @@ delta at a time, so "the first non-space text" is unknown until enough text has 
 - `an_imported_pi_signature_never_replays` — the importer writes a trace.
 - `a_crafted_owner_is_not_authentication` — pins the stated limit: the tag stops an accident,
   not a crafted file.
+
+## 9. The ask, and the effort level
+
+This section was added on 20260821, because the owner asked the plain question: who decides
+that a model thinks, and how hard?
+
+**The capability belongs to the model, not to the provider.** Bedrock serves Claude models
+that think and Titan models that do not. So one provider crate answers per model id, and it
+fails closed. An unknown id asks for nothing, because a field the endpoint does not know is a
+400 for the whole turn.
+
+**One level, two wire shapes.** An OpenAI-compatible host takes a word. An Anthropic-style
+host takes a token budget, and it rejects a request whose `max_tokens` is not above that
+budget. So the level is the user's word, and each provider maps it.
+
+```rust
+/// How hard the model should think. This is the user's word, not a wire value.
+///
+/// `Option<ReasoningEffort>` carries "unset" everywhere. `None` means the provider's own
+/// default, so rho sends no field at all and a host keeps its own behaviour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReasoningEffort {
+    /// Ask the model not to think. A host with a disable switch gets it. A host without one
+    /// gets no field, because rho must not invent a value.
+    Off,
+    Low,
+    Medium,
+    High,
+    XHigh,
+}
+
+impl ReasoningEffort {
+    /// The config, flag, and environment name. `off`, `low`, `medium`, `high`, `xhigh`.
+    pub fn as_str(self) -> &'static str;
+
+    /// The Anthropic-style budget for this level. `None` for `Off`.
+    ///
+    /// The ladder starts at 1024, because Anthropic rejects a smaller budget. The numbers
+    /// are a starting point and section 7 says so.
+    pub fn budget_tokens(self) -> Option<u32>;
+}
+```
+
+`CompletionRequest` gains `pub reasoning: Option<ReasoningEffort>`, so a provider sees the
+level with the request and needs no second channel.
+
+| Level | Budget | Word on an OpenAI-compatible host |
+| --- | --- | --- |
+| `off` | none | `none`, where the host has one |
+| `low` | 1024 | `low` |
+| `medium` | 4096 | `medium` |
+| `high` | 16384 | `high` |
+| `xhigh` | 32768 | `xhigh` |
+
+### The three rules a provider keeps
+
+1. **An unsupported model asks for nothing.** No field, no budget, no error.
+2. **The budget leaves room for the answer.** A provider raises `max_tokens` above the budget
+   when it asks for thinking. Anthropic rejects the request otherwise.
+3. **Thinking drops a temperature.** Anthropic allows only the default temperature with
+   extended thinking, so a provider that asks for thinking sends no temperature.
+
+### The configuration
+
+A new key, and one more flag. The display mode and the effort are two different things: one
+changes what you see, and the other changes what the model does and what you pay.
+
+| Source | Name |
+| --- | --- |
+| config file | `reasoning-effort` |
+| environment | `RHO_REASONING_EFFORT` |
+| flag | `--reasoning-effort <level>` |
+
+An unknown value is refused at its own source, and the error names that source. This is the
+same rule as the display mode, and the reason is `D-the-merge-cannot-name-a-values-source`.
+
+### Test cases for section 9
+
+- `every_effort_name_round_trips` — the five names parse and print back.
+- `an_unknown_effort_name_is_an_error` — no silent fallback.
+- `the_budget_ladder_only_grows` — each level's budget is above the one below it.
+- `off_has_no_budget` — `Off` maps to no budget.
+- `the_request_carries_the_configured_effort` — the level reaches `CompletionRequest`.
+- `a_thinking_model_gets_the_thinking_request` — the Bedrock row asks, so the model returns a
+  structured block instead of writing tags. This is defect 1 of section 0.
+- `an_unsupported_model_asks_for_nothing` — rule 1, tested against real Bedrock model ids.
+- `an_absent_effort_asks_for_nothing` — `None` sends no field.
+- `the_budget_leaves_room_for_the_answer` — rule 2.
+- `thinking_drops_a_temperature` — rule 3.
+- `a_bad_reasoning_effort_value_fails_closed` — the file key, in `rho-config`.
+- `an_unknown_effort_flag_is_refused` and `an_unknown_effort_variable_is_refused` — the other
+  two sources, each named in its own error.
+- `the_run_path_strips_a_leading_thinking_tag` — `rho run` had no splitter, so it printed a
+  tag as the answer while the TUI did not.

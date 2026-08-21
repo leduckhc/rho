@@ -33,6 +33,7 @@ fn config_holding(source: CredentialSource) -> Config {
         discover_skills: true,
         tui_mouse: false,
         reasoning: rho_core::ReasoningDisplay::Summary,
+        reasoning_effort: None,
         mcp_config: None,
         subagents: SubagentLimits::default(),
         credentials,

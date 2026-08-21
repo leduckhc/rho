@@ -92,6 +92,15 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub reasoning: Option<String>,
 
+    /// How hard the model thinks: `off`, `low`, `medium`, `high`, or `xhigh`.
+    ///
+    /// Unset means the provider's own default, so rho sends no field. The level is the
+    /// user's word: a Claude model gets a token budget, and an OpenAI-compatible host gets
+    /// the word. A model that cannot think is asked for nothing. See
+    /// `SPEC-reasoning-across-providers` section 9.
+    #[arg(long, global = true)]
+    pub reasoning_effort: Option<String>,
+
     /// Load skills that live in this repository.
     ///
     /// A skill can instruct the model and can carry scripts, so a skill from the
@@ -219,7 +228,9 @@ fn build_config(config: &rho_config::Config) -> anyhow::Result<SessionConfig> {
         }
     };
 
-    Ok(SessionConfig::new(model, root, approval).with_sandbox(config.sandbox))
+    Ok(SessionConfig::new(model, root, approval)
+        .with_sandbox(config.sandbox)
+        .with_reasoning_effort(config.reasoning_effort))
 }
 
 /// Build a session from the config and the chosen provider.
@@ -379,17 +390,39 @@ async fn run_headless(cli: &Cli, prompt: String) -> i32 {
     // turn runs into the first word of the next.
     let mut wrote_text = false;
     let mut turn_pending = false;
+    // A leading `<thinking>` tag is the model's reasoning, not the answer. Without this
+    // the headless path printed the tag as the answer, while the TUI did not. The splitter
+    // starts fresh for each text block, exactly as the TUI does.
+    let mut splitter = rho_core::ThinkingSplitter::new();
+    let show_reasoning = reasoning_is_shown(loaded.reasoning);
 
     while let Some(item) = events.next().await {
         match item {
+            Ok(AgentEvent::Stream(StreamEvent::TextStart { .. })) => {
+                splitter = rho_core::ThinkingSplitter::new();
+            }
             Ok(AgentEvent::Stream(StreamEvent::TextDelta { delta, .. })) => {
+                let split = split_run_delta(&mut splitter, &delta);
+                if show_reasoning && !split.reasoning.is_empty() {
+                    // stderr, so a pipe on stdout still holds the answer alone.
+                    eprint!("{}", split.reasoning);
+                }
+                if split.answer.is_empty() {
+                    continue;
+                }
                 if turn_pending {
                     let _ = writeln!(stdout);
                     turn_pending = false;
                 }
-                let _ = write!(stdout, "{delta}");
+                let _ = write!(stdout, "{}", split.answer);
                 let _ = stdout.flush();
                 wrote_text = true;
+            }
+            // A structured reasoning block, from a provider rho asked to think.
+            Ok(AgentEvent::Stream(StreamEvent::ThinkingDelta { delta, .. })) => {
+                if show_reasoning {
+                    eprint!("{delta}");
+                }
             }
             Ok(AgentEvent::TurnEnd { .. }) => {
                 // Mark a break, but write it only when more prose actually follows.
@@ -474,6 +507,7 @@ fn flag_layer(cli: &Cli) -> rho_config::ConfigLayer {
             .map(|arg| SandboxMode::from(arg).as_str().to_string()),
         tui_mouse: cli.mouse,
         tui_reasoning: cli.reasoning.clone(),
+        reasoning_effort: cli.reasoning_effort.clone(),
         no_skills: cli.no_skills,
         mcp_config: cli.mcp_config.clone(),
         // An empty `--skill` list is no request at all, so it writes nothing.
@@ -504,6 +538,41 @@ fn bootstrap_root(cli: &Cli, env: &[(String, String)]) -> anyhow::Result<PathBuf
         .map_err(|error| anyhow::anyhow!("cannot read the current directory: {error}"))
 }
 
+/// What one assistant text delta becomes on the two streams of `rho run`.
+///
+/// stdout carries the answer alone, so a pipe stays clean. Reasoning goes to stderr.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RunDelta {
+    answer: String,
+    reasoning: String,
+}
+
+/// Split one text delta into answer text and reasoning text.
+///
+/// `rho run` printed a leading `<thinking>` tag as the answer, because the splitter lived
+/// in the TUI alone. See `SPEC-reasoning-across-providers` section 9.
+fn split_run_delta(splitter: &mut rho_core::ThinkingSplitter, delta: &str) -> RunDelta {
+    let mut out = RunDelta::default();
+    for piece in splitter.push(delta) {
+        match piece {
+            rho_core::ThinkingPiece::Text(text) => out.answer.push_str(&text),
+            rho_core::ThinkingPiece::Reasoning(text) => out.reasoning.push_str(&text),
+        }
+    }
+    out
+}
+
+/// Does this display mode print the reasoning text on this path?
+///
+/// `summary` draws a one-row summary in the TUI. There are no rows here, so `summary` and
+/// `off` both print nothing, and the two modes that ask for the text get it.
+fn reasoning_is_shown(display: rho_core::ReasoningDisplay) -> bool {
+    matches!(
+        display,
+        rho_core::ReasoningDisplay::Full | rho_core::ReasoningDisplay::Live
+    )
+}
+
 /// Refuse a bad reasoning mode at its own source, before the merge.
 ///
 /// `merge` keeps a winning value and drops where it came from, so a refusal raised after the
@@ -520,6 +589,17 @@ fn validate_reasoning_sources(cli: &Cli, env: &[(String, String)]) -> anyhow::Re
     if let Some((_, value)) = env.iter().find(|(name, _)| name == "RHO_TUI_REASONING") {
         rho_core::ReasoningDisplay::from_str(value)
             .map_err(|error| anyhow::anyhow!("the RHO_TUI_REASONING variable is wrong: {error}"))?;
+    }
+    // The effort level follows the same rule as the display mode, and for the same reason:
+    // the merge cannot name a value's source, so each source is checked here.
+    if let Some(level) = cli.reasoning_effort.as_deref() {
+        rho_core::ReasoningEffort::from_str(level)
+            .map_err(|error| anyhow::anyhow!("the --reasoning-effort flag is wrong: {error}"))?;
+    }
+    if let Some((_, value)) = env.iter().find(|(name, _)| name == "RHO_REASONING_EFFORT") {
+        rho_core::ReasoningEffort::from_str(value).map_err(|error| {
+            anyhow::anyhow!("the RHO_REASONING_EFFORT variable is wrong: {error}")
+        })?;
     }
     Ok(())
 }
@@ -622,7 +702,7 @@ mod tests {
     ///
     /// A test never reads the real home directory or the real `RHO_*` variables, because a
     /// result that changes per machine is not a test.
-    fn loaded(cli: &Cli) -> rho_config::Config {
+    pub(super) fn loaded(cli: &Cli) -> rho_config::Config {
         try_load(cli, &[], &[]).expect("the config must load")
     }
 
@@ -1309,5 +1389,141 @@ mod tests {
             &serde_json::json!({}),
         ));
         assert_eq!(decision, rho_core::ApprovalDecision::Deny);
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+    use clap::Parser;
+
+    fn cli(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("the arguments parse")
+    }
+
+    /// The flag reaches layer 6, so a file cannot beat it.
+    #[test]
+    fn the_effort_flag_writes_layer_six() {
+        let cli = cli(&["rho", "--reasoning-effort", "high"]);
+        let layer = flag_layer(&cli);
+        assert_eq!(layer.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    /// An absent flag writes nothing, so a file key survives the merge.
+    #[test]
+    fn an_absent_effort_flag_writes_nothing() {
+        let cli = cli(&["rho"]);
+        assert_eq!(flag_layer(&cli).reasoning_effort, None);
+    }
+
+    /// A bad flag value is refused, and the error names the flag.
+    #[test]
+    fn an_unknown_effort_flag_is_refused() {
+        let cli = cli(&["rho", "--reasoning-effort", "ludicrous"]);
+        let error = validate_reasoning_sources(&cli, &[]).expect_err("a bad level is refused");
+        let text = error.to_string();
+        assert!(
+            text.contains("--reasoning-effort") && text.contains("ludicrous"),
+            "the error names the flag and the value: {text}"
+        );
+    }
+
+    /// A bad variable value is refused, and the error names the variable.
+    #[test]
+    fn an_unknown_effort_variable_is_refused() {
+        let cli = cli(&["rho"]);
+        let env = vec![("RHO_REASONING_EFFORT".to_string(), "ludicrous".to_string())];
+        let error = validate_reasoning_sources(&cli, &env).expect_err("a bad level is refused");
+        assert!(
+            error.to_string().contains("RHO_REASONING_EFFORT"),
+            "the error names the variable: {error}"
+        );
+    }
+
+    /// The level reaches the session, or the whole setting changes nothing. This is the
+    /// wiring step, and the one a green suite hid twice before on this branch.
+    #[test]
+    fn the_session_config_carries_the_effort() {
+        let cli = cli(&["rho", "--model", "m", "--reasoning-effort", "xhigh"]);
+        let loaded = super::tests::loaded(&cli);
+        assert_eq!(
+            loaded.reasoning_effort,
+            Some(rho_core::ReasoningEffort::XHigh),
+            "the flag reaches the merged config"
+        );
+        let built = build_config(&loaded).expect("the session config builds");
+        assert_eq!(
+            built.reasoning_effort,
+            Some(rho_core::ReasoningEffort::XHigh),
+            "the merged config reaches the session"
+        );
+    }
+}
+
+#[cfg(test)]
+mod run_output_tests {
+    use super::*;
+
+    /// `rho run` printed a `<thinking>` tag as the answer, because the splitter was wired
+    /// into the TUI alone. Defect 1 of the spec reaches this path too.
+    #[test]
+    fn the_run_path_strips_a_leading_thinking_tag() {
+        let mut splitter = rho_core::ThinkingSplitter::new();
+        let out = split_run_delta(&mut splitter, "<thinking>plan</thinking>the answer");
+        assert_eq!(out.answer, "the answer");
+        assert_eq!(out.reasoning, "plan");
+    }
+
+    /// A tag in the middle of a sentence is prose about tags, so it stays in the answer.
+    #[test]
+    fn the_run_path_keeps_a_tag_in_the_middle() {
+        let mut splitter = rho_core::ThinkingSplitter::new();
+        let out = split_run_delta(&mut splitter, "here is a <thinking> tag");
+        assert_eq!(out.answer, "here is a <thinking> tag");
+        assert!(out.reasoning.is_empty());
+    }
+
+    /// An opening tag split across deltas still matches, and nothing leaks before the
+    /// splitter decides.
+    #[test]
+    fn the_run_path_holds_a_split_tag_until_it_decides() {
+        let mut splitter = rho_core::ThinkingSplitter::new();
+        let first = split_run_delta(&mut splitter, "<thin");
+        assert!(first.answer.is_empty(), "no text before the decision");
+        let second = split_run_delta(&mut splitter, "king>plan</thinking>done");
+        assert_eq!(second.reasoning, "plan");
+        assert_eq!(second.answer, "done");
+    }
+
+    /// A source guard. `split_run_delta` can be perfect and never be called, which is
+    /// exactly how the TUI got the fix and `rho run` did not.
+    #[test]
+    fn the_headless_loop_splits_its_text() {
+        // The production half only. A guard that searches its own text passes against the
+        // deletion it exists to catch. See the bedrock guard and step 7.
+        let whole = include_str!("cli.rs");
+        let source = whole
+            .split("#[cfg(test)]")
+            .next()
+            .expect("a source file has a first part");
+        assert!(
+            source.contains("split_run_delta(&mut splitter, &delta)"),
+            "the headless loop must split its text deltas"
+        );
+        assert!(
+            source.contains("write!(stdout, \"{}\", split.answer)"),
+            "stdout must carry the split answer, not the raw delta"
+        );
+    }
+
+    /// stdout carries the answer alone, so a pipe stays clean. Reasoning goes to stderr,
+    /// and only when the user asked to see it.
+    #[test]
+    fn reasoning_prints_only_in_full_and_live() {
+        use rho_core::ReasoningDisplay;
+        assert!(!reasoning_is_shown(ReasoningDisplay::Off));
+        assert!(!reasoning_is_shown(ReasoningDisplay::Summary));
+        assert!(reasoning_is_shown(ReasoningDisplay::Full));
+        assert!(reasoning_is_shown(ReasoningDisplay::Live));
     }
 }
