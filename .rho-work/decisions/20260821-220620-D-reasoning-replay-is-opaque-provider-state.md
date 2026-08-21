@@ -48,11 +48,32 @@ A model switch then sends a foreign blob. rho must not copy that hole.
 1. The value carries its **owner**: the provider name and the model id that produced it.
 2. A provider reads a value only when the owner matches. Otherwise it drops it and sends
    nothing. The drop is fail-closed, and it is a named arm.
-3. The value never carries a credential. `rho-redact` covers it on the way to a file and to a
-   log.
-4. An old rho reads the text and ignores the value. A new rho reads a missing value as
-   "nothing to replay".
-5. The value is `serde_json::Value`, and it round-trips unchanged through the session file.
+3. The value carries no credential and no readable text. It holds opaque provider bytes only:
+   a signature, an encrypted blob, an id, or a status. Readable text lives in `text`, where
+   the session cap and the reader both already reach it.
+4. The value never reaches a log, at any level. It is written to the session file verbatim,
+   because a rewritten payload cannot replay. `redact_block` and `cap_block` each get a named
+   arm, so no wildcard covers a reasoning block in silence.
+5. A value over `MAX_RECORD_BYTES` is dropped whole. A truncated opaque token is useless.
+6. An old rho reads the text and ignores the value. A new rho reads a missing value as
+   "nothing to replay", and it reports a `replay: true` record that carries no value.
+7. The value is `serde_json::Value`, and it round-trips unchanged through the session file.
+
+**The owner tag is accident protection, and not authentication.** It stops an honest mismatch
+after a model switch. A crafted session file can set any owner, because the tag sits beside
+the payload it describes. A security review named this, and the claim is corrected here rather
+than left standing. rho trusts a session file exactly as much as it trusts the rest of that
+file.
+
+## The review changed two things
+
+A reviewer and a security pass both read this decision before any code. Two findings landed:
+
+- **A tool call now carries a `ProviderState` too.** The draft kept a typed
+  `thought_signature: Option<String>`. No stream event carried it, so Gemini would have had to
+  edit shared code, and a bare string had no owner, so it replayed after a model switch with
+  nothing checking it. That was the exact hole this decision exists to close, on a second path.
+- **The payload is bounded, and its text is not opaque.** See guards 3 and 5.
 
 ## What this settles elsewhere
 

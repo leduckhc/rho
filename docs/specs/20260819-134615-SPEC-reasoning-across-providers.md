@@ -154,8 +154,9 @@ pub enum ReplayPolicy {
     /// Send the readable text back on an assistant tool-call message. The Kimi coding
     /// endpoint rejects the message without it.
     TextOnToolCall,
-    /// Send a signature back on the matching tool call. Gemini rejects the request with
-    /// `Function call is missing a thought_signature`, and jcode carries the same field.
+    /// Send a signature back on the matching tool call, read from that call's
+    /// `ProviderState`. Gemini rejects the request with
+    /// `Function call is missing a thought_signature`, and jcode carries the same token.
     SignatureOnToolCall,
 }
 ```
@@ -189,10 +190,14 @@ pub enum ContentBlock {
         id: String,
         name: String,
         arguments: serde_json::Value,
-        /// The replay token some providers bind to this call. Gemini rejects a request with
-        /// `Function call is missing a thought_signature` when it is absent, and jcode
-        /// carries the same field for the same reason. `None` means the provider sent none.
-        thought_signature: Option<String>,
+        /// The replay payload some providers bind to this call. Gemini rejects a request
+        /// with `Function call is missing a thought_signature` when it is absent.
+        ///
+        /// This was `thought_signature: Option<String>`. A review killed that: the stream
+        /// event carried no such field, so Gemini would have had to edit shared code, and
+        /// a bare string had no owner, so it replayed after a model switch with nothing
+        /// checking it. One carrier, owner-tagged, on every replay path.
+        state: Option<ProviderState>,
     },
     ToolResult { tool_call_id: String, content: Vec<ContentBlock>, is_error: bool },
 
@@ -239,6 +244,13 @@ pub enum StreamEvent {
         /// Replaces `signature: Option<String>`. A signature now travels inside `value`.
         state: Option<ProviderState>,
     },
+    ToolCallEnd {
+        index: u32,
+        arguments: serde_json::Value,
+        /// New. Without it a provider cannot bind a replay payload to its call, and the
+        /// extension point of section 7 is a promise rho cannot keep.
+        state: Option<ProviderState>,
+    },
 }
 ```
 
@@ -265,6 +277,35 @@ plain string, so the shape is settled and a name documents it better than a blob
 
 **The honest cost.** The compiler no longer checks a payload. So rule 8 below is the whole
 guard, and it fails closed. A test for a mismatched owner is not optional.
+
+### What `value` may hold, and what bounds it
+
+A security review found the first draft of this part unsafe. Both bounds below come from it.
+
+**`value` holds opaque provider bytes only.** A signature, an encrypted blob, an item id, or a
+status. **No readable text.** The OpenAI item's `summary` is readable, so it goes in `text`,
+where the reader sees it and where the session cap already applies. This is what makes the
+redaction exemption of rule 9 safe: opaque bytes cannot be scanned for a secret, and they hold
+none that rho put there.
+
+**Both texts are capped like any assistant text.** `ReasoningTrace.text` and
+`ReasoningReplay.text` pass through `cap_block`, with the same spill as `ContentBlock::Text`.
+A `TextOnToolCall` endpoint then replays a capped text. That is the deliberate trade: a turn
+with reasoning past the cap is already pathological, and the other road writes a session file
+that cannot be read back.
+
+**A `value` is all or nothing.** Over `MAX_RECORD_BYTES` it is dropped whole, and rho reports
+it. A truncated opaque token is useless, and a truncated one that still looks valid is worse.
+
+**No wildcard may cover these blocks.** `redact_block` and `cap_block` in
+`rho-core/src/session/mod.rs` both end in `other => other.clone()` today, so a new variant
+joins them in silence. Each needs a named arm for both reasoning blocks.
+
+**The owner tag is accident protection, and not authentication.** It stops an honest mismatch
+after a model switch. It stops nothing in a session file that somebody crafted, because the
+tag sits beside the payload it describes. rho trusts a session file exactly as much as it
+trusts the rest of that file, and no more. The decision states this too, so nobody reads the
+tag as a signature.
 
 ### The persisted format, in both directions
 
@@ -296,6 +337,11 @@ it on the way to the file. Rule 9 states the matching log rule.
 
 **An old `signature` key is read and dropped.** A file from before this change maps to
 `ReasoningTrace`, and a stale signature never replays.
+
+**An imported pi session holds traces only.** `rho-session-import-pi` cannot know which
+`Provider::id` and model wrote pi's `thinkingSignature`, so it can build no honest owner. It
+writes `ReasoningTrace`, and an imported signature never replays. A review found this, and the
+alternative was a guessed owner, which rule 8 exists to refuse.
 
 ### How one tag carries two variants
 
@@ -398,6 +444,13 @@ D-a-bad-reasoning-mode-is-refused.
    and the request carries no reasoning payload. The drop is never silent, and never partial.
 9. A `state` value never reaches a log, at any level, including `trace`. It is written to the
    session file verbatim, because a rewritten payload cannot replay.
+10. A `value` over `MAX_RECORD_BYTES` is dropped whole, and rho reports it. A reasoning text
+    over the string cap spills, exactly as an assistant text does.
+11. rho reports a `replay: true` record that carries no `state`. It reads as a trace, and the
+    report says so once, so a provider bug does not hide.
+12. A request builder has a named arm for every content block. A stream parser may keep a
+    wildcard, because a wire event set is open and a provider adds events without rho.
+    `rho-provider-azure/src/lib.rs:600` is a request builder, so its `_ => {}` goes.
 
 ### The tag rule, stated for a stream
 
@@ -431,8 +484,8 @@ delta at a time, so "the first non-space text" is unknown until enough text has 
 - **Google and Mistral provider crates.** rho has none yet. Mistral joins the
   OpenAI-compatible table as a row. **Google does not**, and section 3 says why: its reasoning
   is structural, so it arrives as a new crate behind `trait Provider`. The `SignatureOnToolCall`
-  replay policy and the `thought_signature` field exist now so that crate needs no change to
-  shared code when it lands.
+  replay policy, the `ProviderState` on a `ToolCall`, and the `state` field on `ToolCallEnd`
+  exist now, so that crate needs no change to shared code when it lands.
 - **Token accounting for reasoning.** Anthropic reports it in
   `output_tokens_details.thinking_tokens`, and the footer work is separate.
 
@@ -470,6 +523,18 @@ delta at a time, so "the first non-space text" is unknown until enough text has 
 - `an_absent_state_replays_nothing` — a `None` payload sends no reasoning field.
 - `an_azure_reasoning_item_round_trips_through_the_state` — the id, the summary, and the
   encrypted blob all survive one turn. This is the case a single string could not carry.
+- `a_tool_call_state_is_captured_from_the_stream` — `ToolCallEnd` carries the payload, so a
+  provider needs no edit to shared code.
+- `a_tool_call_state_is_dropped_for_another_model` — rule 8 covers the tool-call path too,
+  which the first draft left ungoverned.
+- `a_value_over_the_record_cap_is_dropped_and_reported` — rule 10, all or nothing.
+- `a_reasoning_text_over_the_string_cap_spills` — rule 10, the text half.
+- `a_reasoning_block_has_a_named_redaction_arm` and `a_reasoning_block_has_a_named_cap_arm` —
+  no wildcard covers a reasoning block.
+- `a_replayed_state_cannot_change_a_tool_call` — the payload rides along, and it never
+  rewrites the request rho built.
+- `an_oversize_reasoning_line_does_not_fail_the_whole_resume` — one bad record drops, and the
+  session still opens.
 - `a_rejecting_endpoint_receives_no_reasoning_field` — the strict-schema row sends nothing,
   so no 422.
 - `a_tool_call_endpoint_receives_the_text` — the `TextOnToolCall` row attaches the text.
@@ -480,6 +545,8 @@ delta at a time, so "the first non-space text" is unknown until enough text has 
 ### The display
 
 - `the_summary_row_states_the_span` — `∴ thought for 2.4s`.
+- `off_mode_draws_nothing` — no text, and no summary row. `Off` was deleted by one draft and
+  restored by a review, and it still had no test.
 - `full_mode_draws_the_text_dimmed` — the rows carry `Role::Muted`, never `Role::Text`.
 - `live_mode_collapses_when_the_answer_starts` — the text goes, the summary stays.
 - `the_default_mode_is_summary`.
@@ -532,3 +599,7 @@ delta at a time, so "the first non-space text" is unknown until enough text has 
 - `a_replay_key_with_no_state_reads_as_a_trace` — the fail-closed direction.
 - `an_old_rho_ignores_the_state_key` — the new key does not fail an old load.
 - `a_state_value_never_reaches_a_log` — rule 9, asserted against a captured log at `trace`.
+- `a_replay_record_with_no_state_is_reported` — rule 11, so a provider bug is visible.
+- `an_imported_pi_signature_never_replays` — the importer writes a trace.
+- `a_crafted_owner_is_not_authentication` — pins the stated limit: the tag stops an accident,
+  not a crafted file.
