@@ -298,6 +298,11 @@ impl TuiState {
             AgentEvent::TaskProgressed { id, progress } => self.on_task_progress(id, progress),
             AgentEvent::TaskEnd { id, state, .. } => self.on_task_end(id, state),
             AgentEvent::AgentEnd { stop_reason } => self.on_agent_end(*stop_reason, now_millis),
+            // Steering. The band shows nothing for either one: a queued message is the
+            // composer's business, and a delivery is visible as the next user row. They
+            // are matched by name rather than swept up by a wildcard, so the next event
+            // this enum gains stops the build here and gets a decision.
+            AgentEvent::MessageQueued { .. } | AgentEvent::MessageDelivered { .. } => {}
         }
     }
 
@@ -1246,6 +1251,7 @@ fn stop_reason_label(reason: AgentStopReason) -> &'static str {
         AgentStopReason::MaxTurnRequests => "max turns",
         AgentStopReason::Refusal => "refusal",
         AgentStopReason::Canceled => "canceled",
+        AgentStopReason::MaxToolCalls => "max tool calls",
     }
 }
 
@@ -1323,6 +1329,13 @@ fn outcome_label(outcome: &rho_core::AgentOutcome) -> (String, bool) {
         rho_core::AgentOutcome::Canceled => ("canceled".to_string(), true),
         rho_core::AgentOutcome::Failed { reason } => {
             (format!("failed: {}", crate::sanitize_line(reason)), true)
+        }
+        // rho verified the work and refused it. The child may still have said "done", so
+        // the label states which check failed, and it counts as a failure. Each label is
+        // sanitised, because a failing check can name a path a model chose.
+        rho_core::AgentOutcome::Rejected { failed } => {
+            let names: Vec<String> = failed.iter().map(|one| crate::sanitize_line(one)).collect();
+            (format!("rejected: {}", names.join(", ")), true)
         }
     }
 }

@@ -110,6 +110,14 @@ pub struct ToolContext {
     pub cancel: CancelToken,
     /// A channel for streamed output lines. `bash` sends stdout and stderr here.
     pub updates: tokio::sync::mpsc::Sender<String>,
+    /// A channel for typed agent events, so a tool that runs a subagent can show
+    /// it live.
+    ///
+    /// `updates` carries only strings, so `spawn_agent` could not report a child
+    /// to the frontend. `AgentSpawned`, `AgentProgressed`, and `AgentFinished` were
+    /// defined and rendered while nothing emitted them. See `SPEC-subagents`
+    /// section 9 and decision D-a-panel-nobody-can-open.
+    pub agent_events: tokio::sync::mpsc::Sender<crate::AgentEvent>,
 }
 
 #[async_trait]

@@ -93,7 +93,8 @@ was unusable, because any missing file ended the session.
 
 ## Sprint 2 stage results
 
-`workflow-sprint-2.yaml` drives this sprint. The scope is config, the session log,
+Sprint 2 ran from `workflow-sprint-2.yaml`, which `agentic-workflow.yaml` replaced. The
+scope is config, the session log,
 and the ACP frontend. ACP is the point of the project, because makit needs a cheap
 ACP backend.
 
@@ -259,7 +260,8 @@ gets skipped.
 
 ## Sprint 3, the terminal interface
 
-`workflow-sprint-3.yaml` drives this sprint. The goal is an interface a critic ranks at or
+Sprint 3 ran from `workflow-sprint-3.yaml`, which `agentic-workflow.yaml` replaced. The
+goal is an interface a critic ranks at or
 above pi, codex, claude code, and jcode, in a binary that stays the fastest of them.
 
 The sprint has one rule that the earlier sprints did not. **A critic panel must agree.** Four
@@ -673,3 +675,36 @@ attribution was wrong, and both places are corrected.
 17. **Verify a claim against the code, not against your memory of writing it.** Three commits and two
    documents carried a change that no longer existed. One `grep` for the type would have caught it at
    the time.
+
+## Open defect, found by driving the slot queue for real
+
+`rho-skills` reads a definition's `tools` field as a string. A file that writes a YAML
+sequence, `tools: [read, list]`, fails `serde_yaml`, and `load_definition` returns `None`.
+The whole definition then disappears with no notice, so `spawn_agent` is never registered
+and the model answers that it has no such tool. Two live runs were wasted before the cause
+was found. See `docs/verification/subagent-slot-queue.md` section 6.
+
+The documented spelling is `tools: read, list`, so no contract is broken. The failure path
+is what is wrong: it teaches nothing. The fix needs a contract decision first, because
+`AgentSet` carries only `loaded` and `withheld` and a rejected file has nowhere to go. It is
+not fixed in the slot-queue change.
+
+## Open items the slot queue left, both recorded rather than remembered
+
+A local review pass over the queue found two costs. Neither is fixed, and each needs a contract
+decision of its own.
+
+1. **A blocking spawn has no wait deadline.** One `spawn_agents` call can hold a parent's turn for
+   `ceil(max_queued_per_parent / max_children_per_parent) x child_timeout`, about forty minutes at
+   the defaults, and a prompt-injected model picks the fan-out width and the sleeping children. A
+   fix needs a queue-wait deadline separate from `child_timeout`, with its own error case and its
+   own flag. See `SPEC-subagent-slots-handles-grace` section 2.8, which now states the cost.
+2. **A steering message is bounded by count, not by bytes.** `MessageQueue` holds 32 messages, and
+   the queue now exists for 128 waiting children as well as 32 live ones. Each message body is
+   model-written and its size is not capped. This is the shape of the bug that turned 8 MB of
+   `bash` output into 805 MB, so the cap belongs in `MessageQueue::push` with a named error.
+
+**Config keys for the subagent limits stay unwired, on purpose.** `rho-config` parses a
+`[subagents]` layer that no binary reads, so only a flag changes a limit today. That gap is
+larger than the queue and it belongs to another worktree. See decision
+D-the-layered-config-has-no-caller.

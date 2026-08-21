@@ -184,3 +184,142 @@ fn a_child_cannot_change_the_session_root() {
         "the child root is the parent root"
     );
 }
+
+#[test]
+fn a_depth_refusal_names_no_flag_that_cannot_help() {
+    // "Refusing must teach." The old message told the user to raise
+    // `--max-agent-depth`, and no such flag exists. `rho-cli` gives a child no
+    // spawn tool, so no flag can make a grandchild. A refusal must not send the
+    // user after an impossible fix. See docs/verification/subagents-bedrock.md.
+    let refusal = rho_core::SubagentError::DepthExceeded {
+        limit: 0,
+        attempted: 1,
+    };
+    let text = refusal.to_string();
+    assert!(
+        !text.contains("--max-agent-depth"),
+        "the refusal must not name a flag that does not exist, got: {text}"
+    );
+    assert!(
+        text.contains("Do the work here"),
+        "the refusal must still say what to do instead, got: {text}"
+    );
+}
+
+#[test]
+fn a_child_may_keep_its_parents_exact_sandbox_mode() {
+    // The comment on `narrow_sandbox` says a child may keep the same mode, and no
+    // test called it with an equal pair. A review mutated `>=` to `>` and
+    // `a_child_cannot_widen_the_sandbox_mode` still passed, so the claim was unproven.
+    // It fails safe, but an unproven invariant is not an invariant.
+    use rho_core::SandboxMode::{Confined, Off, Strict};
+    for mode in [Off, Confined, Strict] {
+        assert_eq!(
+            rho_core::narrow_sandbox(mode, Some(mode)).expect("an equal mode is allowed"),
+            mode,
+            "a child asking for its parent's exact mode must be allowed: {mode:?}"
+        );
+    }
+    // And a child that asks for nothing inherits.
+    assert_eq!(
+        rho_core::narrow_sandbox(Confined, None).unwrap(),
+        Confined,
+        "no request inherits the parent's mode"
+    );
+}
+
+#[test]
+fn the_process_wide_cap_holds_when_two_threads_race() {
+    // The comment says the compare-and-swap loop stops two parents both passing a cap
+    // of one. Only a sequential test covered it, and a review replaced the loop with a
+    // non-atomic read-then-add while every test stayed green. This races real threads.
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for _ in 0..200 {
+        let registry = rho_core::AgentRegistry::new(rho_core::SubagentLimits {
+            max_children_per_parent: 64,
+            max_live_total: 1,
+            ..rho_core::SubagentLimits::new()
+        });
+        let granted = Arc::new(AtomicUsize::new(0));
+        // A barrier makes every thread reach the check at the same moment. Without it
+        // the window between a read and an add is too small to lose reliably, and a
+        // non-atomic reservation passed 200 rounds of this test.
+        // A spin gate, not a `Barrier`. A barrier wakes threads through the operating
+        // system, which staggers them, and a staggered start never loses the race.
+        let threads = 16;
+        let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut handles = Vec::new();
+        for _ in 0..threads {
+            let registry = registry.clone();
+            let granted = Arc::clone(&granted);
+            let gate = Arc::clone(&gate);
+            handles.push(std::thread::spawn(move || {
+                let node = registry.new_tree();
+                while !gate.load(Ordering::SeqCst) {
+                    std::hint::spin_loop();
+                }
+                if let Ok(spawn) = node.spawn_child("scout", rho_core::CancelToken::new()) {
+                    granted.fetch_add(1, Ordering::SeqCst);
+                    // Hold the slot until every thread has tried.
+                    std::mem::forget(spawn);
+                }
+            }));
+        }
+        gate.store(true, Ordering::SeqCst);
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(
+            granted.load(Ordering::SeqCst),
+            1,
+            "a process-wide cap of one must grant exactly one child, whatever the race"
+        );
+    }
+}
+
+#[test]
+fn the_per_parent_cap_holds_when_two_threads_race() {
+    // The per-parent reservation was a load, a check, then a later add. Its comment
+    // claimed the three happened under one atomic and they did not, so two racing
+    // spawns could both pass a cap of one. A review found the false comment.
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    for _ in 0..200 {
+        let registry = rho_core::AgentRegistry::new(rho_core::SubagentLimits {
+            max_children_per_parent: 1,
+            max_live_total: 64,
+            ..rho_core::SubagentLimits::new()
+        });
+        // One shared parent, so the per-parent cap is the binding one.
+        let parent = Arc::new(registry.new_tree());
+        let granted = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(AtomicBool::new(false));
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let parent = Arc::clone(&parent);
+            let granted = Arc::clone(&granted);
+            let gate = Arc::clone(&gate);
+            handles.push(std::thread::spawn(move || {
+                while !gate.load(Ordering::SeqCst) {
+                    std::hint::spin_loop();
+                }
+                if let Ok(spawn) = parent.spawn_child("scout", rho_core::CancelToken::new()) {
+                    granted.fetch_add(1, Ordering::SeqCst);
+                    std::mem::forget(spawn);
+                }
+            }));
+        }
+        gate.store(true, Ordering::SeqCst);
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(
+            granted.load(Ordering::SeqCst),
+            1,
+            "a per-parent cap of one must grant exactly one child, whatever the race"
+        );
+    }
+}

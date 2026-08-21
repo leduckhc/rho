@@ -1150,6 +1150,9 @@ fn stop_word(reason: rho_core::AgentStopReason) -> &'static str {
         MaxTurnRequests => "max turns",
         Refusal => "refusal",
         Canceled => "canceled",
+        // A turn cap counts provider round trips, so it cannot bound a turn that asks
+        // for forty tools. This is the other cap, and the footer names it plainly.
+        MaxToolCalls => "max tool calls",
     }
 }
 

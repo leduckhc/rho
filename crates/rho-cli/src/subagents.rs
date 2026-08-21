@@ -15,7 +15,7 @@ use rho_core::{
     ToolRegistry,
 };
 use rho_skills::{AgentConfig, AgentDefinition};
-use rho_tools::{ChildToolFactory, SpawnAgentTool, SpawnEnv};
+use rho_tools::{ChildToolFactory, SpawnAgentTool, SpawnAgentsTool, SpawnEnv};
 
 /// Build a child's tool registry from the parent's set.
 ///
@@ -77,7 +77,7 @@ pub struct LoadRequest {
     pub limits: SubagentLimits,
 }
 
-pub async fn load(request: LoadRequest) -> (Option<Arc<dyn Tool>>, Subagents) {
+pub async fn load(request: LoadRequest) -> (Vec<Arc<dyn Tool>>, Subagents) {
     let LoadRequest {
         session_root,
         trust_project,
@@ -112,7 +112,7 @@ pub async fn load(request: LoadRequest) -> (Option<Arc<dyn Tool>>, Subagents) {
     if loaded == 0 {
         // No definitions, so no tool. See the note on the return type.
         return (
-            None,
+            Vec::new(),
             Subagents {
                 registry,
                 notices,
@@ -136,7 +136,10 @@ pub async fn load(request: LoadRequest) -> (Option<Arc<dyn Tool>>, Subagents) {
         }
     ));
 
-    let transcript_dir = session_root.join(".rho").join("agent-transcripts");
+    // A temp directory, not the session root. A transcript under `.rho/` sits inside
+    // the user's repository, `.gitignore` does not cover it, and it can be committed
+    // by accident. pi writes to a per-user temp root for the same reason.
+    let transcript_dir = rho_core::session_transcript_dir(std::process::id());
     let env = SpawnEnv {
         node: root_node(&registry),
         definitions,
@@ -147,9 +150,26 @@ pub async fn load(request: LoadRequest) -> (Option<Arc<dyn Tool>>, Subagents) {
             tools: parent_tools,
         }),
         transcript_dir,
+        // The gate runs a check under the same confinement the parent's bash uses.
+        runner: Arc::new(rho_tools::SandboxedRunner::new(parent_config.sandbox)),
+        // One ledger per process, so a poisoned task stops being retried.
+        retries: Arc::new(rho_core::RetryLedger::new()),
     };
+    // Two tools, on purpose. `spawn_agent` is the common single-child case, and
+    // `spawn_agents` is a fan-out in one call, because `AgentLoop::dispatch` runs
+    // tool calls one at a time. See decision D-fan-out-is-one-tool-call.
+    let env = Arc::new(env);
+    let tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(SpawnAgentTool::new(Arc::clone(&env))),
+        Arc::new(SpawnAgentsTool::new(Arc::clone(&env))),
+        // A running child is addressable, so the model can redirect one instead of
+        // cancelling the lot and starting again. See SPEC-steering.
+        Arc::new(rho_tools::SteerAgentTool::new(Arc::clone(&env))),
+        Arc::new(rho_tools::AgentStatusTool::new(Arc::clone(&env))),
+        Arc::new(rho_tools::CancelAgentTool::new(env)),
+    ];
     (
-        Some(Arc::new(SpawnAgentTool::new(Arc::new(env)))),
+        tools,
         Subagents {
             registry,
             notices,
@@ -160,7 +180,7 @@ pub async fn load(request: LoadRequest) -> (Option<Arc<dyn Tool>>, Subagents) {
 
 /// The root of this session's spawn tree.
 fn root_node(registry: &AgentRegistry) -> AgentNode {
-    registry.root()
+    registry.new_tree()
 }
 
 #[cfg(test)]

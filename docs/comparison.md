@@ -81,3 +81,25 @@ to avoid: an empty `old_string` with `replace_all` rewrites the whole file, beca
 empty pattern matches at every character boundary.
 
 See `docs/specs/20260817-164906-SPEC-tool-interface.md` section 6a, and decision D-jcode-edit-lessons.
+
+---
+
+## What reading pi's source changed
+
+The spec said pi "spawns a separate `pi` process" per child. That claim was wrong.
+
+Reading the source proved it. `agent-runner.ts` line 921 calls `createAgentSession` inside
+`runInChildSessionContext`. `child-context.ts` lines 1–15 show that is an `AsyncLocalStorage`
+flag, not a process boundary. `agent-manager.ts` line 237 defines `spawn` as a method on
+a manager class. It is not an OS spawn. `agent-manager.ts` line 441 stores the result in
+`record.result`. The result travels through a struct field, not a wire. `nested-tools.ts`
+line 189 checks depth with an integer compare. The only `child_process` import in the whole
+extension is `worktree.ts`, which runs git.
+
+pi chose the same in-process architecture rho chose. The original spec used the false claim
+to argue a structural advantage that does not exist. The real advantage is measured density:
+50 live sessions in 24.98 MiB, about 247 KB each (`docs/benchmarks.md`). That number stands.
+
+The lesson: the spec argued from a remembered design. Reading the actual source took minutes
+and found the error. AGENTS.md step 1 says to read the real source, not your memory of it.
+This section is the proof that step 1 pays.

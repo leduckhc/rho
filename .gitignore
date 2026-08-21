@@ -9,3 +9,9 @@
 .env.*
 !.env.example
 /.rho-work/*.log
+# Agent tooling scratch. A codex job writes a prompt, a pid, and a log per run.
+# It is a record of how a change was made, not part of the change.
+/.piano/
+# A rendered copy of a document is a build artifact, and it goes stale the moment
+# the source changes. The Markdown under docs/ is the source of truth.
+/docs/*.html

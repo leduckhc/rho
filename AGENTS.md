@@ -309,7 +309,7 @@ doc, because somebody will trust it.
 
 ## Gate
 
-All four must pass before you report work as done.
+All of these must pass before you report work as done.
 
 ```sh
 cargo fmt --all --check
@@ -319,10 +319,20 @@ cargo build -p rho-cli --no-default-features --features minimal
 cargo test -p rho-cli --no-default-features --features minimal --no-run
 python3 bench/check-ids.py
 python3 bench/check-prose.py $(find docs -name '*.md')
+python3 bench/check-agentic-workflow.py
+python3 bench/check-spec-tests.py
 ```
 
 `bench/check-ids.py` proves that every spec, ADR, decision, and feature reference resolves,
 and that no numeric id came back. See `docs/ids.md`.
+
+`bench/check-spec-tests.py` proves that every test a delivered spec names really exists. A
+spec that names fifteen tests nobody wrote passes every other gate. A draft, a planned, and a
+superseded spec are exempt, and only the first word of the `Status:` line decides that.
+
+`bench/check-agentic-workflow.py` proves that `agentic-workflow.yaml` still holds together:
+every stage input resolves, every role exists, no agent authors its own definition of done,
+and this gate list matches `gate_sets.full`. See D-agentic-workflow-is-a-template.
 
 ## Prose rules
 

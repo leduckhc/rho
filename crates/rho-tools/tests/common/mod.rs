@@ -56,6 +56,10 @@ impl Harness {
             session_root: self.root(),
             cancel: self.cancel.clone(),
             updates: tx,
+            agent_events: {
+                let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(16);
+                agent_tx
+            },
         }
     }
 

@@ -195,27 +195,26 @@ whole line. `bench/tui_frame.py` must show no regression beyond noise, and the n
 
 ### The scanner
 
-- `a_row_with_no_markup_returns_one_run`
-- `a_heading_drops_its_hashes_and_takes_the_heading_role`
+- `a_line_with_no_markup_is_one_plain_run`
+- `a_heading_drops_its_hashes_and_takes_the_heading_kind`
 - `bold_markers_are_removed_and_the_run_is_bold`
 - `italic_markers_are_removed_and_the_run_is_italic`
-- `inline_code_takes_the_code_role_without_backticks`
-- `a_fence_line_takes_the_fence_role`
-- `a_line_inside_a_fence_takes_the_code_block_role`
-- `a_star_inside_a_fence_is_not_italic`
+- `inline_code_drops_its_backticks_and_takes_the_code_flag`
+- `a_fence_line_and_its_body_take_their_own_kinds`
+- `markup_inside_a_fence_is_not_markup`
 - `an_unclosed_marker_stays_text`
 - `arithmetic_is_not_italic` — `2 * 3 * 4`
 - `an_underscore_inside_a_word_is_not_italic` — `wrap_block`
-- `a_bullet_keeps_its_text_and_colours_only_the_glyph`
+- `a_bullet_becomes_a_glyph_and_keeps_its_text`
 - `a_quote_takes_a_bar_and_the_quote_kind`
 - `a_quote_draws_italic_and_quiet`
-- `a_rule_draws_full_width`
+- `a_rule_becomes_a_rule`, and `a_horizontal_rule_spans_the_whole_width`
 
 ### The contract
 
-- `a_styled_row_sums_to_the_text_width` — for every case above, `line_width` equals the
+- `text_wraps_to_the_terminal_width_not_to_eighty` — for every case above, `line_width` equals the
   visible width, so wrapping cannot drift.
-- `every_role_has_all_three_mappings` — unchanged, and it must stay passing with the new
+- `every_role_is_distinguishable_from_body_text_in_every_mode` — unchanged, and it must stay passing with the new
   roles.
 - `an_escape_never_survives_markdown_styling` — the security guard, on one hostile string.
 - `the_scanner_only_deletes_and_inserts_known_glyphs` — the same guard as a property, which

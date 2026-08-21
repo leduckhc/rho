@@ -249,6 +249,18 @@ impl Tool for BashTool {
 /// directly. When the mode needs confinement and no backend is available, this
 /// fails closed with an error, so the command never runs unconfined. See
 /// `SPEC-bash-sandbox`.
+/// Build a command for a gate check, under the parent's sandbox.
+///
+/// It reuses `build_command`, so an acceptance check is confined exactly like a
+/// `bash` call. A separate path would drift, and the drift would be a hole.
+pub(crate) fn build_gate_command(
+    command_str: &str,
+    session_root: &Path,
+    sandbox: SandboxMode,
+) -> Result<tokio::process::Command, ToolError> {
+    build_command(command_str, session_root, false, sandbox)
+}
+
 fn build_command(
     command_str: &str,
     session_root: &Path,

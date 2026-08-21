@@ -41,10 +41,12 @@ fn config(name: &str) -> McpServerConfig {
 
 fn ctx() -> ToolContext {
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(8);
     ToolContext {
         session_root: std::env::temp_dir(),
         cancel: CancelToken::new(),
         updates: tx,
+        agent_events: agent_tx,
     }
 }
 

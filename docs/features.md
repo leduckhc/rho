@@ -13,6 +13,10 @@ This document is the contract for all later stages. The architect writes specs a
   older spec still names it, and a dangling reference is worse than a history note. The
   row says which feature replaced it.
 
+A status states what the code proves, not what a plan intends. `agentic-workflow.yaml`
+holds the template that every unit of work follows. A filled copy lives in
+`.rho-work/tracks/`, and `.rho-work/progress.md` records what each sprint delivered.
+
 A status states what the code proves, not what a plan intends. `workflow-sprint-2.yaml`
 holds the current sprint. Sprint 2 is at work on config (`rho-config`), the session log,
 and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
@@ -33,7 +37,7 @@ and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
 | F-auto-continue | Auto-continue | When a turn ends with open todos, rho sends the model back to work without user input. | `rho-core` | `planned` | A `ContinuePolicy` trait will let callers control the auto-continue trigger condition. |
 | F-background-tasks | Background tasks | Long-running shell commands become named tasks the agent can list, tail, cancel, or wait on. The agent never writes polling loops. | `rho-core`, `rho-tools` | `sprint-2` | Tools register tasks on a shared `TaskRegistry`. Any tool can create or query tasks. |
 | F-message-queue | Message queue | A user message that arrives during a turn is queued. It is never dropped, and it never lands in the middle of a provider request. The queue is bounded. | `rho-core` | `planned` | Callers push a message from any thread. The queue is part of the session API. See `SPEC-steering`. |
-| F-message-steering | Message steering | A queued message reaches the model after the current tool calls finish. It arrives before the next provider request. Arrival order is kept. | `rho-core` | `planned` | The TUI and `rho-acp` both steer through the same queue. See `SPEC-steering` and F-steer-command. |
+| F-message-steering | Message steering | A queued message reaches the model after the current tool calls finish. It arrives before the next provider request. Arrival order is kept. The queue is bounded, and a cancel keeps it. | `rho-core` | `built` | The TUI and `rho-acp` both steer through the same queue. See `SPEC-steering` and F-steer-command. |
 
 ---
 
@@ -174,7 +178,24 @@ and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
 | F-steer-command | Steer command | The client sends a steering message while the agent is running. The message delivers after the current tool calls finish. | `rho-acp` | `planned` | Same protocol extension point as F-prompt-command. |
 | F-abort-command | Abort command | The client sends a `session/cancel` notification. rho cancels the current turn and responds to `session/prompt` with `stopReason: cancelled`. | `rho-acp` | `planned` | Same protocol extension point as F-prompt-command. |
 | F-session-commands-over-acp | Session commands over ACP | The client creates new sessions, switches sessions, and forks sessions over the protocol. | `rho-acp` | `planned` | Same protocol extension point as F-prompt-command. |
-| F-extension-ui-sub-protocol | Extension UI sub-protocol | An ACP client responds to `extension_ui_request` events for select, confirm, and input dialogs from hooks. | `rho-acp` | `planned` | Clients that do not implement the sub-protocol receive a default value after a timeout. |
+| F-extension-ui-sub-protocol | Permission and dialog requests | An ACP client answers `session/request_permission` for an approval, and the dialog requests a hook raises. | `rho-acp` | `planned` | Clients that do not implement the sub-protocol receive a default value after a timeout. The JSONL frontend has its own row, F-jsonl-dialog-sub-protocol. |
+
+---
+
+## Frontends — JSONL
+
+`docs/specs/20260819-102749-SPEC-jsonl-frontend.md` owns these rows. This protocol lands before
+ACP, because it is small. ACP stays the interop target and arrives as a bridge. See
+decision D-jsonl-before-acp.
+
+| ID | Name | Outcome | Owning crate | Status | Extension point |
+|----|------|---------|--------------|--------|-----------------|
+| F-jsonl-frontend | JSONL frontend | A client drives rho headlessly over stdin and stdout, one JSON object per line. Any process that reads and writes lines can embed rho. | `rho-jsonl` | `planned` | `rho-jsonl` is an optional crate. Any language implements a client. The protocol is documented. |
+| F-jsonl-prompt | JSONL prompt command | The client sends a `prompt` command. The agent streams events. The run ends with a settled event. | `rho-jsonl` | `planned` | The protocol is the extension point. Any language can implement a client. |
+| F-jsonl-steer | JSONL steer command | The client sends a `steer` command while the agent runs. The message delivers after the current tool calls finish. | `rho-jsonl` | `planned` | Same protocol extension point as F-jsonl-prompt. |
+| F-jsonl-abort | JSONL abort command | The client sends an `abort` command. rho cancels the current turn and settles with a cancelled stop reason. | `rho-jsonl` | `planned` | Same protocol extension point as F-jsonl-prompt. |
+| F-jsonl-session-commands | JSONL session commands | The client reads state, switches models, starts a session, and lists messages and commands over the protocol. | `rho-jsonl` | `planned` | Same protocol extension point as F-jsonl-prompt. |
+| F-jsonl-dialog-sub-protocol | JSONL dialog sub-protocol | The agent asks the client for a select, a confirm, an input, or a notify. A dialog blocks until the client answers. The agent side owns the timeout. | `rho-jsonl` | `planned` | A client that answers no dialog receives the default value after the timeout. |
 
 ---
 
@@ -227,7 +248,44 @@ restates them. See `F-lifecycle-hook-points` and `F-slash-commands` above.
 | F-cycle-guard | Cycle guard | The spawn walk carries a visited set. A cycle in the parent chain is refused rather than looped. | `rho-core` | `sprint-2` | No extension point. |
 | F-salvage-and-retry-cap | Salvage and retry cap | A child that dies without a report yields a failed result. A re-delegated task stops at the retry cap. | `rho-core` | `sprint-2` | A caller uses `RetryLedger`. |
 | F-agent-events | Agent events | The parent stream shows a child through three events: spawned, progressed, and finished. | `rho-core` | `sprint-2` | New `AgentEvent` variants. A frontend renders them. |
+| F-background-subagent | Background subagent | The parent starts a child and returns at once. It polls with `agent_status`, and a finished child stays reportable after its handle is gone. | `rho-tools` | `built` | Pass `background: true` to `spawn_agent`. |
+| F-agent-status | Agent status | The parent asks what a child is doing, or what it did. It reports turns, tokens, queued steers, the outcome, the summary, and the transcript path. | `rho-tools` | `built` | Register a different `Tool` under the name `agent_status`. |
+| F-child-transcript | Child transcript | Every child streams a JSONL transcript to a per-user temp directory, and the parent is told the path. A child that never finished still leaves what it wrote. | `rho-core` | `built` | Read `AgentReport.transcript`, or implement a different writer. |
+| F-steer-subagent | Steer a subagent | A host sends a running child a new instruction. The child reads it at its next turn boundary, so it never lands inside a provider request. A model can call `steer_agent` only once a child can outlive a turn. | `rho-tools` | `built` | Register a different `Tool` under the name `steer_agent`, or hold the registry and call `LiveAgent::steer`. |
+| F-cancel-one-subagent | Cancel one subagent | The model stops one child. Its siblings and the parent keep running. | `rho-tools` | `built` | Register a different `Tool` under the name `cancel_agent`. |
+| F-live-agent-handle | Live agent handle | A running child is addressable. A caller lists live children, reads one child's progress, and cancels one child without touching its siblings. | `rho-core` | `built` | `AgentRegistry::live_under`, `descendant`, `status`, and `cancel_descendant`. Each takes the calling node, because the unscoped views are private. A frontend renders the list. |
+| F-agent-tool-call-budget | Agent tool-call budget | A run stops at a tool-call budget. A turn cap counts provider round trips, so it cannot bound a turn that asks for forty tools. | `rho-core` | `built` | `--max-agent-tool-calls`, or `SessionConfig::with_max_tool_calls`. |
+| F-agent-fan-out | Agent fan-out | `spawn_agents` runs several children at once in one tool call. A refused task is a per-task result, and results report in request order. | `rho-tools` | `sprint-2` | Register a different `Tool` under the name `spawn_agents`. See decision D-fan-out-is-one-tool-call. |
 | F-agent-definitions | Agent definitions | An agent is a markdown file with frontmatter. A project definition is withheld until the project is trusted. | `rho-skills` | `sprint-2` | Author a definition file. The loader is shared with skills. |
+| F-tool-list-keywords | Tool list keywords | A definition writes `tools: all` or `tools: *` to inherit every tool the parent holds, and `tools: none` to hold none. A keyword must stand alone, and a mixed line keeps the named tools and warns. | `rho-skills` | `built` | Author a definition file. See decision D-a-tool-keyword-stands-alone. |
+
+`docs/specs/20260820-115320-SPEC-subagent-slots-handles-grace.md` owns the three rows below.
+All three are proposed, and none is built.
+
+| ID | Name | Outcome | Owning crate | Status | Extension point |
+|----|------|---------|--------------|--------|-----------------|
+| F-agent-slot-queue | Agent slot queue | A spawn over a concurrency cap queues instead of refusing. It returns an id at once, and the child starts when a slot frees. A queued child can be polled, steered, and cancelled. `spawn_agent` and `spawn_agents` both use it, so a fan-out wider than the cap runs every task. | `rho-core`, `rho-tools` | `built` | `AgentNode::spawn_child` stays the immediate form, so a caller bypasses the queue. `--max-queued-per-parent` bounds the line. |
+| F-agent-handles | Agent handles | A model addresses a child by a derived name, such as `explore-2`. It can also set its own name with the `alias` argument. The id stays the identity, and a name resolves only inside the caller's own descendants. `agent_status` with no id lists the children. | `rho-core`, `rho-tools` | `built` | `AgentRegistry::set_alias` names a child. `AgentRef` accepts an id or a name, so the old integer shape keeps working. |
+| F-agent-grace-turns | Agent grace turns | rho warns a child a fixed number of turns before its turn cap, so the child writes its summary. The warning uses the steering queue, and it never displaces a user message. A child transcript records the delivery. | `rho-core` | `built` | `SessionConfig::with_grace_turns`, and `--agent-grace-turns`. Zero disables it, and a definition cannot set it. |
+
+`docs/specs/20260820-115310-SPEC-subagent-worktree-isolation.md` owns the two rows below. Both
+are proposed, and neither is built.
+
+| ID | Name | Outcome | Owning crate | Status | Extension point |
+|----|------|---------|--------------|--------|-----------------|
+| F-subagent-workspace-isolation | Subagent workspace isolation | A child works in its own tree, so a fan-out that writes files is safe. Only a trusted caller grants isolation. A definition and the model may refuse it, and neither may demand it. | `rho-core` | `planned` | Implement the `Workspace` trait and install it in `SpawnEnv`. `rho-tools` ships the git one. |
+| F-child-work-kept-on-a-branch | Child work kept on a branch | A child's changes are committed to a named branch when it stops, including after a cancel or a timeout. An unchanged tree leaves no branch, and a failed commit leaves the tree on disk. | `rho-tools` | `planned` | Implement `Workspace::reclaim` differently. Read `AgentReport.branch` and `AgentReport.isolation_root`. |
+| F-isolation-orphan-recovery | Isolation orphan recovery | A worktree and its branch carry the agent, the id, and a UTC timestamp. So a crash leftover is unique and findable. A later run lists an orphan and never deletes it. | `rho-tools` | `planned` | Not pluggable. The naming is a recovery contract a human relies on. |
+
+`docs/specs/20260819-102750-SPEC-agent-tasks.md` owns the four rows below. A child carries a
+task, and rho verifies the result. See decision D-a-child-does-not-grade-itself.
+
+| ID | Name | Outcome | Owning crate | Status | Extension point |
+|----|------|---------|--------------|--------|-----------------|
+| F-agent-task | Agent task | A child carries a goal, its declared artifacts, and its acceptance checks, not a bare prompt. The `spawn_agent` tool takes `artifacts`. | `rho-core` | `built` | Build an `AgentTask`, or pass `artifacts` to `spawn_agent`. |
+| F-artifact-spec | Artifact spec | A deliverable rho can check: a file, a command that exits zero, or a named kind. A new kind is a new variant or a registered checker. A file path obeys `confine`. | `rho-core` | `built` | Register an `ArtifactChecker` for a named kind. |
+| F-acceptance-gate | Acceptance gate | rho verifies the artifacts and runs the checks after the child stops. A child cannot certify its own work, because no public constructor builds a verdict. A failed gate reports `Rejected`, never `Done`. | `rho-core` | `built` | Implement the `Gate` trait. A `CommandRunner` supplies the sandbox. |
+| F-unverified-child-claims | Unverified child claims | The child reports its open questions and what it did not check. These stay separate from the gate verdict, and they are never proof. | `rho-core` | `built` | No extension point. This is a security boundary. |
 
 ## MCP client
 

@@ -1,7 +1,7 @@
 # D-provider-contract-crate — The provider contract suite is a real crate, not a private test file
 
 
-`workflow.yaml` put the shared provider contract suite in
+The sprint 1 workflow file put the shared provider contract suite in
 `crates/rho-core/tests/provider_contract.rs`. The controller changed this.
 
 **Decision:** the suite lives in a new crate, `rho-provider-testkit`. It exports

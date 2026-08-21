@@ -12,6 +12,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-a-role-column-is-not-a-stack](20260818-181500-D-a-role-column-is-not-a-stack.md) | 20260818 | A theme role resolves in one mode, and the columns never stack |
 | [D-acp-cancelled-spelling](20260817-171334-D-acp-cancelled-spelling.md) | 20260817 | The ACP cancelled stop reason needs an explicit serde rename |
 | [D-acp-is-real-acp](20260817-164906-D-acp-is-real-acp.md) | 20260817 | The headless frontend is ACP, and it is the real ACP |
+| [D-agentic-workflow-is-a-template](20260820-120345-D-agentic-workflow-is-a-template.md) | 20260820 | One agentic workflow template, filled per unit of work |
 | [D-alternate-screen-after-all](20260819-093316-D-alternate-screen-after-all.md) | 20260819 | rho takes the whole screen, and it gives the transcript back with one key |
 | [D-append-only-jsonl](20260818-014343-D-append-only-jsonl.md) | 20260818 | The session file is append-only JSONL with a per-record parent pointer |
 | [D-approval-default-ask](20260818-020639-D-approval-default-ask.md) | 20260818 | The approval default is Ask where answerable, read-only where not |

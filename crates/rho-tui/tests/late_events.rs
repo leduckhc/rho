@@ -48,6 +48,11 @@ fn a_late_event_reaches_an_old_row() {
                     ..Default::default()
                 },
                 turns: 3,
+                // rho verifies a child's work, so a report carries the verdict and the
+                // claims beside it. A finished child with no declared artifact has an
+                // empty gate, which passes.
+                gate: Default::default(),
+                claims: Default::default(),
                 transcript: None,
             },
         },

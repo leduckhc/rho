@@ -313,7 +313,11 @@ pub fn test_config() -> rho_core::SessionConfig {
     )
 }
 
-/// A tool that always returns `Err`. Used to prove that a tool failure returns to
+/// An approval policy that approves every tool call.
+pub fn allow_all() -> impl rho_core::ApprovalPolicy {
+    rho_core::AllowAllPolicy
+}
+
 /// the model as an error result, rather than killing the run.
 pub struct FailingTool {
     name: String,
@@ -560,4 +564,85 @@ fn install_capture() {
         tracing::subscriber::set_global_default(subscriber)
             .expect("the capture subscriber installs once per test binary");
     });
+}
+
+/// A tool that counts how many times it ran.
+///
+/// A budget test needs this. Asserting only the run's outcome cannot show an
+/// overrun, and a review proved that by mutating the cap check from `>=` to `>`
+/// while the test stayed green.
+pub struct CountingTool {
+    name: String,
+    calls: Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl CountingTool {
+    pub fn new(name: impl Into<String>, calls: Arc<std::sync::atomic::AtomicU32>) -> Self {
+        Self {
+            name: name.into(),
+            calls,
+        }
+    }
+}
+
+#[async_trait]
+impl rho_core::Tool for CountingTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        "counts its own calls"
+    }
+    fn kind(&self) -> ToolKind {
+        ToolKind::Read
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _ctx: rho_core::ToolContext,
+    ) -> Result<rho_core::ToolOutput, rho_core::ToolError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(rho_core::ToolOutput::text("counted"))
+    }
+}
+
+/// A tool that never returns until its run is cancelled.
+///
+/// A timeout test needs it: the child must still be working when the deadline
+/// fires, so the transcript has lines written and not yet flushed.
+pub struct HangingTool {
+    name: String,
+}
+
+impl HangingTool {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
+#[async_trait]
+impl rho_core::Tool for HangingTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        "never finishes"
+    }
+    fn kind(&self) -> ToolKind {
+        ToolKind::Read
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        ctx: rho_core::ToolContext,
+    ) -> Result<rho_core::ToolOutput, rho_core::ToolError> {
+        ctx.cancel.cancelled().await;
+        Ok(rho_core::ToolOutput::text("cancelled"))
+    }
 }
