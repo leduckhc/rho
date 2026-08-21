@@ -370,11 +370,11 @@ async fn build_session(
     // The skills block joins the stable prefix, never the dynamic part. The skill set
     // is fixed for a session, so the prefix stays byte-identical and the provider
     // prompt cache survives. See SPEC-core-runtime section 1 and SPEC-skills section 6.
-    let mut prompt = system_prompt();
-    if !extensions.skills_prompt.is_empty() {
-        prompt.push_str("\n\n");
-        prompt.push_str(&extensions.skills_prompt);
-    }
+    let prompt = assemble_prompt(
+        &system_prompt(),
+        &extensions.instructions_prompt,
+        &extensions.skills_prompt,
+    );
 
     let context = Context::new(Some(prompt), tools.specs());
     Ok((
@@ -422,6 +422,27 @@ fn system_prompt() -> String {
      Use the task tool with the wait action to be woken when it finishes or \
      reports progress. Never sleep and poll."
         .to_string()
+}
+
+/// Join the three parts of the stable prefix, in the one fixed order.
+///
+/// The order is the rho prompt, then project instructions, then skills. An instruction is a
+/// rule that governs a choice, and a skill is a capability the model may choose, so the rule
+/// comes first. The order is fixed because reordering changes the prefix bytes and costs the
+/// provider prompt cache. See SPEC-project-instructions section 6 and
+/// F-stable-prefix-for-kv-cache.
+///
+/// An empty part contributes nothing, not even a blank line, so a session with no
+/// instructions sends the same bytes it sent before this feature existed.
+fn assemble_prompt(system: &str, instructions: &str, skills: &str) -> String {
+    let mut prompt = String::from(system);
+    for block in [instructions, skills] {
+        if !block.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(block);
+        }
+    }
+    prompt
 }
 
 /// Run the CLI. Return the process exit code.
@@ -859,6 +880,43 @@ fn subagent_limits(cli: &Cli) -> rho_core::SubagentLimits {
 
 #[cfg(test)]
 mod tests {
+    // ---- the stable prefix, and its fixed order ----
+
+    #[test]
+    fn project_instructions_precede_skills_in_the_prefix() {
+        let prompt = assemble_prompt(
+            "SYS",
+            "<project_instructions>I</project_instructions>",
+            "<available_skills>S</available_skills>",
+        );
+
+        let instructions_at = prompt
+            .find("project_instructions")
+            .expect("instructions present");
+        let skills_at = prompt.find("available_skills").expect("skills present");
+        assert!(
+            instructions_at < skills_at,
+            "a rule must precede a capability; prompt was:\n{prompt}"
+        );
+        assert!(prompt.starts_with("SYS"), "prompt was:\n{prompt}");
+    }
+
+    #[test]
+    fn an_empty_block_adds_no_bytes_to_the_prefix() {
+        // A session with no instructions and no skills must send exactly what it sent
+        // before this feature existed. A stray blank line is a cache miss.
+        assert_eq!(assemble_prompt("SYS", "", ""), "SYS");
+        assert_eq!(assemble_prompt("SYS", "I", ""), "SYS\n\nI");
+        assert_eq!(assemble_prompt("SYS", "", "S"), "SYS\n\nS");
+    }
+
+    #[test]
+    fn the_prefix_is_byte_identical_across_calls() {
+        let first = assemble_prompt("SYS", "I", "S");
+        let second = assemble_prompt("SYS", "I", "S");
+        assert_eq!(first, second);
+    }
+
     use super::*;
     use clap::CommandFactory;
     use std::collections::BTreeMap;

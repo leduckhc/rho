@@ -21,6 +21,7 @@ rho-provider-bedrock = { path = "crates/rho-provider-bedrock", version = "0.1.0"
 rho-provider-azure = { path = "crates/rho-provider-azure", version = "0.1.0" }
 rho-provider-testkit = { path = "crates/rho-provider-testkit", version = "0.1.0" }
 rho-skills = { path = "crates/rho-skills", version = "0.1.0" }
+rho-instructions = { path = "crates/rho-instructions", version = "0.1.0" }
 rho-mcp = { path = "crates/rho-mcp", version = "0.1.0" }
 rho-redact = { path = "crates/rho-redact", version = "0.1.0" }
 rho-tui = { path = "crates/rho-tui", version = "0.1.0" }

@@ -16,6 +16,7 @@ futures = "0.3.34"
 rho-acp = { version = "0.1.0", path = "../rho-acp", optional = true }
 rho-config = { version = "0.1.0", path = "../rho-config" }
 rho-core = { version = "0.1.0", path = "../rho-core" }
+rho-instructions = { version = "0.1.0", path = "../rho-instructions" }
 rho-mcp = { version = "0.1.0", path = "../rho-mcp" }
 rho-plugin = { version = "0.1.0", path = "../rho-plugin", optional = true }
 rho-provider-azure = { version = "0.1.0", path = "../rho-provider-azure", optional = true }

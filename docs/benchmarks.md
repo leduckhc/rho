@@ -541,6 +541,23 @@ not the TUI. It is the session log and the config work that landed earlier this
 sprint. `bench/footprint.sh` measures the minimal size and restores the default
 binary afterwards.
 
+### Binary size after project instructions
+
+`F-project-instructions` added the `rho-instructions` crate. Both feature sets carry it,
+because every frontend needs the same context.
+
+| Feature set | Before | After | Command |
+| --- | --- | --- | --- |
+| default | 10,221,504 B | 10,437,040 B | `cargo build --release -p rho-cli` |
+| minimal | 6,804,304 B | 6,986,560 B | `cargo build --release -p rho-cli --no-default-features --features minimal` |
+
+The default set grew by 215,536 bytes. The minimal set grew by 182,256 bytes. Read the size
+after each build with this command:
+
+```sh
+stat -f%z target/release/rho
+```
+
 ### Beside pi and jcode
 
 State rho's own numbers beside the two prior-art figures. The prior-art figures

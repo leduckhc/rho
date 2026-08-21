@@ -1,0 +1,21 @@
+[package]
+name = "rho-instructions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+description = "Project instruction discovery and prompt rendering for rho."
+
+[dependencies]
+libc = "0.2.189"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt", "fs", "macros"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["full"] }

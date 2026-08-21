@@ -2786,6 +2786,7 @@ dependencies = [
  "rho-acp",
  "rho-config",
  "rho-core",
+ "rho-instructions",
  "rho-mcp",
  "rho-plugin",
  "rho-provider-azure",
@@ -2832,6 +2833,17 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rho-instructions"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
