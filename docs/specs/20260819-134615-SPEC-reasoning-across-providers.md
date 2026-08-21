@@ -1,7 +1,10 @@
 # SPEC-reasoning-across-providers — one reasoning contract, and a table instead of branches
 
 Status: draft, for review before any implementation.
-Prior art: pi and jcode, both read as source. See `docs/comparison.md`.
+Prior art: pi, jcode, and fx, all three read as source. See `docs/comparison.md`.
+
+Amended 20260821. The replay payload is now one opaque, owner-tagged provider state. See
+decision `D-reasoning-replay-is-opaque-provider-state`. Section 4 holds the change.
 
 ## 0. The defects this fixes
 
@@ -33,9 +36,9 @@ Each one is measured, and each has a named test in section 8.
 Contract kinds touched: the data model, the wire format, the persisted format, the
 configuration, and the behaviour rules.
 
-## 2. What pi does, and what jcode does
+## 2. What pi does, what jcode does, and what fx does
 
-Both were read as source, not recalled.
+All three were read as source, not recalled.
 
 **pi** keeps one `thinking` block with a `thinkingSignature`, and decides at send time in
 `transform-messages.js`. Its rule is keyed on whether the same model answers:
@@ -79,6 +82,23 @@ both directions:
 And jcode records a third lesson, from three crashes: reasoning arrives as a byte stream, and
 slicing it at a non-character boundary panics and kills the process (issues 632, 633, 635).
 
+**fx** stores no reasoning at all. It asks the endpoint to return an encrypted payload with
+`include: ["reasoning.encrypted_content"]`, and it replays that payload from one opaque
+`provider_state_json` on the message. See `fx-src/src/gateway/openai_codex.zig:109` and
+`fx-src/src/core/shared/types.zig:909`.
+
+fx gives rho two things, one to copy and one to avoid:
+
+- **Copy the opaque payload.** A new host then needs no change to shared code. Section 4
+  takes it.
+- **Avoid the missing tag.** fx never records which provider wrote a payload, so a model or a
+  provider switch can send a foreign blob. rho tags the payload with its owner, and rule 8
+  drops a mismatch.
+
+fx also gates the ask on a model capability, and it fails closed when the catalogue does not
+list the effort. See `fx-src/src/core/config/model_capabilities.zig:95`. A project file in fx
+may not set the model or the effort, so a cloned repository cannot raise your spend.
+
 ## 3. Where rho goes further
 
 Three additions. Each answers a defect that neither reference fixes.
@@ -111,7 +131,7 @@ pub struct ReasoningWire {
     /// host that sends two fields with the same text would otherwise double it.
     pub read_fields: &'static [&'static str],
     /// What the endpoint needs echoed back on the next request.
-    pub replay: ReasoningReplay,
+    pub replay: ReplayPolicy,
     /// True when the endpoint rejects a reasoning field it did not send. Mistral answers
     /// 422 `Extra inputs are not permitted`, so rho must send nothing.
     pub rejects_unknown_fields: bool,
@@ -121,11 +141,14 @@ pub struct ReasoningWire {
 }
 
 /// What an endpoint needs echoed back.
+///
+/// Named `ReplayPolicy`, and not `ReasoningReplay`, because `ContentBlock::ReasoningReplay` in
+/// section 4 already owns that name. One name per meaning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReasoningReplay {
+pub enum ReplayPolicy {
     /// Send nothing back. The trace stays in the transcript for the reader.
     Never,
-    /// Send the signed block back while the same model answers. Anthropic requires this
+    /// Send the payload back while the same owner answers. Anthropic requires its signature
     /// inside a tool loop, and it rejects the turn without it.
     SignedWhileSameModel,
     /// Send the readable text back on an assistant tool-call message. The Kimi coding
@@ -136,6 +159,10 @@ pub enum ReasoningReplay {
     SignatureOnToolCall,
 }
 ```
+
+Every policy runs **after** the owner check of rule 8. A mismatched owner sends nothing,
+whatever the policy says. So a policy decides the shape of a replay, and the owner decides
+whether a replay may happen at all.
 
 **Two. rho reads `<thinking>` tags.** Neither pi nor jcode does. It is the defect the owner
 reported, so rho fixes it. The rule is narrow on purpose:
@@ -174,20 +201,70 @@ pub enum ContentBlock {
 
     /// Reasoning the provider needs echoed back.
     ReasoningReplay {
+        /// The readable text. A cross-model turn falls back to this, as plain text.
         text: String,
-        /// `None` means the provider sent no signature. It is **not** an empty string.
-        ///
-        /// An earlier draft used `String` with `""` for none. A review named that a
-        /// fail-open default, because `""` cannot be told apart from a provider that sent
-        /// an empty signature, and a mis-built block would then replay unsigned in silence.
-        /// jcode uses `Option<String>` with `skip_serializing_if`, and so does rho.
-        signature: Option<String>,
+        /// The opaque replay payload. `None` means there is nothing to replay.
+        state: Option<ProviderState>,
+    },
+}
+
+/// Which provider and which model produced a replay payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningOwner {
+    /// The value of `Provider::id`, for example `bedrock`.
+    pub provider: String,
+    /// The model id of the request that produced the payload.
+    pub model: String,
+}
+
+/// One provider's own replay payload. Shared code never reads inside `value`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProviderState {
+    /// The pair that may read the value. See behaviour rule 8.
+    pub owner: ReasoningOwner,
+    /// The provider's private shape. It holds an Anthropic signature, an OpenAI reasoning
+    /// item, or whatever a later host needs.
+    pub value: serde_json::Value,
+}
+```
+
+The provider builds the whole `ProviderState`, because only the provider knows its own id and
+the model of the request. So the stream event carries it, and the typed signature goes:
+
+```rust
+pub enum StreamEvent {
+    // ... other variants unchanged ...
+    ThinkingEnd {
+        index: u32,
+        /// Replaces `signature: Option<String>`. A signature now travels inside `value`.
+        state: Option<ProviderState>,
     },
 }
 ```
 
 `Thinking { thinking, signature }` is replaced by these. The rename is the point: the old
 name never said which blocks travel, and that is why one was dropped in silence.
+
+### Why one opaque payload, and not a typed field per provider
+
+An earlier draft carried `signature: Option<String>` and nothing else. rho already **reads**
+an OpenAI-shaped reasoning item in `rho-provider-azure`, and that item is an id, a summary
+list, an encrypted blob, and a status. A single string cannot hold it. So rho could read a
+shape it could never send back.
+
+jcode answers this with a fourth typed variant. That puts every host's wire shape into shared
+code, and shared code then changes for each new host. fx answers it with one opaque value per
+message, and a new host costs nothing. rho takes fx's shape, and adds the tag fx lacks.
+
+**The signature is not a second carrier.** Two carriers for one job means two answers, and
+that is the family of defect that killed the `""` signature default. An Anthropic signature is
+now one key inside `value`, written and read by the crate that owns the wire.
+
+**A tool call keeps its typed `thought_signature`.** All three references carry that as a
+plain string, so the shape is settled and a name documents it better than a blob.
+
+**The honest cost.** The compiler no longer checks a payload. So rule 8 below is the whole
+guard, and it fails closed. A test for a mismatched owner is not optional.
 
 ### The persisted format, in both directions
 
@@ -198,15 +275,64 @@ from an older session is stale, and replaying it would fail, so it is not carrie
 
 **An old rho reads a new file.** This was missing, and `AGENTS.md` step 3 requires it. An old
 rho uses a tagged enum with no `reasoning_trace` variant, so it **fails the whole load**. That
-is unacceptable, so the new variants serialise under the old tag with an added field:
+is unacceptable, so both new variants share the old `"type": "thinking"` record:
 
 ```json
-{"type": "thinking", "thinking": "...", "signature": null, "replay": false}
+{"type": "thinking", "thinking": "...", "replay": true,
+ "state": {"owner": {"provider": "bedrock", "model": "anthropic.claude-haiku-4-5"},
+           "value": {"signature": "..."}}}
 ```
 
-An old rho reads the text and ignores `replay`. A new rho reads `replay` to choose between
-`ReasoningTrace` and `ReasoningReplay`. A missing `replay` key reads as `false`, which is the
-safe direction: it never replays a stale signature.
+An old rho reads the text and ignores `replay` and `state`. A new rho reads `replay` to choose
+between `ReasoningTrace` and `ReasoningReplay`. A missing `replay` key reads as `false`, which
+is the safe direction: it never replays a stale payload.
+
+**`replay: true` with no `state` reads as a trace.** There is nothing to send, so the block
+becomes readable history. This is fail-closed, and it also covers a file written by a rho that
+crashed between the two keys.
+
+**A `state` value is stored verbatim.** A redacted payload cannot replay, so nothing rewrites
+it on the way to the file. Rule 9 states the matching log rule.
+
+**An old `signature` key is read and dropped.** A file from before this change maps to
+`ReasoningTrace`, and a stale signature never replays.
+
+### How one tag carries two variants
+
+The first draft of this section was **wrong**, and a compile proved it. Two enum variants
+cannot share one serde tag. Both `#[serde(rename = "thinking")]` variants compile, and the
+reader then returns the **first** one every time. A replay block came back as a trace, and
+nothing said so. That is a silent drop, which `AGENTS.md` names as a defect. See decision
+`D-two-variants-cannot-share-a-serde-tag`.
+
+So the file shape is its own type, and the conversion happens at the boundary:
+
+```rust
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "DiskBlock", into = "DiskBlock")]
+pub enum ContentBlock { /* the variants of section 4 */ }
+
+/// The on-disk shape. One `thinking` record carries both reasoning variants.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum DiskBlock {
+    Thinking {
+        thinking: String,
+        #[serde(default)]
+        replay: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<ProviderState>,
+        /// Read from an old file, and never written.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    // ... one variant per block of section 4 ...
+}
+```
+
+The conversion holds the rules: `replay: true` with a state gives `ReasoningReplay`, and every
+other case gives `ReasoningTrace`. This shape was transcribed to a scratch crate outside the
+repository, and its four round-trip tests pass. See `docs/verification/` once the code lands.
 
 **A truncated line.** A session log is append-only and line-delimited. A reader drops a final
 line that does not parse, and it says so once. A half-written reasoning block must never stop
@@ -267,6 +393,11 @@ D-a-bad-reasoning-mode-is-refused.
 7. Strip a leading `<thinking>` or `<think>` pair, and only a leading one. The rules below
    say how, because the stream is incremental and a message-global rule cannot be applied one
    delta at a time.
+8. A provider replays a `state` only when `owner.provider` equals its own `Provider::id`, and
+   `owner.model` equals the model of the request. A mismatch drops the state in a named arm,
+   and the request carries no reasoning payload. The drop is never silent, and never partial.
+9. A `state` value never reaches a log, at any level, including `trace`. It is written to the
+   session file verbatim, because a rewritten payload cannot replay.
 
 ### The tag rule, stated for a stream
 
@@ -332,8 +463,13 @@ delta at a time, so "the first non-space text" is unknown until enough text has 
 
 - `a_trace_never_reaches_a_provider` — every provider's request builder omits
   `ReasoningTrace`.
-- `a_signed_block_replays_for_the_same_model` — Anthropic gets the signature back.
-- `a_signed_block_is_dropped_for_another_model` — a model change drops it.
+- `a_state_replays_for_the_same_owner` — Anthropic gets its signature back, inside `value`.
+- `a_state_is_dropped_for_another_model` — a model change drops the payload, by rule 8.
+- `a_state_is_dropped_for_another_provider` — the other half of rule 8, which fx does not
+  check at all.
+- `an_absent_state_replays_nothing` — a `None` payload sends no reasoning field.
+- `an_azure_reasoning_item_round_trips_through_the_state` — the id, the summary, and the
+  encrypted blob all survive one turn. This is the case a single string could not carry.
 - `a_rejecting_endpoint_receives_no_reasoning_field` — the strict-schema row sends nothing,
   so no 422.
 - `a_tool_call_endpoint_receives_the_text` — the `TextOnToolCall` row attaches the text.
@@ -392,3 +528,7 @@ delta at a time, so "the first non-space text" is unknown until enough text has 
   session still opens.
 - `the_reasoning_text_is_stored_in_every_mode` — switching to `full` mid-session shows the
   earlier reasoning.
+- `a_state_round_trips_through_the_session_file` — the payload survives a resume unchanged.
+- `a_replay_key_with_no_state_reads_as_a_trace` — the fail-closed direction.
+- `an_old_rho_ignores_the_state_key` — the new key does not fail an old load.
+- `a_state_value_never_reaches_a_log` — rule 9, asserted against a captured log at `trace`.

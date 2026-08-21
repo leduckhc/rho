@@ -57,6 +57,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-pty-teardown-closes-before-it-waits](20260818-155000-D-pty-teardown-closes-before-it-waits.md) | 20260818 | A pty harness closes the master, then kills, then waits with a deadline |
 | [D-read-only-maps-onto-approval](20260820-214512-D-read-only-maps-onto-approval.md) | 20260820 | `--read-only` writes the approval key, and only when true |
 | [D-reader-line-cap](20260818-020639-D-reader-line-cap.md) | 20260818 | The session reader caps one line |
+| [D-reasoning-replay-is-opaque-provider-state](20260821-220620-D-reasoning-replay-is-opaque-provider-state.md) | 20260821 | A provider replays its own reasoning through one opaque, owner-tagged state value |
 | [D-recorder-consumes-events](20260818-014343-D-recorder-consumes-events.md) | 20260818 | The session log is an event-stream consumer, not a field in Session |
 | [D-redact-json-secrets](20260818-020639-D-redact-json-secrets.md) | 20260818 | Session redaction uses one new function in rho-redact |
 | [D-redact-tool-arguments](20260818-014343-D-redact-tool-arguments.md) | 20260818 | A tool argument is redacted on the way into the file |
@@ -82,6 +83,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-tui-plugin-render-budget](20260818-055346-D-tui-plugin-render-budget.md) | 20260818 | A terminal view render has an 8 ms budget and a worker thread |
 | [D-tui-plugin-trust-default-no-transcript](20260818-055346-D-tui-plugin-trust-default-no-transcript.md) | 20260818 | A terminal view reads nothing until the user opts in |
 | [D-two-weak-tests](20260818-003819-D-two-weak-tests.md) | 20260818 | Two weak tests found by breaking the code, and one design consequence recorded |
+| [D-two-variants-cannot-share-a-serde-tag](20260821-221500-D-two-variants-cannot-share-a-serde-tag.md) | 20260821 | Two enum variants cannot share one serde tag, and the reader says nothing |
 | [D-unmappable-pi-record-drops](20260818-030907-D-unmappable-pi-record-drops.md) | 20260818 | An unmappable pi record drops with a count, and the import finishes |
 | [D-website-direction](20260817-170455-D-website-direction.md) | 20260817 | Website direction is mockup C, with A's command-prompt labels |
 | [D-write-failure-degrades](20260818-014343-D-write-failure-degrades.md) | 20260818 | A write failure degrades a session to ephemeral, and never ends the run |
