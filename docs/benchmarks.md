@@ -587,7 +587,8 @@ Date: 20260822. A performance review found that the renderer sanitised and wrapp
 accumulated reasoning text on every frame, and only then cut it to the band. The work grew
 with the text, and the band could never show it.
 
-The command, one frame per streamed delta, at 100 columns and 30 rows:
+The command, one frame per streamed delta, at 100 columns and 30 rows, through a `ratatui`
+`TestBackend`:
 
 ```sh
 cargo build --release -p rho-tui --example reason_bench
@@ -621,3 +622,11 @@ a few percent.
 The assistant row carried the same quadratic, measured at 413, 1458, and 3119 µs as the answer
 grew. It now shares `tail_for_band`, and `a_long_answer_row_draws_only_its_tail` compares the
 two frames.
+
+**What this measurement does not cover.** A reviewer named it, and it is a real limit. The
+number is the cost of building the frame, through `TestBackend`. Nothing is drawn to a real
+terminal, so no write, no flush, and no terminal-side cost is in it. `bench/tui_first_frame.py`
+does use a real pseudo-terminal, but it measures the time to the first frame, not the cost of a
+frame under a streaming turn. Measuring that needs a provider the release binary can stream
+from, which is its own piece of work. So the honest claim is narrow: the renderer stopped doing
+work that grew with the text, and the ratio is the renderer's, not the terminal's.
