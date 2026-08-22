@@ -353,3 +353,53 @@ async fn an_empty_reasoning_delta_starts_no_block() {
         .count();
     assert_eq!(starts, 0, "an empty reasoning field must start no block");
 }
+
+/// The effort level must reach the OpenRouter body, or the setting is a lie on this provider.
+///
+/// A review found this: the agent carried the level faithfully, Bedrock consumed it, and this
+/// crate ignored it. A user running `--reasoning-effort high` here got silence, so `unset` and
+/// `set` collapsed to the same wire.
+#[test]
+fn the_request_body_carries_the_effort() {
+    let mut request = common::sample_request();
+    request.reasoning = Some(rho_core::ReasoningEffort::High);
+    let body = rho_provider_openrouter::build_request_body(&request);
+    assert_eq!(
+        body["reasoning"]["effort"], "high",
+        "the level reaches the wire: {body}"
+    );
+}
+
+/// `off` asks the host not to think, rather than saying nothing.
+#[test]
+fn an_off_effort_disables_reasoning_on_the_wire() {
+    let mut request = common::sample_request();
+    request.reasoning = Some(rho_core::ReasoningEffort::Off);
+    let body = rho_provider_openrouter::build_request_body(&request);
+    assert_eq!(
+        body["reasoning"]["enabled"], false,
+        "off is an instruction, not a silence: {body}"
+    );
+    assert!(body["reasoning"].get("effort").is_none());
+}
+
+/// An unset level sends no field, so the host keeps its own default.
+#[test]
+fn an_absent_effort_sends_no_reasoning_field() {
+    let request = common::sample_request();
+    let body = rho_provider_openrouter::build_request_body(&request);
+    assert!(
+        body.get("reasoning").is_none(),
+        "unset must not send a field: {body}"
+    );
+}
+
+/// `xhigh` is not in OpenRouter's set, and rho must not invent a value the host rejects.
+/// It maps to the highest level the host accepts, and the mapping is stated in one place.
+#[test]
+fn xhigh_maps_to_the_highest_accepted_level() {
+    let mut request = common::sample_request();
+    request.reasoning = Some(rho_core::ReasoningEffort::XHigh);
+    let body = rho_provider_openrouter::build_request_body(&request);
+    assert_eq!(body["reasoning"]["effort"], "high");
+}

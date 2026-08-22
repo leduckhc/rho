@@ -107,6 +107,37 @@ rho: client error: status 400 ...
 The 400 is the profile itself, which does not exist in this account. The warning is the point:
 rho still fails closed, and it now says why rather than dropping the request in silence.
 
+## 6. After the reviewer team
+
+Six reviewers read the change, each with one aim. Four findings changed the request path, so
+the live runs were repeated.
+
+The replay now covers the current tool loop only, per `D-replay-only-the-current-loop`. A
+three-call loop and a two-call loop both still finish:
+
+```text
+run 1 exit=0 -> zx9-quibble, kt4-marlow
+run 2 exit=0 -> zx9-quibble, kt4-marlow
+three tool calls, effort medium: exit 0
+```
+
+The effort level now reaches OpenRouter as well, and that was driven with a real key:
+
+```sh
+rho run "Which is larger, 9.11 or 9.9? One sentence." --provider openrouter \
+  --model anthropic/claude-haiku-4.5 --reasoning-effort high --reasoning full
+```
+
+| run | reasoning on stderr |
+| --- | --- |
+| `--reasoning-effort high` | 398 bytes |
+| no effort flag | 0 bytes |
+| `--reasoning-effort off` | 0 bytes |
+| `--reasoning-effort xhigh` | accepted, exit 0 |
+
+The middle two rows are the control. Without them the first row proves only that the model
+sometimes thinks, and rho's field could have been ignored.
+
 ## What is proved, and what is not
 
 Proved live:

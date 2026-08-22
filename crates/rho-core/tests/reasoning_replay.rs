@@ -48,6 +48,11 @@ fn state(value: serde_json::Value) -> ProviderState {
 /// `D-no-caller-writes-a-session-file`. These tests cover the format, and they claim nothing
 /// about a lifecycle that has no caller.
 fn recorded(block: ContentBlock) -> Vec<String> {
+    recorded_in_dir(block).0
+}
+
+/// The same, and the directory, so a test can look for a spill sidecar.
+fn recorded_in_dir(block: ContentBlock) -> (Vec<String>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("a temp dir");
     let store = rho_core::SessionStore::new(dir.path());
     let writer = store
@@ -57,11 +62,12 @@ fn recorded(block: ContentBlock) -> Vec<String> {
     let mut recorder = rho_core::SessionRecorder::new(SessionLog::File(writer));
     recorder.record_prompt(&[block]);
     drop(recorder);
-    std::fs::read_to_string(&path)
+    let lines = std::fs::read_to_string(&path)
         .expect("the file reads")
         .lines()
         .map(str::to_string)
-        .collect()
+        .collect();
+    (lines, dir)
 }
 
 /// Rule 9. The payload is exempt from redaction, so it must never reach a log instead.
@@ -170,15 +176,58 @@ fn a_replay_record_with_no_state_is_reported() {
     );
 }
 
-/// A reasoning text is capped like any assistant text, so one turn cannot write a record
-/// that the reader then refuses.
+/// A reasoning text is capped like any assistant text, and the body really spills.
+///
+/// The first version of this test asserted only that the record was smaller than twice the
+/// cap. A mutation review named it: a bug that dropped the text entirely, or truncated it
+/// instead of spilling it, would have passed. That is the same shape as the memory-cap defect
+/// this project already shipped once.
 #[test]
 fn a_reasoning_text_over_the_string_cap_spills() {
     let long = "y".repeat(rho_core::MAX_RECORD_BYTES);
-    let joined = recorded(ContentBlock::ReasoningTrace { text: long }).join("\n");
+    let (lines, dir) = recorded_in_dir(ContentBlock::ReasoningTrace { text: long.clone() });
+    let joined = lines.join("\n");
     assert!(
-        joined.len() < rho_core::MAX_RECORD_BYTES * 2,
-        "the record is bounded"
+        joined.len() < rho_core::MAX_RECORD_BYTES,
+        "the record itself is bounded"
+    );
+    assert!(
+        !joined.contains(&long),
+        "the whole body is not in the record"
+    );
+    assert!(
+        joined.contains("yyyy"),
+        "a head of the text stays in the record: {joined}"
+    );
+    // The body is not lost. It spills to a sidecar beside the session file.
+    let sidecars: Vec<String> = std::fs::read_dir(dir.path())
+        .expect("the directory reads")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_none_or(|ext| ext != "jsonl"))
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .collect();
+    assert!(
+        sidecars.iter().any(|body| body.contains(&long)),
+        "the spilled body is kept beside the session file"
+    );
+}
+
+/// A payload of exactly the cap is kept. One byte more is dropped.
+///
+/// A mutation review found the boundary untested, so `<=` could become `<` unseen.
+#[test]
+fn the_payload_cap_is_inclusive() {
+    // The encoded value carries `{"signature":"..."}`, so the padding is computed from that.
+    let padding = r#"{"signature":""}"#.len();
+    let exact = "z".repeat(rho_core::MAX_RECORD_BYTES - padding);
+    let joined = recorded(ContentBlock::ReasoningReplay {
+        text: "a plan".to_string(),
+        state: Some(state(serde_json::json!({ "signature": exact.clone() }))),
+    })
+    .join("\n");
+    assert!(
+        joined.contains(&exact),
+        "a payload of exactly the cap is kept"
     );
 }
 
@@ -275,4 +324,95 @@ fn every_request_builder_has_an_explicit_arm() {
             }
         }
     }
+}
+
+/// A payload from a file rho did not write is bounded on the way **in**, not only on the way
+/// out.
+///
+/// A security review found the bound was write-only. A session file is untrusted input: it
+/// can be copied between machines, and rho may not have written it. Without a read-side
+/// bound, a foreign file could carry a payload up to the line cap and rho would replay it on
+/// every later turn.
+#[test]
+fn an_oversize_payload_in_a_file_is_dropped_on_read() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("hostile.jsonl");
+    let huge = "x".repeat(rho_core::MAX_RECORD_BYTES * 2);
+    let header = serde_json::json!({
+        "id": "r0", "parentId": null, "timestamp": "1700000000000", "type": "session",
+        "version": 1, "cwd": "/tmp", "approval": "allow-all", "sandbox": "off"
+    });
+    let record = serde_json::json!({
+        "id": "r1", "parentId": "r0", "timestamp": "1700000000000", "type": "message",
+        "message": { "role": "assistant", "content": [{
+            "type": "thinking", "thinking": "a plan", "replay": true,
+            "state": {
+                "owner": { "provider": "bedrock", "model": "claude" },
+                "value": { "signature": huge }
+            }
+        }]}
+    });
+    std::fs::write(&path, format!("{header}\n{record}\n")).expect("write the file");
+
+    let result = rho_core::SessionReader::read(&path).expect("the file loads");
+    let payloads: Vec<_> = result
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.record {
+            rho_core::Record::Message { message } => Some(message.content.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|block| match block {
+            ContentBlock::ReasoningReplay { state, .. } => state.clone(),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        payloads.is_empty(),
+        "an oversize payload must not survive the read"
+    );
+}
+
+/// A bad record in the middle of a file is skipped and counted, and every later record
+/// survives.
+///
+/// A security review found that any bad line stopped the read, so one flipped byte silently
+/// discarded the rest of the session and reported it as a truncated tail.
+#[test]
+fn a_bad_middle_record_does_not_discard_the_rest() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("corrupt.jsonl");
+    let header = serde_json::json!({
+        "id": "r0", "parentId": null, "timestamp": "1700000000000", "type": "session",
+        "version": 1, "cwd": "/tmp", "approval": "allow-all", "sandbox": "off"
+    });
+    let good = |id: &str, text: &str| {
+        serde_json::json!({
+            "id": id, "parentId": "r0", "timestamp": "1700000000000", "type": "message",
+            "message": { "role": "assistant", "content": [{ "type": "text", "text": text }] }
+        })
+        .to_string()
+    };
+    std::fs::write(
+        &path,
+        format!(
+            "{header}\n{}\n{{not json at all\n{}\n",
+            good("r1", "first"),
+            good("r2", "second")
+        ),
+    )
+    .expect("write the file");
+
+    let result = rho_core::SessionReader::read(&path).expect("the file loads");
+    assert_eq!(
+        result.entries.len(),
+        2,
+        "the record after the corruption survives"
+    );
+    assert_eq!(result.dropped_records, 1, "the drop is counted");
+    assert!(
+        !result.truncated_tail,
+        "corruption in the middle is not a truncated tail"
+    );
 }

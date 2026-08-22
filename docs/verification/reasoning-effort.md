@@ -65,7 +65,11 @@ both calls at once.
 ```
 
 Result: exit 0, two files read, and no 400. Bedrock's Converse API accepted the next request
-without the thinking block. That is measured now, not assumed. It stays a risk for a provider
+without the thinking block. That is measured now, not assumed.
+
+**Read this with the caveat that `reasoning-replay.md` states.** A passing tool loop is not
+evidence that a field travelled, because this same loop passed while rho sent no reasoning at
+all. The replay is proved separately, by breaking the signature and watching Bedrock refuse. It stays a risk for a provider
 that enforces the replay, and section 4 of the spec holds the design for it.
 
 ## 3. An unsupported model asks for nothing

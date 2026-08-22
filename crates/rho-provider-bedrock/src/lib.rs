@@ -420,27 +420,7 @@ impl Provider for BedrockProvider {
             .await;
         let client = Client::new(&sdk_config);
 
-        let mut builder = client
-            .converse_stream()
-            .model_id(request.model.clone())
-            .set_messages(Some(build_messages_for_model(
-                &request.messages,
-                &request.model,
-            )));
-        if let Some(system) = &request.system {
-            builder = builder.system(aws_sdk_bedrockruntime::types::SystemContentBlock::Text(
-                system.clone(),
-            ));
-        }
-        if let Some(config) = build_inference_config(&request) {
-            builder = builder.inference_config(config);
-        }
-        if let Some(fields) = build_thinking_fields(&request) {
-            builder = builder.additional_model_request_fields(fields);
-        }
-        if let Some(tools) = build_tool_config(&request) {
-            builder = builder.tool_config(tools);
-        }
+        let builder = apply_request(client.converse_stream(), &request);
 
         let output = builder
             .send()
@@ -628,23 +608,25 @@ fn sdk_event_to_mirror(
     Some(mirror)
 }
 
-/// Build the SDK message list from the normalised messages. Sprint 1 sends text
-/// and tool calls. See `SPEC-provider-interface` section 8 for the out-of-scope block kinds.
-pub fn build_messages(messages: &[Message]) -> Vec<aws_sdk_bedrockruntime::types::Message> {
-    // Kept for the contract suite, which builds messages with no model in hand.
-    //
-    // It can never replay a reasoning payload, and that is deliberate: the empty model
-    // reaches `for_owner`, which refuses an empty name. A caller that replays uses
-    // `build_messages_for_model`. See `an_empty_owner_never_matches_anything`.
-    build_messages_for_model(messages, "")
-}
-
 /// Build the request messages for one model. The model decides whether a stored reasoning
 /// payload may travel, per rule 8.
 pub fn build_messages_for_model(
     messages: &[Message],
     model: &str,
 ) -> Vec<aws_sdk_bedrockruntime::types::Message> {
+    // A review deleted the old `build_messages`, which passed an empty model. It made the
+    // replay path look covered by tests that could never reach it, because `for_owner`
+    // refuses an empty name. One function now, and every caller states its model.
+    //
+    // Only the current tool loop replays its reasoning. The prompt is append-only, so a
+    // block re-sent on every later turn costs bytes for the whole session: twenty turns
+    // re-upload turn one's trace nineteen times. Anthropic needs the thinking of the
+    // assistant turns that carry the pending call, and nothing older. A performance review
+    // measured the growth as O(turns squared). See `D-replay-only-the-current-loop`.
+    let loop_start = messages
+        .iter()
+        .rposition(|message| message.role == Role::User)
+        .unwrap_or(0);
     use aws_sdk_bedrockruntime::types::{
         ContentBlock as SdkBlock, ConversationRole, Message as SdkMessage, ToolResultBlock,
         ToolResultContentBlock, ToolUseBlock,
@@ -664,7 +646,7 @@ pub fn build_messages_for_model(
     // Merging is also what Bedrock wants: all tool results for one turn belong in a
     // single user message.
     let mut grouped: Vec<(ConversationRole, Vec<SdkBlock>)> = Vec::new();
-    for message in messages {
+    for (position, message) in messages.iter().enumerate() {
         let role = match message.role {
             Role::User | Role::Tool => ConversationRole::User,
             Role::Assistant => ConversationRole::Assistant,
@@ -719,7 +701,11 @@ pub fn build_messages_for_model(
                 // A replay block travels only when the payload is ours and the model still
                 // matches. Otherwise it is dropped in this named arm, never by `_ => {}`.
                 ContentBlock::ReasoningReplay { text, state } => {
-                    if let Some(reasoning) = replay_block(text, state, model) {
+                    // Out of the current loop, so it is history. It is dropped whole, and it
+                    // never becomes prose, because prose would read as an answer.
+                    if position >= loop_start
+                        && let Some(reasoning) = replay_block(text, state, model)
+                    {
                         blocks.push(SdkBlock::ReasoningContent(reasoning));
                     }
                 }
@@ -753,6 +739,40 @@ pub fn build_messages_for_model(
 }
 
 /// Build the inference configuration when the request sets any limit.
+/// Put one request onto a `converse_stream` builder.
+///
+/// Every field the wire needs is set here, and `stream` calls nothing else. So a test can
+/// build the same request offline and read it back with `as_input`, instead of grepping this
+/// file for a call. A source guard cannot tell a live call from a comment, and two reviews
+/// found exactly that hole.
+fn apply_request(
+    builder: aws_sdk_bedrockruntime::operation::converse_stream::builders::ConverseStreamFluentBuilder,
+    request: &CompletionRequest,
+) -> aws_sdk_bedrockruntime::operation::converse_stream::builders::ConverseStreamFluentBuilder {
+    let mut builder =
+        builder
+            .model_id(request.model.clone())
+            .set_messages(Some(build_messages_for_model(
+                &request.messages,
+                &request.model,
+            )));
+    if let Some(system) = &request.system {
+        builder = builder.system(aws_sdk_bedrockruntime::types::SystemContentBlock::Text(
+            system.clone(),
+        ));
+    }
+    if let Some(config) = build_inference_config(request) {
+        builder = builder.inference_config(config);
+    }
+    if let Some(fields) = build_thinking_fields(request) {
+        builder = builder.additional_model_request_fields(fields);
+    }
+    if let Some(tools) = build_tool_config(request) {
+        builder = builder.tool_config(tools);
+    }
+    builder
+}
+
 /// The provider id every payload carries. It is `Provider::id` for this crate.
 const PROVIDER_ID: &str = "bedrock";
 
@@ -810,10 +830,14 @@ fn replay_block(
             // Rule 8 says a drop is never silent. A review found that every one of these
             // paths returned `None` with nothing said, which is the same silence the rule
             // forbids. The report names the owner and the reason, and never the payload.
+            // Every one of these strings can come from a session file, which is untrusted
+            // input. A security review found that a crafted `owner.model` could carry
+            // terminal escapes or a forged newline straight into a log. `rho-redact` is the
+            // one home for that, per `D-one-redaction-home`.
             tracing::warn!(
-                owner_provider = %state.owner.provider,
-                owner_model = %state.owner.model,
-                request_model = %model,
+                owner_provider = %rho_redact::sanitize_line(&state.owner.provider),
+                owner_model = %rho_redact::sanitize_line(&state.owner.model),
+                request_model = %rho_redact::sanitize_line(model),
                 "a reasoning payload belongs to another owner, so it was not replayed"
             );
             return None;
@@ -855,33 +879,93 @@ fn replay_block(
     }
 }
 
-/// Does this model id support Anthropic extended thinking?
+/// Report an unreadable model id once per model, not once per turn.
 ///
-/// It fails closed. Only a Claude id at version 3.7 or above answers `true`, because a
-/// field the endpoint does not know is a 400 for the whole turn. An id rho cannot read is
-/// treated as "no". See `SPEC-reasoning-across-providers` section 9 rule 1.
+/// A review found the spam: the comment said "once" and the code warned on every request. A
+/// warning a user learns to scroll past is a warning that no longer works.
+fn report_once(model: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+
+    static REPORTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let reported = REPORTED.get_or_init(|| Mutex::new(HashSet::new()));
+    let first = match reported.lock() {
+        Ok(mut set) => set.insert(model.to_string()),
+        // A poisoned lock must not silence a report, so it reports again instead.
+        Err(_) => true,
+    };
+    if first {
+        tracing::warn!(
+            model = %rho_redact::sanitize_line(model),
+            "this model is not known to support extended thinking, so rho asked for none"
+        );
+    }
+}
+
+/// One model family that supports extended thinking, and the version it starts at.
+///
+/// A review asked for a table instead of a parse, and it was right for one reason: a reader
+/// can check a table. The parse stays, because a Bedrock id really does carry its version in
+/// its name, but the families and their thresholds are now data, and each row is tested.
+///
+/// A family absent from this table is asked for nothing. That is fail-closed, and
+/// `build_thinking_fields` reports it, because a field the endpoint does not know is a 400
+/// for the whole turn.
+struct ThinkingFamily {
+    /// The substring that names the family inside a Bedrock model id.
+    marker: &'static str,
+    /// The lowest version that supports extended thinking, as (major, minor).
+    since: (u32, u32),
+}
+
+/// The families rho knows. Anthropic added extended thinking in Claude 3.7.
+const THINKING_FAMILIES: &[ThinkingFamily] = &[ThinkingFamily {
+    marker: "anthropic.claude",
+    since: (3, 7),
+}];
+
+/// Does this model id support extended thinking?
+///
+/// It fails closed. An id rho cannot read answers `false`, and so does a family it does not
+/// know. A known limit: an application inference profile ARN hides the model behind an opaque
+/// id, so a capable model reads as incapable. `build_thinking_fields` reports that rather
+/// than dropping the request in silence, because the user asked for a level.
 fn model_supports_thinking(model: &str) -> bool {
     let id = model.to_ascii_lowercase();
-    // A Bedrock id may carry a region prefix, as in `us.anthropic.claude-...`.
-    let Some(after) = id.split("anthropic.claude").nth(1) else {
-        return false;
-    };
-    // The first two numbers after the family name are the version. `claude-3-5-sonnet`
-    // gives 3 and 5, and `claude-haiku-4-5-2025...` gives 4 and 5.
-    //
-    // A version part is always under 100. A release date is not, and
-    // `anthropic.claude-3-haiku-20240307` read its date as minor version 20240307, which
-    // made a model without thinking claim it. The test found that, so the bound stays.
-    let mut version = after
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|part| !part.is_empty())
-        .filter_map(|part| part.parse::<u32>().ok())
-        .filter(|number| *number < 100);
-    let Some(major) = version.next() else {
-        return false;
-    };
-    let minor = version.next().unwrap_or(0);
-    major > 3 || (major == 3 && minor >= 7)
+    THINKING_FAMILIES.iter().any(|family| {
+        // A Bedrock id may carry a region prefix, as in `us.anthropic.claude-...`. It may
+        // also carry no vendor prefix at all: `claude-3-7-sonnet-20250219-v1:0` is a real id
+        // that a review found reading as incapable. So the family name matches on its last
+        // segment too.
+        let short = family.marker.rsplit('.').next().unwrap_or(family.marker);
+        let Some(after) = id
+            .split(family.marker)
+            .nth(1)
+            .or_else(|| id.split(short).nth(1))
+        else {
+            return false;
+        };
+        // The first two numbers after the family name are the version. `claude-3-5-sonnet`
+        // gives 3 and 5, and `claude-haiku-4-5-2025...` gives 4 and 5.
+        //
+        // A version part is always under 100. A release date is not, and
+        // `anthropic.claude-3-haiku-20240307` read its date as minor version 20240307, which
+        // made a model without thinking claim it. A test found that, so the bound stays.
+        // A version part is short. A date part is not, and a review found a second date
+        // shape that slipped through: `claude-3-opus-2025-07-15` offered `07` as a minor
+        // version, which read as 3.7 and would have earned a 400. So a group of three or
+        // more digits ends the version, and nothing after it counts.
+        let mut version = after
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|part| !part.is_empty())
+            .take_while(|part| part.len() <= 2)
+            .filter_map(|part| part.parse::<u32>().ok());
+        let Some(major) = version.next() else {
+            return false;
+        };
+        let minor = version.next().unwrap_or(0);
+        (major, minor) >= family.since
+    })
 }
 
 /// Build the `additionalModelRequestFields` that ask Claude for extended thinking.
@@ -895,10 +979,7 @@ fn build_thinking_fields(request: &CompletionRequest) -> Option<Document> {
         // hides the model behind an opaque id, so a thinking-capable model reads as
         // incapable. The answer stays fail-closed, because an unknown field is a 400 for
         // the whole turn, but it is no longer silent.
-        tracing::warn!(
-            model = %request.model,
-            "this model is not known to support extended thinking, so rho asked for none"
-        );
+        report_once(&request.model);
         return None;
     }
     let thinking = HashMap::from([
@@ -935,8 +1016,12 @@ fn build_inference_config(
     }
     let mut builder = aws_sdk_bedrockruntime::types::InferenceConfiguration::builder();
     match (budget, request.max_tokens) {
-        // Rule 2. Keep the caller's number when it already clears the budget.
-        (Some(budget), Some(max_tokens)) if max_tokens > budget => {
+        // Rule 2. Keep the caller's number only when it leaves room for an answer as well.
+        //
+        // A review found the hole: `max_tokens = budget + 1` clears Anthropic's check and
+        // leaves one token for the answer, so rho honoured a number that starves the reply
+        // exactly when thinking is on.
+        (Some(budget), Some(max_tokens)) if max_tokens > budget + ANSWER_HEAD_ROOM => {
             builder = builder.max_tokens(max_tokens as i32);
         }
         (Some(budget), _) => {
@@ -1191,6 +1276,55 @@ mod thinking_request_tests {
             code.contains("builder.additional_model_request_fields(fields)"),
             "the converse builder must send the thinking fields"
         );
+    }
+
+    /// A caller's `max_tokens` is honoured only when it also leaves room for an answer.
+    ///
+    /// A review found that `budget + 1` cleared Anthropic's check and starved the reply.
+    #[test]
+    fn a_starving_max_tokens_is_raised() {
+        let mut request = request(
+            "anthropic.claude-haiku-4-5-20251001-v1:0",
+            Some(ReasoningEffort::Medium),
+        );
+        let budget = ReasoningEffort::Medium.budget_tokens().unwrap();
+        request.max_tokens = Some(budget + 1);
+        let config = build_inference_config(&request).expect("a config exists");
+        assert!(
+            config.max_tokens().expect("max tokens") > (budget + ANSWER_HEAD_ROOM) as i32 - 1,
+            "a number that clears the budget but starves the answer is raised"
+        );
+    }
+
+    /// The boundary Anthropic actually rejects: `max_tokens` equal to the budget.
+    ///
+    /// A mutation review found that `>` could become `>=` with no test failing, and the API
+    /// requires strictly more than the budget. This is the case that would have shipped a 400.
+    #[test]
+    fn a_max_tokens_equal_to_the_budget_is_raised() {
+        let mut request = request(
+            "anthropic.claude-haiku-4-5-20251001-v1:0",
+            Some(ReasoningEffort::XHigh),
+        );
+        let budget = ReasoningEffort::XHigh.budget_tokens().unwrap();
+        request.max_tokens = Some(budget);
+        let config = build_inference_config(&request).expect("a config exists");
+        assert!(
+            config.max_tokens().expect("max tokens") > budget as i32,
+            "max_tokens must be strictly above the budget"
+        );
+    }
+
+    /// A generous caller keeps its own number.
+    #[test]
+    fn a_generous_max_tokens_is_kept() {
+        let mut request = request(
+            "anthropic.claude-haiku-4-5-20251001-v1:0",
+            Some(ReasoningEffort::Low),
+        );
+        request.max_tokens = Some(90_000);
+        let config = build_inference_config(&request).expect("a config exists");
+        assert_eq!(config.max_tokens(), Some(90_000));
     }
 
     #[test]
@@ -1750,6 +1884,488 @@ mod unowned_stream_tests {
             ends,
             vec![None],
             "a stream with no model carries no owner, so it carries no payload"
+        );
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    //! The request rho really builds, read back from the SDK builder.
+    //!
+    //! Two reviews found the same hole from two directions: a source guard cannot tell a live
+    //! call from a comment, and no test proved the thinking fields or the replayed signature
+    //! reached a request at all. `apply_request` is the one place that assembles a request, so
+    //! these tests build it offline and read it back with `as_input`. No network, no
+    //! credentials, and no source text.
+
+    use super::*;
+    use aws_sdk_bedrockruntime::types::ContentBlock as SdkBlockAlias;
+    use aws_sdk_bedrockruntime::types::ReasoningContentBlock;
+    use rho_core::{ContentBlock, Message, ProviderState, ReasoningEffort, ReasoningOwner, Role};
+
+    const MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+
+    /// An offline client. It signs nothing and sends nothing, because no test may use a
+    /// network. See `AGENTS.md` step 5.
+    fn offline_client() -> aws_sdk_bedrockruntime::Client {
+        let config = aws_sdk_bedrockruntime::Config::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_bedrockruntime::config::Region::new("us-east-1"))
+            .build();
+        aws_sdk_bedrockruntime::Client::from_conf(config)
+    }
+
+    fn request(
+        model: &str,
+        effort: Option<ReasoningEffort>,
+        content: Vec<ContentBlock>,
+    ) -> CompletionRequest {
+        CompletionRequest {
+            model: model.to_string(),
+            system: None,
+            messages: vec![Message {
+                role: Role::Assistant,
+                content,
+            }],
+            tools: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            reasoning: effort,
+        }
+    }
+
+    fn state(provider: &str, model: &str, signature: &str) -> Option<ProviderState> {
+        Some(ProviderState {
+            owner: ReasoningOwner {
+                provider: provider.to_string(),
+                model: model.to_string(),
+            },
+            value: serde_json::json!({ "signature": signature }),
+        })
+    }
+
+    /// The thinking request reaches the real request object, not just a helper's return value.
+    #[test]
+    fn the_request_carries_the_thinking_fields() {
+        let request = request(
+            MODEL,
+            Some(ReasoningEffort::Medium),
+            vec![ContentBlock::Text {
+                text: "hello".to_string(),
+            }],
+        );
+        let builder = apply_request(offline_client().converse_stream(), &request);
+        let input = builder.as_input();
+        let fields = input
+            .get_additional_model_request_fields()
+            .as_ref()
+            .expect("the request carries the thinking fields");
+        let Document::Object(root) = fields else {
+            panic!("the fields are an object");
+        };
+        let Some(Document::Object(thinking)) = root.get("thinking") else {
+            panic!("the fields carry a thinking object");
+        };
+        assert_eq!(
+            thinking.get("type"),
+            Some(&Document::String("enabled".to_string()))
+        );
+        // And the model id and the messages travel with it.
+        assert_eq!(input.get_model_id().as_deref(), Some(MODEL));
+        assert_eq!(
+            input.get_messages().as_ref().map(Vec::len),
+            Some(1),
+            "the message list reaches the request"
+        );
+    }
+
+    /// A model that cannot think gets no field on the real request.
+    #[test]
+    fn a_plain_model_carries_no_thinking_fields() {
+        let request = request(
+            "amazon.nova-lite-v1:0",
+            Some(ReasoningEffort::High),
+            vec![ContentBlock::Text {
+                text: "hello".to_string(),
+            }],
+        );
+        let builder = apply_request(offline_client().converse_stream(), &request);
+        assert!(
+            builder
+                .as_input()
+                .get_additional_model_request_fields()
+                .is_none()
+        );
+    }
+
+    /// The replayed signature reaches the real request. This is the defect the live 400
+    /// proved, now pinned offline.
+    #[test]
+    fn the_request_carries_a_replayed_signature() {
+        let request = request(
+            MODEL,
+            Some(ReasoningEffort::Low),
+            vec![ContentBlock::ReasoningReplay {
+                text: "a plan".to_string(),
+                state: state("bedrock", MODEL, "sig-wire"),
+            }],
+        );
+        let builder = apply_request(offline_client().converse_stream(), &request);
+        let messages = builder
+            .as_input()
+            .get_messages()
+            .clone()
+            .expect("the request carries messages");
+        let signatures: Vec<String> = messages
+            .iter()
+            .flat_map(|message| message.content().iter())
+            .filter_map(|block| match block {
+                SdkBlockAlias::ReasoningContent(ReasoningContentBlock::ReasoningText(text)) => {
+                    Some(text.signature().unwrap_or_default().to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(signatures, vec!["sig-wire".to_string()]);
+    }
+
+    /// A foreign payload never reaches the request, whatever the helpers do.
+    #[test]
+    fn the_request_carries_no_foreign_signature() {
+        let request = request(
+            MODEL,
+            Some(ReasoningEffort::Low),
+            vec![ContentBlock::ReasoningReplay {
+                text: "a plan".to_string(),
+                state: state("bedrock", "another-model", "sig-wire"),
+            }],
+        );
+        let builder = apply_request(offline_client().converse_stream(), &request);
+        let messages = builder
+            .as_input()
+            .get_messages()
+            .clone()
+            .unwrap_or_default();
+        let has_reasoning = messages
+            .iter()
+            .flat_map(|message| message.content().iter())
+            .any(|block| matches!(block, SdkBlockAlias::ReasoningContent(_)));
+        assert!(!has_reasoning, "a foreign payload must not reach the wire");
+    }
+
+    /// Rule 2 and rule 3 on the real request: the budget has room, and no temperature rides
+    /// along with a thinking request.
+    #[test]
+    fn the_request_bounds_the_budget_and_drops_the_temperature() {
+        let mut request = request(
+            MODEL,
+            Some(ReasoningEffort::XHigh),
+            vec![ContentBlock::Text {
+                text: "hello".to_string(),
+            }],
+        );
+        request.temperature = Some(0.3);
+        let builder = apply_request(offline_client().converse_stream(), &request);
+        let config = builder
+            .as_input()
+            .get_inference_config()
+            .clone()
+            .expect("the request carries an inference config");
+        let budget = ReasoningEffort::XHigh.budget_tokens().unwrap() as i32;
+        assert!(config.max_tokens().expect("max tokens") > budget);
+        assert_eq!(config.temperature(), None);
+    }
+}
+
+#[cfg(test)]
+mod family_table_tests {
+    use super::*;
+
+    /// Every row of the table is reachable, and each threshold is exact.
+    ///
+    /// A table nobody checks is worse than a parse, so each row gets a pair: the version
+    /// below the threshold, and the version at it.
+    #[test]
+    fn every_family_row_is_tested() {
+        assert_eq!(
+            THINKING_FAMILIES.len(),
+            1,
+            "a new family row needs a pair of cases below, so this count is deliberate"
+        );
+        // anthropic.claude, since 3.7.
+        assert!(!model_supports_thinking(
+            "anthropic.claude-3-5-sonnet-20240620-v1:0"
+        ));
+        assert!(model_supports_thinking(
+            "anthropic.claude-3-7-sonnet-20250219-v1:0"
+        ));
+    }
+
+    /// A family rho does not know is asked for nothing, whatever its version.
+    #[test]
+    fn an_unknown_family_is_never_capable() {
+        for model in [
+            "meta.llama4-90b-instruct-v9:0",
+            "amazon.nova-pro-v1:0",
+            "mistral.mistral-large-2407-v1:0",
+            "cohere.command-r-plus-v1:0",
+        ] {
+            assert!(!model_supports_thinking(model), "{model}");
+        }
+    }
+
+    /// The 3.7 threshold, pinned from below as well as above.
+    ///
+    /// A mutation review found that `minor >= 7` could become `minor >= 6` and no test
+    /// noticed, so an off-by-one would have enabled thinking on a model without it.
+    #[test]
+    fn the_threshold_is_exact_from_below() {
+        assert!(!model_supports_thinking(
+            "anthropic.claude-3-6-sonnet-20250101-v1:0"
+        ));
+        assert!(model_supports_thinking(
+            "anthropic.claude-3-7-sonnet-20250219-v1:0"
+        ));
+    }
+
+    /// A prefix-less id is still a Claude id. A review found this false negative, and the
+    /// exact string it named.
+    #[test]
+    fn an_id_with_no_vendor_prefix_is_still_capable() {
+        assert!(model_supports_thinking("claude-3-7-sonnet-20250219-v1:0"));
+        assert!(model_supports_thinking("claude-haiku-4-5-20251001-v1:0"));
+        assert!(!model_supports_thinking("claude-3-5-sonnet-20240620-v1:0"));
+    }
+
+    /// A dash-dated id must not offer its month as a minor version. A review found this
+    /// false positive, which would have earned a 400 on a model without thinking.
+    #[test]
+    fn a_dash_dated_id_does_not_read_its_month_as_a_version() {
+        assert!(
+            !model_supports_thinking("anthropic.claude-3-opus-2025-07-15"),
+            "the month 07 must not read as minor version 7"
+        );
+        // And the same shape on a capable major version still works.
+        assert!(model_supports_thinking(
+            "anthropic.claude-4-opus-2025-07-15"
+        ));
+    }
+
+    /// The limit rho cannot fix by reading an id, stated as a test so nobody forgets it.
+    ///
+    /// An application inference profile hides the model. rho fails closed and reports, and
+    /// `capability_report_tests` proves the report.
+    #[test]
+    fn an_inference_profile_arn_reads_as_incapable() {
+        assert!(!model_supports_thinking(
+            "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod log_safety_tests {
+    //! A session file is untrusted input, and its strings reach a log.
+    //!
+    //! A security review found that `owner.provider` and `owner.model` were logged with
+    //! `Display` and no sanitiser, so a crafted file could inject a terminal escape or forge
+    //! a log line. `rho-redact` is the one home for that, per `D-one-redaction-home`.
+
+    use super::*;
+    use rho_core::{ContentBlock, Message, ProviderState, ReasoningOwner, Role};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for BufferWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufferWriter {
+        type Writer = BufferWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn a_hostile_owner_cannot_inject_a_terminal_escape() {
+        let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufferWriter(Arc::clone(&buffer)))
+            .with_max_level(tracing::Level::TRACE)
+            // The subscriber's own colours are escape bytes too. Turn them off, or the test
+            // cannot tell the attacker's escape from the formatter's.
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let hostile = ProviderState {
+                owner: ReasoningOwner {
+                    provider: "bedrock".to_string(),
+                    // An escape, a title-setting sequence, and a forged log line.
+                    model: "\u{1b}]0;pwned\u{7}\nWARN forged".to_string(),
+                },
+                value: serde_json::json!({ "signature": "s" }),
+            };
+            build_messages_for_model(
+                &[Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ReasoningReplay {
+                        text: "a plan".to_string(),
+                        state: Some(hostile),
+                    }],
+                }],
+                "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            );
+            tracing::warn!("the capture is live");
+        });
+        let logged = String::from_utf8(buffer.lock().unwrap().clone()).expect("utf8");
+        assert!(logged.contains("the capture is live"), "the capture works");
+        assert!(
+            !logged.contains('\u{1b}'),
+            "no escape byte reaches a log: {logged:?}"
+        );
+        assert!(
+            !logged.contains("\nWARN forged"),
+            "no forged line reaches a log: {logged:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod replay_scope_tests {
+    //! Only the current tool loop replays its reasoning.
+    //!
+    //! A performance review found the cost: the prompt is append-only, so every stored
+    //! reasoning block was re-sent on every later turn. Twenty turns re-upload turn one's
+    //! trace nineteen times, which is O(turns squared) in bytes.
+    //!
+    //! Anthropic needs the thinking of the assistant turn that made the pending tool call, so
+    //! that the signature chain of the current loop stays whole. A block from before the last
+    //! user prompt is not needed, and re-sending it buys nothing.
+
+    use super::*;
+    use rho_core::{ContentBlock, Message, ProviderState, ReasoningOwner, Role};
+
+    const MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+
+    fn replay(text: &str) -> ContentBlock {
+        ContentBlock::ReasoningReplay {
+            text: text.to_string(),
+            state: Some(ProviderState {
+                owner: ReasoningOwner {
+                    provider: "bedrock".to_string(),
+                    model: MODEL.to_string(),
+                },
+                value: serde_json::json!({ "signature": format!("sig-{text}") }),
+            }),
+        }
+    }
+
+    fn user(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+        }
+    }
+
+    fn assistant(content: Vec<ContentBlock>) -> Message {
+        Message {
+            role: Role::Assistant,
+            content,
+        }
+    }
+
+    /// The reasoning texts that reached the wire, in order.
+    fn sent(messages: &[Message]) -> Vec<String> {
+        use aws_sdk_bedrockruntime::types::{
+            ContentBlock as SdkBlock, ReasoningContentBlock as SdkReasoning,
+        };
+        build_messages_for_model(messages, MODEL)
+            .iter()
+            .flat_map(|message| message.content().iter())
+            .filter_map(|block| match block {
+                SdkBlock::ReasoningContent(SdkReasoning::ReasoningText(text)) => {
+                    Some(text.text().to_string())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn only_the_current_loop_replays_its_reasoning() {
+        let messages = vec![
+            user("first question"),
+            assistant(vec![
+                replay("old reasoning"),
+                ContentBlock::Text {
+                    text: "first answer".to_string(),
+                },
+            ]),
+            user("second question"),
+            assistant(vec![replay("current reasoning")]),
+        ];
+        assert_eq!(
+            sent(&messages),
+            vec!["current reasoning".to_string()],
+            "a block from before the last prompt buys nothing and costs every turn"
+        );
+    }
+
+    /// Inside one loop, every assistant turn keeps its reasoning, because the chain of the
+    /// pending call must stay whole.
+    #[test]
+    fn a_whole_tool_loop_keeps_its_reasoning() {
+        let messages = vec![
+            user("do it"),
+            assistant(vec![replay("first thought")]),
+            Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::ToolResult {
+                    tool_call_id: "1".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: "result".to_string(),
+                    }],
+                    is_error: false,
+                }],
+            },
+            assistant(vec![replay("second thought")]),
+        ];
+        assert_eq!(
+            sent(&messages),
+            vec!["first thought".to_string(), "second thought".to_string()],
+            "a tool result does not end the loop, so both turns replay"
+        );
+    }
+
+    /// The text of a dropped block does not leak into the request as prose either.
+    #[test]
+    fn an_out_of_scope_block_leaves_no_text_behind() {
+        let messages = vec![
+            user("first"),
+            assistant(vec![replay("old reasoning")]),
+            user("second"),
+        ];
+        let built = build_messages_for_model(&messages, MODEL);
+        let text: String = built
+            .iter()
+            .flat_map(|message| message.content().iter())
+            .filter_map(|block| block.as_text().ok())
+            .cloned()
+            .collect();
+        assert!(
+            !text.contains("old reasoning"),
+            "a dropped block never becomes prose: {text}"
         );
     }
 }

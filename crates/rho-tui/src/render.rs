@@ -115,6 +115,29 @@ pub struct FreezeBatch {
 }
 
 /// Draw the band. Pure. No IO. Safe to call every frame.
+/// The tail of `text` that can possibly reach a band of `measure` columns.
+///
+/// A frame draws at most `BAND_ROWS` rows, and the band keeps the newest lines, so wrapping
+/// the whole of a growing reasoning text is work thrown away. A performance review measured
+/// the cost of doing it anyway: one frame per streamed delta went from 414 microseconds at
+/// 63 kB to 1397 at 252 kB, which is O(N squared) over a turn.
+///
+/// The slice is generous, at four times the rows a band can hold, so a wrap that breaks on a
+/// word still has more than enough text. It always starts on a character boundary, because a
+/// reasoning delta is a byte stream and slicing one in the middle of a character panics. That
+/// panic killed jcode three times.
+fn tail_for_band(text: &str, measure: usize) -> &str {
+    let budget = measure.max(1) * BAND_ROWS as usize * 4;
+    if text.len() <= budget {
+        return text;
+    }
+    let mut start = text.len() - budget;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
+}
+
 pub fn render(state: &TuiState, frame: &mut Frame<'_>) {
     let area = frame.area();
     let width = area.width as usize;
@@ -488,7 +511,7 @@ fn push_row(
                 }
                 rho_core::ReasoningDisplay::Full => {
                     out.push((pad(&summary, width), style_for(Role::Muted)));
-                    for line in wrap(&sanitize_line(text), measure) {
+                    for line in wrap(&sanitize_line(tail_for_band(text, measure)), measure) {
                         out.push((pad(&line, width), style_for(Role::Muted)));
                     }
                 }
@@ -499,7 +522,7 @@ fn push_row(
                     if row_duration(state, index).is_some() {
                         out.push((pad(&summary, width), style_for(Role::Muted)));
                     } else {
-                        for line in wrap(&sanitize_line(text), measure) {
+                        for line in wrap(&sanitize_line(tail_for_band(text, measure)), measure) {
                             out.push((pad(&line, width), style_for(Role::Muted)));
                         }
                     }

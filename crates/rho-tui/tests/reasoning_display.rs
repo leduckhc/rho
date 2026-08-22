@@ -8,7 +8,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::style::Color;
 use rho_core::{AgentEvent, ReasoningDisplay, StreamEvent};
-use rho_tui::{TuiState, render};
+use rho_tui::{Row, TuiState, render};
 
 /// A rendered cell: its symbol and its foreground colour.
 struct Grid {
@@ -195,5 +195,34 @@ fn live_mode_collapses_when_the_answer_starts() {
     assert!(
         collapsed.contains("the answer"),
         "the answer draws, buffer was:\n{collapsed}"
+    );
+}
+
+/// A long reasoning row draws only the tail that can reach the band.
+///
+/// A performance review measured the old behaviour: the whole accumulated text was sanitised
+/// and wrapped on every frame and then thrown away, so one frame per delta grew from 414
+/// microseconds at 63 kB to 2769 at 504 kB. The band keeps the newest lines, so the frame is
+/// unchanged; only the work is gone. See `docs/benchmarks.md`.
+#[test]
+fn a_long_reasoning_row_draws_only_its_tail() {
+    let chunk = "the model weighs one option against another at some length. ";
+    let long = chunk.repeat(4000);
+    let tail = &long[long.len() - 60 * 14 * 4..];
+
+    let mut whole = TuiState::default();
+    whole.reasoning_display = rho_core::ReasoningDisplay::Full;
+    whole.rows.push(Row::Thinking { text: long.clone() });
+
+    let mut short = TuiState::default();
+    short.reasoning_display = rho_core::ReasoningDisplay::Full;
+    short.rows.push(Row::Thinking {
+        text: tail.to_string(),
+    });
+
+    assert_eq!(
+        Grid::render(&whole, 60, 30).text(),
+        Grid::render(&short, 60, 30).text(),
+        "the visible frame is identical, so only the wasted work is gone"
     );
 }

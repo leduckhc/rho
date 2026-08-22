@@ -25,4 +25,5 @@ tracing = "0.1.44"
 [dev-dependencies]
 rho-provider-testkit = { path = "../rho-provider-testkit" }
 tokio = { version = "1.53.1", features = ["full"] }
+tracing-subscriber = "0.3.23"
 wiremock = "0.6.5"

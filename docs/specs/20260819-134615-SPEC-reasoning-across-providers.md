@@ -84,8 +84,8 @@ slicing it at a non-character boundary panics and kills the process (issues 632,
 
 **fx** stores no reasoning at all. It asks the endpoint to return an encrypted payload with
 `include: ["reasoning.encrypted_content"]`, and it replays that payload from one opaque
-`provider_state_json` on the message. See `fx-src/src/gateway/openai_codex.zig:109` and
-`fx-src/src/core/shared/types.zig:909`.
+`provider_state_json` on the message. See `fx-src/src/gateway/openai_codex.zig:99` and
+`fx-src/src/core/shared/types.zig:873`.
 
 fx gives rho two things, one to copy and one to avoid:
 
@@ -122,48 +122,24 @@ So the claim is narrowed to what is true:
 - **The replay policy is data for every provider**, because the policy is a small closed set
   and the failures are hard in both directions.
 
-```rust
-/// How one OpenAI-compatible endpoint names its reasoning, and what it wants echoed back.
-/// A new host in this family is a row. A provider with a different structure is a new crate.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ReasoningWire {
-    /// The delta field names to read, in order. The first non-empty one wins, because a
-    /// host that sends two fields with the same text would otherwise double it.
-    pub read_fields: &'static [&'static str],
-    /// What the endpoint needs echoed back on the next request.
-    pub replay: ReplayPolicy,
-    /// True when the endpoint rejects a reasoning field it did not send. Mistral answers
-    /// 422 `Extra inputs are not permitted`, so rho must send nothing.
-    pub rejects_unknown_fields: bool,
-    /// True when rho must ask for thinking before the model emits a structured block.
-    /// Without the ask, Claude writes `<thinking>` tags into ordinary text.
-    pub ask_to_enable: bool,
-}
+**The table was specified and never built, so it is deleted.** An architecture review called
+it a liability, and the evidence is in the tree: `Delta::first_reasoning` in
+`rho-provider-openrouter` already reads the field names in order, with no table, and no
+production code ever referenced `ReasoningWire` or `ReplayPolicy`. An unbuilt struct in a spec
+is a promise a reviewer must keep checking and a shape the first real host may not fit.
 
-/// What an endpoint needs echoed back.
-///
-/// Named `ReplayPolicy`, and not `ReasoningReplay`, because `ContentBlock::ReasoningReplay` in
-/// section 4 already owns that name. One name per meaning.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReplayPolicy {
-    /// Send nothing back. The trace stays in the transcript for the reader.
-    Never,
-    /// Send the payload back while the same owner answers. Anthropic requires its signature
-    /// inside a tool loop, and it rejects the turn without it.
-    SignedWhileSameModel,
-    /// Send the readable text back on an assistant tool-call message. The Kimi coding
-    /// endpoint rejects the message without it.
-    TextOnToolCall,
-    /// Send a signature back on the matching tool call, read from that call's
-    /// `ProviderState`. Gemini rejects the request with
-    /// `Function call is missing a thought_signature`, and jcode carries the same token.
-    SignatureOnToolCall,
-}
-```
+What survives is what was learned, because that is what the next author needs:
 
-Every policy runs **after** the owner check of rule 8. A mismatched owner sends nothing,
-whatever the policy says. So a policy decides the shape of a replay, and the owner decides
-whether a replay may happen at all.
+- A host in this family disagrees only on the **field name**, so a reader takes the first
+  non-empty of `reasoning_content`, `reasoning`, and `reasoning_text`.
+- Kimi and DeepSeek **require** the stored field echoed back. Mistral **rejects** it with 422
+  `Extra inputs are not permitted`. So replay is a per-host property, and guessing fails in
+  both directions.
+- rho therefore sends nothing on this family until a host arrives with a live proof, and it
+  says so in a named arm. See `docs/verification/reasoning-effort.md`.
+
+The replay policy that **is** built is the owner check of rule 8, in `ProviderState::for_owner`,
+plus the loop scope of rule 13.
 
 **Two. rho reads `<thinking>` tags.** Neither pi nor jcode does. It is the defect the owner
 reported, so rho fixes it. The rule is narrow on purpose:
@@ -441,7 +417,8 @@ D-a-bad-reasoning-mode-is-refused.
 1. Read the delta fields in order, and take the first non-empty one.
 2. An empty delta adds nothing and starts no block.
 3. Slice a reasoning delta only on a character boundary. jcode crashed three times here.
-4. Never send a `ReasoningTrace`. Send a `ReasoningReplay` only when `ReasoningWire` says so.
+4. Never send a `ReasoningTrace`. Send a `ReasoningReplay` only when the owner matches and
+   the block is inside the current tool loop. See rules 8 and 12.
 5. An orphaned tool call gets a synthetic error result, so the signature chain stays whole.
 6. A redacted block replays only while the same model answers, and it is dropped otherwise.
 7. Strip a leading `<thinking>` or `<think>` pair, and only a leading one. The rules below
@@ -456,7 +433,11 @@ D-a-bad-reasoning-mode-is-refused.
     over the string cap spills, exactly as an assistant text does.
 11. rho reports a `replay: true` record that carries no `state`. It reads as a trace, and the
     report says so once, so a provider bug does not hide.
-12. A request builder has a named arm for every content block. A stream parser may keep a
+12. Only the current tool loop replays its reasoning. A block from before the last user
+    prompt is history: the provider needs the thinking of the turns that carry the pending
+    call, and nothing older. The prompt is append-only, so re-sending an old block costs its
+    bytes on every later turn, and a review measured that growth as O(turns squared).
+13. A request builder has a named arm for every content block. A stream parser may keep a
     wildcard, because a wire event set is open and a provider adds events without rho.
     `rho-provider-azure/src/lib.rs:600` is a request builder, so its `_ => {}` goes.
 
@@ -507,7 +488,7 @@ delta at a time, so "the first non-space text" is unknown until enough text has 
   nothing here today.
 - `reasoning_text_is_read` — the third name produces a delta.
 - `an_empty_reasoning_delta_starts_no_block` — no `ThinkingStart` for an empty string.
-- `a_reasoning_delta_splits_on_a_character_boundary` — a multi-byte character split across
+- `a_multibyte_reasoning_body_is_not_corrupted` — a multi-byte character split across
   two deltas does not panic and does not corrupt.
 
 ### The tags
@@ -519,6 +500,8 @@ delta at a time, so "the first non-space text" is unknown until enough text has 
   the rule that stops rho eating an answer about tags.
 - `an_unclosed_tag_ends_at_the_message_end` — a truncated stream keeps its text.
 - `a_stripped_tag_does_not_change_the_request` — what reaches the provider is unchanged.
+  **Not built.** The splitter runs in a frontend, so a request cannot see it. U3 of
+  `.rho-work/reasoning-expansion.md` holds the open choice.
 
 ### The replay
 
@@ -530,17 +513,22 @@ delta at a time, so "the first non-space text" is unknown until enough text has 
   check at all.
 - `an_absent_state_replays_nothing` — a `None` payload sends no reasoning field.
 - `an_azure_reasoning_item_round_trips_through_the_state` — the id, the summary, and the
-  encrypted blob all survive one turn. This is the case a single string could not carry.
-- `a_tool_call_state_is_captured_from_the_stream` — `ToolCallEnd` carries the payload, so a
+  encrypted blob all survive one turn.
+  **Not built.** Azure replays nothing yet, and rho has no account to drive.
+- `a_tool_call_payload_reaches_the_transcript` — `ToolCallEnd` carries the payload, so a
   provider needs no edit to shared code.
-- `a_tool_call_state_is_dropped_for_another_model` — rule 8 covers the tool-call path too,
-  which the first draft left ungoverned.
+- `a_tool_call_state_is_dropped_for_another_model` — rule 8 covers the tool-call path too.
+  **Not built.** No provider binds a payload to a call yet. The block-level rule is proved
+  by `a_state_is_dropped_for_another_model`.
 - `a_value_over_the_record_cap_is_dropped_and_reported` — rule 10, all or nothing.
 - `a_reasoning_text_over_the_string_cap_spills` — rule 10, the text half.
-- `a_reasoning_block_has_a_named_redaction_arm` and `a_reasoning_block_has_a_named_cap_arm` —
-  no wildcard covers a reasoning block.
+- `every_request_builder_has_an_explicit_arm` — no wildcard covers a reasoning block. It
+  reads each arm of each match, and it drops comments first.
+- `a_reasoning_text_over_the_string_cap_spills` and `the_payload_cap_is_inclusive` — the cap
+  arms, proved by behaviour rather than by a name.
 - `a_replayed_state_cannot_change_a_tool_call` — the payload rides along, and it never
   rewrites the request rho built.
+  **Not built.**
 - `an_oversize_reasoning_line_does_not_fail_the_whole_resume` — one bad record drops, and the
   session still opens. **Not built.** No production caller writes a session file, so the
   resume path has no caller to test. See `D-no-caller-writes-a-session-file`.
@@ -562,9 +550,12 @@ Added while building it, each for a reason the list above did not hold:
 - `a_payload_under_the_cap_is_written_verbatim` — the other side of rule 10.
 - `an_imported_pi_signature_never_replays` — the importer writes a trace.
 - `a_rejecting_endpoint_receives_no_reasoning_field` — the strict-schema row sends nothing,
+  **Not built.** no host row exists, and section 3 now says why.
   so no 422.
 - `a_tool_call_endpoint_receives_the_text` — the `TextOnToolCall` row attaches the text.
+  **Not built.** no host row exists.
 - `an_orphaned_tool_call_gets_a_synthetic_result` — the chain stays whole.
+  **Not built.** the repair exists for a trailing call at resume only.
 - `every_content_block_has_an_explicit_arm` — a compile-time exhaustive match, so no
   `_ => {}` can hide a new block. This is the test that would have caught defect three.
 
@@ -579,36 +570,41 @@ Added while building it, each for a reason the list above did not hold:
 
 ### The tag rule under a stream
 
-- `an_opening_tag_split_across_three_deltas_matches` — the lead buffer holds until it decides.
-- `a_mixed_case_tag_is_stripped` — `<Thinking>` matches without case.
-- `a_self_closing_tag_opens_no_region` — `<thinking/>` yields an empty reasoning block.
-- `an_unclosed_tag_stops_at_a_tool_call` — the answer is never swallowed.
+- `an_opening_tag_split_across_three_deltas` — the lead buffer holds until it decides.
+- `a_mixed_case_tag_opens_a_block` — `<Thinking>` matches without case.
+- `a_self_closing_tag_is_an_empty_block_and_keeps_the_rest` — `<thinking/>` yields an empty reasoning block.
+- `an_unclosed_tag_before_a_tool_call_keeps_only_the_reasoning` — the answer is never swallowed.
 - `a_turn_with_structured_reasoning_keeps_its_tags` — the case rho cannot separate. A turn
+  **Not built.** `thinking.rs` states the opposite behaviour today, and the spec and the
+  code must be reconciled before this lands.
   that already produced a reasoning block leaves the text alone, so a model asked to print a
   tag prints it.
 - `no_text_is_emitted_before_the_decision` — a caller never sees text rho later reclassifies.
+  **Not built.**
 
 ### The replay policy
 
 - `never_replay_sends_nothing` — the `Never` row sends no reasoning field.
+  **Not built.** no policy table exists.
 - `a_signature_replays_on_the_matching_tool_call` — the `SignatureOnToolCall` row attaches
+  **Not built.** no provider binds a payload to a call yet.
   `thought_signature`, so Gemini does not answer `Function call is missing a
   thought_signature`.
-- `ask_to_enable_adds_the_thinking_request` — the Bedrock row asks for thinking, so the model
+- `a_thinking_model_gets_the_thinking_request` — the Bedrock row asks for thinking, so the model
   returns a structured block instead of writing tags.
 
 ### The configuration
 
 - `every_name_round_trips` — `off`, `summary`, `full`, and `live` each parse and print back.
   This is the tree's name for what an earlier draft called
-  `the_reasoning_mode_parses_every_value`.
+  `the_reasoning_mode_parses_every_value`, and the tree calls it `every_name_round_trips`.
 - `an_unknown_name_is_an_error` in `rho-core`, and `an_unknown_reasoning_mode_is_refused`
   plus `an_unknown_mode_in_the_environment_is_refused` in `rho-cli`. A wrong value never
   falls back in silence, at any source. See decision D-a-bad-reasoning-mode-is-refused.
 - `a_bad_reasoning_value_fails_closed` in `rho-config` — the same rule for a file key.
 - `the_flag_beats_the_config_and_the_environment` — the config leg needs a call site that
   reads a file, so this test moved to `SPEC-config-call-site`. `rho-cli` proves the two legs
-  it has today with `the_flag_wins_over_the_env_var`.
+  it has today with `the_flag_beats_the_config_and_the_environment`.
 
 ### The persisted format
 
@@ -617,18 +613,22 @@ Added while building it, each for a reason the list above did not hold:
 - `a_new_block_is_readable_by_an_old_rho` — the new variants serialise under the old
   `"type": "thinking"` tag, so an old reader loads the file instead of failing it.
 - `a_missing_replay_key_reads_as_false` — the safe direction, so no stale signature replays.
+  **Not built.** covered by `a_replay_key_with_no_state_reads_as_a_trace`, which is the same rule with the name the tree uses.
 - `a_truncated_final_line_does_not_stop_the_load` — a half-written block is dropped, and the
+  **Not built.** the reader rule is proved by `a_bad_middle_record_does_not_discard_the_rest` in `rho-core`.
   session still opens.
 - `the_reasoning_text_is_stored_in_every_mode` — switching to `full` mid-session shows the
+  **Not built.**
   earlier reasoning.
 - `a_state_round_trips_through_the_session_file` — the payload survives a resume unchanged.
 - `a_replay_key_with_no_state_reads_as_a_trace` — the fail-closed direction.
-- `an_old_rho_ignores_the_state_key` — the new key does not fail an old load.
+- `a_new_block_is_readable_by_an_old_rho` — the new key does not fail an old load.
 - `a_state_value_never_reaches_a_log` — rule 9, asserted against a captured log at `trace`.
   The capture proves itself first, per `D-log-capture-proves-itself`.
 - `a_replay_record_with_no_state_is_reported` — rule 11, so a provider bug is visible.
 - `an_imported_pi_signature_never_replays` — the importer writes a trace.
 - `a_crafted_owner_is_not_authentication` — pins the stated limit: the tag stops an accident,
+  **Not built.** the limit is stated in section 4 and in the decision. A test would assert an absence, so the claim lives in prose instead.
   not a crafted file.
 
 ## 9. The ask, and the effort level

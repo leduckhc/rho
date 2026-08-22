@@ -13,6 +13,10 @@ use rho_provider_bedrock::{
     BedrockMapState, ConverseStreamEvent, map_converse_error, map_converse_event,
 };
 
+/// A real Bedrock id that supports extended thinking. A message builder needs a model,
+/// because a stored reasoning payload may only travel back to the model that made it.
+const THINKING_MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+
 /// Parse one recorded event from JSON.
 fn event(json: &str) -> ConverseStreamEvent {
     serde_json::from_str(json).expect("the event JSON must parse")
@@ -333,7 +337,10 @@ fn build_messages_never_emits_two_messages_with_the_same_role_in_a_row() {
     // This defect is in the request.
     use aws_sdk_bedrockruntime::types::ConversationRole;
 
-    let built = rho_provider_bedrock::build_messages(&two_tool_results_conversation());
+    let built = rho_provider_bedrock::build_messages_for_model(
+        &two_tool_results_conversation(),
+        THINKING_MODEL,
+    );
     let roles: Vec<&ConversationRole> = built.iter().map(|message| message.role()).collect();
     for pair in roles.windows(2) {
         assert_ne!(
@@ -349,7 +356,10 @@ fn build_messages_merges_tool_results_into_one_user_message() {
     // one would lose a tool result in silence, which is worse than the 400.
     use aws_sdk_bedrockruntime::types::{ContentBlock as SdkBlock, ConversationRole};
 
-    let built = rho_provider_bedrock::build_messages(&two_tool_results_conversation());
+    let built = rho_provider_bedrock::build_messages_for_model(
+        &two_tool_results_conversation(),
+        THINKING_MODEL,
+    );
     assert_eq!(
         built.len(),
         3,
@@ -379,7 +389,7 @@ fn build_messages_keeps_a_single_tool_result_working() {
 
     let mut conversation = two_tool_results_conversation();
     conversation.pop();
-    let built = rho_provider_bedrock::build_messages(&conversation);
+    let built = rho_provider_bedrock::build_messages_for_model(&conversation, THINKING_MODEL);
     assert_eq!(built.len(), 3);
     assert_eq!(built[2].role(), &ConversationRole::User);
 }
@@ -415,7 +425,7 @@ fn every_content_block_has_an_explicit_arm() {
         ],
     }];
 
-    let built = rho_provider_bedrock::build_messages(&conversation);
+    let built = rho_provider_bedrock::build_messages_for_model(&conversation, THINKING_MODEL);
     assert_eq!(built.len(), 1, "the one assistant message survives");
 
     let text_blocks = built[0]

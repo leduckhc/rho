@@ -48,14 +48,14 @@ impl ProviderState {
     /// provider's payload from another's.
     pub fn for_owner(&self, provider: &str, model: &str) -> Option<&serde_json::Value> {
         // An empty name is not a name. Two empty strings compare equal, so a payload minted
-        // with no model would have replayed on any request that also had no model. A second
-        // review found that, and both ends really did pass `""`. See the test
-        // `an_empty_owner_never_matches_anything`.
-        if provider.is_empty()
-            || model.is_empty()
-            || self.owner.provider.is_empty()
-            || self.owner.model.is_empty()
-        {
+        // with no model would have replayed on any request that also had no model. A review
+        // found that, and both ends really did pass `""`.
+        //
+        // Only the two arguments are checked. A mutation review showed why: with the equality
+        // below, an empty stored name can only match an empty argument, so checks on the
+        // stored pair were redundant, and a redundant guard is a guard whose deletion no test
+        // can see. Two guards, both load-bearing.
+        if provider.is_empty() || model.is_empty() {
             return None;
         }
         if self.owner.provider == provider && self.owner.model == model {

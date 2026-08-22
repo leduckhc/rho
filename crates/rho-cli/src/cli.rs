@@ -384,6 +384,32 @@ async fn run_headless(cli: &Cli, prompt: String) -> i32 {
     let cancel = CancelToken::new();
     let mut events = session.prompt(vec![ContentBlock::Text { text: prompt }], cancel);
     let mut stdout = std::io::stdout();
+    let mut stderr = std::io::stderr();
+    print_run(
+        &mut events,
+        &mut stdout,
+        &mut stderr,
+        reasoning_is_shown(loaded.reasoning),
+    )
+    .await
+}
+
+/// Print one run onto two streams, and return the exit code.
+///
+/// stdout carries the answer alone, so a pipe stays clean. stderr carries the reasoning and
+/// any error. Both are parameters, so a test drives the real loop over a scripted event
+/// stream and reads both streams back. The previous version was inline in `run_headless`,
+/// where the only guard possible was a grep of this file, and two reviews found that a grep
+/// cannot tell a live call from a comment.
+async fn print_run<S, O: Write, E: Write>(
+    events: &mut S,
+    stdout: &mut O,
+    stderr: &mut E,
+    show_reasoning: bool,
+) -> i32
+where
+    S: futures::Stream<Item = Result<AgentEvent, rho_core::Error>> + Unpin,
+{
     let mut failed = false;
     // A run may span several turns, because a turn can call tools. Each turn is a
     // separate block of prose, so separate them. Without this, the last word of one
@@ -394,7 +420,6 @@ async fn run_headless(cli: &Cli, prompt: String) -> i32 {
     // the headless path printed the tag as the answer, while the TUI did not. The splitter
     // starts fresh for each text block, exactly as the TUI does.
     let mut splitter = rho_core::ThinkingSplitter::new();
-    let show_reasoning = reasoning_is_shown(loaded.reasoning);
 
     while let Some(item) = events.next().await {
         match item {
@@ -404,8 +429,7 @@ async fn run_headless(cli: &Cli, prompt: String) -> i32 {
             Ok(AgentEvent::Stream(StreamEvent::TextDelta { delta, .. })) => {
                 let split = split_run_delta(&mut splitter, &delta);
                 if show_reasoning && !split.reasoning.is_empty() {
-                    // stderr, so a pipe on stdout still holds the answer alone.
-                    eprint!("{}", split.reasoning);
+                    let _ = write!(stderr, "{}", split.reasoning);
                 }
                 if split.answer.is_empty() {
                     continue;
@@ -421,7 +445,7 @@ async fn run_headless(cli: &Cli, prompt: String) -> i32 {
             // A structured reasoning block, from a provider rho asked to think.
             Ok(AgentEvent::Stream(StreamEvent::ThinkingDelta { delta, .. })) => {
                 if show_reasoning {
-                    eprint!("{delta}");
+                    let _ = write!(stderr, "{delta}");
                 }
             }
             Ok(AgentEvent::TurnEnd { .. }) => {
@@ -436,7 +460,7 @@ async fn run_headless(cli: &Cli, prompt: String) -> i32 {
             }
             Ok(_) => {}
             Err(error) => {
-                eprintln!("rho: {error}");
+                let _ = writeln!(stderr, "rho: {error}");
                 failed = true;
                 break;
             }
@@ -1495,8 +1519,8 @@ mod run_output_tests {
         assert_eq!(second.answer, "done");
     }
 
-    /// A source guard. `split_run_delta` can be perfect and never be called, which is
-    /// exactly how the TUI got the fix and `rho run` did not.
+    /// A source guard, kept as a cheap tripwire beside the behavioural test in
+    /// `headless_loop_tests`. It proves the call exists; the other proves it works.
     #[test]
     fn the_headless_loop_splits_its_text() {
         // The production half, with comments removed. A guard that searches its own text
@@ -1535,5 +1559,121 @@ mod run_output_tests {
         assert!(!reasoning_is_shown(ReasoningDisplay::Summary));
         assert!(reasoning_is_shown(ReasoningDisplay::Full));
         assert!(reasoning_is_shown(ReasoningDisplay::Live));
+    }
+}
+
+#[cfg(test)]
+mod headless_loop_tests {
+    //! The headless loop, driven for real over a scripted event stream.
+    //!
+    //! `print_run` takes both streams as parameters, so a test reads back exactly what a user
+    //! would see. This replaces a grep of this file, which two reviews showed could pass
+    //! against a deleted call whose words survived in a comment.
+
+    use super::*;
+    use rho_core::{AgentEvent, StopReason, StreamEvent};
+
+    /// Run the real loop over `events`, and return what landed on each stream.
+    fn run(events: Vec<AgentEvent>, show_reasoning: bool) -> (String, String, i32) {
+        drive(events.into_iter().map(Ok).collect(), show_reasoning)
+    }
+
+    /// The same, for a list that may hold an error.
+    fn drive(
+        items: Vec<Result<AgentEvent, rho_core::Error>>,
+        show_reasoning: bool,
+    ) -> (String, String, i32) {
+        let mut stream = futures::stream::iter(items);
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let code = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(print_run(&mut stream, &mut out, &mut err, show_reasoning));
+        (
+            String::from_utf8(out).expect("utf8 on stdout"),
+            String::from_utf8(err).expect("utf8 on stderr"),
+            code,
+        )
+    }
+
+    fn text(delta: &str) -> Vec<AgentEvent> {
+        vec![
+            AgentEvent::Stream(StreamEvent::TextStart { index: 0 }),
+            AgentEvent::Stream(StreamEvent::TextDelta {
+                index: 0,
+                delta: delta.to_string(),
+            }),
+            AgentEvent::TurnEnd {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]
+    }
+
+    /// The defect that opened this branch, on the headless path, proved end to end.
+    #[test]
+    fn a_leading_tag_never_reaches_stdout() {
+        let (out, err, code) = run(text("<thinking>a plan</thinking>the answer"), true);
+        assert_eq!(out.trim(), "the answer", "stdout carries the answer alone");
+        assert_eq!(err, "a plan", "the reasoning goes to stderr");
+        assert_eq!(code, 0);
+    }
+
+    /// A tag in the middle is prose about tags, so it stays in the answer.
+    #[test]
+    fn a_tag_in_the_middle_stays_on_stdout() {
+        let (out, err, _) = run(text("here is a <thinking> tag"), true);
+        assert_eq!(out.trim(), "here is a <thinking> tag");
+        assert!(err.is_empty());
+    }
+
+    /// A structured reasoning block goes to stderr, and only when asked for.
+    #[test]
+    fn structured_reasoning_obeys_the_display_mode() {
+        let events = vec![
+            AgentEvent::Stream(StreamEvent::ThinkingStart { index: 0 }),
+            AgentEvent::Stream(StreamEvent::ThinkingDelta {
+                index: 0,
+                delta: "private".to_string(),
+            }),
+            AgentEvent::Stream(StreamEvent::ThinkingEnd {
+                index: 0,
+                state: None,
+            }),
+            AgentEvent::Stream(StreamEvent::TextStart { index: 1 }),
+            AgentEvent::Stream(StreamEvent::TextDelta {
+                index: 1,
+                delta: "the answer".to_string(),
+            }),
+        ];
+        let (out, err, _) = run(events.clone(), true);
+        assert_eq!(out.trim(), "the answer");
+        assert_eq!(err, "private");
+
+        let (out, err, _) = run(events, false);
+        assert_eq!(
+            out.trim(),
+            "the answer",
+            "the answer never depends on the mode"
+        );
+        assert!(err.is_empty(), "no reasoning without the mode: {err}");
+    }
+
+    /// An error goes to stderr and sets a non-zero code, so a script can see it.
+    #[test]
+    fn an_error_exits_non_zero_and_names_itself() {
+        let (out, err, code) = drive(
+            vec![Err(rho_core::Error::Provider(
+                rho_core::ProviderError::Decode("a broken chunk".to_string()),
+            ))],
+            false,
+        );
+        assert_eq!(code, EXIT_FAILURE);
+        assert!(
+            err.contains("a broken chunk"),
+            "the error names itself: {err}"
+        );
+        assert!(out.trim().is_empty(), "no answer on stdout: {out}");
     }
 }

@@ -528,6 +528,51 @@ fn cap_block(block: ContentBlock, spills: &mut Vec<String>) -> ContentBlock {
     }
 }
 
+/// Bound every replay payload inside one record read from a file.
+///
+/// The write path caps a payload, and a security review found that the read path did not. A
+/// session file is untrusted input: rho may not have written it, and it can be copied between
+/// machines. Without this, a foreign file could carry a payload up to the line cap and rho
+/// would replay it on every later turn.
+fn cap_entry_state(mut entry: Entry) -> Entry {
+    if let Record::Message { message } = &mut entry.record {
+        let content = std::mem::take(&mut message.content);
+        message.content = content.into_iter().map(cap_block_state).collect();
+    }
+    entry
+}
+
+/// Bound the payload of one block, and of every block inside a tool result.
+fn cap_block_state(block: ContentBlock) -> ContentBlock {
+    match block {
+        ContentBlock::ReasoningReplay { text, state } => ContentBlock::ReasoningReplay {
+            text,
+            state: cap_state(state),
+        },
+        ContentBlock::ToolCall {
+            id,
+            name,
+            arguments,
+            state,
+        } => ContentBlock::ToolCall {
+            id,
+            name,
+            arguments,
+            state: cap_state(state),
+        },
+        ContentBlock::ToolResult {
+            tool_call_id,
+            content,
+            is_error,
+        } => ContentBlock::ToolResult {
+            tool_call_id,
+            content: content.into_iter().map(cap_block_state).collect(),
+            is_error,
+        },
+        other => other,
+    }
+}
+
 /// Bound one replay payload. Rule 10: a payload over `MAX_RECORD_BYTES` is dropped whole.
 ///
 /// A payload is opaque, so it cannot be trimmed. Half a signature still looks like a
@@ -542,8 +587,10 @@ fn cap_state(state: Option<crate::ProviderState>) -> Option<crate::ProviderState
             // The report names the size and the owner, and never the value, per rule 9. It
             // is a log line and not a spill, because a spilled payload cannot be replayed
             // from a sidecar and would only carry opaque bytes into a second file.
+            // The provider name may come from a file, so it is sanitised. See
+            // `D-one-redaction-home`.
             tracing::warn!(
-                provider = %state.owner.provider,
+                provider = %rho_redact::sanitize_line(&state.owner.provider),
                 size,
                 "a reasoning payload exceeded the record cap and was dropped"
             );
@@ -582,6 +629,13 @@ pub struct ReadResult {
     pub entries: Vec<Entry>,
     /// True when the last line was partial and dropped. Resume warns on this.
     pub truncated_tail: bool,
+    /// How many records in the **middle** of the file did not decode.
+    ///
+    /// A security review found that any bad line stopped the read, so one flipped byte
+    /// silently discarded every later record and reported it as a truncated tail. A bad
+    /// record in the middle is now skipped and counted, and the tail rule is unchanged.
+    /// See `D-a-bad-middle-record-is-skipped-and-counted`.
+    pub dropped_records: usize,
 }
 
 /// A cheap summary for a list. It reads only the first line of a file.
@@ -690,6 +744,8 @@ impl SessionReader {
 
         let mut entries = Vec::new();
         let mut truncated_tail = false;
+        let mut pending_bad_line = false;
+        let mut dropped_records = 0usize;
         while read_capped_line(&mut source, &mut buf)? {
             let line = String::from_utf8_lossy(&buf);
             let line = line.trim_end_matches(['\n', '\r']);
@@ -697,14 +753,38 @@ impl SessionReader {
                 continue;
             }
             match decode::<Entry>(line) {
-                Ok(entry) => entries.push(entry),
+                // A payload from a file rho did not write is bounded here as well as on the
+                // way in. A security review found the bound was write-only, so a foreign
+                // file could carry a payload up to the line cap and replay it every turn.
+                Ok(entry) => {
+                    // A bad line with a good record after it was corruption in the middle,
+                    // not a truncated tail. Count it and keep going, so one flipped byte
+                    // cannot discard the rest of the session in silence.
+                    if pending_bad_line {
+                        dropped_records += 1;
+                        pending_bad_line = false;
+                    }
+                    entries.push(cap_entry_state(entry));
+                }
                 Err(_) => {
-                    // A line that does not decode is a truncated tail. Drop it, keep
-                    // every whole record before it, and flag the tail. See section 6.
-                    truncated_tail = true;
-                    break;
+                    // Two bad lines in a row means the first one was in the middle.
+                    if pending_bad_line {
+                        dropped_records += 1;
+                    }
+                    pending_bad_line = true;
+                    continue;
                 }
             }
+        }
+        // The last bad line, if any, is the tail. Every earlier one was counted above.
+        if pending_bad_line {
+            truncated_tail = true;
+        }
+        if dropped_records > 0 {
+            tracing::warn!(
+                dropped = dropped_records,
+                "the session file had records that did not decode; they were skipped"
+            );
         }
         if truncated_tail {
             // A crash can cut the last line in half. Drop it, but never silently. See
@@ -715,6 +795,7 @@ impl SessionReader {
             header,
             entries,
             truncated_tail,
+            dropped_records,
         })
     }
 }

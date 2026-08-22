@@ -580,3 +580,34 @@ and then this section must run again.
 - Motion cost inside the render. The renderer does not call the motion yet.
 - First frame on Windows. Neither the script nor CI covers it.
 - Frame time on Linux. The example builds there, but this run was macOS only.
+
+## Reasoning in `full` mode: the frame cost of a growing row
+
+Date: 20260822. A performance review found that the renderer sanitised and wrapped the whole
+accumulated reasoning text on every frame, and only then cut it to the band. The work grew
+with the text, and the band could never show it.
+
+The command, one frame per streamed delta, at 100 columns and 30 rows:
+
+```sh
+cargo build --release -p rho-tui --example reason_bench
+for d in 1000 2000 4000 8000; do RHO_DELTAS=$d ./target/release/examples/reason_bench; done
+```
+
+| deltas | row bytes | before, avg frame | after, avg frame |
+| --- | --- | --- | --- |
+| 1000 | 63 kB | 414 µs | 122 µs |
+| 2000 | 126 kB | 723 µs | 97 µs |
+| 4000 | 252 kB | 1397 µs | 98 µs |
+| 8000 | 504 kB | 2769 µs | 95 µs |
+
+Before, each doubling of the input cost about four times the total time, which is the shape of
+an O(N squared) loop. After, the average frame is flat at about 95 µs, so the total is linear
+in the number of frames. At 504 kB the frame is 29 times cheaper.
+
+The fix is `tail_for_band` in `crates/rho-tui/src/render.rs`. It wraps only the tail that a
+band of 14 rows could show, and it always starts on a character boundary. The frame is
+identical, which `a_long_reasoning_row_draws_only_its_tail` asserts by rendering the whole text
+and its tail and comparing the two grids.
+
+The numbers above come from one machine, in one run each. They are a ratio, not a promise.

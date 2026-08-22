@@ -566,6 +566,26 @@ fn finish_reason_to_stop(reason: &str) -> StopReason {
 // --- The request body. ---------------------------------------------------
 
 /// Build the chat-completions request body. See `SPEC-provider-interface` section 4.
+/// The `reasoning` field for one effort level, or `None` when rho must send nothing.
+///
+/// A review found that this crate ignored the level entirely: the agent carried it, Bedrock
+/// consumed it, and here `unset` and `set` collapsed to the same wire. Silence is the defect,
+/// so the level now travels.
+///
+/// OpenRouter accepts `minimal`, `low`, `medium`, and `high`. It has no `xhigh`, and rho must
+/// not invent a value a host rejects, because an unknown field is a failed turn. So `xhigh`
+/// maps to `high`, and the mapping lives here rather than in four call sites.
+fn reasoning_field(effort: Option<rho_core::ReasoningEffort>) -> Option<Value> {
+    use rho_core::ReasoningEffort;
+    match effort? {
+        // An instruction, not a silence. A host that thinks by default is told to stop.
+        ReasoningEffort::Off => Some(json!({ "enabled": false })),
+        ReasoningEffort::Low => Some(json!({ "effort": "low" })),
+        ReasoningEffort::Medium => Some(json!({ "effort": "medium" })),
+        ReasoningEffort::High | ReasoningEffort::XHigh => Some(json!({ "effort": "high" })),
+    }
+}
+
 pub fn build_request_body(request: &CompletionRequest) -> Value {
     let mut messages = Vec::new();
     if let Some(system) = &request.system {
@@ -589,6 +609,9 @@ pub fn build_request_body(request: &CompletionRequest) -> Value {
         "usage": { "include": true },
     });
     let map = body.as_object_mut().expect("the body is an object");
+    if let Some(reasoning) = reasoning_field(request.reasoning) {
+        map.insert("reasoning".to_string(), reasoning);
+    }
     if !request.tools.is_empty() {
         let tools: Vec<Value> = request
             .tools
