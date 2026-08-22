@@ -52,8 +52,10 @@ All three were read as source, not recalled.
 | other model | convert to plain text |
 
 pi reads three field names in order, `reasoning_content`, `reasoning`, then
-`reasoning_text`, and it takes **the first non-empty one**. Its comment names the reason:
-one host returns two fields with the same content, so a naive reader doubles the text.
+`reasoning_text`, and it takes **the first non-empty one**. See
+`pi-ai/dist/api/openai-completions.js:350`. Its comment names the reason, and the host:
+one host returns two fields with the same content, so a naive reader doubles the text. The
+comment names `chutes.ai` as that host.
 
 pi also inserts a synthetic tool result for an orphaned tool call, and its comment says this
 "preserves thinking signatures and satisfies API requirements".
@@ -73,11 +75,14 @@ transcript never holds it twice.
 jcode also proves that replay is a **per-endpoint** property, and that guessing fails in
 both directions:
 
-| Endpoint | Rule | jcode issue |
+| Endpoint | Rule | Where jcode says so |
 | --- | --- | --- |
-| Moonshot Kimi coding | **requires** `reasoning_content` on an assistant tool-call message | 322 |
-| DeepSeek, direct OpenAI-compatible | **requires** the stored `reasoning_content` replayed | 815 |
-| Mistral, strict OpenAI schema | **rejects** it with 422 `Extra inputs are not permitted` | 261 |
+| Moonshot Kimi coding | **requires** `reasoning_content` on an assistant tool-call message | `openrouter-runtime/src/lib.rs:1441`, issue 322 |
+| DeepSeek, direct OpenAI-compatible | **requires** the stored `reasoning_content` replayed | `openrouter_provider_impl.rs:67`, issue 815 |
+| Mistral, strict OpenAI schema | **rejects** it with 422 `Extra inputs are not permitted` | `openrouter-runtime/src/lib.rs:1473`, issue 261 |
+
+The issue numbers come from comments in jcode's own source, which is what rho read. Nobody
+here has seen that tracker, and a docs audit was right to ask.
 
 And jcode records a third lesson, from three crashes: reasoning arrives as a byte stream, and
 slicing it at a non-character boundary panics and kills the process (issues 632, 633, 635).

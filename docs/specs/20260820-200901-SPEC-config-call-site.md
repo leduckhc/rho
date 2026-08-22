@@ -144,6 +144,7 @@ No new error type. `ConfigError` already names every case, and `rho-cli` maps it
 | unreadable file | `ConfigError::Read`, with the path | `rho-config` |
 | malformed TOML | `ConfigError::Parse`, with the path | `rho-config` |
 | unknown key | `ConfigError::Parse`, by `deny_unknown_fields` | `rho-config` |
+| *(the three rows above are the file-read path, so `Parse` has a real path to name)* | | |
 | unknown profile | `ConfigError::UnknownProfile` | `rho-config` |
 | bad enum value | `ConfigError::Value`, fail closed | `rho-config` |
 | bad boolean | `ConfigError::Value`, fail closed | `rho-config` |
