@@ -80,6 +80,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-sprint-one-hook-interfaces](20260817-170455-D-sprint-one-hook-interfaces.md) | 20260817 | The Hook trait and the approval gate are sprint-1 interfaces |
 | [D-staged-server-serves-every-connection](20260818-043346-D-staged-server-serves-every-connection.md) | 20260818 | A test double must answer every connection |
 | [D-the-merge-cannot-name-a-values-source](20260820-214513-D-the-merge-cannot-name-a-values-source.md) | 20260820 | The merge loses which layer held a bad value |
+| [D-three-reasoning-costs-stay-open](20260822-101500-D-three-reasoning-costs-stay-open.md) | 20260822 | Three reasoning costs stay open, and each one names its trigger |
 | [D-three-tiers](20260817-232444-D-three-tiers.md) | 20260817 | Three tiers, named for what each contributes |
 | [D-todo-in-a-green-stage](20260817-175834-D-todo-in-a-green-stage.md) | 20260817 | Three `todo!()` bodies survived stage S4, and one is a security boundary |
 | [D-truncated-tail-warns](20260818-014343-D-truncated-tail-warns.md) | 20260818 | Resume drops a truncated last line and warns, and keeps every whole record |

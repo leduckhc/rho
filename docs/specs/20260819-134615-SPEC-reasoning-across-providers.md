@@ -716,6 +716,23 @@ level with the request and needs no second channel.
 3. **Thinking drops a temperature.** Anthropic allows only the default temperature with
    extended thinking, so a provider that asks for thinking sends no temperature.
 
+### What each provider does with the level
+
+| Provider | What it sends |
+| --- | --- |
+| `rho-provider-bedrock` | `thinking` with a budget, for a model the table knows |
+| `rho-provider-openrouter` | `reasoning.effort`, and `enabled: false` for `off` |
+| `rho-provider-azure` | **nothing yet.** It reports once that the level had no effect |
+
+Azure is a gap, not a silence. rho has no Azure account to drive, and guessing a field name is
+how three providers rejected rho's requests in sprint 1. A report costs a user nothing and an
+invented field costs a whole turn.
+
+**Changing the level mid-session drops the provider cache.** The thinking request is part of the
+request shape, so a new level changes the stable prefix. A performance review checked that
+nothing else in this work moves the prefix: a replayed block is rebuilt byte for byte, so a
+warm cache stays warm across turns.
+
 ### The configuration
 
 A new key, and one more flag. The display mode and the effort are two different things: one
