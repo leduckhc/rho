@@ -341,6 +341,18 @@ crashed between the two keys.
 **A `state` value is stored verbatim.** A redacted payload cannot replay, so nothing rewrites
 it on the way to the file. Rule 9 states the matching log rule.
 
+**Nothing denies an unknown field, at any level.** The promise that an old rho loads a new
+file rests on that, and a security review asked for it to be confirmed rather than assumed. It
+holds for a header, a record, a message, and a block, and
+`an_unknown_key_at_every_level_is_ignored` pins all four. A `deny_unknown_fields` anywhere in
+this path would turn every later key into a failed load.
+
+**A record read from a file is bounded as a whole, not only field by field.** The write path
+caps the encoded record at `MAX_RECORD_BYTES`, and the read path caps each field. A record of
+twenty thousand small blocks passes every field cap and still weighs megabytes, so the read path
+checks the total too. The check runs only when the raw line was already over the cap, so a
+normal read pays nothing.
+
 **An old `signature` key is read and dropped.** A file from before this change maps to
 `ReasoningTrace`, and a stale signature never replays.
 

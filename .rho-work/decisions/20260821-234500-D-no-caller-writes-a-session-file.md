@@ -47,6 +47,19 @@ The persisted format of a reasoning block is proved at the unit level, in both d
 Those cover the format. They cannot cover a lifecycle that has no caller, and the
 verification file says so rather than implying a live resume was tested.
 
+## What the reader now guarantees, with no caller
+
+Two security reviews hardened this path while it still has no production writer, because the
+reader is a contract with every file rho will ever write. The reader now:
+
+- bounds every field of a record it reads, with the same caps the write path applies,
+- bounds the whole record, because the write path does,
+- skips a bad record in the middle, counts it, and stops at a ceiling,
+- ignores an unknown field at every level, so a file from a later rho still loads.
+
+Neither `truncated_tail` nor `dropped_records` has a consumer, because no resume path exists.
+A reviewer named that, and it is the same absence this decision records.
+
 ## The next step
 
 One spec for the session lifecycle: when rho creates a file, when it resumes, what a resume

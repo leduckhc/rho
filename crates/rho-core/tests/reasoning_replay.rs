@@ -492,3 +492,73 @@ fn a_file_of_bad_records_stops_at_the_ceiling() {
         result.dropped_records
     );
 }
+
+/// A record of many small blocks is bounded too, not only a record with one large field.
+///
+/// The write path checks the whole encoded record against the cap. The read path checked each
+/// field and not the total, so ten thousand small blocks passed every field cap and still
+/// weighed megabytes. A security review named the asymmetry as a class, and this is its second
+/// member: one side bounded, the other not.
+#[test]
+fn a_record_of_many_small_blocks_is_dropped_on_read() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("many-blocks.jsonl");
+    let header = serde_json::json!({
+        "id": "r0", "parentId": null, "timestamp": "1700000000000", "type": "session",
+        "version": 1, "cwd": "/tmp", "approval": "allow-all", "sandbox": "off"
+    });
+    // Each block is small, so every field cap passes. The record is not.
+    let blocks: Vec<serde_json::Value> = (0..20_000)
+        .map(|index| serde_json::json!({ "type": "text", "text": format!("block {index}") }))
+        .collect();
+    let record = serde_json::json!({
+        "id": "r1", "parentId": "r0", "timestamp": "1700000000000", "type": "message",
+        "message": { "role": "assistant", "content": blocks }
+    });
+    let good = serde_json::json!({
+        "id": "r2", "parentId": "r0", "timestamp": "1700000000000", "type": "message",
+        "message": { "role": "assistant", "content": [{ "type": "text", "text": "after" }] }
+    });
+    std::fs::write(&path, format!("{header}\n{record}\n{good}\n")).expect("write the file");
+
+    let result = rho_core::SessionReader::read(&path).expect("the file loads");
+    assert_eq!(
+        result.entries.len(),
+        1,
+        "the oversize record is dropped and the next one survives"
+    );
+    assert_eq!(result.dropped_records, 1, "the drop is counted");
+}
+
+/// An unknown key on a record does not fail the load.
+///
+/// The spec promises that an old rho loads a file a new rho wrote. That rests on nothing
+/// denying unknown fields, at any level. A security review could not confirm it, so it is
+/// pinned here: at the block level, at the message level, and at the record level.
+#[test]
+fn an_unknown_key_at_every_level_is_ignored() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("from-the-future.jsonl");
+    let header = serde_json::json!({
+        "id": "r0", "parentId": null, "timestamp": "1700000000000", "type": "session",
+        "version": 1, "cwd": "/tmp", "approval": "allow-all", "sandbox": "off",
+        "a_header_key_from_a_later_rho": true
+    });
+    let record = serde_json::json!({
+        "id": "r1", "parentId": "r0", "timestamp": "1700000000000", "type": "message",
+        "an_entry_key_from_a_later_rho": [1, 2],
+        "message": {
+            "role": "assistant",
+            "a_message_key_from_a_later_rho": "x",
+            "content": [{
+                "type": "text", "text": "hello",
+                "a_block_key_from_a_later_rho": { "nested": true }
+            }]
+        }
+    });
+    std::fs::write(&path, format!("{header}\n{record}\n")).expect("write the file");
+
+    let result = rho_core::SessionReader::read(&path).expect("a file from the future still loads");
+    assert_eq!(result.entries.len(), 1, "the record survives");
+    assert_eq!(result.dropped_records, 0, "nothing was dropped");
+}

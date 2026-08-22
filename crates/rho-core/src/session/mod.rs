@@ -536,6 +536,18 @@ fn cap_block(block: ContentBlock, spills: &mut Vec<String>) -> ContentBlock {
     }
 }
 
+/// Does this record fit the record cap once its fields are bounded?
+///
+/// A record that does not fit was not written by rho, because the write path caps the whole
+/// encoded line. Dropping it is the same answer the write path would have given.
+fn record_fits(entry: &Entry) -> bool {
+    match encode(entry) {
+        Ok(line) => line.len() <= MAX_RECORD_BYTES,
+        // A record that cannot be encoded cannot be written back either, so it does not fit.
+        Err(_) => false,
+    }
+}
+
 /// Bound one record read from a file, with the **same** caps the write path applies.
 ///
 /// A security review found the first version of this bounded the payload and not the text, so
@@ -754,7 +766,25 @@ impl SessionReader {
                         dropped_records += 1;
                         pending_bad_line = false;
                     }
-                    entries.push(cap_entry_state(entry));
+                    let entry = cap_entry_state(entry);
+                    // The write path checks the **whole** encoded record against
+                    // `MAX_RECORD_BYTES`, and the read path checked only each field. So a
+                    // record of ten thousand small blocks passed every field cap and still
+                    // weighed megabytes. A security review named that asymmetry as a class, and
+                    // this is the second member of it.
+                    //
+                    // The re-encode runs only when the raw line was already over the cap, which
+                    // a record rho wrote never is. So a normal read pays nothing.
+                    if line.len() > MAX_RECORD_BYTES && !record_fits(&entry) {
+                        dropped_records += 1;
+                        tracing::warn!(
+                            bytes = line.len(),
+                            "a record exceeded the record cap after its fields were bounded; \
+                             it was dropped"
+                        );
+                        continue;
+                    }
+                    entries.push(entry);
                 }
                 Err(_) => {
                     // Two bad lines in a row means the first one was in the middle.
