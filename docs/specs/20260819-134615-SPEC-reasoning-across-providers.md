@@ -206,7 +206,12 @@ pub enum ContentBlock {
 
     /// Reasoning the provider needs echoed back.
     ReasoningReplay {
-        /// The readable text. A cross-model turn falls back to this, as plain text.
+        /// The readable text, for the reader.
+        ///
+        /// pi converts this to plain text when another model answers. rho does **not**: the
+        /// whole block is dropped, and the report of rule 8 says why. Passing one model's
+        /// reasoning to another as an answer changes what the second model reads, and no
+        /// test here could show that it helps.
         text: String,
         /// The opaque replay payload. `None` means there is nothing to replay.
         state: Option<ProviderState>,
@@ -272,8 +277,11 @@ message, and a new host costs nothing. rho takes fx's shape, and adds the tag fx
 that is the family of defect that killed the `""` signature default. An Anthropic signature is
 now one key inside `value`, written and read by the crate that owns the wire.
 
-**A tool call keeps its typed `thought_signature`.** All three references carry that as a
-plain string, so the shape is settled and a name documents it better than a blob.
+**A tool call carries the same opaque payload.** An earlier draft kept a typed
+`thought_signature: Option<String>` here. A review killed it twice over: no stream event
+carried the string, so Gemini would have had to edit shared code, and a bare string had no
+owner, so it replayed after a model switch with nothing checking it. One carrier, owner
+tagged, on every replay path.
 
 **The honest cost.** The compiler no longer checks a payload. So rule 8 below is the whole
 guard, and it fails closed. A test for a mismatched owner is not optional.

@@ -432,3 +432,57 @@ async fn an_absent_effort_reaches_the_provider_as_none() {
     let seen = provider.seen.lock().expect("the lock holds");
     assert_eq!(seen[0].reasoning, None);
 }
+
+/// A tool-call payload reaches the transcript.
+///
+/// A review found that every test built `ToolCallEnd` with `state: None`, so nothing proved
+/// the reducer carries a payload onto the block. Gemini needs exactly that, and a field
+/// nobody carries is the wiring defect this project keeps finding.
+#[tokio::test]
+async fn a_tool_call_payload_reaches_the_transcript() {
+    use rho_core::{ProviderState, ReasoningOwner};
+
+    let state = ProviderState {
+        owner: ReasoningOwner {
+            provider: "gemini".to_string(),
+            model: "flash".to_string(),
+        },
+        value: serde_json::json!({ "thought_signature": "sig-1" }),
+    };
+    let turn = vec![
+        StreamEvent::MessageStart {
+            role: rho_core::Role::Assistant,
+        },
+        StreamEvent::ToolCallStart {
+            index: 0,
+            id: "call-1".to_string(),
+            name: "recorder".to_string(),
+        },
+        StreamEvent::ToolCallEnd {
+            index: 0,
+            arguments: serde_json::json!({}),
+            state: Some(state.clone()),
+        },
+        StreamEvent::Done {
+            stop_reason: StopReason::ToolUse,
+        },
+    ];
+    let provider = Arc::new(common::ScriptedProvider::new(vec![turn, text_turn("done")]));
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(RecordingTool::new("recorder")));
+    let session = session_with(provider, tools);
+    let events = session.prompt(user_input("go"), CancelToken::new());
+    let _ = collect(events).await;
+
+    let carried = session
+        .messages()
+        .await
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .find_map(|block| match block {
+            ContentBlock::ToolCall { state, .. } => state.clone(),
+            _ => None,
+        })
+        .expect("the tool call carries its payload");
+    assert_eq!(carried, state);
+}

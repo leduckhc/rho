@@ -79,6 +79,34 @@ exit 0 -> I'll read a.txt for you.
 
 A turn with no thinking sends no reasoning block, and the tool loop is unchanged.
 
+## 5. After the second review
+
+A Codex review found six things, and four of them changed the code. The live runs were then
+repeated, because the request path had moved.
+
+```text
+run 1 exit=0 -> zx9-quibble, kt4-marlow
+run 2 exit=0 -> zx9-quibble, kt4-marlow
+```
+
+The new report for an unreadable model id was driven too, with an application inference
+profile ARN, which hides the model behind an opaque id:
+
+```sh
+rho run "Say ok." --provider bedrock \
+  --model "arn:aws:bedrock:us-east-1:...:application-inference-profile/none" \
+  --reasoning-effort high --log info
+```
+
+```text
+WARN rho_provider_bedrock: this model is not known to support extended thinking, so rho asked
+     for none model=arn:aws:bedrock:us-east-1:...:application-inference-profile/none
+rho: client error: status 400 ...
+```
+
+The 400 is the profile itself, which does not exist in this account. The warning is the point:
+rho still fails closed, and it now says why rather than dropping the request in silence.
+
 ## What is proved, and what is not
 
 Proved live:

@@ -182,6 +182,30 @@ fn a_reasoning_text_over_the_string_cap_spills() {
     );
 }
 
+/// Is this line the start of a catch-all match arm?
+///
+/// A catch-all is `_` or a bare binding such as `other`. Both take every case that the
+/// named arms above them did not, which is how a new block kind vanishes in silence.
+///
+/// The first version of this check looked for the literal `_ => {}`. A review pointed out
+/// that `other => ()` walks straight past it, and a guard that catches one spelling teaches
+/// the next author to use another.
+fn is_catch_all_arm(line: &str) -> bool {
+    let Some((pattern, _)) = line.trim().split_once("=>") else {
+        return false;
+    };
+    let pattern = pattern.trim();
+    if pattern == "_" {
+        return true;
+    }
+    // A bare binding: one lowercase identifier, with no path, no struct pattern, and no
+    // guard. `ContentBlock::Text { text }` and `}` are both excluded by that.
+    !pattern.is_empty()
+        && pattern
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
 /// Each `match block {` region of a source file, up to the arm that closes it.
 ///
 /// Crude on purpose. It reads the text, because the alternative is a parser, and the guard
@@ -238,10 +262,17 @@ fn every_request_builder_has_an_explicit_arm() {
         // `_ => {}` and kept every name, and the first version of this guard passed. So
         // the match over a content block is now read arm by arm.
         for region in match_block_regions(production) {
-            assert!(
-                !region.contains("_ => {}") && !region.contains("_ => {"),
-                "{path} has a wildcard in a match over a content block:\n{region}"
-            );
+            // Every spelling of a catch-all, not one. A review pointed out that the first
+            // version caught `_ => {}` and missed `other => ()`, `_ =>` with any body, and
+            // a binding arm. A guard that catches one spelling teaches the next author to
+            // use another.
+            for line in region.lines() {
+                assert!(
+                    !is_catch_all_arm(line),
+                    "{path} has a catch-all arm in a match over a content block: {}",
+                    line.trim()
+                );
+            }
         }
     }
 }

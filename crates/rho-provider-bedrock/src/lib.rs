@@ -631,8 +631,11 @@ fn sdk_event_to_mirror(
 /// Build the SDK message list from the normalised messages. Sprint 1 sends text
 /// and tool calls. See `SPEC-provider-interface` section 8 for the out-of-scope block kinds.
 pub fn build_messages(messages: &[Message]) -> Vec<aws_sdk_bedrockruntime::types::Message> {
-    // Kept for the contract suite, which builds messages with no model in hand. A reasoning
-    // payload needs the model, so a caller that replays uses `build_messages_for_model`.
+    // Kept for the contract suite, which builds messages with no model in hand.
+    //
+    // It can never replay a reasoning payload, and that is deliberate: the empty model
+    // reaches `for_owner`, which refuses an empty name. A caller that replays uses
+    // `build_messages_for_model`. See `an_empty_owner_never_matches_anything`.
     build_messages_for_model(messages, "")
 }
 
@@ -766,6 +769,13 @@ fn take_reasoning_state(
     if signature.is_none() && redacted.is_none() {
         return None;
     }
+    // A payload with no model has no owner, and an unowned payload can never be replayed.
+    // Minting one would write a dead payload into a session file, so it is refused here as
+    // well as in `for_owner`. `events_to_stream` is the caller that has no model.
+    if state.model.is_empty() {
+        tracing::warn!("a reasoning payload arrived with no model, so it carries no owner");
+        return None;
+    }
     let mut value = serde_json::Map::new();
     if let Some(signature) = signature {
         value.insert("signature".to_string(), Value::String(signature));
@@ -793,26 +803,56 @@ fn replay_block(
 ) -> Option<aws_sdk_bedrockruntime::types::ReasoningContentBlock> {
     use aws_sdk_bedrockruntime::types::{ReasoningContentBlock, ReasoningTextBlock};
 
-    let value = state.as_ref()?.for_owner(PROVIDER_ID, model)?;
+    let state = state.as_ref()?;
+    let value = match state.for_owner(PROVIDER_ID, model) {
+        Some(value) => value,
+        None => {
+            // Rule 8 says a drop is never silent. A review found that every one of these
+            // paths returned `None` with nothing said, which is the same silence the rule
+            // forbids. The report names the owner and the reason, and never the payload.
+            tracing::warn!(
+                owner_provider = %state.owner.provider,
+                owner_model = %state.owner.model,
+                request_model = %model,
+                "a reasoning payload belongs to another owner, so it was not replayed"
+            );
+            return None;
+        }
+    };
     if let Some(redacted) = value.get("redacted").and_then(Value::as_str) {
         use base64::Engine;
         // The payload holds base64, because a blob is not valid UTF-8 in general. A failed
         // decode sends nothing: a wrong blob is worse than a missing one, because Bedrock
         // would reject the whole turn.
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(redacted)
-            .ok()?;
-        return Some(ReasoningContentBlock::RedactedContent(
-            aws_smithy_types::Blob::new(bytes),
-        ));
+        match base64::engine::general_purpose::STANDARD.decode(redacted) {
+            Ok(bytes) => {
+                return Some(ReasoningContentBlock::RedactedContent(
+                    aws_smithy_types::Blob::new(bytes),
+                ));
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "an encrypted reasoning payload did not decode, so it was not replayed"
+                );
+                return None;
+            }
+        }
     }
-    let signature = value.get("signature").and_then(Value::as_str)?;
-    ReasoningTextBlock::builder()
+    let Some(signature) = value.get("signature").and_then(Value::as_str) else {
+        tracing::warn!("a reasoning payload carries no signature, so it was not replayed");
+        return None;
+    };
+    match ReasoningTextBlock::builder()
         .text(text)
         .signature(signature)
         .build()
-        .ok()
-        .map(ReasoningContentBlock::ReasoningText)
+    {
+        Ok(block) => Some(ReasoningContentBlock::ReasoningText(block)),
+        Err(error) => {
+            tracing::warn!(%error, "a reasoning block did not build, so it was not replayed");
+            None
+        }
+    }
 }
 
 /// Does this model id support Anthropic extended thinking?
@@ -850,6 +890,15 @@ fn model_supports_thinking(model: &str) -> bool {
 fn build_thinking_fields(request: &CompletionRequest) -> Option<Document> {
     let budget = request.reasoning?.budget_tokens()?;
     if !model_supports_thinking(&request.model) {
+        // The user asked for thinking and will not get it, so rho says so once. A review
+        // found the case that makes this necessary: an application inference profile ARN
+        // hides the model behind an opaque id, so a thinking-capable model reads as
+        // incapable. The answer stays fail-closed, because an unknown field is a 400 for
+        // the whole turn, but it is no longer silent.
+        tracing::warn!(
+            model = %request.model,
+            "this model is not known to support extended thinking, so rho asked for none"
+        );
         return None;
     }
     let thinking = HashMap::from([
@@ -955,6 +1004,42 @@ fn json_to_document(value: &Value) -> Document {
                 .collect(),
         ),
     }
+}
+
+/// One source line with any comment removed, including a trailing one.
+///
+/// A trailing comment is the hole a review left open in the first version: the break
+/// `let _ = fields; // builder.additional_model_request_fields(fields)` deleted the call and
+/// kept the words, and a guard that drops only whole comment lines passed it. A `://` inside
+/// a URL is left alone.
+#[cfg(test)]
+fn code_only(line: &str) -> &str {
+    let mut search = 0;
+    while let Some(found) = line[search..].find("//") {
+        let at = search + found;
+        if at > 0 && line.as_bytes()[at - 1] == b':' {
+            search = at + 2;
+            continue;
+        }
+        return &line[..at];
+    }
+    line
+}
+
+/// The production half of a source file, with every comment removed.
+///
+/// A source guard needs this. Prose that quotes the call it guards would otherwise satisfy
+/// the guard after the call itself was deleted.
+#[cfg(test)]
+fn production_code(source: &str) -> String {
+    source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("a source file has a first part")
+        .lines()
+        .map(code_only)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -1096,16 +1181,14 @@ mod thinking_request_tests {
     /// branch has already shipped twice.
     #[test]
     fn the_thinking_fields_reach_the_request() {
-        // Search the production half only. The first version of this guard searched the
-        // whole file, so it matched its own assertion string and passed against a deleted
-        // call. Step 7 caught that, and the split is the fix.
+        // Search the production half, with comments removed. Two reviews shaped this: the
+        // first version searched the whole file and matched its own assertion string, and
+        // the second pointed out that the literal surviving in a comment would pass after
+        // the real call was deleted.
         let source = include_str!("lib.rs");
-        let production = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("a source file has a first part");
+        let code = production_code(source);
         assert!(
-            production.contains("builder.additional_model_request_fields(fields)"),
+            code.contains("builder.additional_model_request_fields(fields)"),
             "the converse builder must send the thinking fields"
         );
     }
@@ -1375,6 +1458,298 @@ mod replay_tests {
         assert!(
             out.iter()
                 .any(|event| matches!(event, StreamEvent::ThinkingEnd { state: None, .. }))
+        );
+    }
+}
+
+#[cfg(test)]
+mod drop_report_tests {
+    use super::*;
+    use rho_core::{ContentBlock, Message, ProviderState, ReasoningOwner, Role};
+    use std::sync::{Arc, Mutex};
+
+    const MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+
+    #[derive(Clone)]
+    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for BufferWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufferWriter {
+        type Writer = BufferWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Build messages under a log capture, and return what was logged.
+    fn logged_while_building(block: ContentBlock, model: &str) -> String {
+        let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufferWriter(Arc::clone(&buffer)))
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            build_messages_for_model(
+                &[Message {
+                    role: Role::Assistant,
+                    content: vec![block],
+                }],
+                model,
+            );
+            // Prove the capture works before trusting what it holds.
+            tracing::warn!("the capture is live");
+        });
+        String::from_utf8(buffer.lock().unwrap().clone()).expect("valid utf8")
+    }
+
+    fn state(provider: &str, model: &str, value: serde_json::Value) -> Option<ProviderState> {
+        Some(ProviderState {
+            owner: ReasoningOwner {
+                provider: provider.to_string(),
+                model: model.to_string(),
+            },
+            value,
+        })
+    }
+
+    /// Rule 8: the drop is never silent. Every one of these paths said nothing before a
+    /// second review found them.
+    #[test]
+    fn a_dropped_payload_is_reported() {
+        let cases: Vec<(&str, ContentBlock, &str)> = vec![
+            (
+                "another model",
+                ContentBlock::ReasoningReplay {
+                    text: "plan".to_string(),
+                    state: state(
+                        "bedrock",
+                        "other-model",
+                        serde_json::json!({"signature": "s"}),
+                    ),
+                },
+                "another owner",
+            ),
+            (
+                "another provider",
+                ContentBlock::ReasoningReplay {
+                    text: "plan".to_string(),
+                    state: state("openrouter", MODEL, serde_json::json!({"signature": "s"})),
+                },
+                "another owner",
+            ),
+            (
+                "no signature",
+                ContentBlock::ReasoningReplay {
+                    text: "plan".to_string(),
+                    state: state("bedrock", MODEL, serde_json::json!({"unrelated": true})),
+                },
+                "no signature",
+            ),
+            (
+                "bad base64",
+                ContentBlock::ReasoningReplay {
+                    text: "plan".to_string(),
+                    state: state(
+                        "bedrock",
+                        MODEL,
+                        serde_json::json!({"redacted": "!!not base64!!"}),
+                    ),
+                },
+                "did not decode",
+            ),
+        ];
+        for (name, block, needle) in cases {
+            let logged = logged_while_building(block, MODEL);
+            assert!(
+                logged.contains("the capture is live"),
+                "{name}: capture works"
+            );
+            assert!(
+                logged.contains(needle),
+                "{name}: the drop must be reported, and say why: {logged}"
+            );
+        }
+    }
+
+    /// A payload that replays says nothing, because there is nothing to report.
+    #[test]
+    fn a_replayed_payload_is_not_reported_as_a_drop() {
+        let logged = logged_while_building(
+            ContentBlock::ReasoningReplay {
+                text: "plan".to_string(),
+                state: state("bedrock", MODEL, serde_json::json!({"signature": "s"})),
+            },
+            MODEL,
+        );
+        assert!(
+            !logged.contains("not replayed"),
+            "a good payload is quiet: {logged}"
+        );
+    }
+
+    /// The report never carries the payload, per rule 9.
+    #[test]
+    fn a_drop_report_never_names_the_payload() {
+        let logged = logged_while_building(
+            ContentBlock::ReasoningReplay {
+                text: "plan".to_string(),
+                state: state(
+                    "bedrock",
+                    "other-model",
+                    serde_json::json!({ "signature": "secret-signature-value" }),
+                ),
+            },
+            MODEL,
+        );
+        assert!(!logged.contains("secret-signature-value"), "{logged}");
+    }
+}
+
+#[cfg(test)]
+mod capability_report_tests {
+    use super::*;
+    use rho_core::{ContentBlock, Message, ReasoningEffort, Role};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for BufferWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufferWriter {
+        type Writer = BufferWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn logged_for(model: &str, effort: Option<ReasoningEffort>) -> String {
+        let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufferWriter(Arc::clone(&buffer)))
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let request = CompletionRequest {
+                model: model.to_string(),
+                system: None,
+                messages: vec![Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "hi".to_string(),
+                    }],
+                }],
+                tools: Vec::new(),
+                max_tokens: None,
+                temperature: None,
+                reasoning: effort,
+            };
+            build_thinking_fields(&request);
+            tracing::warn!("the capture is live");
+        });
+        String::from_utf8(buffer.lock().unwrap().clone()).expect("valid utf8")
+    }
+
+    /// An id rho cannot read still fails closed, and it no longer does so in silence.
+    ///
+    /// An application inference profile hides the model, so a thinking-capable model reads
+    /// as incapable. A review found it. The user asked for a level, so the user hears why
+    /// nothing happened.
+    #[test]
+    fn an_unreadable_model_id_reports_that_it_asked_for_nothing() {
+        let arn = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123";
+        let logged = logged_for(arn, Some(ReasoningEffort::High));
+        assert!(logged.contains("the capture is live"), "the capture works");
+        assert!(
+            logged.contains("asked for none"),
+            "the refusal is reported: {logged}"
+        );
+    }
+
+    /// A user who asked for nothing hears nothing. A warning on every plain turn would be
+    /// noise, and noise is how a real warning gets ignored.
+    #[test]
+    fn an_absent_effort_reports_nothing() {
+        let logged = logged_for("amazon.nova-lite-v1:0", None);
+        assert!(
+            !logged.contains("asked for none"),
+            "no report without a request: {logged}"
+        );
+    }
+
+    /// `off` is an answer, not an ask, so it is quiet too.
+    #[test]
+    fn an_off_effort_reports_nothing() {
+        let logged = logged_for("amazon.nova-lite-v1:0", Some(ReasoningEffort::Off));
+        assert!(!logged.contains("asked for none"), "{logged}");
+    }
+}
+
+#[cfg(test)]
+mod unowned_stream_tests {
+    use super::*;
+
+    /// `events_to_stream` has no model, so it must mint no payload.
+    ///
+    /// A review found this. The fake transport built its state with `BedrockMapState::default()`,
+    /// whose model is `""`, and the legacy `build_messages` also passes `""`. Two empty strings
+    /// compare equal, so an unowned payload would have replayed on an unowned request. The
+    /// stream now refuses to mint one, and `for_owner` refuses an empty name as well.
+    #[tokio::test]
+    async fn the_fake_transport_mints_no_unowned_payload() {
+        use futures::StreamExt;
+
+        let events = vec![
+            ConverseStreamEvent {
+                content_block_delta: Some(ContentBlockDelta {
+                    content_block_index: 0,
+                    delta: BlockDelta {
+                        text: None,
+                        tool_use: None,
+                        reasoning_content: Some(ReasoningDelta {
+                            text: Some("a plan".to_string()),
+                            signature: Some("sig".to_string()),
+                            redacted_content: None,
+                        }),
+                    },
+                }),
+                ..Default::default()
+            },
+            ConverseStreamEvent {
+                content_block_stop: Some(ContentBlockStop {
+                    content_block_index: 0,
+                }),
+                ..Default::default()
+            },
+        ];
+        let mut stream = events_to_stream(events, CancelToken::new());
+        let mut ends = Vec::new();
+        while let Some(Ok(event)) = stream.next().await {
+            if let StreamEvent::ThinkingEnd { state, .. } = event {
+                ends.push(state);
+            }
+        }
+        assert_eq!(
+            ends,
+            vec![None],
+            "a stream with no model carries no owner, so it carries no payload"
         );
     }
 }

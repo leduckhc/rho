@@ -223,3 +223,81 @@ fn an_old_tool_call_loads_with_no_state() {
     let back: ContentBlock = serde_json::from_value(json).unwrap();
     assert!(matches!(back, ContentBlock::ToolCall { state: None, .. }));
 }
+
+#[test]
+fn an_empty_owner_never_matches_anything() {
+    // A second review found this. Two empty strings compare equal, so a payload minted with
+    // no model would replay on any request that also had no model. `events_to_stream` and
+    // the legacy `build_messages` both pass `""`, so the two ends met in the middle and the
+    // owner check passed while nothing had been checked.
+    //
+    // An empty owner is not an owner. It never matches, in either direction.
+    let unowned = ProviderState {
+        owner: ReasoningOwner {
+            provider: "bedrock".to_string(),
+            model: String::new(),
+        },
+        value: serde_json::json!({ "signature": "sig" }),
+    };
+    assert!(unowned.for_owner("bedrock", "").is_none());
+    assert!(unowned.for_owner("bedrock", "claude").is_none());
+
+    let no_provider = ProviderState {
+        owner: ReasoningOwner {
+            provider: String::new(),
+            model: "claude".to_string(),
+        },
+        value: serde_json::json!({ "signature": "sig" }),
+    };
+    assert!(no_provider.for_owner("", "claude").is_none());
+
+    // And a request with no model reaches nothing, even from a well-owned payload.
+    let owned = ProviderState {
+        owner: ReasoningOwner {
+            provider: "bedrock".to_string(),
+            model: "claude".to_string(),
+        },
+        value: serde_json::json!({ "signature": "sig" }),
+    };
+    assert!(owned.for_owner("bedrock", "").is_none());
+    assert!(owned.for_owner("", "claude").is_none());
+    assert!(owned.for_owner("bedrock", "claude").is_some());
+}
+
+#[test]
+fn an_unknown_key_in_a_record_is_ignored() {
+    // A future rho adds a key. This rho must load the record and keep what it understands,
+    // because the alternative is a session file that a newer rho can write and an older one
+    // cannot read. A review asked for this case by name, and it had no test.
+    let json = serde_json::json!({
+        "type": "thinking",
+        "thinking": "a plan",
+        "replay": true,
+        "state": {
+            "owner": { "provider": "bedrock", "model": "claude" },
+            "value": { "signature": "sig" }
+        },
+        "a_key_from_a_later_rho": { "nested": [1, 2, 3] }
+    });
+    let back: ContentBlock = serde_json::from_value(json).expect("an unknown key is ignored");
+    match back {
+        ContentBlock::ReasoningReplay { text, state } => {
+            assert_eq!(text, "a plan");
+            let state = state.expect("the payload survives beside the unknown key");
+            assert_eq!(state.value["signature"], "sig");
+        }
+        other => panic!("expected a replay block, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_lowest_budget_is_the_anthropic_minimum() {
+    // A review found this unpinned: the ladder was proved to grow and to clear 1024, but no
+    // test held the documented value. Anthropic refuses a budget under 1024, so the constant
+    // and the bottom rung must stay equal.
+    assert_eq!(rho_core::MIN_THINKING_BUDGET, 1024);
+    assert_eq!(
+        rho_core::ReasoningEffort::Low.budget_tokens(),
+        Some(rho_core::MIN_THINKING_BUDGET)
+    );
+}

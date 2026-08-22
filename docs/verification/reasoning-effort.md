@@ -158,7 +158,8 @@ a function, and both carried reasoning.
 
 - **OpenRouter and Azure.** This change touches the Bedrock request only. The effort level
   reaches every provider through `CompletionRequest`, and no other crate reads it yet.
-- **The replay.** rho still drops a reasoning block when it builds a request, in a named arm.
-  Section 4 of the spec holds the design, and it is the next piece of work.
+- **The replay.** It was unbuilt when these runs happened, and it landed straight after. See
+  `docs/verification/reasoning-replay.md` for the live proof, where a corrupted signature
+  makes Bedrock answer 400.
 - **The budget numbers.** The ladder is a starting point. Section 7 of the spec says a
   measurement gets its own bench.

@@ -1499,13 +1499,23 @@ mod run_output_tests {
     /// exactly how the TUI got the fix and `rho run` did not.
     #[test]
     fn the_headless_loop_splits_its_text() {
-        // The production half only. A guard that searches its own text passes against the
-        // deletion it exists to catch. See the bedrock guard and step 7.
+        // The production half, with comments removed. A guard that searches its own text
+        // passes against the deletion it exists to catch, and so does one that accepts the
+        // literal surviving in a comment. Two reviews found those in turn.
         let whole = include_str!("cli.rs");
-        let source = whole
+        let source: String = whole
             .split("#[cfg(test)]")
             .next()
-            .expect("a source file has a first part");
+            .expect("a source file has a first part")
+            .lines()
+            // Every comment goes, including a trailing one. A break that deleted the call
+            // and left its words in a trailing comment passed the first version of this.
+            .map(|line| match line.split_once("//") {
+                Some((code, _)) => code,
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
             source.contains("split_run_delta(&mut splitter, &delta)"),
             "the headless loop must split its text deltas"

@@ -47,6 +47,17 @@ impl ProviderState {
     /// the same kind of payload with no owner at all, and its own code cannot tell one
     /// provider's payload from another's.
     pub fn for_owner(&self, provider: &str, model: &str) -> Option<&serde_json::Value> {
+        // An empty name is not a name. Two empty strings compare equal, so a payload minted
+        // with no model would have replayed on any request that also had no model. A second
+        // review found that, and both ends really did pass `""`. See the test
+        // `an_empty_owner_never_matches_anything`.
+        if provider.is_empty()
+            || model.is_empty()
+            || self.owner.provider.is_empty()
+            || self.owner.model.is_empty()
+        {
+            return None;
+        }
         if self.owner.provider == provider && self.owner.model == model {
             Some(&self.value)
         } else {
