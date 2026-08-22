@@ -158,6 +158,23 @@ run 2: 9.9 is larger than 9.11.                                    exit 0, 296 b
 A config file alone turns thinking on. The two runs differ in wording, because a model is not
 a function, and both carried reasoning.
 
+## 8. The mutation the test reviewer could not finish
+
+A mutation reviewer ran seventeen mutations and reported one it could not complete: its
+substitute for the headless-loop guard named a type wrongly and failed to compile before the
+guard could run. That path has since been refactored, so the mutation was run here against the
+current code, four ways:
+
+| mutation | result |
+| --- | --- |
+| the loop never splits, and prints the raw delta | caught by `a_leading_tag_never_reaches_stdout` and the guard |
+| reasoning is written to stdout instead of stderr | caught by `a_leading_tag_never_reaches_stdout` |
+| the display mode is ignored for structured reasoning | caught by `structured_reasoning_obeys_the_display_mode` |
+| an error stops setting a non-zero exit code | caught by `an_error_exits_non_zero_and_names_itself` |
+
+The behavioural test catches each one, and the source guard catches the first. That is why the
+loop now takes both streams as parameters: a grep could only ever see the first.
+
 ## What is not verified here
 
 - **OpenRouter and Azure.** This change touches the Bedrock request only. The effort level
