@@ -16,6 +16,7 @@ mod hook;
 mod provider;
 mod queue;
 mod reasoning;
+mod results;
 mod retry;
 mod sandbox;
 mod secret;
@@ -41,6 +42,11 @@ pub use hook::{Hook, HookChain, HookOutcome, ToolCallView};
 pub use provider::{CompletionRequest, Provider, ProviderStream, ToolSpec};
 pub use queue::{MessageQueue, QueueError, STEER_QUEUE_CAPACITY};
 pub use reasoning::{MIN_THINKING_BUDGET, ReasoningDisplay, ReasoningEffort};
+pub use results::{
+    CappedText, FileResultStore, HeadPreview, MAX_MATCH_LINE_BYTES, READ_CEILING_BYTES,
+    ResultLimits, ResultPolicy, ResultPreview, ResultStore, ResultStoreError, StoredMatch,
+    StoredSlice, cap_result_text, default_search, is_valid_handle,
+};
 pub use retry::RetryPolicy;
 pub use sandbox::SandboxMode;
 pub use secret::Secret;

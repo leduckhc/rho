@@ -595,6 +595,22 @@ fn parent_note(
 /// root is inherited. Keeping them together means a reader checks confinement in one
 /// place instead of scanning a two-hundred-line procedure for it.
 ///
+/// The result policy a child inherits.
+///
+/// The bounds follow the parent, or a caller who tightened `max_result_bytes` would find every
+/// child ignoring the tighter value.
+///
+/// The store never follows. `read_tool_result` is registered per session and a child does not
+/// get it, so a store would swallow a tail the child could never read back. A cut that says the
+/// tail is gone is better than a handle nobody can use. See `SPEC-tool-result-handle` section 9.
+fn child_result_policy(parent: &SessionConfig) -> rho_core::ResultPolicy {
+    rho_core::ResultPolicy {
+        limits: parent.results.limits,
+        preview: Arc::clone(&parent.results.preview),
+        store: None,
+    }
+}
+
 /// It returns the intersection too, because the caller reports a dropped tool name.
 async fn build_child(
     env: &Arc<SpawnEnv>,
@@ -640,10 +656,12 @@ async fn build_child(
         Some(env.node.limits().max_tool_calls),
     );
 
+    let child_results = child_result_policy(&env.parent_config);
     let child_config = SessionConfig::new(model, env.parent_config.session_root.clone(), approval)
         .with_sandbox(sandbox)
         .with_max_turns(max_turns)
         .with_max_tool_calls(max_tool_calls)
+        .with_result_policy(child_results)
         // A definition cannot set this, so a project file cannot turn off a child's
         // warning. No clamp against `max_turns` is applied here: the driver only warns
         // at a boundary after the child has taken a turn, so a window wider than the
@@ -1019,6 +1037,36 @@ pub(crate) fn error_result(reason: impl Into<String>) -> ToolOutput {
 #[cfg(test)]
 mod unstarted_child_tests {
     use super::*;
+
+    /// A child must inherit the parent's result bounds, and must get no store.
+    ///
+    /// A security review found that `build_child` set no result policy at all, so a caller who
+    /// tightened the cap was ignored by every child. Nothing tested a child's cap.
+    #[test]
+    fn a_child_inherits_the_parent_result_bounds() {
+        let tightened = rho_core::ResultLimits {
+            max_result_bytes: 4096,
+            store_threshold_bytes: 1024,
+            ..rho_core::ResultLimits::default()
+        };
+        let dir = std::env::temp_dir();
+        let parent = SessionConfig::new("m", &dir, Arc::new(rho_core::ReadOnlyPolicy))
+            .with_result_policy(rho_core::ResultPolicy {
+                limits: tightened,
+                ..rho_core::ResultPolicy::default()
+            });
+
+        let child = child_result_policy(&parent);
+
+        assert_eq!(
+            child.limits, tightened,
+            "a child that ignored the tighter cap would spend the context the caller saved"
+        );
+        assert!(
+            child.store.is_none(),
+            "a child has no read_tool_result tool, so a store would swallow a tail it cannot read"
+        );
+    }
 
     #[test]
     fn a_cancelled_waiter_is_cancelled_and_a_full_process_is_a_failure() {

@@ -201,6 +201,12 @@ pub struct SessionConfig {
     /// opts in, because a child that runs out of turns has nobody to ask. See
     /// `SPEC-subagent-slots-handles-grace` section 4.
     pub grace_turns: u32,
+    /// How a large tool result is bounded, and where its tail goes.
+    ///
+    /// The default caps and keeps no tail. It is not `Option`, because a cap a caller can
+    /// leave off is a cap a peer can escape. See D-cap-at-one-choke-point and
+    /// `SPEC-tool-result-handle` section 2. Use `with_result_policy` to add a store.
+    pub results: crate::ResultPolicy,
 }
 
 impl SessionConfig {
@@ -226,6 +232,9 @@ impl SessionConfig {
             // State the default out loud. Zero means no warning, which is today's
             // behaviour for every top-level session.
             grace_turns: AgentConfig::default().grace_turns,
+            // The cap is on by default. A session with no store still bounds a result, so a
+            // peer that returns ten megabytes cannot fill the context window.
+            results: crate::ResultPolicy::default(),
         }
     }
 
@@ -248,6 +257,13 @@ impl SessionConfig {
     /// Set the per-run tool-call budget.
     pub fn with_max_tool_calls(mut self, max_tool_calls: u32) -> Self {
         self.max_tool_calls = max_tool_calls;
+        self
+    }
+
+    /// Replace the result policy. The default already caps, so this adds a store or a
+    /// different preview. See `SPEC-tool-result-handle`.
+    pub fn with_result_policy(mut self, results: crate::ResultPolicy) -> Self {
+        self.results = results;
         self
     }
 
@@ -900,8 +916,40 @@ impl Driver {
         self.finish_tool(&id, output).await
     }
 
+    /// Bound every text block in a tool output, and store the tail when a store exists.
+    ///
+    /// An image block passes through untouched. Only text can be capped, and only text can be
+    /// stored. See `SPEC-tool-result-handle` section 2.
+    async fn cap_output(&self, output: ToolOutput) -> ToolOutput {
+        let policy = &self.inner.config.results;
+        let mut content = Vec::with_capacity(output.content.len());
+        for block in output.content {
+            match block {
+                ContentBlock::Text { text } => {
+                    let capped = crate::cap_result_text(policy, text).await;
+                    if let Some(warning) = &capped.warning {
+                        // The user hears about a broken store. The model does not, because it
+                        // can do nothing about it and the note would spend context.
+                        tracing::warn!("{warning}");
+                    }
+                    content.push(ContentBlock::Text { text: capped.text });
+                }
+                other => content.push(other),
+            }
+        }
+        ToolOutput {
+            content,
+            is_error: output.is_error,
+        }
+    }
+
     /// Emit `ToolEnd` and append the tool-result message to the context.
+    ///
+    /// This is the one place every tool result passes through, so it is where the result cap
+    /// runs. A per-tool cap would be a rule each tool author must remember, and an MCP or
+    /// plugin tool would never learn it. See D-cap-at-one-choke-point.
     async fn finish_tool(&self, id: &str, output: ToolOutput) -> DispatchOutcome {
+        let output = self.cap_output(output).await;
         let message = Message {
             role: Role::Tool,
             content: vec![ContentBlock::ToolResult {

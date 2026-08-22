@@ -315,7 +315,7 @@ fn build_config_with_notices(
 async fn build_session(
     cli: &Cli,
     loaded: &rho_config::Config,
-    config: SessionConfig,
+    mut config: SessionConfig,
 ) -> anyhow::Result<(Session, Arc<rho_core::TaskRegistry>, SessionExtras)> {
     let name = provider::resolve_provider_name(loaded.provider.as_deref(), None)?;
     let provider = provider::build_provider(&name)?;
@@ -336,10 +336,28 @@ async fn build_session(
     )
     .await;
 
+    // The result store. The cap already runs without it; the store is what makes the tail
+    // readable and shrinks the preview from 64 KiB to 4 KiB. See SPEC-tool-result-handle.
+    let (results_dir, result_notices) = open_result_store().await;
+    if let Some((store, _)) = &results_dir {
+        config = config.with_result_policy(rho_core::ResultPolicy {
+            store: Some(Arc::clone(store)),
+            ..rho_core::ResultPolicy::default()
+        });
+    }
+
     let mut registry =
         rho_tools::builtin_registry_with_tasks_and_sandbox(Arc::clone(&tasks), config.sandbox);
     for tool in &extensions.mcp_tools {
         registry.register(Arc::clone(tool));
+    }
+    // Registered only when a store exists. A tool that always fails would spend schema bytes
+    // every turn and teach the model a capability rho does not have.
+    if let Some((store, _)) = &results_dir {
+        registry.register(Arc::new(rho_tools::ReadToolResultTool::new(
+            Arc::clone(store),
+            config.results.limits,
+        )));
     }
     let hooks = Arc::new(rho_core::HookChain::default());
 
@@ -385,7 +403,11 @@ async fn build_session(
                 .notices
                 .into_iter()
                 .chain(subagents.notices)
+                .chain(result_notices)
                 .collect(),
+            // Holding the guard keeps the directory alive for the session, and removes it when
+            // the session ends. See D-stored-result-inherits-session-trust.
+            results_dir: results_dir.map(|(_, guard)| guard),
             agents: subagents.registry,
             agent_definitions: subagents.loaded,
             mcp_pool: extensions.mcp_pool,
@@ -395,6 +417,9 @@ async fn build_session(
 
 /// What a caller must hold, and what it should show the user.
 struct SessionExtras {
+    /// The result store directory. Dropping it removes the stored results.
+    #[allow(dead_code)]
+    results_dir: Option<tempfile::TempDir>,
     /// Lines to print once, before the session starts.
     notices: Vec<String>,
     /// The subagent registry. Holding it keeps the process-wide live cap in force for as
@@ -422,6 +447,60 @@ fn system_prompt() -> String {
      Use the task tool with the wait action to be woken when it finishes or \
      reports progress. Never sleep and poll."
         .to_string()
+}
+
+/// Open a private directory for this session's stored tool results.
+///
+/// `rho-cli` writes no session file yet, so there is nothing to sit beside. A temporary
+/// directory with owner-only permissions has the same privacy and the same lifetime, and it is
+/// removed when the session ends. See D-stored-result-inherits-session-trust.
+///
+/// A failure is never fatal. Without a store the cap still runs, so the model still cannot
+/// flood the context; it only loses the ability to read a tail.
+async fn open_result_store() -> (
+    Option<(Arc<dyn rho_core::ResultStore>, tempfile::TempDir)>,
+    Vec<String>,
+) {
+    let guard = match tempfile::Builder::new().prefix("rho-results-").tempdir() {
+        Ok(guard) => guard,
+        Err(error) => {
+            return (
+                None,
+                vec![format!(
+                    "cannot open a result store: {error}. A large tool result will be cut \
+                     instead of stored."
+                )],
+            );
+        }
+    };
+    // Owner only. A stored result can hold whatever a tool read.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(error) =
+            std::fs::set_permissions(guard.path(), std::fs::Permissions::from_mode(0o700))
+        {
+            return (
+                None,
+                vec![format!(
+                    "cannot make the result store private: {error}. No result will be stored."
+                )],
+            );
+        }
+    }
+    match rho_core::FileResultStore::open(guard.path()).await {
+        Ok(store) => (
+            Some((Arc::new(store) as Arc<dyn rho_core::ResultStore>, guard)),
+            Vec::new(),
+        ),
+        Err(error) => (
+            None,
+            vec![format!(
+                "cannot open a result store: {error}. A large tool result will be cut instead \
+                 of stored."
+            )],
+        ),
+    }
 }
 
 /// Join the three parts of the stable prefix, in the one fixed order.
@@ -880,6 +959,84 @@ fn subagent_limits(cli: &Cli) -> rho_core::SubagentLimits {
 
 #[cfg(test)]
 mod tests {
+    // ---- the result store, wired ----
+
+    /// The store must really open, and it must be private. Without this the feature is a
+    /// library nobody calls, which is the defect `F-layered-config` already has.
+    #[tokio::test]
+    async fn the_result_store_opens_and_is_owner_only() {
+        let (opened, notices) = open_result_store().await;
+
+        let (store, guard) = opened.expect("a store must open on a normal host");
+        assert!(notices.is_empty(), "{notices:?}");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(guard.path())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o777,
+                0o700,
+                "a stored result can hold what a tool read"
+            );
+        }
+
+        // It is a working store, not just a directory.
+        let handle = store.put("evidence").await.unwrap();
+        let slice = store.read_range(&handle, 0, 64).await.unwrap();
+        assert_eq!(slice.text, "evidence");
+    }
+
+    /// Dropping the guard must remove the directory, so a stored result does not outlive its
+    /// session.
+    #[tokio::test]
+    async fn the_result_store_is_removed_with_its_session() {
+        let (opened, _) = open_result_store().await;
+        let (store, guard) = opened.unwrap();
+        let path = guard.path().to_path_buf();
+        store.put("evidence").await.unwrap();
+        assert!(path.is_dir());
+
+        drop(guard);
+
+        assert!(
+            !path.exists(),
+            "a stored result must not outlive its session"
+        );
+    }
+
+    /// A session with a store must advertise `read_tool_result`, and one without must not.
+    #[tokio::test]
+    async fn read_tool_result_is_advertised_only_with_a_store() {
+        let tasks = Arc::new(rho_core::TaskRegistry::new(rho_core::TaskLimits::default()));
+        let mut with_store = rho_tools::builtin_registry_with_tasks_and_sandbox(
+            Arc::clone(&tasks),
+            rho_core::SandboxMode::Off,
+        );
+        let without: Vec<String> = with_store.specs().iter().map(|s| s.name.clone()).collect();
+        assert!(
+            !without.contains(&"read_tool_result".to_string()),
+            "a tool that always fails must not be advertised"
+        );
+
+        // The same registration the session build does.
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn rho_core::ResultStore> =
+            Arc::new(rho_core::FileResultStore::open(dir.path()).await.unwrap());
+        with_store.register(Arc::new(rho_tools::ReadToolResultTool::new(
+            store,
+            rho_core::ResultLimits::default(),
+        )));
+        let names: Vec<String> = with_store.specs().iter().map(|s| s.name.clone()).collect();
+        assert!(
+            names.contains(&"read_tool_result".to_string()),
+            "with a store the tool must reach the model: {names:?}"
+        );
+    }
+
     // ---- the stable prefix, and its fixed order ----
 
     #[test]

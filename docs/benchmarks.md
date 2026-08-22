@@ -558,6 +558,18 @@ after each build with this command:
 stat -f%z target/release/rho
 ```
 
+### Binary size after the tool result handle
+
+`F-tool-result-handle` added the result store and the `read_tool_result` tool. Both live in
+crates every feature set already carries.
+
+| Feature set | Before | After | Command |
+| --- | --- | --- | --- |
+| default | 10,437,040 B | 10503536 B | `cargo build --release -p rho-cli` |
+| minimal | 6,986,560 B | 7053088 B | `cargo build --release -p rho-cli --no-default-features --features minimal` |
+
+The default set grew by 66496 bytes. The minimal set grew by 66528 bytes.
+
 ### Beside pi and jcode
 
 State rho's own numbers beside the two prior-art figures. The prior-art figures
