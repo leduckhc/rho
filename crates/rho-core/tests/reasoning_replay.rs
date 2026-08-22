@@ -562,3 +562,47 @@ fn an_unknown_key_at_every_level_is_ignored() {
     assert_eq!(result.entries.len(), 1, "the record survives");
     assert_eq!(result.dropped_records, 0, "nothing was dropped");
 }
+
+/// A record whose raw line is under the cap, but whose re-encoded form is over it, is dropped.
+///
+/// The first version of the whole-record bound gated the check on the raw line length, assuming
+/// a line under the cap could not encode to more than the cap. A probe disproved it: a line
+/// packed with floats in exponent form re-encodes 3.8 times larger, because `1e15` becomes
+/// `1000000000000000.0`. So a 60 kB record passed the gate and landed at 228 kB.
+///
+/// `ToolCall.arguments` is free JSON from the model, so this shape is reachable.
+#[test]
+fn a_record_that_grows_when_re_encoded_is_dropped() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("grower.jsonl");
+    let header = serde_json::json!({
+        "id": "r0", "parentId": null, "timestamp": "1700000000000", "type": "session",
+        "version": 1, "cwd": "/tmp", "approval": "allow-all", "sandbox": "off"
+    });
+    // Each value is four characters on the wire and eighteen once re-encoded.
+    let floats: String = (0..3000)
+        .map(|index| format!("\"k{index}\":1e15"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let record = format!(
+        r#"{{"id":"r1","parentId":"r0","timestamp":"1700000000000","type":"message","message":{{"role":"assistant","content":[{{"type":"tool_call","id":"1","name":"t","arguments":{{{floats}}}}}]}}}}"#
+    );
+    let good = serde_json::json!({
+        "id": "r2", "parentId": "r0", "timestamp": "1700000000000", "type": "message",
+        "message": { "role": "assistant", "content": [{ "type": "text", "text": "after" }] }
+    });
+    assert!(
+        record.len() < rho_core::MAX_RECORD_BYTES,
+        "the raw line must be under the cap, or the test proves nothing: {} bytes",
+        record.len()
+    );
+    std::fs::write(&path, format!("{header}\n{record}\n{good}\n")).expect("write the file");
+
+    let result = rho_core::SessionReader::read(&path).expect("the file loads");
+    assert_eq!(
+        result.entries.len(),
+        1,
+        "the record that grows past the cap is dropped, and the next one survives"
+    );
+    assert_eq!(result.dropped_records, 1, "the drop is counted");
+}

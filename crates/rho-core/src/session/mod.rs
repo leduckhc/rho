@@ -536,15 +536,62 @@ fn cap_block(block: ContentBlock, spills: &mut Vec<String>) -> ContentBlock {
     }
 }
 
+/// A sink that counts encoded bytes and stops as soon as the count passes a limit.
+///
+/// It allocates nothing, and it short-circuits, so measuring a record costs at most the limit
+/// rather than the size of the record.
+struct ByteCounter {
+    count: usize,
+    limit: usize,
+}
+
+impl Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.count += buf.len();
+        if self.count > self.limit {
+            // Any error stops the serializer. The caller reads the stop as "does not fit".
+            return Err(std::io::Error::other("the record is over the limit"));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Does this record fit the record cap once its fields are bounded?
 ///
 /// A record that does not fit was not written by rho, because the write path caps the whole
 /// encoded line. Dropping it is the same answer the write path would have given.
+///
+/// **The first version gated this on the raw line length**, on the reasoning that a line under
+/// the cap could not encode to more than the cap. That is false, and a probe measured it: a
+/// line packed with floats in exponent form re-encodes 3.8 times larger, because `1e15` becomes
+/// `1000000000000000.0`. A 60 kB record therefore slipped the gate and landed at 228 kB. The
+/// count is now exact and runs for every record, and `ByteCounter` stops at the cap so it costs
+/// no more than the cap.
 fn record_fits(entry: &Entry) -> bool {
-    match encode(entry) {
-        Ok(line) => line.len() <= MAX_RECORD_BYTES,
-        // A record that cannot be encoded cannot be written back either, so it does not fit.
-        Err(_) => false,
+    #[cfg_attr(feature = "fast-json", allow(unused_mut))]
+    let mut counter = ByteCounter {
+        count: 0,
+        limit: MAX_RECORD_BYTES,
+    };
+    // One mechanism, not two. A first version also compared `counter.count` at the end, and a
+    // mutation showed that each guard masked the other: deleting either changed nothing a test
+    // could see. The same redundant-guard trap appeared in `ProviderState::for_owner`, and the
+    // answer is the same. The abort is the guard, and `a_counter_stops_at_its_limit` pins it.
+    #[cfg(not(feature = "fast-json"))]
+    {
+        serde_json::to_writer(&mut counter, entry).is_ok()
+    }
+    // `sonic_rs` writes through its own `WriteExt`, which `ByteCounter` does not implement, so
+    // the optional fast codec measures by encoding instead. One allocation, bounded by the line
+    // cap. The answer is the same, and only the cost differs, on a path that is opt-in.
+    #[cfg(feature = "fast-json")]
+    {
+        let _ = counter;
+        matches!(encode(entry), Ok(line) if line.len() <= MAX_RECORD_BYTES)
     }
 }
 
@@ -775,7 +822,7 @@ impl SessionReader {
                     //
                     // The re-encode runs only when the raw line was already over the cap, which
                     // a record rho wrote never is. So a normal read pays nothing.
-                    if line.len() > MAX_RECORD_BYTES && !record_fits(&entry) {
+                    if !record_fits(&entry) {
                         dropped_records += 1;
                         tracing::warn!(
                             bytes = line.len(),
