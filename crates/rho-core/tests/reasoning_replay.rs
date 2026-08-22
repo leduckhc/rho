@@ -38,6 +38,23 @@ fn state(value: serde_json::Value) -> ProviderState {
     }
 }
 
+/// Every plain text a read produced, so a test can name the survivor rather than count it.
+fn surviving_texts(result: &rho_core::ReadResult) -> Vec<String> {
+    result
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.record {
+            rho_core::Record::Message { message } => Some(message.content.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Write one message through the recorder, and return every line of the session file.
 ///
 /// The block travels the real write path: `redact_block`, then `cap_record`. It goes in as a
@@ -522,12 +539,14 @@ fn a_record_of_many_small_blocks_is_dropped_on_read() {
     std::fs::write(&path, format!("{header}\n{record}\n{good}\n")).expect("write the file");
 
     let result = rho_core::SessionReader::read(&path).expect("the file loads");
-    assert_eq!(
-        result.entries.len(),
-        1,
-        "the oversize record is dropped and the next one survives"
-    );
     assert_eq!(result.dropped_records, 1, "the drop is counted");
+    // The survivor's content, not a count. A mutation review inverted the bound so that the
+    // oversize record was kept and the good one dropped, and a count of one passed either way.
+    assert_eq!(
+        surviving_texts(&result),
+        vec!["after".to_string()],
+        "the good record is the one that survives"
+    );
 }
 
 /// An unknown key on a record does not fail the load.
@@ -599,12 +618,12 @@ fn a_record_that_grows_when_re_encoded_is_dropped() {
     std::fs::write(&path, format!("{header}\n{record}\n{good}\n")).expect("write the file");
 
     let result = rho_core::SessionReader::read(&path).expect("the file loads");
-    assert_eq!(
-        result.entries.len(),
-        1,
-        "the record that grows past the cap is dropped, and the next one survives"
-    );
     assert_eq!(result.dropped_records, 1, "the drop is counted");
+    assert_eq!(
+        surviving_texts(&result),
+        vec!["after".to_string()],
+        "the good record is the one that survives, not the oversize one"
+    );
 }
 
 /// A file of valid but oversize records stops at the ceiling too.

@@ -2630,6 +2630,30 @@ mod once_tests {
         assert!(!first_sighting(&mut seen, "model-b"));
     }
 
+    /// The ceiling is a stated number, and the clear happens **at** it.
+    ///
+    /// A mutation review found two escapes here, both of the shape this branch has now hit four
+    /// times: every assertion derived the bound from the symbol under test, so `64` could become
+    /// `65` and `>=` could become `>` with nothing failing.
+    #[test]
+    fn the_remembered_model_ceiling_is_sixty_four() {
+        assert_eq!(REMEMBERED_MODELS, 64);
+
+        let mut seen = std::collections::HashSet::new();
+        for index in 0..64 {
+            first_sighting(&mut seen, &format!("model-{index}"));
+        }
+        assert_eq!(seen.len(), 64, "the set fills to the ceiling");
+        // The next sighting clears at the ceiling, so the set holds one entry again rather
+        // than sixty-five. A `>` instead of `>=` would let it reach sixty-five.
+        first_sighting(&mut seen, "model-64");
+        assert_eq!(
+            seen.len(),
+            1,
+            "the clear happens at the ceiling, not past it"
+        );
+    }
+
     #[test]
     fn the_set_is_bounded_and_never_falls_silent() {
         let mut seen = HashSet::new();

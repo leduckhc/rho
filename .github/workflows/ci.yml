@@ -111,6 +111,22 @@ jobs:
           python3 bench/check-prose.py $(find docs -name '*.md') | tee prose.txt
           grep -q '^VIOLATIONS 0$' prose.txt
 
+  claimed-tests:
+    name: every test a commit names must exist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The guard reads commit messages, so it needs the history of the branch.
+          fetch-depth: 0
+      # This guard comes from a real loss, not from a worry. A review agent whose worktree
+      # isolation failed restored an older copy of a file over three tests. The suite stayed
+      # green, because a missing test fails nothing, and a commit message then named one of
+      # them. A test that exists only in a commit message is a false claim about the work.
+      - run: |
+          python3 bench/check-claimed-tests.py | tee claimed.txt
+          grep -qE '^VIOLATIONS 0' claimed.txt
+
   pty-harness:
     name: pty harness teardown guards
     runs-on: ubuntu-latest

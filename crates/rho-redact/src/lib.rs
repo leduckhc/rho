@@ -451,6 +451,23 @@ mod trojan_source_tests {
     }
 
     /// A short line is untouched, so the bound never rewrites ordinary output.
+    /// The bound is a stated number, so a literal pins it.
+    ///
+    /// A mutation review changed 4096 to 4097 and every test passed, because each one derived
+    /// the length from the symbol. That is the same shape as the answer head room and the budget
+    /// ladder, and this is the third time it has appeared on this branch.
+    #[test]
+    fn the_line_bound_is_four_thousand_and_ninety_six() {
+        assert_eq!(MAX_LINE_CHARS, 4096);
+        let long = "z".repeat(5000);
+        let out = sanitize_line(&long);
+        assert_eq!(
+            out.chars().count(),
+            4096 + " [cut]".chars().count(),
+            "the answer is the bound plus the marker, as literals"
+        );
+    }
+
     #[test]
     fn a_short_line_is_not_marked() {
         assert_eq!(sanitize_line("a plain line"), "a plain line");

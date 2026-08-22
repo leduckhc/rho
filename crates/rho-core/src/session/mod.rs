@@ -1337,3 +1337,80 @@ impl SessionRecorder {
         self.log.is_ephemeral()
     }
 }
+
+#[cfg(test)]
+mod byte_counter_tests {
+    //! The counter that bounds the cost of measuring a record.
+    //!
+    //! Without an early stop, measuring an eight-megabyte record would walk all of it to learn
+    //! that it exceeds sixty-four kilobytes. A mutation review found that the stop and a final
+    //! length comparison masked each other, so the comparison went and this pins the stop.
+    //!
+    //! **These tests were written once and lost.** A review agent whose isolation failed
+    //! restored an older copy of this file over them, and the loss was invisible: a missing test
+    //! fails nothing. A commit message then claimed `a_counter_stops_at_its_limit` existed while
+    //! it did not. So they are here again, and an audit of every test name claimed in a commit
+    //! message now runs against the tree.
+
+    use super::*;
+
+    /// The boundary itself: exactly the limit fits, and one byte more does not.
+    ///
+    /// A mutation review changed `>` to `>=`. A record that encodes to exactly the cap must be
+    /// kept, because the write path would have written it.
+    #[test]
+    fn a_counter_accepts_exactly_its_limit_and_no_more() {
+        let mut counter = ByteCounter {
+            count: 0,
+            limit: 100,
+        };
+        assert!(
+            counter.write(&[b'x'; 100]).is_ok(),
+            "exactly the limit fits, so a record at the cap is kept"
+        );
+        assert_eq!(counter.count, 100);
+        assert!(
+            counter.write(&[b'x'; 1]).is_err(),
+            "one byte past the limit does not"
+        );
+    }
+
+    #[test]
+    fn a_counter_stops_at_its_limit() {
+        let mut counter = ByteCounter {
+            count: 0,
+            limit: 4096,
+        };
+        let chunk = [b'x'; 1024];
+        let mut writes = 0;
+        let mut failed = false;
+        for _ in 0..1000 {
+            writes += 1;
+            if counter.write(&chunk).is_err() {
+                failed = true;
+                break;
+            }
+        }
+        assert!(failed, "the counter must stop rather than count for ever");
+        assert!(
+            writes <= 6,
+            "it stops just past the limit, not at the end of the input: {writes} writes"
+        );
+        assert!(
+            counter.count <= 4096 + chunk.len(),
+            "the work is bounded by the limit, not by the input: {} bytes",
+            counter.count
+        );
+    }
+
+    #[test]
+    fn a_counter_under_its_limit_accepts_every_write() {
+        let mut counter = ByteCounter {
+            count: 0,
+            limit: 4096,
+        };
+        assert!(counter.write(&[b'y'; 100]).is_ok());
+        assert!(counter.write(&[b'y'; 100]).is_ok());
+        assert_eq!(counter.count, 200);
+    }
+}

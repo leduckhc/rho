@@ -317,10 +317,16 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo build -p rho-cli --no-default-features --features minimal
 python3 bench/check-ids.py
+python3 bench/check-claimed-tests.py
 ```
 
 `bench/check-ids.py` proves that every spec, ADR, decision, and feature reference resolves,
 and that no numeric id came back. See `docs/ids.md`.
+
+`bench/check-claimed-tests.py` proves that every test a commit message names exists in the
+tree. A green suite cannot see a missing test, and on this branch three tests were lost to a
+concurrent writer while the suite stayed green and a commit claimed one of them by name. A test
+that exists only in a commit message is a false claim about the work.
 
 ## Prose rules
 

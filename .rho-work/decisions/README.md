@@ -10,6 +10,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-a-budget-is-measured-not-asserted](20260818-120304-D-a-budget-is-measured-not-asserted.md) | 20260818 | A cost budget is measured, or it is prose |
 | [D-a-bad-middle-record-is-skipped-and-counted](20260822-093000-D-a-bad-middle-record-is-skipped-and-counted.md) | 20260822 | A bad record in the middle of a session file is skipped and counted |
 | [D-a-merged-value-error-names-no-file](20260821-231500-D-a-merged-value-error-names-no-file.md) | 20260821 | A merged value error names the key and the value, and never a file |
+| [D-a-second-writer-can-delete-a-test-in-silence](20260822-131500-D-a-second-writer-can-delete-a-test-in-silence.md) | 20260822 | A second writer can delete a test in silence, so a commit's claims are checked |
 | [D-a-panel-nobody-can-open](20260818-171500-D-a-panel-nobody-can-open.md) | 20260818 | A rendered panel with no key that opens it is not a feature |
 | [D-a-role-column-is-not-a-stack](20260818-181500-D-a-role-column-is-not-a-stack.md) | 20260818 | A theme role resolves in one mode, and the columns never stack |
 | [D-acp-cancelled-spelling](20260817-171334-D-acp-cancelled-spelling.md) | 20260817 | The ACP cancelled stop reason needs an explicit serde rename |
