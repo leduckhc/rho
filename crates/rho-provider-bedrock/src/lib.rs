@@ -618,52 +618,35 @@ pub fn build_messages_for_model(
     // replay path look covered by tests that could never reach it, because `for_owner`
     // refuses an empty name. One function now, and every caller states its model.
     //
-    // Only the current tool loop replays its reasoning. The prompt is append-only, so a
-    // block re-sent on every later turn costs bytes for the whole session: twenty turns
-    // re-upload turn one's trace nineteen times. Anthropic needs the thinking of the
-    // assistant turns that carry the pending call, and nothing older. A performance review
-    // measured the growth as O(turns squared). See `D-replay-only-the-current-loop`.
-    // The scope is the **one assistant turn that carries the pending call**, and nothing else.
-    //
-    // Two reviews shaped this rule, and a test caught a bug in the second version.
-    //
-    // The first version anchored on the last user message, and replayed every assistant turn
-    // after it. A review found that an autonomous tool loop holds no user message, so a
-    // hundred-iteration loop still re-sent iteration one's trace ninety-nine times.
-    //
-    // The second version replayed the last assistant turn. `a_prompt_with_no_answer_replays_nothing`
-    // then failed: when a user prompt follows that turn, its chain is already closed, and its
-    // thinking must not travel again.
-    //
-    // So the block replays only when the last assistant turn comes **after** the last prompt.
-    // Anthropic needs the thinking of the pending call's turn, and a live three-call loop
-    // confirms it accepts a request with the earlier turns' thinking omitted. See
-    // `D-replay-only-the-current-loop`.
-    let last_prompt = messages
-        .iter()
-        .rposition(|message| message.role == Role::User);
-    let pending_turn = messages
-        .iter()
-        .rposition(|message| message.role == Role::Assistant)
-        .filter(|turn| last_prompt.is_none_or(|prompt| *turn > prompt));
     use aws_sdk_bedrockruntime::types::{
         ContentBlock as SdkBlock, ConversationRole, Message as SdkMessage, ToolResultBlock,
         ToolResultContentBlock, ToolUseBlock,
     };
     use rho_core::ContentBlock;
 
-    // Collect the blocks per role, merging a run of messages that share a role.
+    // The scope is the **trailing run of assistant turns**, which is the message the provider
+    // is being asked to continue. Three reviews and one test shaped this rule.
     //
-    // Converse requires strictly alternating roles. `rho-core` records one
-    // `Role::Tool` message per tool result, and Bedrock has no tool role, so every
-    // result maps to `user`. Two tool calls in one turn therefore produced two
-    // consecutive user messages, and Bedrock answered 400.
+    // 1. "From the last user message onward" replayed every turn of a loop. A performance
+    //    review found that an autonomous loop holds no user message, so a hundred iterations
+    //    re-sent iteration one's trace ninety-nine times.
+    // 2. "The last assistant turn" then failed `a_prompt_with_no_answer_replays_nothing`: a turn
+    //    followed by a prompt has a closed chain, and its thinking must not travel again.
+    // 3. "The last assistant turn, after the last prompt" then failed a review's shape. Bedrock
+    //    wants alternating roles, so consecutive assistant turns **merge into one wire message**.
+    //    Keeping only the last turn's thinking left the earlier turn's tool call with no thinking
+    //    in front of it, which Anthropic refuses. See `a_merged_pair_of_turns_keeps_both_traces`.
     //
-    // One tool call worked, which is why the unit tests and the first live check both
-    // passed. A live run with two calls found it.
-    //
-    // Merging is also what Bedrock wants: all tool results for one turn belong in a
-    // single user message.
+    // So the run starts after the last message that is not from the assistant, and it replays
+    // every turn inside it. A tool result ends the run, so a long loop still sends one trace.
+    let run_start = messages
+        .iter()
+        .rposition(|message| message.role != Role::Assistant)
+        .map(|last_other| last_other + 1)
+        .unwrap_or(0);
+    // A run that is empty carries no pending call, so nothing replays.
+    let pending_run = run_start..messages.len();
+
     let mut grouped: Vec<(ConversationRole, Vec<SdkBlock>)> = Vec::new();
     for (position, message) in messages.iter().enumerate() {
         let role = match message.role {
@@ -722,7 +705,7 @@ pub fn build_messages_for_model(
                 ContentBlock::ReasoningReplay { text, state } => {
                     // Out of the current loop, so it is history. It is dropped whole, and it
                     // never becomes prose, because prose would read as an answer.
-                    if pending_turn == Some(position)
+                    if pending_run.contains(&position)
                         && let Some(reasoning) = replay_block(text, state, model)
                     {
                         blocks.push(SdkBlock::ReasoningContent(reasoning));
@@ -2411,15 +2394,15 @@ mod replay_scope_tests {
         );
     }
 
-    /// Inside one loop, only the turn that carries the pending call replays.
+    /// A separated turn inside a loop does not replay: only the pending run does.
     ///
-    /// This test asserted the opposite until a second performance review showed why that was
-    /// wrong: an autonomous tool loop holds no user message, so keeping every in-loop turn
-    /// re-sent the first trace once per iteration. The rule changed, so the test follows the
-    /// rule, and a live three-call loop on Bedrock proved the narrower request is accepted.
-    /// See `docs/verification/reasoning-replay.md` section 7.
+    /// This test was called `a_whole_tool_loop_keeps_its_reasoning`, and it asserted that both
+    /// turns of a loop travel. A performance review changed the rule, and the body followed
+    /// while the name stayed. A review then said the plain thing: a name is the contract a
+    /// future `grep` reads, and that name now asserted the opposite of its body. So the name
+    /// moved too.
     #[test]
-    fn a_whole_tool_loop_keeps_its_reasoning() {
+    fn a_separated_turn_in_a_loop_does_not_replay() {
         let messages = vec![
             user("do it"),
             assistant(vec![replay("first thought")]),
@@ -2442,12 +2425,13 @@ mod replay_scope_tests {
         );
     }
 
-    /// A transcript with no user message still replays exactly one turn.
+    /// A transcript with no user message replays its trailing run, and nothing before it.
     ///
-    /// The scope is the last assistant turn, so it needs no prompt to anchor it. That also
-    /// removes the unbounded fallback the first version had, which a review flagged.
+    /// This test was called `a_transcript_with_no_prompt_replays_everything`, which described a
+    /// fallback that an earlier rule had and this one does not. A review called it the clearest
+    /// retrofit tell in the delta, and it was right: the name described deleted behaviour.
     #[test]
-    fn a_transcript_with_no_prompt_replays_everything() {
+    fn a_transcript_with_no_prompt_replays_only_its_trailing_run() {
         let messages = vec![
             assistant(vec![replay("first thought")]),
             Message {
@@ -2660,5 +2644,129 @@ mod once_tests {
         // Past the ceiling the set clears, so a model is reported again rather than silenced.
         // Silence is the defect the report was written to fix.
         assert!(first_sighting(&mut seen, "model-0"));
+    }
+}
+
+#[cfg(test)]
+mod merged_turn_tests {
+    //! Two assistant turns with no tool result between them merge into one wire message.
+    //!
+    //! A review found the shape and what it costs: Bedrock wants strictly alternating roles, so
+    //! `build_messages_for_model` merges consecutive same-role messages. If the scope keeps only
+    //! the very last assistant turn, the earlier turn's `tool_use` travels inside the merged
+    //! message with **no** thinking in front of it, which Anthropic rejects when thinking is on.
+    //!
+    //! The shape is not reachable from today's loop, because a cancelled turn writes its tool
+    //! results and a new prompt is a user message. A compaction step or a spliced transcript
+    //! would reach it, so the rule covers it rather than waiting.
+
+    use super::*;
+    use rho_core::{ContentBlock, Message, ProviderState, ReasoningOwner, Role};
+
+    const MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+
+    fn replay(text: &str) -> ContentBlock {
+        ContentBlock::ReasoningReplay {
+            text: text.to_string(),
+            state: Some(ProviderState {
+                owner: ReasoningOwner {
+                    provider: "bedrock".to_string(),
+                    model: MODEL.to_string(),
+                },
+                value: serde_json::json!({ "signature": format!("sig-{text}") }),
+            }),
+        }
+    }
+
+    fn call(id: &str) -> ContentBlock {
+        ContentBlock::ToolCall {
+            id: id.to_string(),
+            name: "read".to_string(),
+            arguments: serde_json::json!({}),
+            state: None,
+        }
+    }
+
+    fn sent(messages: &[Message]) -> Vec<String> {
+        use aws_sdk_bedrockruntime::types::{
+            ContentBlock as SdkBlock, ReasoningContentBlock as SdkReasoning,
+        };
+        build_messages_for_model(messages, MODEL)
+            .iter()
+            .flat_map(|message| message.content().iter())
+            .filter_map(|block| match block {
+                SdkBlock::ReasoningContent(SdkReasoning::ReasoningText(text)) => {
+                    Some(text.text().to_string())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every assistant turn that merges into the pending message keeps its reasoning.
+    ///
+    /// A tool call without its thinking is the request Anthropic refuses, so the scope is the
+    /// trailing run of assistant turns, not the single last one.
+    #[test]
+    fn a_merged_pair_of_turns_keeps_both_traces() {
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "do it".to_string(),
+                }],
+            },
+            // A turn that was cancelled before its tool ran, so no result follows it.
+            Message {
+                role: Role::Assistant,
+                content: vec![replay("first thought"), call("1")],
+            },
+            // The retry, which is the pending turn. Both merge into one wire message.
+            Message {
+                role: Role::Assistant,
+                content: vec![replay("second thought"), call("2")],
+            },
+        ];
+        assert_eq!(
+            sent(&messages),
+            vec!["first thought".to_string(), "second thought".to_string()],
+            "a merged message carries the thinking of every turn inside it"
+        );
+    }
+
+    /// A tool result still ends the run, so a long loop sends one trace.
+    #[test]
+    fn a_tool_result_still_bounds_the_run() {
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "do it".to_string(),
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![replay("old thought"), call("1")],
+            },
+            Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::ToolResult {
+                    tool_call_id: "1".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: "done".to_string(),
+                    }],
+                    is_error: false,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![replay("pending thought"), call("2")],
+            },
+        ];
+        assert_eq!(
+            sent(&messages),
+            vec!["pending thought".to_string()],
+            "a separated turn is history, so a long loop stays at one trace"
+        );
     }
 }

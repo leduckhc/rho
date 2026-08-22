@@ -158,8 +158,30 @@ run 2 exit=0 -> **zx9-quibble, kt4-marlow, qp7-tundra**
 ```
 
 A plain thinking turn still works, with 286 bytes of reasoning on stderr, and OpenRouter is
-unaffected. So the replay is now one block per request, whatever the length of the loop, and
-that is measured against the provider rather than assumed from the documentation.
+unaffected.
+
+### After the trailing-run rule
+
+A review found a shape the rule mishandled, so the rule changed again and the runs were repeated.
+A reviewer also said parallel tool calls in one turn had never been driven, so that ran too.
+
+```text
+three-call loop, run 1: zx9-quibble,kt4-marlow,qp7-tundra          exit 0
+three-call loop, run 2: **zx9-quibble, kt4-marlow, qp7-tundra**    exit 0
+parallel calls in one turn: **b.txt:** `kt4-marlow`                exit 0
+a plain thinking turn: 9.9 is larger than 9.11.                    exit 0
+```
+
+The parallel-call run finished and printed one of the two files, which is the model choosing what
+to say rather than a transport failure. The request was accepted, which is what this run tests.
+
+**What that proves, exactly.** One shape was driven: sequential turns, one tool per turn, each
+separated by a tool result, at a loop length of three. It proves that a provider accepts a request
+which omits the thinking of earlier separated turns. It does **not** prove the flat count at
+length 20 or 100, which is a unit test, and it does not cover a merged run of consecutive
+assistant turns, which a review found and which is now covered by a test rather than by a live
+run. A reviewer asked for this paragraph, because the first version of it claimed the general
+case from one measurement.
 
 ## What is proved, and what is not
 

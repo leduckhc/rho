@@ -350,8 +350,13 @@ this path would turn every later key into a failed load.
 **A record read from a file is bounded as a whole, not only field by field.** The write path
 caps the encoded record at `MAX_RECORD_BYTES`, and the read path caps each field. A record of
 twenty thousand small blocks passes every field cap and still weighs megabytes, so the read path
-checks the total too. The check runs only when the raw line was already over the cap, so a
-normal read pays nothing.
+checks the total too.
+
+The check first tried to run only when the raw line already exceeded the cap. That was unsound,
+and a probe measured why: `serde_json` writes `1e15` as `1000000000000000.0`, so a line packed
+with floats in exponent form re-encodes 3.8 times larger, and a 60 kB record landed at 228 kB
+inside the gate. The count is now exact for every record, and it stops at the cap, so measuring
+one record costs no more than the cap.
 
 **An old `signature` key is read and dropped.** A file from before this change maps to
 `ReasoningTrace`, and a stale signature never replays.

@@ -606,3 +606,51 @@ fn a_record_that_grows_when_re_encoded_is_dropped() {
     );
     assert_eq!(result.dropped_records, 1, "the drop is counted");
 }
+
+/// A file of valid but oversize records stops at the ceiling too.
+///
+/// The ceiling first covered only the records that failed to decode. A security review found
+/// that a file of records which decode and then fail to fit walked to the end of the file, so
+/// the bound existed on one of the two paths that drop a record.
+#[test]
+fn a_file_of_oversize_records_stops_at_the_ceiling() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("oversize.jsonl");
+    let header = serde_json::json!({
+        "id": "r0", "parentId": null, "timestamp": "1700000000000", "type": "session",
+        "version": 1, "cwd": "/tmp", "approval": "allow-all", "sandbox": "off"
+    });
+    // Each record must genuinely fail to fit, or this test asserts nothing. A first version
+    // used two thousand small blocks, which came to sixty kilobytes and fitted, so zero records
+    // were dropped and the assertion passed for the wrong reason. A mutation review found it by
+    // deleting the ceiling and watching the test still pass.
+    let blocks: Vec<serde_json::Value> = (0..6000)
+        .map(|index| serde_json::json!({ "type": "text", "text": format!("block-{index}") }))
+        .collect();
+    let record = serde_json::json!({
+        "id": "r1", "parentId": "r0", "timestamp": "1700000000000", "type": "message",
+        "message": { "role": "assistant", "content": blocks }
+    })
+    .to_string();
+    let mut file = format!("{header}\n");
+    for _ in 0..(rho_core::MAX_DROPPED_RECORDS * 2) {
+        file.push_str(&record);
+        file.push('\n');
+    }
+    std::fs::write(&path, file).expect("write the file");
+
+    let result = rho_core::SessionReader::read(&path).expect("the header loads");
+    assert!(
+        result.dropped_records > 0,
+        "the records must actually fail to fit, or this test proves nothing"
+    );
+    assert_eq!(
+        result.dropped_records,
+        rho_core::MAX_DROPPED_RECORDS,
+        "the read stops exactly at the ceiling"
+    );
+    assert!(
+        result.entries.is_empty(),
+        "no oversize record survives the read"
+    );
+}

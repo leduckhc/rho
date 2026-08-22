@@ -1,4 +1,4 @@
-# Only the current tool loop replays its reasoning
+# Only the pending run of assistant turns replays its reasoning
 
 Date: 20260822. Reference: `D-replay-only-the-current-loop`.
 Found by a performance review of the reasoning work.
@@ -31,8 +31,16 @@ The rule took three attempts, and each one was corrected by evidence rather than
 2. **The last assistant turn.** A test then failed: `a_prompt_with_no_answer_replays_nothing`.
    When a user prompt follows that turn, its chain is already closed, and its thinking must not
    travel again.
-3. **The last assistant turn, and only when it comes after the last prompt.** This is the rule
-   in the code. A pending call has a chain, and a closed one does not.
+3. **The last assistant turn, and only when it comes after the last prompt.** A review then
+   found the shape that breaks: Bedrock wants alternating roles, so consecutive assistant turns
+   merge into one wire message. Keeping only the last turn's thinking left the earlier turn's
+   tool call with no thinking in front of it, which Anthropic refuses.
+4. **The trailing run of assistant turns.** This is the rule in the code. The run starts after
+   the last message that is not from the assistant, so a tool result ends it and a long loop
+   still sends one trace. A merged pair keeps both.
+
+The title of this file said "one assistant turn" for two of those attempts, while the code
+comment said "turns". A review named the contradiction, and the title now matches the rule.
 
 ## Why
 

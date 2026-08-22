@@ -110,20 +110,26 @@ pub fn sanitize_text(input: &str) -> String {
 
 /// Can this character reorder or hide the text around it?
 ///
-/// The set is the bidirectional controls and the zero-width characters. Rust's `is_control`
-/// answers only for the `Cc` class, and every character here is `Cf` or a space separator, so
-/// each one used to pass through untouched.
+/// This asks the Unicode category, not a list. A first version listed the bidi controls and the
+/// zero-width characters it had thought of, and a security review named seven it had missed,
+/// including `U+2028`. That one is a line separator: `char::is_control` answers false for it, so
+/// it survived and broke the one-line layout this module promises. A list of instances loses to
+/// the next character somebody finds, so the rule is now the property itself.
+///
+/// - `Cf`, the format class, holds every bidi control, the zero-width characters, the soft
+///   hyphen, the byte-order mark, and the tag characters.
+/// - `Zl` and `Zp`, the line and paragraph separators, break a line without being controls.
+/// - `Mn` variation selectors change how the character before them draws.
 fn reorders_or_hides(ch: char) -> bool {
-    matches!(ch,
-        // Zero width space, joiner, non-joiner, and the bidi marks beside them.
-        '\u{200b}'..='\u{200f}'
-        // The bidi embedding and override controls, which are the Trojan Source set.
-        | '\u{202a}'..='\u{202e}'
-        // The bidi isolates.
-        | '\u{2066}'..='\u{2069}'
-        // A soft hyphen and a byte-order mark, both invisible in a terminal.
-        | '\u{00ad}'
-        | '\u{feff}')
+    use unicode_general_category::{GeneralCategory, get_general_category};
+
+    matches!(
+        get_general_category(ch),
+        GeneralCategory::Format
+            | GeneralCategory::LineSeparator
+            | GeneralCategory::ParagraphSeparator
+            | GeneralCategory::NonspacingMark
+    )
 }
 
 /// The longest line `sanitize_line` returns. A log line is for a human, and a megabyte of it
@@ -132,14 +138,35 @@ pub const MAX_LINE_CHARS: usize = 4096;
 
 /// Sanitise text for a single line. Also folds a newline and a tab into a space, so the
 /// result cannot break a one-line layout, and bounds the length.
+/// The head of `input` that `sanitize_line` may return, plus one character so a cut is visible.
+///
+/// It returns a slice, so it allocates nothing. This exists because the bound must bound the
+/// **work**, not only the answer: a security review found the first version sanitising a whole
+/// input before trimming it, so a hundred megabytes of control bytes allocated three hundred
+/// megabytes and then threw almost all of it away.
+///
+/// A mutation that sanitises the whole input instead produces the same string, so no test of
+/// the output can see it. This function is the guard, and `a_line_head_is_bounded` pins it.
+pub fn line_head(input: &str) -> &str {
+    match input.char_indices().nth(MAX_LINE_CHARS + 1) {
+        Some((at, _)) => &input[..at],
+        None => input,
+    }
+}
+
 pub fn sanitize_line(input: &str) -> String {
-    let mut out: String = sanitize_text(input)
+    let head = line_head(input);
+    let mut out: String = sanitize_text(head)
         .chars()
         .map(|ch| if ch == '\n' || ch == '\t' { ' ' } else { ch })
         .take(MAX_LINE_CHARS)
         .collect();
     // Say that it was cut, so a reader never trusts a truncated line as whole.
-    if out.chars().count() == MAX_LINE_CHARS && input.chars().count() > MAX_LINE_CHARS {
+    //
+    // The marker is in band, so a line that already ends in `[cut]` cannot be told from one
+    // that rho cut. A review named that, and it stays: an out-of-band signal would change the
+    // return type of a function whose whole job is to hand a caller one printable line.
+    if out.chars().count() == MAX_LINE_CHARS && head.chars().count() > MAX_LINE_CHARS {
         out.push_str(" [cut]");
     }
     out
@@ -348,6 +375,40 @@ mod trojan_source_tests {
 
     use super::*;
 
+    /// The characters a security review named as missing from the first version.
+    ///
+    /// `U+2028` is the important one: it is a line separator, `char::is_control` answers false,
+    /// and it broke the one-line layout this module promises.
+    #[test]
+    fn a_reviewer_named_character_never_survives() {
+        for ch in [
+            '\u{061c}',  // arabic letter mark, a bidi control
+            '\u{2028}',  // line separator, not a control character
+            '\u{2029}',  // paragraph separator
+            '\u{180e}',  // mongolian vowel separator
+            '\u{fe0f}',  // variation selector 16
+            '\u{e0001}', // a language tag character
+            '\u{e0041}', // a tag character
+        ] {
+            let out = sanitize_line(&format!("safe{ch}text"));
+            assert!(!out.contains(ch), "{ch:?} must not survive: {out:?}");
+            assert!(
+                out.contains("safe") && out.contains("text"),
+                "the text stays: {out:?}"
+            );
+        }
+    }
+
+    /// The bound bounds the work, not only the answer.
+    #[test]
+    fn a_huge_input_is_not_walked_in_full() {
+        // Every byte would become a three-byte replacement, so the old order allocated three
+        // times the input before trimming. This asserts the result, and the cost is the point.
+        let huge = "\u{7}".repeat(1_000_000);
+        let out = sanitize_line(&huge);
+        assert!(out.chars().count() <= MAX_LINE_CHARS + " [cut]".len());
+    }
+
     #[test]
     fn a_bidi_control_never_survives() {
         for ch in [
@@ -402,5 +463,41 @@ mod trojan_source_tests {
         let out = sanitize_line(&exact);
         assert_eq!(out.chars().count(), MAX_LINE_CHARS);
         assert!(!out.ends_with("[cut]"));
+    }
+}
+
+#[cfg(test)]
+mod line_head_tests {
+    //! The helper that bounds the work of `sanitize_line`.
+    //!
+    //! Sanitising the whole input and trimming afterwards returns the same string, so no test of
+    //! the output can tell the two orders apart. A mutation review found exactly that. So the
+    //! bounding is a function of its own, and this pins it.
+
+    use super::*;
+
+    #[test]
+    fn a_line_head_is_bounded() {
+        let huge = "x".repeat(1_000_000);
+        let head = line_head(&huge);
+        assert_eq!(
+            head.chars().count(),
+            MAX_LINE_CHARS + 1,
+            "only the head plus one character is ever looked at"
+        );
+    }
+
+    #[test]
+    fn a_short_input_is_returned_whole() {
+        assert_eq!(line_head("short"), "short");
+    }
+
+    #[test]
+    fn a_head_ends_on_a_character_boundary() {
+        // Three-byte characters, so a naive byte slice would land mid-character.
+        let text = '\u{2192}'.to_string().repeat(MAX_LINE_CHARS * 2);
+        let head = line_head(&text);
+        assert!(head.chars().all(|ch| ch == '\u{2192}'));
+        assert_eq!(head.chars().count(), MAX_LINE_CHARS + 1);
     }
 }

@@ -569,8 +569,8 @@ impl Write for ByteCounter {
 /// the cap could not encode to more than the cap. That is false, and a probe measured it: a
 /// line packed with floats in exponent form re-encodes 3.8 times larger, because `1e15` becomes
 /// `1000000000000000.0`. A 60 kB record therefore slipped the gate and landed at 228 kB. The
-/// count is now exact and runs for every record, and `ByteCounter` stops at the cap so it costs
-/// no more than the cap.
+/// count is now exact and runs for **every** record. `ByteCounter` stops at the cap, so
+/// measuring one record costs no more than the cap however large the record is.
 fn record_fits(entry: &Entry) -> bool {
     #[cfg_attr(feature = "fast-json", allow(unused_mut))]
     let mut counter = ByteCounter {
@@ -820,8 +820,10 @@ impl SessionReader {
                     // weighed megabytes. A security review named that asymmetry as a class, and
                     // this is the second member of it.
                     //
-                    // The re-encode runs only when the raw line was already over the cap, which
-                    // a record rho wrote never is. So a normal read pays nothing.
+                    // The count runs for every record, and it stops at the cap, so it costs no
+                    // more than the cap however large the record is. An earlier version gated it
+                    // on the raw line length, and a probe showed that a line under the cap can
+                    // re-encode past it.
                     if !record_fits(&entry) {
                         dropped_records += 1;
                         tracing::warn!(
@@ -829,6 +831,17 @@ impl SessionReader {
                             "a record exceeded the record cap after its fields were bounded; \
                              it was dropped"
                         );
+                        // The same ceiling as a decode failure. A security review found it
+                        // covered only that path, so a file of valid but oversize records
+                        // walked to the end while the ceiling never fired.
+                        if dropped_records >= MAX_DROPPED_RECORDS {
+                            tracing::warn!(
+                                dropped = dropped_records,
+                                "the session file had too many records that did not fit; \
+                                 the read stopped"
+                            );
+                            break;
+                        }
                         continue;
                     }
                     entries.push(entry);
