@@ -197,6 +197,28 @@ mod effort_tests {
         assert!(budgets[0] >= 1024, "the lowest budget is at least 1024");
     }
 
+    /// The ladder is a table in the spec, so it is a table here, in literals.
+    ///
+    /// A mutation review found `ANSWER_HEAD_ROOM` pinned only to itself. The same shape was
+    /// here: every test compared a budget against `budget_tokens`, so changing 4096 to 5000
+    /// passed the whole suite. A number a document states must be pinned by a literal, or the
+    /// document is the only thing holding it.
+    ///
+    /// See `SPEC-reasoning-across-providers` section 9. Change one side, and change both.
+    #[test]
+    fn the_budget_ladder_matches_the_spec() {
+        assert_eq!(
+            [
+                ReasoningEffort::Off.budget_tokens(),
+                ReasoningEffort::Low.budget_tokens(),
+                ReasoningEffort::Medium.budget_tokens(),
+                ReasoningEffort::High.budget_tokens(),
+                ReasoningEffort::XHigh.budget_tokens(),
+            ],
+            [None, Some(1024), Some(4096), Some(16_384), Some(32_768)]
+        );
+    }
+
     #[test]
     fn off_has_no_budget() {
         assert_eq!(ReasoningEffort::Off.budget_tokens(), None);

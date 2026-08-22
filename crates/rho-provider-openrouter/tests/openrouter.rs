@@ -403,3 +403,37 @@ fn xhigh_maps_to_the_highest_accepted_level() {
     let body = rho_provider_openrouter::build_request_body(&request);
     assert_eq!(body["reasoning"]["effort"], "high");
 }
+
+/// Every level maps to its own wire value, and the table says which.
+///
+/// A mutation review swapped `low` for `high` and every test still passed: the tests covered
+/// `off`, `high`, and `xhigh`, so nothing pinned the middle of the ladder. A level that maps
+/// upward costs a user money they did not ask to spend, so the whole mapping is now a table.
+#[test]
+fn every_level_maps_to_its_own_wire_value() {
+    let cases = [
+        (rho_core::ReasoningEffort::Off, None),
+        (rho_core::ReasoningEffort::Low, Some("low")),
+        (rho_core::ReasoningEffort::Medium, Some("medium")),
+        (rho_core::ReasoningEffort::High, Some("high")),
+        // The host has no `xhigh`, so rho sends the highest it accepts rather than inventing one.
+        (rho_core::ReasoningEffort::XHigh, Some("high")),
+    ];
+    for (effort, expected) in cases {
+        let mut request = common::sample_request();
+        request.reasoning = Some(effort);
+        let body = rho_provider_openrouter::build_request_body(&request);
+        match expected {
+            Some(word) => assert_eq!(
+                body["reasoning"]["effort"],
+                word,
+                "{} must send {word}: {body}",
+                effort.as_str()
+            ),
+            None => assert_eq!(
+                body["reasoning"]["enabled"], false,
+                "off disables rather than choosing a level: {body}"
+            ),
+        }
+    }
+}
