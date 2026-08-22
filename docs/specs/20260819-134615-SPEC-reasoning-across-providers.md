@@ -295,6 +295,13 @@ it. A truncated opaque token is useless, and a truncated one that still looks va
 `rho-core/src/session/mod.rs` both end in `other => other.clone()` today, so a new variant
 joins them in silence. Each needs a named arm for both reasoning blocks.
 
+**An encrypted block replays without its text.** A provider that sends encrypted reasoning
+gets its blob back, and the readable `text` beside it does not travel. So on that one path,
+what the user reads and what the provider receives are different things. A security review
+asked for the limit to be stated: a crafted file could pair benign text with a captured blob.
+The blob is provider-encrypted, so it cannot be forged, and the paragraph below bounds how far
+a session file is trusted at all.
+
 **The owner tag is accident protection, and not authentication.** It stops an honest mismatch
 after a model switch. It stops nothing in a session file that somebody crafted, because the
 tag sits beside the payload it describes. rho trusts a session file exactly as much as it

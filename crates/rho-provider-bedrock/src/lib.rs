@@ -845,6 +845,13 @@ fn replay_block(
     };
     if let Some(redacted) = value.get("redacted").and_then(Value::as_str) {
         use base64::Engine;
+        // The text does not travel with an encrypted block, and the reader still sees it. So
+        // what a user reads and what the provider receives are two different things here. A
+        // security review named that divergence: a crafted file could show benign text beside
+        // a captured blob. The blob is provider-encrypted, so a crafted one cannot be built,
+        // and a session file is trusted exactly as much as the rest of that file. The limit is
+        // stated in `SPEC-reasoning-across-providers` section 4 rather than left implicit.
+        //
         // The payload holds base64, because a blob is not valid UTF-8 in general. A failed
         // decode sends nothing: a wrong blob is worse than a missing one, because Bedrock
         // would reject the whole turn.
