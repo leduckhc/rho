@@ -502,6 +502,15 @@ fn parse_arguments(buffer: &str) -> Result<Value, ProviderError> {
 /// Report once that a set effort level does not reach this provider.
 ///
 /// Once per level, not once per turn. A warning a user learns to scroll past stops working.
+/// Is this the first sighting of `effort`? The state is a parameter, so a test can pin the
+/// once-ness without process-global state, which no test could observe.
+fn first_sighting(
+    seen: &mut std::collections::HashSet<&'static str>,
+    effort: &'static str,
+) -> bool {
+    seen.insert(effort)
+}
+
 fn report_effort_gap(effort: rho_core::ReasoningEffort) {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
@@ -509,7 +518,7 @@ fn report_effort_gap(effort: rho_core::ReasoningEffort) {
     static REPORTED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
     let reported = REPORTED.get_or_init(|| Mutex::new(HashSet::new()));
     let first = match reported.lock() {
-        Ok(mut set) => set.insert(effort.as_str()),
+        Ok(mut set) => first_sighting(&mut set, effort.as_str()),
         Err(_) => true,
     };
     if first {
@@ -661,5 +670,41 @@ fn role_name(role: Role) -> &'static str {
     match role {
         Role::User | Role::Tool => "user",
         Role::Assistant => "assistant",
+    }
+}
+
+#[cfg(test)]
+mod once_tests {
+    //! The once-ness of the effort-gap report, pinned without process-global state.
+
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn the_first_sighting_is_reported_and_the_second_is_not() {
+        let mut seen = HashSet::new();
+        assert!(first_sighting(&mut seen, "medium"));
+        assert!(!first_sighting(&mut seen, "medium"), "once means once");
+        assert!(
+            first_sighting(&mut seen, "high"),
+            "a new level is its own first"
+        );
+    }
+
+    /// The set holds one entry per level, and there are five levels, so it is bounded by the
+    /// type rather than by a ceiling.
+    #[test]
+    fn the_set_is_bounded_by_the_level_count() {
+        let mut seen = HashSet::new();
+        for effort in ["off", "low", "medium", "high", "xhigh"] {
+            first_sighting(&mut seen, effort);
+        }
+        assert_eq!(seen.len(), 5);
+        for effort in ["off", "low", "medium", "high", "xhigh"] {
+            assert!(
+                !first_sighting(&mut seen, effort),
+                "each level reports once"
+            );
+        }
     }
 }

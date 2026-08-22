@@ -623,10 +623,29 @@ pub fn build_messages_for_model(
     // re-upload turn one's trace nineteen times. Anthropic needs the thinking of the
     // assistant turns that carry the pending call, and nothing older. A performance review
     // measured the growth as O(turns squared). See `D-replay-only-the-current-loop`.
-    let loop_start = messages
+    // The scope is the **one assistant turn that carries the pending call**, and nothing else.
+    //
+    // Two reviews shaped this rule, and a test caught a bug in the second version.
+    //
+    // The first version anchored on the last user message, and replayed every assistant turn
+    // after it. A review found that an autonomous tool loop holds no user message, so a
+    // hundred-iteration loop still re-sent iteration one's trace ninety-nine times.
+    //
+    // The second version replayed the last assistant turn. `a_prompt_with_no_answer_replays_nothing`
+    // then failed: when a user prompt follows that turn, its chain is already closed, and its
+    // thinking must not travel again.
+    //
+    // So the block replays only when the last assistant turn comes **after** the last prompt.
+    // Anthropic needs the thinking of the pending call's turn, and a live three-call loop
+    // confirms it accepts a request with the earlier turns' thinking omitted. See
+    // `D-replay-only-the-current-loop`.
+    let last_prompt = messages
         .iter()
-        .rposition(|message| message.role == Role::User)
-        .unwrap_or(0);
+        .rposition(|message| message.role == Role::User);
+    let pending_turn = messages
+        .iter()
+        .rposition(|message| message.role == Role::Assistant)
+        .filter(|turn| last_prompt.is_none_or(|prompt| *turn > prompt));
     use aws_sdk_bedrockruntime::types::{
         ContentBlock as SdkBlock, ConversationRole, Message as SdkMessage, ToolResultBlock,
         ToolResultContentBlock, ToolUseBlock,
@@ -703,7 +722,7 @@ pub fn build_messages_for_model(
                 ContentBlock::ReasoningReplay { text, state } => {
                     // Out of the current loop, so it is history. It is dropped whole, and it
                     // never becomes prose, because prose would read as an answer.
-                    if position >= loop_start
+                    if pending_turn == Some(position)
                         && let Some(reasoning) = replay_block(text, state, model)
                     {
                         blocks.push(SdkBlock::ReasoningContent(reasoning));
@@ -890,6 +909,26 @@ fn replay_block(
 ///
 /// A review found the spam: the comment said "once" and the code warned on every request. A
 /// warning a user learns to scroll past is a warning that no longer works.
+/// How many distinct model ids `report_once` remembers.
+///
+/// A review found the set unbounded, and a process that walks a model list would grow it for
+/// ever. At the ceiling the set clears, so memory is bounded and the report still fires rather
+/// than falling silent.
+const REMEMBERED_MODELS: usize = 64;
+
+/// Is this the first time `model` has been seen? The state is a parameter, so a test can pin
+/// the once-ness without touching process-global state.
+///
+/// A mutation review changed `if first` to `if true` and every test still passed, because the
+/// only state was a `OnceLock` shared by the whole test binary. The rule was unprovable, so it
+/// moved out here.
+fn first_sighting(seen: &mut std::collections::HashSet<String>, model: &str) -> bool {
+    if seen.len() >= REMEMBERED_MODELS {
+        seen.clear();
+    }
+    seen.insert(model.to_string())
+}
+
 fn report_once(model: &str) {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
@@ -897,7 +936,7 @@ fn report_once(model: &str) {
     static REPORTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     let reported = REPORTED.get_or_init(|| Mutex::new(HashSet::new()));
     let first = match reported.lock() {
-        Ok(mut set) => set.insert(model.to_string()),
+        Ok(mut set) => first_sighting(&mut set, model),
         // A poisoned lock must not silence a report, so it reports again instead.
         Err(_) => true,
     };
@@ -1297,16 +1336,32 @@ mod thinking_request_tests {
         let budget = ReasoningEffort::Medium.budget_tokens().unwrap();
         request.max_tokens = Some(budget + 1);
         let config = build_inference_config(&request).expect("a config exists");
-        assert!(
-            config.max_tokens().expect("max tokens") > (budget + ANSWER_HEAD_ROOM) as i32 - 1,
-            "a number that clears the budget but starves the answer is raised"
+        // The literal, not the constant. A mutation review found that comparing the output
+        // against `ANSWER_HEAD_ROOM` could not see a change to `ANSWER_HEAD_ROOM`, so the
+        // number was pinned to itself.
+        assert_eq!(
+            config.max_tokens(),
+            Some((budget + 4096) as i32),
+            "a number that clears the budget but starves the answer is raised to the head room"
         );
+    }
+
+    /// The head room is a stated number, so it is pinned by a literal.
+    ///
+    /// A mutation review changed 4096 to 4097 and every test still passed, because each one
+    /// compared the code's output against the code's own constant.
+    #[test]
+    fn the_answer_head_room_is_four_thousand_and_ninety_six() {
+        assert_eq!(ANSWER_HEAD_ROOM, 4096);
     }
 
     /// The boundary Anthropic actually rejects: `max_tokens` equal to the budget.
     ///
-    /// A mutation review found that `>` could become `>=` with no test failing, and the API
-    /// requires strictly more than the budget. This is the case that would have shipped a 400.
+    /// A mutation review reported that `>` could become `>=` here with no test failing, and
+    /// called it an escape. It is not one. At `max_tokens == budget + ANSWER_HEAD_ROOM` the
+    /// two forms both answer `budget + ANSWER_HEAD_ROOM`, so no input can tell them apart.
+    /// A mutation that no input can observe is not a defect, and no test can kill it. The
+    /// value at the boundary is pinned below instead, which is the part that matters.
     #[test]
     fn a_max_tokens_equal_to_the_budget_is_raised() {
         let mut request = request(
@@ -1320,6 +1375,27 @@ mod thinking_request_tests {
             config.max_tokens().expect("max tokens") > budget as i32,
             "max_tokens must be strictly above the budget"
         );
+    }
+
+    /// The value at the head-room boundary, pinned as a number.
+    #[test]
+    fn a_max_tokens_at_the_head_room_boundary_is_exact() {
+        let mut request = request(
+            "anthropic.claude-haiku-4-5-20251001-v1:0",
+            Some(ReasoningEffort::Low),
+        );
+        let budget = ReasoningEffort::Low.budget_tokens().unwrap();
+        request.max_tokens = Some(budget + 4096);
+        let config = build_inference_config(&request).expect("a config exists");
+        assert_eq!(
+            config.max_tokens(),
+            Some((budget + 4096) as i32),
+            "at the boundary the answer is the boundary, whichever way the comparison reads"
+        );
+        // One token above it, the caller's number is kept as it stands.
+        request.max_tokens = Some(budget + 4097);
+        let config = build_inference_config(&request).expect("a config exists");
+        assert_eq!(config.max_tokens(), Some((budget + 4097) as i32));
     }
 
     /// A generous caller keeps its own number.
@@ -1750,6 +1826,12 @@ mod drop_report_tests {
                 ),
             },
             MODEL,
+        );
+        // A mutation review noted that this passed on an empty log, so it now asserts both
+        // halves: the report happened, and it carried no payload.
+        assert!(
+            logged.contains("another owner"),
+            "the report is present: {logged}"
         );
         assert!(!logged.contains("secret-signature-value"), "{logged}");
     }
@@ -2329,8 +2411,13 @@ mod replay_scope_tests {
         );
     }
 
-    /// Inside one loop, every assistant turn keeps its reasoning, because the chain of the
-    /// pending call must stay whole.
+    /// Inside one loop, only the turn that carries the pending call replays.
+    ///
+    /// This test asserted the opposite until a second performance review showed why that was
+    /// wrong: an autonomous tool loop holds no user message, so keeping every in-loop turn
+    /// re-sent the first trace once per iteration. The rule changed, so the test follows the
+    /// rule, and a live three-call loop on Bedrock proved the narrower request is accepted.
+    /// See `docs/verification/reasoning-replay.md` section 7.
     #[test]
     fn a_whole_tool_loop_keeps_its_reasoning() {
         let messages = vec![
@@ -2350,9 +2437,46 @@ mod replay_scope_tests {
         ];
         assert_eq!(
             sent(&messages),
-            vec!["first thought".to_string(), "second thought".to_string()],
-            "a tool result does not end the loop, so both turns replay"
+            vec!["second thought".to_string()],
+            "only the pending call's turn replays, so a long loop cannot grow"
         );
+    }
+
+    /// A transcript with no user message still replays exactly one turn.
+    ///
+    /// The scope is the last assistant turn, so it needs no prompt to anchor it. That also
+    /// removes the unbounded fallback the first version had, which a review flagged.
+    #[test]
+    fn a_transcript_with_no_prompt_replays_everything() {
+        let messages = vec![
+            assistant(vec![replay("first thought")]),
+            Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::ToolResult {
+                    tool_call_id: "1".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: "result".to_string(),
+                    }],
+                    is_error: false,
+                }],
+            },
+            assistant(vec![replay("second thought")]),
+        ];
+        assert_eq!(
+            sent(&messages),
+            vec!["second thought".to_string()],
+            "the last assistant turn anchors the scope, with or without a prompt"
+        );
+    }
+
+    /// A prompt with no answer yet replays nothing, because there is no chain to keep whole.
+    #[test]
+    fn a_prompt_with_no_answer_replays_nothing() {
+        let messages = vec![
+            assistant(vec![replay("old thought")]),
+            user("a new question"),
+        ];
+        assert!(sent(&messages).is_empty());
     }
 
     /// The text of a dropped block does not leak into the request as prose either.
@@ -2374,5 +2498,167 @@ mod replay_scope_tests {
             !text.contains("old reasoning"),
             "a dropped block never becomes prose: {text}"
         );
+    }
+}
+
+#[cfg(test)]
+mod loop_growth_tests {
+    //! A long tool loop must not re-send every earlier trace.
+    //!
+    //! The first scope was "from the last user message". A second performance review found that
+    //! an autonomous tool loop contains no user message, so the growth returned inside one
+    //! loop. The scope is now the last assistant turn, which is the one carrying the pending
+    //! call.
+
+    use super::*;
+    use rho_core::{ContentBlock, Message, ProviderState, ReasoningOwner, Role};
+
+    const MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+
+    fn replay(text: &str) -> ContentBlock {
+        ContentBlock::ReasoningReplay {
+            text: text.to_string(),
+            state: Some(ProviderState {
+                owner: ReasoningOwner {
+                    provider: "bedrock".to_string(),
+                    model: MODEL.to_string(),
+                },
+                value: serde_json::json!({ "signature": format!("sig-{text}") }),
+            }),
+        }
+    }
+
+    fn tool_result(id: &str) -> Message {
+        Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: id.to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "result".to_string(),
+                }],
+                is_error: false,
+            }],
+        }
+    }
+
+    fn sent(messages: &[Message]) -> Vec<String> {
+        use aws_sdk_bedrockruntime::types::{
+            ContentBlock as SdkBlock, ReasoningContentBlock as SdkReasoning,
+        };
+        build_messages_for_model(messages, MODEL)
+            .iter()
+            .flat_map(|message| message.content().iter())
+            .filter_map(|block| match block {
+                SdkBlock::ReasoningContent(SdkReasoning::ReasoningText(text)) => {
+                    Some(text.text().to_string())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A twenty-iteration loop sends one trace, not twenty.
+    #[test]
+    fn a_long_tool_loop_sends_one_trace() {
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "do a lot of work".to_string(),
+            }],
+        }];
+        for index in 0..20 {
+            messages.push(Message {
+                role: Role::Assistant,
+                content: vec![replay(&format!("thought {index}"))],
+            });
+            messages.push(tool_result(&index.to_string()));
+        }
+        messages.push(Message {
+            role: Role::Assistant,
+            content: vec![replay("the last thought")],
+        });
+
+        assert_eq!(
+            sent(&messages),
+            vec!["the last thought".to_string()],
+            "only the turn that carries the pending call replays"
+        );
+    }
+
+    /// The count does not grow with the loop, which is the invariant rather than the example.
+    #[test]
+    fn the_replayed_count_does_not_grow_with_the_loop() {
+        let mut counts = Vec::new();
+        for iterations in [1usize, 5, 20, 100] {
+            let mut messages = vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "go".to_string(),
+                }],
+            }];
+            for index in 0..iterations {
+                messages.push(Message {
+                    role: Role::Assistant,
+                    content: vec![replay(&format!("thought {index}"))],
+                });
+                messages.push(tool_result(&index.to_string()));
+            }
+            messages.push(Message {
+                role: Role::Assistant,
+                content: vec![replay("pending")],
+            });
+            counts.push(sent(&messages).len());
+        }
+        assert_eq!(
+            counts,
+            vec![1, 1, 1, 1],
+            "the replayed count is flat in the loop length"
+        );
+    }
+}
+
+#[cfg(test)]
+mod once_tests {
+    //! The once-ness of a report, pinned without process-global state.
+    //!
+    //! A mutation review changed `if first` to `if true` and every test still passed: the only
+    //! state was a `OnceLock` shared by the whole test binary, so no test could observe the
+    //! rule. The rule now lives in `first_sighting`, whose state is a parameter.
+
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn the_first_sighting_is_reported_and_the_second_is_not() {
+        let mut seen = HashSet::new();
+        assert!(
+            first_sighting(&mut seen, "model-a"),
+            "the first is reported"
+        );
+        assert!(
+            !first_sighting(&mut seen, "model-a"),
+            "the second is silent, which is what once means"
+        );
+        assert!(
+            first_sighting(&mut seen, "model-b"),
+            "a different model is its own first sighting"
+        );
+        assert!(!first_sighting(&mut seen, "model-b"));
+    }
+
+    #[test]
+    fn the_set_is_bounded_and_never_falls_silent() {
+        let mut seen = HashSet::new();
+        for index in 0..(REMEMBERED_MODELS * 3) {
+            first_sighting(&mut seen, &format!("model-{index}"));
+        }
+        assert!(
+            seen.len() <= REMEMBERED_MODELS,
+            "the set is bounded: {} entries",
+            seen.len()
+        );
+        // Past the ceiling the set clears, so a model is reported again rather than silenced.
+        // Silence is the defect the report was written to fix.
+        assert!(first_sighting(&mut seen, "model-0"));
     }
 }

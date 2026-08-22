@@ -416,3 +416,79 @@ fn a_bad_middle_record_does_not_discard_the_rest() {
         "corruption in the middle is not a truncated tail"
     );
 }
+
+/// Every oversize field in a foreign record is bounded on read, not only the payload.
+///
+/// A security review found the hole: the first read-side bound covered `state` and left `text`
+/// alone, so a crafted file could carry a megabyte of reasoning text and re-upload it on every
+/// turn. That is the cost the bound exists to stop, arriving through another field.
+#[test]
+fn an_oversize_text_in_a_file_is_bounded_on_read() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("hostile-text.jsonl");
+    let huge = "t".repeat(1024 * 1024);
+    let header = serde_json::json!({
+        "id": "r0", "parentId": null, "timestamp": "1700000000000", "type": "session",
+        "version": 1, "cwd": "/tmp", "approval": "allow-all", "sandbox": "off"
+    });
+    let record = serde_json::json!({
+        "id": "r1", "parentId": "r0", "timestamp": "1700000000000", "type": "message",
+        "message": { "role": "assistant", "content": [{
+            "type": "thinking", "thinking": huge, "replay": true,
+            "state": {
+                "owner": { "provider": "bedrock", "model": "claude" },
+                "value": { "signature": "small" }
+            }
+        }]}
+    });
+    std::fs::write(&path, format!("{header}\n{record}\n")).expect("write the file");
+
+    let result = rho_core::SessionReader::read(&path).expect("the file loads");
+    let texts: Vec<usize> = result
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.record {
+            rho_core::Record::Message { message } => Some(message.content.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|block| match block {
+            ContentBlock::ReasoningReplay { text, .. } => Some(text.len()),
+            ContentBlock::ReasoningTrace { text } => Some(text.len()),
+            _ => None,
+        })
+        .collect();
+    assert!(!texts.is_empty(), "the record still loads");
+    for len in texts {
+        assert!(
+            len < 1024 * 1024,
+            "a megabyte of text must not survive the read: {len} bytes"
+        );
+    }
+}
+
+/// A file of nothing but bad records stops at the ceiling.
+///
+/// Skipping a bad record instead of stopping means a crafted file of a million bad lines would
+/// buy a million iterations. A security review asked for a bound, so there is one.
+#[test]
+fn a_file_of_bad_records_stops_at_the_ceiling() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("garbage.jsonl");
+    let header = serde_json::json!({
+        "id": "r0", "parentId": null, "timestamp": "1700000000000", "type": "session",
+        "version": 1, "cwd": "/tmp", "approval": "allow-all", "sandbox": "off"
+    });
+    let mut file = format!("{header}\n");
+    for index in 0..(rho_core::MAX_DROPPED_RECORDS * 2) {
+        file.push_str(&format!("{{not json {index}\n"));
+    }
+    std::fs::write(&path, file).expect("write the file");
+
+    let result = rho_core::SessionReader::read(&path).expect("the header still loads");
+    assert!(
+        result.dropped_records <= rho_core::MAX_DROPPED_RECORDS,
+        "the read stops at the ceiling: {}",
+        result.dropped_records
+    );
+}

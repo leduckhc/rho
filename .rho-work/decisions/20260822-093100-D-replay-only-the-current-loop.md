@@ -19,9 +19,20 @@ rule. The one measured number in this work is the TUI frame cost in `docs/benchm
 
 ## The decision
 
-A reasoning block replays only when it sits at or after the last user message. Everything
-older is history: the transcript keeps it, the reader can see it, and the wire never carries
-it again.
+A reasoning block replays only when it belongs to **the one assistant turn that carries the
+pending tool call**. Everything else is history: the transcript keeps it, the reader can see
+it, and the wire never carries it again.
+
+The rule took three attempts, and each one was corrected by evidence rather than by opinion.
+
+1. **From the last user message onward.** A performance review found that an autonomous tool
+   loop holds no user message at all, so a hundred-iteration loop still re-sent iteration
+   one's trace ninety-nine times. The growth returned one level down.
+2. **The last assistant turn.** A test then failed: `a_prompt_with_no_answer_replays_nothing`.
+   When a user prompt follows that turn, its chain is already closed, and its thinking must not
+   travel again.
+3. **The last assistant turn, and only when it comes after the last prompt.** This is the rule
+   in the code. A pending call has a chain, and a closed one does not.
 
 ## Why
 
@@ -41,14 +52,24 @@ is not part of that chain. Sending it buys nothing and costs its bytes every tur
 
 - `only_the_current_loop_replays_its_reasoning`: two prompts, and only the second turn's
   reasoning reaches the wire.
-- `a_whole_tool_loop_keeps_its_reasoning`: a tool result does not end a loop, so both assistant
-  turns inside it still replay.
+- `a_long_tool_loop_sends_one_trace`: twenty iterations send one trace, not twenty.
+- `the_replayed_count_does_not_grow_with_the_loop`: the count is flat at one for loops of 1, 5,
+  20, and 100 iterations. That pins the invariant rather than an example.
+- `a_prompt_with_no_answer_replays_nothing`: a closed chain never travels again. This is the
+  test that found attempt 2 wrong.
 - `an_out_of_scope_block_leaves_no_text_behind`: the dropped text never appears as prose.
 - Live: the two-call tool loop still passes on Bedrock after the change. See
   `docs/verification/reasoning-replay.md`.
 
 ## The limit
 
-The rule reads roles, so it assumes a user message opens a loop and a tool result does not. If
-a future frontend injects a synthetic user message mid-loop, the scope would cut early and a
-turn would lose its chain. A test would catch it, because the loop would fail with a 400.
+The rule reads roles, so it assumes a user message opens a loop and a tool result does not. Two
+shapes sit at its edges, and both are now pinned by a test.
+
+**A transcript with no user message still replays exactly one turn.** The scope needs no prompt
+to anchor it, so the unbounded fallback of the first attempt is gone. See
+`a_transcript_with_no_prompt_replays_everything`.
+
+**A synthetic user message mid-loop would cut the scope early**, and the turn would lose its
+chain. Nothing injects one today. A live run would fail with a 400 rather than fail quietly,
+which is the failure mode to want.

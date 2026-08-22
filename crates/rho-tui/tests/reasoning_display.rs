@@ -226,3 +226,27 @@ fn a_long_reasoning_row_draws_only_its_tail() {
         "the visible frame is identical, so only the wasted work is gone"
     );
 }
+
+/// A long answer row draws only its tail too.
+///
+/// A review measured the assistant arm at the same curve as the reasoning arm before the fix.
+/// It matters less, because an answer rarely reaches half a megabyte in one row, but it is the
+/// same defect and the frame must be identical either way.
+#[test]
+fn a_long_answer_row_draws_only_its_tail() {
+    let chunk = "the model streams another sentence of its answer here. ";
+    let long = chunk.repeat(4000);
+    let tail = long[long.len() - 60 * 14 * 4..].to_string();
+
+    let mut whole = TuiState::default();
+    whole.rows.push(Row::Assistant { text: long.clone() });
+
+    let mut short = TuiState::default();
+    short.rows.push(Row::Assistant { text: tail });
+
+    assert_eq!(
+        Grid::render(&whole, 60, 30).text(),
+        Grid::render(&short, 60, 30).text(),
+        "the visible frame is identical"
+    );
+}

@@ -138,6 +138,29 @@ rho run "Which is larger, 9.11 or 9.9? One sentence." --provider openrouter \
 The middle two rows are the control. Without them the first row proves only that the model
 sometimes thinks, and rho's field could have been ignored.
 
+## 7. The question a review could not answer, answered live
+
+A performance review found that the first replay scope still grew inside one tool loop, and
+said its fix needed live Bedrock to confirm: does Anthropic accept a request that omits the
+thinking of the **earlier** turns of a loop, and keeps only the pending call's turn?
+
+It does. The narrower request was built and driven twice, through a three-call loop:
+
+```sh
+rho run "Use your tools one at a time. First read a.txt. Then read b.txt. Then read c.txt. \
+Then print the three exact strings separated by commas." \
+  --provider bedrock --model "$M" --reasoning-effort high
+```
+
+```text
+run 1 exit=0 -> **zx9-quibble, kt4-marlow, qp7-tundra**
+run 2 exit=0 -> **zx9-quibble, kt4-marlow, qp7-tundra**
+```
+
+A plain thinking turn still works, with 286 bytes of reasoning on stderr, and OpenRouter is
+unaffected. So the replay is now one block per request, whatever the length of the loop, and
+that is measured against the provider rather than assumed from the documentation.
+
 ## What is proved, and what is not
 
 Proved live:

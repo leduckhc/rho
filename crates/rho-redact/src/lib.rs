@@ -80,8 +80,14 @@ const REPLACEMENT: char = '\u{fffd}';
 /// 2. Any other control character is replaced, so nothing invisible survives. A tab
 ///    and a newline are kept, because a caller may want the shape of the text.
 ///
-/// The guarantee to rely on: the result contains no escape character, and no control
-/// character other than `\t` and `\n`.
+/// 3. A bidirectional control and a zero-width character are replaced too. `char::is_control`
+///    covers the Unicode `Cc` class only, so a right-to-left override passed straight through
+///    the first version. That is the Trojan Source class: the bytes reorder what a reader sees
+///    without changing what a program reads. A security review found it in a path that logs a
+///    string taken from a session file.
+///
+/// The guarantee to rely on: the result contains no escape character, no control character
+/// other than `\t` and `\n`, and no character that can reorder or hide what follows it.
 pub fn sanitize_text(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -93,7 +99,7 @@ pub fn sanitize_text(input: &str) -> String {
         }
         if ch == '\t' || ch == '\n' {
             out.push(ch);
-        } else if ch.is_control() {
+        } else if ch.is_control() || reorders_or_hides(ch) {
             out.push(REPLACEMENT);
         } else {
             out.push(ch);
@@ -102,13 +108,41 @@ pub fn sanitize_text(input: &str) -> String {
     out
 }
 
+/// Can this character reorder or hide the text around it?
+///
+/// The set is the bidirectional controls and the zero-width characters. Rust's `is_control`
+/// answers only for the `Cc` class, and every character here is `Cf` or a space separator, so
+/// each one used to pass through untouched.
+fn reorders_or_hides(ch: char) -> bool {
+    matches!(ch,
+        // Zero width space, joiner, non-joiner, and the bidi marks beside them.
+        '\u{200b}'..='\u{200f}'
+        // The bidi embedding and override controls, which are the Trojan Source set.
+        | '\u{202a}'..='\u{202e}'
+        // The bidi isolates.
+        | '\u{2066}'..='\u{2069}'
+        // A soft hyphen and a byte-order mark, both invisible in a terminal.
+        | '\u{00ad}'
+        | '\u{feff}')
+}
+
+/// The longest line `sanitize_line` returns. A log line is for a human, and a megabyte of it
+/// helps nobody. A security review asked for the bound, because the input can come from a file.
+pub const MAX_LINE_CHARS: usize = 4096;
+
 /// Sanitise text for a single line. Also folds a newline and a tab into a space, so the
-/// result cannot break a one-line layout.
+/// result cannot break a one-line layout, and bounds the length.
 pub fn sanitize_line(input: &str) -> String {
-    sanitize_text(input)
+    let mut out: String = sanitize_text(input)
         .chars()
         .map(|ch| if ch == '\n' || ch == '\t' { ' ' } else { ch })
-        .collect()
+        .take(MAX_LINE_CHARS)
+        .collect();
+    // Say that it was cut, so a reader never trusts a truncated line as whole.
+    if out.chars().count() == MAX_LINE_CHARS && input.chars().count() > MAX_LINE_CHARS {
+        out.push_str(" [cut]");
+    }
+    out
 }
 
 /// Mask every value under a key that `looks_like_a_secret` flags, anywhere in a JSON
@@ -300,5 +334,73 @@ mod tests {
         assert_eq!(sanitize_text("日本語"), "日本語");
         assert_eq!(sanitize_text("café"), "café");
         assert_eq!(sanitize_text("🙂"), "🙂");
+    }
+}
+
+#[cfg(test)]
+mod trojan_source_tests {
+    //! A bidirectional control and a zero-width character cannot survive a sanitised line.
+    //!
+    //! A security review found that `char::is_control` covers the Unicode `Cc` class only, so a
+    //! right-to-left override passed straight through. That is the Trojan Source class: it
+    //! reorders what a reader sees without changing what a program reads. The path that exposed
+    //! it logs an owner string taken from a session file.
+
+    use super::*;
+
+    #[test]
+    fn a_bidi_control_never_survives() {
+        for ch in [
+            '\u{202e}', // right-to-left override
+            '\u{202d}', // left-to-right override
+            '\u{2066}', // left-to-right isolate
+            '\u{200b}', // zero width space
+            '\u{200d}', // zero width joiner
+            '\u{feff}', // byte order mark
+            '\u{00ad}', // soft hyphen
+        ] {
+            let input = format!("safe{ch}text");
+            let out = sanitize_line(&input);
+            assert!(!out.contains(ch), "{ch:?} must not survive: {out:?}");
+            assert!(
+                out.contains("safe") && out.contains("text"),
+                "the text stays: {out:?}"
+            );
+        }
+    }
+
+    /// The same rule holds for the multi-line form, because both share one walk.
+    #[test]
+    fn a_bidi_control_never_survives_multiline_text() {
+        let out = sanitize_text("one\u{202e}two");
+        assert!(!out.contains('\u{202e}'));
+    }
+
+    /// A sanitised line is bounded, and it says when it was cut.
+    #[test]
+    fn a_sanitised_line_is_bounded() {
+        let long = "x".repeat(MAX_LINE_CHARS * 4);
+        let out = sanitize_line(&long);
+        assert!(
+            out.chars().count() <= MAX_LINE_CHARS + " [cut]".len(),
+            "the line is bounded: {} chars",
+            out.chars().count()
+        );
+        assert!(out.ends_with("[cut]"), "a cut line says so");
+    }
+
+    /// A short line is untouched, so the bound never rewrites ordinary output.
+    #[test]
+    fn a_short_line_is_not_marked() {
+        assert_eq!(sanitize_line("a plain line"), "a plain line");
+    }
+
+    /// A line of exactly the bound is not marked, because nothing was lost.
+    #[test]
+    fn a_line_at_the_bound_is_not_marked() {
+        let exact = "y".repeat(MAX_LINE_CHARS);
+        let out = sanitize_line(&exact);
+        assert_eq!(out.chars().count(), MAX_LINE_CHARS);
+        assert!(!out.ends_with("[cut]"));
     }
 }

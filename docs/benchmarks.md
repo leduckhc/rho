@@ -610,4 +610,14 @@ band of 14 rows could show, and it always starts on a character boundary. The fr
 identical, which `a_long_reasoning_row_draws_only_its_tail` asserts by rendering the whole text
 and its tail and comparing the two grids.
 
-The numbers above come from one machine, in one run each. They are a ratio, not a promise.
+The numbers above come from one machine, in one run each, at a fixed 100 by 30 terminal. The
+geometry sets the constant, so "29 times" is one point at one size and one width. They are a
+ratio, not a promise.
+
+A second reviewer re-ran the same command on its own machine and reported 443, 729, 1394, and
+2936 µs before, against 122, 92, 95, and 97 after. The shape holds, and the constants moved by
+a few percent.
+
+The assistant row carried the same quadratic, measured at 413, 1458, and 3119 µs as the answer
+grew. It now shares `tail_for_band`, and `a_long_answer_row_draws_only_its_tail` compares the
+two frames.

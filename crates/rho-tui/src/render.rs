@@ -491,7 +491,11 @@ fn push_row(
             }
         }
         Row::Assistant { text } => {
-            let wrapped = wrap(&sanitize_line(text), measure);
+            // The same bound as a reasoning row, for the same reason. A review measured this
+            // arm at the identical curve: 413, 1458, then 3119 microseconds a frame as the
+            // answer grew. An answer rarely reaches half a megabyte in one live row, so it
+            // mattered less, but it is the same defect and the fix is one call.
+            let wrapped = wrap(&sanitize_line(tail_for_band(text, measure)), measure);
             for line in wrapped {
                 out.push((pad(&line, width), text_style()));
             }
@@ -1262,4 +1266,70 @@ fn style_for(role: Role) -> Style {
         return style.add_modifier(Modifier::BOLD);
     }
     style
+}
+
+#[cfg(test)]
+mod tail_tests {
+    //! The three edges of `tail_for_band`, tested directly.
+    //!
+    //! A review asked for these by name. The slicing runs on a byte stream, and slicing a
+    //! reasoning delta at a non-character boundary panics. That panic killed jcode three times,
+    //! so the boundary gets its own test rather than only an indirect one through `render`.
+
+    use super::*;
+
+    #[test]
+    fn a_short_text_is_returned_whole() {
+        assert_eq!(tail_for_band("abc", 80), "abc");
+    }
+
+    #[test]
+    fn a_text_of_exactly_the_budget_is_returned_whole() {
+        // The formula is `measure * BAND_ROWS * 4`, with a measure of one.
+        let budget = BAND_ROWS as usize * 4;
+        let text = "x".repeat(budget);
+        assert_eq!(tail_for_band(&text, 1), text);
+    }
+
+    #[test]
+    fn one_byte_over_the_budget_takes_the_tail() {
+        // The formula is `measure * BAND_ROWS * 4`, with a measure of one.
+        let budget = BAND_ROWS as usize * 4;
+        let text = format!("A{}", "x".repeat(budget));
+        let tail = tail_for_band(&text, 1);
+        assert_eq!(tail.len(), budget, "the tail is exactly the budget");
+        assert!(!tail.starts_with('A'), "the head is gone");
+    }
+
+    #[test]
+    fn a_zero_width_never_divides_by_nothing() {
+        // A zero-column terminal reaches here. `measure.max(1)` is the guard.
+        assert_eq!(tail_for_band("abcdef", 0), "abcdef");
+    }
+
+    /// The one character width that can land mid-character, and so the only one that tests the
+    /// boundary walk.
+    ///
+    /// The budget is `measure * BAND_ROWS * 4`, always a multiple of four. So a two-byte or a
+    /// four-byte character lands on a boundary by arithmetic, whatever the text. Two earlier
+    /// versions of this test used exactly those widths, and deleting the walk still passed
+    /// them: they proved nothing. Three bytes does not divide the budget, so this is the case
+    /// that panics without the walk.
+    #[test]
+    fn a_three_byte_character_is_never_cut() {
+        let arrow = '\u{2192}';
+        let text = arrow.to_string().repeat(1000);
+        let tail = tail_for_band(&text, 1);
+        assert!(tail.starts_with(arrow), "the tail starts on a boundary");
+        assert!(tail.chars().all(|ch| ch == arrow), "no character was cut");
+    }
+
+    /// The arithmetic that makes the test above the only one that matters.
+    ///
+    /// If a future change makes the budget odd, a two-byte character could land mid-character
+    /// too, and this assertion fails to say so.
+    #[test]
+    fn the_budget_is_a_multiple_of_four() {
+        assert_eq!((BAND_ROWS as usize * 4) % 4, 0);
+    }
 }

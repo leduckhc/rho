@@ -126,6 +126,14 @@ pub struct SessionHeader {
 /// error, never an allocation. See section 6a.
 pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 
+/// How many records may fail to decode before a read gives up.
+///
+/// A bad record in the middle is skipped and counted, so a corrupt file no longer loses its
+/// tail. A crafted file of nothing but bad lines would then buy a full pass, so the pass has a
+/// ceiling. A security review asked for it. The number is generous: real corruption is a byte
+/// or a line, not a thousand.
+pub const MAX_DROPPED_RECORDS: usize = 1024;
+
 /// A typed session error.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -528,49 +536,31 @@ fn cap_block(block: ContentBlock, spills: &mut Vec<String>) -> ContentBlock {
     }
 }
 
-/// Bound every replay payload inside one record read from a file.
+/// Bound one record read from a file, with the **same** caps the write path applies.
 ///
-/// The write path caps a payload, and a security review found that the read path did not. A
-/// session file is untrusted input: rho may not have written it, and it can be copied between
-/// machines. Without this, a foreign file could carry a payload up to the line cap and rho
-/// would replay it on every later turn.
+/// A security review found the first version of this bounded the payload and not the text, so
+/// a crafted file could carry a megabyte of reasoning text and re-upload it on every turn:
+/// the very cost the read-side bound was added to stop. One field bounded on one side only is
+/// the same defect wearing a different field name, so read and write now share `cap_block`.
+///
+/// The spilled text is dropped rather than written to a sidecar. A sidecar belongs to a record
+/// rho wrote, and this record came from somewhere else.
 fn cap_entry_state(mut entry: Entry) -> Entry {
     if let Record::Message { message } = &mut entry.record {
         let content = std::mem::take(&mut message.content);
-        message.content = content.into_iter().map(cap_block_state).collect();
+        let mut dropped = Vec::new();
+        message.content = content
+            .into_iter()
+            .map(|block| cap_block(block, &mut dropped))
+            .collect();
+        if !dropped.is_empty() {
+            tracing::warn!(
+                fields = dropped.len(),
+                "a record read from a file carried oversize content; it was bounded"
+            );
+        }
     }
     entry
-}
-
-/// Bound the payload of one block, and of every block inside a tool result.
-fn cap_block_state(block: ContentBlock) -> ContentBlock {
-    match block {
-        ContentBlock::ReasoningReplay { text, state } => ContentBlock::ReasoningReplay {
-            text,
-            state: cap_state(state),
-        },
-        ContentBlock::ToolCall {
-            id,
-            name,
-            arguments,
-            state,
-        } => ContentBlock::ToolCall {
-            id,
-            name,
-            arguments,
-            state: cap_state(state),
-        },
-        ContentBlock::ToolResult {
-            tool_call_id,
-            content,
-            is_error,
-        } => ContentBlock::ToolResult {
-            tool_call_id,
-            content: content.into_iter().map(cap_block_state).collect(),
-            is_error,
-        },
-        other => other,
-    }
 }
 
 /// Bound one replay payload. Rule 10: a payload over `MAX_RECORD_BYTES` is dropped whole.
@@ -772,6 +762,17 @@ impl SessionReader {
                         dropped_records += 1;
                     }
                     pending_bad_line = true;
+                    // A file of nothing but bad lines is no longer a stop, so it is now a full
+                    // pass. A security review asked for a ceiling, because a crafted file of a
+                    // million bad lines would otherwise buy a million iterations.
+                    if dropped_records >= MAX_DROPPED_RECORDS {
+                        tracing::warn!(
+                            dropped = dropped_records,
+                            "the session file had too many records that did not decode; \
+                             the read stopped"
+                        );
+                        break;
+                    }
                     continue;
                 }
             }
