@@ -293,6 +293,7 @@ pub fn tool_call_turn(id: &str, tool_name: &str, arguments: serde_json::Value) -
         StreamEvent::ToolCallEnd {
             index: 0,
             arguments,
+            state: None,
         },
         StreamEvent::Done {
             stop_reason: StopReason::ToolUse,

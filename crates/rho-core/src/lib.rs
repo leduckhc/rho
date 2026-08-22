@@ -26,7 +26,7 @@ mod usage;
 
 pub use agent::{AgentConfig, AgentEvent, AgentEvents, AgentStopReason, Session, SessionConfig};
 pub use cancel::CancelToken;
-pub use content::{ContentBlock, ImageSource, Message, Role};
+pub use content::{ContentBlock, ImageSource, Message, ProviderState, ReasoningOwner, Role};
 pub use context::Context;
 pub use error::{Error, ProviderError};
 pub use event::StreamEvent;

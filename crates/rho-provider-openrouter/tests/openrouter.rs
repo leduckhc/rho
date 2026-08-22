@@ -71,7 +71,9 @@ async fn provider_openrouter_assembles_parallel_tool_calls() {
     let mut ends: Vec<(u32, serde_json::Value)> = events
         .iter()
         .filter_map(|item| match item {
-            Ok(StreamEvent::ToolCallEnd { index, arguments }) => Some((*index, arguments.clone())),
+            Ok(StreamEvent::ToolCallEnd {
+                index, arguments, ..
+            }) => Some((*index, arguments.clone())),
             _ => None,
         })
         .collect();

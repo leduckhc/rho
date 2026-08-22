@@ -480,6 +480,7 @@ fn cap_block(block: ContentBlock, spills: &mut Vec<String>) -> ContentBlock {
             id,
             name,
             arguments,
+            state,
         } if max_json_string(&arguments) > STRING_HEAD_LIMIT => {
             // A `ToolCall` is never rewritten to a text note. Keep the id and the name,
             // spill the full arguments, and cap the oversize string values inside them.
@@ -488,9 +489,71 @@ fn cap_block(block: ContentBlock, spills: &mut Vec<String>) -> ContentBlock {
                 id,
                 name,
                 arguments: cap_json_strings(arguments),
+                state: cap_state(state),
+            }
+        }
+        ContentBlock::ToolCall {
+            id,
+            name,
+            arguments,
+            state,
+        } => ContentBlock::ToolCall {
+            id,
+            name,
+            arguments,
+            state: cap_state(state),
+        },
+        // Reasoning text is capped exactly as assistant text is. A named arm, because a
+        // wildcard here let a new block join the file uncapped. See rule 10.
+        ContentBlock::ReasoningTrace { text } if text.len() > STRING_HEAD_LIMIT => {
+            let capped = cap_string_value(&text);
+            spills.push(text);
+            ContentBlock::ReasoningTrace { text: capped }
+        }
+        ContentBlock::ReasoningTrace { text } => ContentBlock::ReasoningTrace { text },
+        ContentBlock::ReasoningReplay { text, state } => {
+            let state = cap_state(state);
+            if text.len() > STRING_HEAD_LIMIT {
+                let capped = cap_string_value(&text);
+                spills.push(text);
+                ContentBlock::ReasoningReplay {
+                    text: capped,
+                    state,
+                }
+            } else {
+                ContentBlock::ReasoningReplay { text, state }
             }
         }
         other => other,
+    }
+}
+
+/// Bound one replay payload. Rule 10: a payload over `MAX_RECORD_BYTES` is dropped whole.
+///
+/// A payload is opaque, so it cannot be trimmed. Half a signature still looks like a
+/// signature and would be replayed as one, and a record that cannot be read back makes the
+/// whole session unresumable. So the answer is all or nothing, and the drop is reported.
+fn cap_state(state: Option<crate::ProviderState>) -> Option<crate::ProviderState> {
+    let state = state?;
+    let size = serde_json::to_string(&state.value).map(|text| text.len());
+    match size {
+        Ok(size) if size <= MAX_RECORD_BYTES => Some(state),
+        Ok(size) => {
+            // The report names the size and the owner, and never the value, per rule 9. It
+            // is a log line and not a spill, because a spilled payload cannot be replayed
+            // from a sidecar and would only carry opaque bytes into a second file.
+            tracing::warn!(
+                provider = %state.owner.provider,
+                size,
+                "a reasoning payload exceeded the record cap and was dropped"
+            );
+            None
+        }
+        // A value that cannot be encoded cannot be written either, so it goes the same way.
+        Err(_) => {
+            tracing::warn!("a reasoning payload could not be encoded and was dropped");
+            None
+        }
     }
 }
 
@@ -966,10 +1029,23 @@ fn redact_block(block: &ContentBlock) -> ContentBlock {
             id,
             name,
             arguments,
+            state,
         } => ContentBlock::ToolCall {
             id: id.clone(),
             name: name.clone(),
             arguments: rho_redact::redact_json_secrets(arguments),
+            // A payload is opaque provider bytes, and a rewritten payload cannot replay.
+            // Rule 9 keeps it verbatim, and rule 10 bounds it instead.
+            state: state.clone(),
+        },
+        // Named arms, because a wildcard let a new block bypass redaction in silence. A
+        // reasoning text is model output, so it gets the same treatment as assistant text.
+        ContentBlock::ReasoningTrace { text } => {
+            ContentBlock::ReasoningTrace { text: text.clone() }
+        }
+        ContentBlock::ReasoningReplay { text, state } => ContentBlock::ReasoningReplay {
+            text: text.clone(),
+            state: state.clone(),
         },
         ContentBlock::ToolResult {
             tool_call_id,
@@ -1053,6 +1129,8 @@ impl SessionRecorder {
                     id: id.clone(),
                     name: name.clone(),
                     arguments: serde_json::json!({}),
+                    // The payload is not known here, and a guessed one would be replayed.
+                    state: None,
                 })
                 .collect();
             last = self.log.record(

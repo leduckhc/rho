@@ -534,7 +534,25 @@ delta at a time, so "the first non-space text" is unknown until enough text has 
 - `a_replayed_state_cannot_change_a_tool_call` — the payload rides along, and it never
   rewrites the request rho built.
 - `an_oversize_reasoning_line_does_not_fail_the_whole_resume` — one bad record drops, and the
-  session still opens.
+  session still opens. **Not built.** No production caller writes a session file, so the
+  resume path has no caller to test. See `D-no-caller-writes-a-session-file`.
+
+Added while building it, each for a reason the list above did not hold:
+
+- `the_stream_captures_the_signature` and `a_stream_with_no_signature_yields_no_state` — the
+  reader kept the reasoning text and dropped the signature, so there was nothing to replay.
+- `the_sdk_translation_carries_a_signature` and
+  `the_sdk_translation_carries_redacted_reasoning` — the live SDK translation dropped every
+  signature in a wildcard arm, while every unit test passed. The unit tests build the wire
+  mirror directly, so only a test over the SDK types can see this.
+- `a_state_with_no_signature_is_dropped` — an unsigned payload is not a signed block, and an
+  empty signature is a 400.
+- `every_request_builder_has_an_explicit_arm` — a source guard that reads each match over a
+  content block, arm by arm. It also drops comments first, because one named arm quotes
+  `_ => {}` to say what it avoids, and the first version of the guard failed the build for
+  that prose.
+- `a_payload_under_the_cap_is_written_verbatim` — the other side of rule 10.
+- `an_imported_pi_signature_never_replays` — the importer writes a trace.
 - `a_rejecting_endpoint_receives_no_reasoning_field` — the strict-schema row sends nothing,
   so no 422.
 - `a_tool_call_endpoint_receives_the_text` — the `TextOnToolCall` row attaches the text.
@@ -599,6 +617,7 @@ delta at a time, so "the first non-space text" is unknown until enough text has 
 - `a_replay_key_with_no_state_reads_as_a_trace` — the fail-closed direction.
 - `an_old_rho_ignores_the_state_key` — the new key does not fail an old load.
 - `a_state_value_never_reaches_a_log` — rule 9, asserted against a captured log at `trace`.
+  The capture proves itself first, per `D-log-capture-proves-itself`.
 - `a_replay_record_with_no_state_is_reported` — rule 11, so a provider bug is visible.
 - `an_imported_pi_signature_never_replays` — the importer writes a trace.
 - `a_crafted_owner_is_not_authentication` — pins the stated limit: the tag stops an accident,
@@ -697,3 +716,16 @@ same rule as the display mode, and the reason is `D-the-merge-cannot-name-a-valu
   two sources, each named in its own error.
 - `the_run_path_strips_a_leading_thinking_tag` — `rho run` had no splitter, so it printed a
   tag as the answer while the TUI did not.
+
+### How the replay was proved live
+
+A passing tool loop proves nothing on its own, because the loop also passed while rho sent no
+reasoning at all. So the signature was corrupted on purpose and the run repeated:
+
+| Request | Bedrock |
+| --- | --- |
+| the real signature | 200, and the loop finishes |
+| `deliberately-wrong-signature` | **400**, the request is invalid |
+
+A wrong signature can only break a request that carries it. See
+`docs/verification/reasoning-replay.md`.

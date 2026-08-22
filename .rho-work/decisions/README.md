@@ -43,6 +43,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-mcp-shared-by-default](20260817-215003-D-mcp-shared-by-default.md) | 20260817 | An MCP server is shared between sessions by default |
 | [D-measured-codec-choice](20260818-014343-D-measured-codec-choice.md) | 20260818 | A JSONL codec choice is measured, and the fast codec stays optional |
 | [D-measured-cost-and-cache](20260817-234608-D-measured-cost-and-cache.md) | 20260817 | Report the cache hit rate and the real cost, because a competitor only claims them |
+| [D-no-caller-writes-a-session-file](20260821-234500-D-no-caller-writes-a-session-file.md) | 20260821 | No production caller writes a session file, and the persisted format has no reader |
 | [D-no-cross-session-cache](20260817-235346-D-no-cross-session-cache.md) | 20260817 | No cross-session shared file cache, because rho has no tenancy model |
 | [D-no-four-argument-session-new](20260817-180735-D-no-four-argument-session-new.md) | 20260817 | Remove the four-argument `Session::new` |
 | [D-no-git-writes-by-a-subagent](20260817-184709-D-no-git-writes-by-a-subagent.md) | 20260817 | A subagent must never run a git command that changes the working tree |

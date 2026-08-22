@@ -39,7 +39,10 @@ pub enum StreamEvent {
     },
     ThinkingEnd {
         index: u32,
-        signature: Option<String>,
+        /// The provider's opaque replay payload, or `None` when it sent none. It replaces
+        /// `signature: Option<String>`: a signature now travels inside the payload, so one
+        /// carrier covers every provider. See `SPEC-reasoning-across-providers` section 4.
+        state: Option<crate::ProviderState>,
     },
     /// A tool call begins. The name is known at the start.
     ToolCallStart {
@@ -56,6 +59,10 @@ pub enum StreamEvent {
     ToolCallEnd {
         index: u32,
         arguments: serde_json::Value,
+        /// The replay payload a provider binds to this call, such as Gemini's thought
+        /// signature. Without this field a provider could not carry one, and the extension
+        /// point of the spec would be a promise rho cannot keep.
+        state: Option<crate::ProviderState>,
     },
     /// Cumulative token usage, reported one or more times.
     Usage(Usage),

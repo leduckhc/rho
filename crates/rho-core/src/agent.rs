@@ -783,23 +783,31 @@ impl AssistantBuilder {
                     thinking.push_str(delta);
                 }
             }
-            StreamEvent::ThinkingEnd { signature, .. } => {
-                if let Some(thinking) = self.thinking.take() {
-                    self.content.push(ContentBlock::Thinking {
-                        thinking,
-                        signature: signature.clone(),
+            // A payload makes the block replayable. Without one it is history for the
+            // reader, and the type stops it reaching a provider at all.
+            StreamEvent::ThinkingEnd { state, .. } => {
+                if let Some(text) = self.thinking.take() {
+                    self.content.push(match state {
+                        Some(state) => ContentBlock::ReasoningReplay {
+                            text,
+                            state: Some(state.clone()),
+                        },
+                        None => ContentBlock::ReasoningTrace { text },
                     });
                 }
             }
             StreamEvent::ToolCallStart { id, name, .. } => {
                 self.tool_call = Some((id.clone(), name.clone()));
             }
-            StreamEvent::ToolCallEnd { arguments, .. } => {
+            StreamEvent::ToolCallEnd {
+                arguments, state, ..
+            } => {
                 if let Some((id, name)) = self.tool_call.take() {
                     self.content.push(ContentBlock::ToolCall {
                         id: id.clone(),
                         name: name.clone(),
                         arguments: arguments.clone(),
+                        state: state.clone(),
                     });
                     self.tool_calls.push(PendingToolCall {
                         id,

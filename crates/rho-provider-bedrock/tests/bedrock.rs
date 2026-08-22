@@ -286,11 +286,13 @@ fn two_tool_results_conversation() -> Vec<rho_core::Message> {
                     id: "call_1".to_string(),
                     name: "read".to_string(),
                     arguments: serde_json::json!({ "path": "a.txt" }),
+                    state: None,
                 },
                 ContentBlock::ToolCall {
                     id: "call_2".to_string(),
                     name: "read".to_string(),
                     arguments: serde_json::json!({ "path": "b.txt" }),
+                    state: None,
                 },
             ],
         },
@@ -398,10 +400,10 @@ fn every_content_block_has_an_explicit_arm() {
             ContentBlock::Text {
                 text: "answer".to_string(),
             },
-            // Reasoning must not travel to Bedrock in phase 1. It is dropped in a named arm.
-            ContentBlock::Thinking {
-                thinking: "private".to_string(),
-                signature: Some("sig".to_string()),
+            // A trace must not travel. A replay block with a matching owner does, and the
+            // unit tests in the crate cover that. See `SPEC-reasoning-across-providers`.
+            ContentBlock::ReasoningTrace {
+                text: "private".to_string(),
             },
             // An image in an assistant message is out of scope for the request builder.
             ContentBlock::Image {

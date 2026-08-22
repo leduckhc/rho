@@ -391,7 +391,11 @@ impl ResponsesState {
                     .or_else(|| event.arguments.clone())
                     .unwrap_or_default();
                 match parse_arguments(&buffer) {
-                    Ok(arguments) => events.push(StreamEvent::ToolCallEnd { index, arguments }),
+                    Ok(arguments) => events.push(StreamEvent::ToolCallEnd {
+                        index,
+                        arguments,
+                        state: None,
+                    }),
                     Err(error) => {
                         return EventOutcome {
                             events,
@@ -566,6 +570,8 @@ fn message_to_items(message: &Message) -> Vec<Value> {
                 id,
                 name,
                 arguments,
+                // No replay payload travels on this wire yet. Gemini binds one to a call.
+                state: _,
             } => {
                 // Flush any prose that came before the call, so order survives.
                 if !text.is_empty() {
@@ -596,8 +602,15 @@ fn message_to_items(message: &Message) -> Vec<Value> {
                     "output": output,
                 }));
             }
-            // Thinking replay and image input are out of scope for sprint 1.
-            _ => {}
+            // A trace is for the reader, so it never travels.
+            ContentBlock::ReasoningTrace { .. } => {}
+            // Azure returns a reasoning summary and no replay token on this path, so rho
+            // stores no payload and has nothing to send back. The named arm replaces a
+            // `_ => {}` that a review found: a wildcard in a request builder hides the next
+            // block kind, and that is how a reasoning block was dropped in silence before.
+            ContentBlock::ReasoningReplay { .. } => {}
+            // Image input in a request is out of scope for sprint 1.
+            ContentBlock::Image { .. } => {}
         }
     }
 

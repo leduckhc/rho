@@ -51,6 +51,7 @@ impl Provider for ToolCallingProvider {
                 StreamEvent::ToolCallEnd {
                     index: 0,
                     arguments: serde_json::json!({ "path": "note.txt" }),
+                    state: None,
                 },
                 StreamEvent::Done {
                     stop_reason: StopReason::ToolUse,

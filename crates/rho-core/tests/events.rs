@@ -36,7 +36,7 @@ fn stream_event_tags_are_snake_case() {
         (
             StreamEvent::ThinkingEnd {
                 index: 0,
-                signature: None,
+                state: None,
             },
             "thinking_end",
         ),
@@ -59,6 +59,7 @@ fn stream_event_tags_are_snake_case() {
             StreamEvent::ToolCallEnd {
                 index: 0,
                 arguments: serde_json::json!({}),
+                state: None,
             },
             "tool_call_end",
         ),

@@ -193,6 +193,7 @@ fn no_written_record_of_any_kind_exceeds_the_cap() {
                     id: "t1".to_string(),
                     name: "bash".to_string(),
                     arguments: serde_json::json!({ "cmd": big }),
+                    state: None,
                 }],
             },
         },
@@ -272,6 +273,7 @@ fn an_oversize_record_of_every_kind_stays_under_the_cap() {
                 id: "call-1".to_string(),
                 name: "bash".to_string(),
                 arguments: serde_json::json!({ "script": big }),
+                state: None,
             }],
         },
     };

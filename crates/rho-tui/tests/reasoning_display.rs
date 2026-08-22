@@ -74,7 +74,7 @@ fn thinking_block(state: &mut TuiState, text: &str, start: i64, end: i64) {
     state.apply(
         &AgentEvent::Stream(StreamEvent::ThinkingEnd {
             index: 0,
-            signature: None,
+            state: None,
         }),
         end,
     );
@@ -168,7 +168,7 @@ fn live_mode_collapses_when_the_answer_starts() {
     state.apply(
         &AgentEvent::Stream(StreamEvent::ThinkingEnd {
             index: 0,
-            signature: None,
+            state: None,
         }),
         2_400,
     );

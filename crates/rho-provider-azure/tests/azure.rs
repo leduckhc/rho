@@ -134,11 +134,13 @@ fn two_tool_results_conversation() -> Vec<rho_core::Message> {
                     id: "call_1".to_string(),
                     name: "read".to_string(),
                     arguments: serde_json::json!({ "path": "a.txt" }),
+                    state: None,
                 },
                 ContentBlock::ToolCall {
                     id: "call_2".to_string(),
                     name: "read".to_string(),
                     arguments: serde_json::json!({ "path": "b.txt" }),
+                    state: None,
                 },
             ],
         },

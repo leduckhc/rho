@@ -523,7 +523,8 @@ impl SseState {
         if self.thinking_open {
             events.push(StreamEvent::ThinkingEnd {
                 index: Self::TEXT_INDEX,
-                signature: None,
+                // This wire carries no replay token, so the reducer keeps a trace.
+                state: None,
             });
             self.thinking_open = false;
         }
@@ -541,7 +542,11 @@ impl SseState {
                     }
                 }
             };
-            events.push(StreamEvent::ToolCallEnd { index, arguments });
+            events.push(StreamEvent::ToolCallEnd {
+                index,
+                arguments,
+                state: None,
+            });
         }
         None
     }
@@ -627,6 +632,8 @@ fn message_to_json(message: &Message) -> Value {
                 id,
                 name,
                 arguments,
+                // No replay payload travels on this wire yet. Gemini binds one to a call.
+                state: _,
             } => {
                 tool_calls.push(json!({
                     "id": id,
@@ -649,11 +656,14 @@ fn message_to_json(message: &Message) -> Value {
                     }
                 }
             }
-            // Reasoning never travels to OpenRouter in phase 1, and image input is out of
-            // scope for sprint 1. Drop each in a named arm, never by `_ => {}`, so a new
-            // block kind breaks the build instead of vanishing in silence. See
-            // SPEC-reasoning-across-providers section 3 "Three".
-            ContentBlock::Thinking { .. } => {}
+            // A trace is for the reader, so it never travels.
+            ContentBlock::ReasoningTrace { .. } => {}
+            // A replay block does not travel to OpenRouter yet. The hosts behind this one
+            // wire format disagree: Kimi and DeepSeek require the field back, and Mistral
+            // answers 422 when it is present. rho has no host row and no live proof for
+            // either, so it sends nothing and says so here. A wrong guess is a broken turn
+            // in both directions. See SPEC-reasoning-across-providers section 3 "One".
+            ContentBlock::ReasoningReplay { .. } => {}
             ContentBlock::Image { .. } => {}
         }
     }

@@ -1,0 +1,247 @@
+//! The rules that govern a replay payload: the log rule, the bound, and the report.
+//!
+//! See `SPEC-reasoning-across-providers` section 4 and rules 8 to 11, and decision
+//! `D-reasoning-replay-is-opaque-provider-state`.
+
+use std::sync::{Arc, Mutex};
+
+use rho_core::{ContentBlock, ProviderState, ReasoningOwner, SessionLog};
+
+/// A writer that collects every log byte into a shared buffer.
+#[derive(Clone)]
+struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for BufferWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufferWriter {
+    type Writer = BufferWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn state(value: serde_json::Value) -> ProviderState {
+    ProviderState {
+        owner: ReasoningOwner {
+            provider: "bedrock".to_string(),
+            model: "claude".to_string(),
+        },
+        value,
+    }
+}
+
+/// Write one message through the recorder, and return every line of the session file.
+///
+/// The block travels the real write path: `redact_block`, then `cap_record`. It goes in as a
+/// prompt, because that is the one entry point the recorder exposes for a message, and the
+/// two functions under test do not care about the role.
+///
+/// **No production caller writes a session file yet.** See
+/// `D-no-caller-writes-a-session-file`. These tests cover the format, and they claim nothing
+/// about a lifecycle that has no caller.
+fn recorded(block: ContentBlock) -> Vec<String> {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = rho_core::SessionStore::new(dir.path());
+    let writer = store
+        .create("test-session", dir.path(), "allow-all", "off")
+        .expect("the session file opens");
+    let path = writer.path().to_path_buf();
+    let mut recorder = rho_core::SessionRecorder::new(SessionLog::File(writer));
+    recorder.record_prompt(&[block]);
+    drop(recorder);
+    std::fs::read_to_string(&path)
+        .expect("the file reads")
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Rule 9. The payload is exempt from redaction, so it must never reach a log instead.
+#[test]
+fn a_state_value_never_reaches_a_log() {
+    let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(BufferWriter(Arc::clone(&buffer)))
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let block = ContentBlock::ReasoningReplay {
+            text: "a plan".to_string(),
+            state: Some(state(serde_json::json!({ "signature": "sig-do-not-log" }))),
+        };
+        let lines = recorded(block);
+        assert!(
+            lines.iter().any(|line| line.contains("sig-do-not-log")),
+            "the payload is stored verbatim, because a rewritten payload cannot replay"
+        );
+        // Prove the capture works before trusting an empty result. See
+        // `D-log-capture-proves-itself`.
+        tracing::warn!("the capture is live");
+    });
+    let logged = String::from_utf8(buffer.lock().unwrap().clone()).expect("valid utf8");
+    assert!(logged.contains("the capture is live"), "the capture works");
+    assert!(
+        !logged.contains("sig-do-not-log"),
+        "no payload in a log, at any level: {logged}"
+    );
+}
+
+/// Rule 10. A payload over the record cap is dropped whole, and the drop is reported.
+#[test]
+fn a_value_over_the_record_cap_is_dropped_and_reported() {
+    let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(BufferWriter(Arc::clone(&buffer)))
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    let joined = tracing::subscriber::with_default(subscriber, || {
+        let huge = "x".repeat(rho_core::MAX_RECORD_BYTES + 1);
+        let block = ContentBlock::ReasoningReplay {
+            text: "a plan".to_string(),
+            state: Some(state(serde_json::json!({ "signature": huge }))),
+        };
+        recorded(block).join("\n")
+    });
+    assert!(
+        !joined.contains(&"x".repeat(1000)),
+        "the oversize payload is not written"
+    );
+    assert!(
+        joined.contains("a plan"),
+        "the readable text survives the drop"
+    );
+    let logged = String::from_utf8(buffer.lock().unwrap().clone()).expect("valid utf8");
+    // The report names the size and the provider, and never the value.
+    assert!(
+        logged.contains("exceeded the record cap") && logged.contains("bedrock"),
+        "the drop is reported: {logged}"
+    );
+    assert!(
+        !logged.contains(&"x".repeat(1000)),
+        "the report never carries the payload"
+    );
+}
+
+/// A payload under the cap is written unchanged, or a replay after a resume would fail.
+#[test]
+fn a_payload_under_the_cap_is_written_verbatim() {
+    let block = ContentBlock::ReasoningReplay {
+        text: "a plan".to_string(),
+        state: Some(state(serde_json::json!({ "signature": "keep-me" }))),
+    };
+    let joined = recorded(block).join("\n");
+    assert!(joined.contains("keep-me"));
+    assert!(joined.contains("\"replay\":true"));
+}
+
+/// Rule 11. A record that claims a replay and carries no payload loads as history, and
+/// rho says so, because a provider bug must not hide.
+#[test]
+fn a_replay_record_with_no_state_is_reported() {
+    let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(BufferWriter(Arc::clone(&buffer)))
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    let block: ContentBlock = tracing::subscriber::with_default(subscriber, || {
+        serde_json::from_value(serde_json::json!({
+            "type": "thinking", "thinking": "x", "replay": true
+        }))
+        .expect("the record loads")
+    });
+    assert_eq!(
+        block,
+        ContentBlock::ReasoningTrace {
+            text: "x".to_string()
+        }
+    );
+    let logged = String::from_utf8(buffer.lock().unwrap().clone()).expect("valid utf8");
+    assert!(
+        logged.contains("no payload"),
+        "the load reports the claim it could not honour: {logged}"
+    );
+}
+
+/// A reasoning text is capped like any assistant text, so one turn cannot write a record
+/// that the reader then refuses.
+#[test]
+fn a_reasoning_text_over_the_string_cap_spills() {
+    let long = "y".repeat(rho_core::MAX_RECORD_BYTES);
+    let joined = recorded(ContentBlock::ReasoningTrace { text: long }).join("\n");
+    assert!(
+        joined.len() < rho_core::MAX_RECORD_BYTES * 2,
+        "the record is bounded"
+    );
+}
+
+/// Each `match block {` region of a source file, up to the arm that closes it.
+///
+/// Crude on purpose. It reads the text, because the alternative is a parser, and the guard
+/// only needs to see whether a wildcard sits beside the named arms.
+fn match_block_regions(source: &str) -> Vec<String> {
+    let mut regions = Vec::new();
+    for (start, _) in source.match_indices("match block {") {
+        let rest = &source[start..];
+        // The region ends at the first line that closes the match at its own indentation.
+        let end = rest
+            .find("\n        }")
+            .or_else(|| rest.find("\n    }"))
+            .unwrap_or(rest.len());
+        // Comments are dropped first. Every named arm here carries a comment that explains
+        // the drop, and one of them writes `_ => {}` to name what it avoids. The first
+        // version of this guard read that prose as code and failed the build for it.
+        let code: String = rest[..end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        regions.push(code);
+    }
+    regions
+}
+
+/// Every request builder names every content block. A stream parser may keep a wildcard,
+/// because a wire event set is open, but a request builder must not: that is how a reasoning
+/// block was dropped in silence, and how Azure kept dropping one for a whole sprint.
+#[test]
+fn every_request_builder_has_an_explicit_arm() {
+    for path in [
+        "../rho-provider-bedrock/src/lib.rs",
+        "../rho-provider-openrouter/src/lib.rs",
+        "../rho-provider-azure/src/lib.rs",
+    ] {
+        let source = std::fs::read_to_string(path).expect("the provider source reads");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("a source file has a first part");
+        for block in [
+            "ContentBlock::ReasoningTrace",
+            "ContentBlock::ReasoningReplay",
+            "ContentBlock::Image",
+        ] {
+            assert!(
+                production.contains(block),
+                "{path} must name {block} in an arm of its own"
+            );
+        }
+        // Naming the blocks is not enough. A wildcard beside them takes the traffic and
+        // the named arms become decoration. A deliberate break proved that: it added
+        // `_ => {}` and kept every name, and the first version of this guard passed. So
+        // the match over a content block is now read arm by arm.
+        for region in match_block_regions(production) {
+            assert!(
+                !region.contains("_ => {}") && !region.contains("_ => {"),
+                "{path} has a wildcard in a match over a content block:\n{region}"
+            );
+        }
+    }
+}

@@ -29,8 +29,9 @@ use std::collections::{HashMap, HashSet};
 // the mapping consumes this mirror, so a test can build events from a fixture.
 
 /// One `ConverseStream` event. Exactly one field is set per event.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(default)]
 pub struct ConverseStreamEvent {
     pub message_start: Option<MessageStart>,
     pub content_block_start: Option<ContentBlockStart>,
@@ -90,7 +91,17 @@ pub struct ToolUseDelta {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReasoningDelta {
-    pub text: String,
+    /// The readable reasoning. Absent on a signature-only or redacted delta.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// The token that proves the model wrote the text. The AWS SDK states the rule: "If you
+    /// pass a reasoning block back to the API in a multi-turn conversation, include the text
+    /// and its signature unmodified." rho read the text and dropped this on the floor.
+    #[serde(default)]
+    pub signature: Option<String>,
+    /// Reasoning the provider encrypted. It is opaque, and it replays as it arrived.
+    #[serde(default)]
+    pub redacted_content: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -134,6 +145,24 @@ pub struct BedrockMapState {
     text_started: HashSet<u32>,
     /// The indexes that already emitted a `ThinkingStart`.
     thinking_started: HashSet<u32>,
+    /// The signature of each open reasoning block, keyed by index. Bedrock sends it in its
+    /// own delta, after the text.
+    signatures: HashMap<u32, String>,
+    /// The encrypted reasoning of each open block, keyed by index.
+    redacted: HashMap<u32, String>,
+    /// The model of this request. A payload names its owner, and only the stream knows it.
+    model: String,
+}
+
+impl BedrockMapState {
+    /// Build a state for one model. A payload needs the model id to name its owner, and
+    /// rule 8 drops a payload whose owner does not match the next request.
+    pub fn for_model(model: impl Into<String>) -> Self {
+        Self {
+            model: model.into(),
+            ..Self::default()
+        }
+    }
 }
 
 /// Map one `ConverseStream` event to zero or more normalised events. See
@@ -187,13 +216,24 @@ pub fn map_converse_event(
             });
         }
         if let Some(reasoning) = block.delta.reasoning_content {
-            if state.thinking_started.insert(index) {
-                out.push(StreamEvent::ThinkingStart { index });
+            // A signature-only delta must not open a block on its own, and an empty text
+            // must add nothing. See behaviour rules 1 and 2.
+            if let Some(text) = reasoning.text.filter(|text| !text.is_empty()) {
+                if state.thinking_started.insert(index) {
+                    out.push(StreamEvent::ThinkingStart { index });
+                }
+                out.push(StreamEvent::ThinkingDelta { index, delta: text });
             }
-            out.push(StreamEvent::ThinkingDelta {
-                index,
-                delta: reasoning.text,
-            });
+            if let Some(signature) = reasoning.signature {
+                state
+                    .signatures
+                    .entry(index)
+                    .or_default()
+                    .push_str(&signature);
+            }
+            if let Some(redacted) = reasoning.redacted_content {
+                state.redacted.entry(index).or_default().push_str(&redacted);
+            }
         }
     }
 
@@ -207,13 +247,18 @@ pub fn map_converse_event(
             } else {
                 serde_json::from_str(&buffer).unwrap_or(Value::Null)
             };
-            out.push(StreamEvent::ToolCallEnd { index, arguments });
+            out.push(StreamEvent::ToolCallEnd {
+                index,
+                arguments,
+                // Bedrock binds no replay payload to a tool call. Gemini does.
+                state: None,
+            });
         } else if state.text_started.remove(&index) {
             out.push(StreamEvent::TextEnd { index });
         } else if state.thinking_started.remove(&index) {
             out.push(StreamEvent::ThinkingEnd {
                 index,
-                signature: None,
+                state: take_reasoning_state(state, index),
             });
         }
     }
@@ -378,7 +423,10 @@ impl Provider for BedrockProvider {
         let mut builder = client
             .converse_stream()
             .model_id(request.model.clone())
-            .set_messages(Some(build_messages(&request.messages)));
+            .set_messages(Some(build_messages_for_model(
+                &request.messages,
+                &request.model,
+            )));
         if let Some(system) = &request.system {
             builder = builder.system(aws_sdk_bedrockruntime::types::SystemContentBlock::Text(
                 system.clone(),
@@ -400,8 +448,9 @@ impl Provider for BedrockProvider {
             .map_err(|error| map_sdk_error(error.code(), error.to_string()))?;
 
         let mut receiver = output.stream;
+        let model_id = request.model.clone();
         let stream = stream! {
-            let mut state = BedrockMapState::default();
+            let mut state = BedrockMapState::for_model(model_id);
             let mut deferred_done: Option<StreamEvent> = None;
             loop {
                 let next = tokio::select! {
@@ -503,8 +552,43 @@ fn sdk_event_to_mirror(
                 Some(SdkDelta::ReasoningContent(SdkReasoning::Text(text))) => BlockDelta {
                     text: None,
                     tool_use: None,
-                    reasoning_content: Some(ReasoningDelta { text }),
+                    reasoning_content: Some(ReasoningDelta {
+                        text: Some(text),
+                        signature: None,
+                        redacted_content: None,
+                    }),
                 },
+                // The signature arrives in its own delta, after the text. This arm was a
+                // wildcard, so the live path dropped every signature and rho had nothing to
+                // replay. The unit tests could not see it, because they build the mirror
+                // shape directly.
+                Some(SdkDelta::ReasoningContent(SdkReasoning::Signature(signature))) => {
+                    BlockDelta {
+                        text: None,
+                        tool_use: None,
+                        reasoning_content: Some(ReasoningDelta {
+                            text: None,
+                            signature: Some(signature),
+                            redacted_content: None,
+                        }),
+                    }
+                }
+                // Encrypted reasoning. It is opaque, and it replays as it arrived. The blob
+                // is not valid UTF-8 in general, so it is carried as base64.
+                Some(SdkDelta::ReasoningContent(SdkReasoning::RedactedContent(blob))) => {
+                    use base64::Engine;
+                    BlockDelta {
+                        text: None,
+                        tool_use: None,
+                        reasoning_content: Some(ReasoningDelta {
+                            text: None,
+                            signature: None,
+                            redacted_content: Some(
+                                base64::engine::general_purpose::STANDARD.encode(blob.as_ref()),
+                            ),
+                        }),
+                    }
+                }
                 _ => BlockDelta {
                     text: None,
                     tool_use: None,
@@ -547,6 +631,17 @@ fn sdk_event_to_mirror(
 /// Build the SDK message list from the normalised messages. Sprint 1 sends text
 /// and tool calls. See `SPEC-provider-interface` section 8 for the out-of-scope block kinds.
 pub fn build_messages(messages: &[Message]) -> Vec<aws_sdk_bedrockruntime::types::Message> {
+    // Kept for the contract suite, which builds messages with no model in hand. A reasoning
+    // payload needs the model, so a caller that replays uses `build_messages_for_model`.
+    build_messages_for_model(messages, "")
+}
+
+/// Build the request messages for one model. The model decides whether a stored reasoning
+/// payload may travel, per rule 8.
+pub fn build_messages_for_model(
+    messages: &[Message],
+    model: &str,
+) -> Vec<aws_sdk_bedrockruntime::types::Message> {
     use aws_sdk_bedrockruntime::types::{
         ContentBlock as SdkBlock, ConversationRole, Message as SdkMessage, ToolResultBlock,
         ToolResultContentBlock, ToolUseBlock,
@@ -581,6 +676,9 @@ pub fn build_messages(messages: &[Message]) -> Vec<aws_sdk_bedrockruntime::types
                     id,
                     name,
                     arguments,
+                    // Bedrock binds no replay payload to a call. Gemini does, and that crate
+                    // reads this field without any change to shared code.
+                    state: _,
                 } => {
                     if let Ok(tool_use) = ToolUseBlock::builder()
                         .tool_use_id(id.clone())
@@ -612,11 +710,16 @@ pub fn build_messages(messages: &[Message]) -> Vec<aws_sdk_bedrockruntime::types
                         blocks.push(SdkBlock::ToolResult(result));
                     }
                 }
-                // Reasoning never travels to Bedrock in phase 1. rho does not yet ask for
-                // extended thinking, and replaying a reasoning block needs the per-endpoint
-                // rules that are phase 2. Drop it here in a named arm, never by `_ => {}`,
-                // so the drop is stated. See SPEC-reasoning-across-providers section 3 "Three".
-                ContentBlock::Thinking { .. } => {}
+                // A trace is for the reader, and it never reaches a provider. That is the
+                // whole point of the split, and the type enforces it here.
+                ContentBlock::ReasoningTrace { .. } => {}
+                // A replay block travels only when the payload is ours and the model still
+                // matches. Otherwise it is dropped in this named arm, never by `_ => {}`.
+                ContentBlock::ReasoningReplay { text, state } => {
+                    if let Some(reasoning) = replay_block(text, state, model) {
+                        blocks.push(SdkBlock::ReasoningContent(reasoning));
+                    }
+                }
                 // Image input in a request is out of scope for sprint 1. Drop it in a named
                 // arm, so a new block kind cannot hide behind a wildcard.
                 ContentBlock::Image { .. } => {}
@@ -647,6 +750,71 @@ pub fn build_messages(messages: &[Message]) -> Vec<aws_sdk_bedrockruntime::types
 }
 
 /// Build the inference configuration when the request sets any limit.
+/// The provider id every payload carries. It is `Provider::id` for this crate.
+const PROVIDER_ID: &str = "bedrock";
+
+/// The payload for one finished reasoning block, or `None` when the model signed nothing.
+///
+/// An unsigned block is not replayable. Bedrock rejects a reasoning block without its
+/// signature, so rho keeps the text as history instead of sending a block it knows is bad.
+fn take_reasoning_state(
+    state: &mut BedrockMapState,
+    index: u32,
+) -> Option<rho_core::ProviderState> {
+    let signature = state.signatures.remove(&index);
+    let redacted = state.redacted.remove(&index);
+    if signature.is_none() && redacted.is_none() {
+        return None;
+    }
+    let mut value = serde_json::Map::new();
+    if let Some(signature) = signature {
+        value.insert("signature".to_string(), Value::String(signature));
+    }
+    if let Some(redacted) = redacted {
+        value.insert("redacted".to_string(), Value::String(redacted));
+    }
+    Some(rho_core::ProviderState {
+        owner: rho_core::ReasoningOwner {
+            provider: PROVIDER_ID.to_string(),
+            model: state.model.clone(),
+        },
+        value: Value::Object(value),
+    })
+}
+
+/// Turn one replay payload into a Bedrock reasoning block, when it is ours to replay.
+///
+/// Rule 8 runs first, through `ProviderState::for_owner`. A payload from another provider or
+/// another model is dropped, because a signature is bound to the model that made it.
+fn replay_block(
+    text: &str,
+    state: &Option<rho_core::ProviderState>,
+    model: &str,
+) -> Option<aws_sdk_bedrockruntime::types::ReasoningContentBlock> {
+    use aws_sdk_bedrockruntime::types::{ReasoningContentBlock, ReasoningTextBlock};
+
+    let value = state.as_ref()?.for_owner(PROVIDER_ID, model)?;
+    if let Some(redacted) = value.get("redacted").and_then(Value::as_str) {
+        use base64::Engine;
+        // The payload holds base64, because a blob is not valid UTF-8 in general. A failed
+        // decode sends nothing: a wrong blob is worse than a missing one, because Bedrock
+        // would reject the whole turn.
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(redacted)
+            .ok()?;
+        return Some(ReasoningContentBlock::RedactedContent(
+            aws_smithy_types::Blob::new(bytes),
+        ));
+    }
+    let signature = value.get("signature").and_then(Value::as_str)?;
+    ReasoningTextBlock::builder()
+        .text(text)
+        .signature(signature)
+        .build()
+        .ok()
+        .map(ReasoningContentBlock::ReasoningText)
+}
+
 /// Does this model id support Anthropic extended thinking?
 ///
 /// It fails closed. Only a Claude id at version 3.7 or above answers `true`, because a
@@ -948,5 +1116,265 @@ mod thinking_request_tests {
         request.temperature = Some(0.2);
         let config = build_inference_config(&request).expect("an inference config exists");
         assert_eq!(config.temperature(), Some(0.2));
+    }
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+    use aws_sdk_bedrockruntime::types::ContentBlock as SdkBlock;
+    use rho_core::{ContentBlock, Message, ProviderState, ReasoningOwner, Role};
+
+    const MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+
+    /// One reasoning delta event in the wire mirror.
+    fn reasoning_delta_event(
+        index: u32,
+        text: Option<&str>,
+        signature: Option<&str>,
+    ) -> ConverseStreamEvent {
+        ConverseStreamEvent {
+            content_block_delta: Some(ContentBlockDelta {
+                content_block_index: index,
+                delta: BlockDelta {
+                    text: None,
+                    tool_use: None,
+                    reasoning_content: Some(ReasoningDelta {
+                        text: text.map(str::to_string),
+                        signature: signature.map(str::to_string),
+                        redacted_content: None,
+                    }),
+                },
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn owned_state(provider: &str, model: &str, signature: &str) -> ProviderState {
+        ProviderState {
+            owner: ReasoningOwner {
+                provider: provider.to_string(),
+                model: model.to_string(),
+            },
+            value: serde_json::json!({ "signature": signature }),
+        }
+    }
+
+    fn assistant(block: ContentBlock) -> Vec<Message> {
+        vec![Message {
+            role: Role::Assistant,
+            content: vec![block],
+        }]
+    }
+
+    /// The reasoning blocks Bedrock received, as (text, signature) pairs.
+    fn sent_reasoning(messages: &[Message], model: &str) -> Vec<(String, String)> {
+        build_messages_for_model(messages, model)
+            .iter()
+            .flat_map(|message| message.content().iter())
+            .filter_map(|block| match block {
+                SdkBlock::ReasoningContent(
+                    aws_sdk_bedrockruntime::types::ReasoningContentBlock::ReasoningText(text),
+                ) => Some((
+                    text.text().to_string(),
+                    text.signature().unwrap_or_default().to_string(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A signature must come back inside a tool loop, and the AWS SDK says so: "If you pass
+    /// a reasoning block back to the API in a multi-turn conversation, include the text and
+    /// its signature unmodified."
+    #[test]
+    fn a_state_replays_for_the_same_owner() {
+        let messages = assistant(ContentBlock::ReasoningReplay {
+            text: "a plan".to_string(),
+            state: Some(owned_state("bedrock", MODEL, "sig-1")),
+        });
+        assert_eq!(
+            sent_reasoning(&messages, MODEL),
+            vec![("a plan".to_string(), "sig-1".to_string())]
+        );
+    }
+
+    /// Rule 8. Another model's payload is dropped, because a signature is bound to the
+    /// model that made it and Bedrock rejects a foreign one.
+    #[test]
+    fn a_state_is_dropped_for_another_model() {
+        let messages = assistant(ContentBlock::ReasoningReplay {
+            text: "a plan".to_string(),
+            state: Some(owned_state("bedrock", "another-model", "sig-1")),
+        });
+        assert!(sent_reasoning(&messages, MODEL).is_empty());
+    }
+
+    /// Rule 8, the other half. fx checks neither, and its own code cannot tell one
+    /// provider's payload from another's.
+    #[test]
+    fn a_state_is_dropped_for_another_provider() {
+        let messages = assistant(ContentBlock::ReasoningReplay {
+            text: "a plan".to_string(),
+            state: Some(owned_state("openrouter", MODEL, "sig-1")),
+        });
+        assert!(sent_reasoning(&messages, MODEL).is_empty());
+    }
+
+    /// A trace never travels. That is the whole reason for the split.
+    #[test]
+    fn a_trace_never_reaches_a_provider() {
+        let messages = assistant(ContentBlock::ReasoningTrace {
+            text: "a plan".to_string(),
+        });
+        assert!(sent_reasoning(&messages, MODEL).is_empty());
+        // And it does not arrive as text either, which would look like an answer.
+        let sent = build_messages_for_model(&messages, MODEL);
+        assert!(sent.is_empty(), "a trace-only message carries nothing");
+    }
+
+    /// A replay block with no payload has nothing to send.
+    #[test]
+    fn an_absent_state_replays_nothing() {
+        let messages = assistant(ContentBlock::ReasoningReplay {
+            text: "a plan".to_string(),
+            state: None,
+        });
+        assert!(sent_reasoning(&messages, MODEL).is_empty());
+    }
+
+    /// A payload with no signature is not a signed block, so it is dropped rather than
+    /// sent with an empty signature, which Bedrock would reject.
+    #[test]
+    fn a_state_with_no_signature_is_dropped() {
+        let mut state = owned_state("bedrock", MODEL, "sig-1");
+        state.value = serde_json::json!({ "unrelated": true });
+        let messages = assistant(ContentBlock::ReasoningReplay {
+            text: "a plan".to_string(),
+            state: Some(state),
+        });
+        assert!(sent_reasoning(&messages, MODEL).is_empty());
+    }
+
+    /// The stream must capture the signature, or there is nothing to replay. rho parsed the
+    /// reasoning text and dropped the signature field on the floor.
+    #[test]
+    fn the_stream_captures_the_signature() {
+        let mut state = BedrockMapState::for_model(MODEL);
+        let events = vec![
+            reasoning_delta_event(0, Some("a plan"), None),
+            reasoning_delta_event(0, None, Some("sig-1")),
+            ConverseStreamEvent {
+                content_block_stop: Some(ContentBlockStop {
+                    content_block_index: 0,
+                }),
+                ..Default::default()
+            },
+        ];
+        let mut out = Vec::new();
+        for event in events {
+            out.extend(map_converse_event(&mut state, event));
+        }
+        let end = out
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::ThinkingEnd { state, .. } => Some(state.clone()),
+                _ => None,
+            })
+            .expect("the stream ends the thinking block");
+        let state = end.expect("the payload carries the signature");
+        assert_eq!(state.owner.provider, "bedrock");
+        assert_eq!(state.owner.model, MODEL);
+        assert_eq!(state.value["signature"], "sig-1");
+    }
+
+    /// The live SDK translation must carry a signature into the mirror.
+    ///
+    /// Every unit test above builds the mirror shape directly, so all of them passed while
+    /// the real path dropped the signature in a wildcard arm. This test drives the SDK
+    /// types, which is the only way to see that.
+    #[test]
+    fn the_sdk_translation_carries_a_signature() {
+        use aws_sdk_bedrockruntime::types::{
+            ContentBlockDelta as SdkDelta, ContentBlockDeltaEvent, ConverseStreamOutput as Out,
+            ReasoningContentBlockDelta as SdkReasoning,
+        };
+        let event = Out::ContentBlockDelta(
+            ContentBlockDeltaEvent::builder()
+                .content_block_index(0)
+                .delta(SdkDelta::ReasoningContent(SdkReasoning::Signature(
+                    "sig-live".to_string(),
+                )))
+                .build()
+                .expect("the delta builds"),
+        );
+        let mirror = sdk_event_to_mirror(event).expect("the event maps");
+        let reasoning = mirror
+            .content_block_delta
+            .expect("a delta arrived")
+            .delta
+            .reasoning_content
+            .expect("the reasoning survives the translation");
+        assert_eq!(reasoning.signature.as_deref(), Some("sig-live"));
+        assert_eq!(reasoning.text, None, "a signature delta carries no text");
+    }
+
+    /// The same for encrypted reasoning, which arrives as a blob and rides as base64.
+    #[test]
+    fn the_sdk_translation_carries_redacted_reasoning() {
+        use aws_sdk_bedrockruntime::types::{
+            ContentBlockDelta as SdkDelta, ContentBlockDeltaEvent, ConverseStreamOutput as Out,
+            ReasoningContentBlockDelta as SdkReasoning,
+        };
+        let event = Out::ContentBlockDelta(
+            ContentBlockDeltaEvent::builder()
+                .content_block_index(0)
+                .delta(SdkDelta::ReasoningContent(SdkReasoning::RedactedContent(
+                    aws_smithy_types::Blob::new(vec![0xff, 0x00, 0x10]),
+                )))
+                .build()
+                .expect("the delta builds"),
+        );
+        let mirror = sdk_event_to_mirror(event).expect("the event maps");
+        let reasoning = mirror
+            .content_block_delta
+            .expect("a delta arrived")
+            .delta
+            .reasoning_content
+            .expect("the reasoning survives the translation");
+        let encoded = reasoning
+            .redacted_content
+            .expect("the blob survives as base64");
+        use base64::Engine;
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("valid base64"),
+            vec![0xff, 0x00, 0x10],
+            "a blob is not valid utf8, so it must ride as base64"
+        );
+    }
+
+    /// A turn with no signature yields no payload, so the reducer keeps a trace.
+    #[test]
+    fn a_stream_with_no_signature_yields_no_state() {
+        let mut state = BedrockMapState::for_model(MODEL);
+        let events = vec![
+            reasoning_delta_event(0, Some("a plan"), None),
+            ConverseStreamEvent {
+                content_block_stop: Some(ContentBlockStop {
+                    content_block_index: 0,
+                }),
+                ..Default::default()
+            },
+        ];
+        let mut out = Vec::new();
+        for event in events {
+            out.extend(map_converse_event(&mut state, event));
+        }
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, StreamEvent::ThinkingEnd { state: None, .. }))
+        );
     }
 }
