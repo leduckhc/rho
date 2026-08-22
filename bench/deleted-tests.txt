@@ -1,0 +1,8 @@
+# Tests a commit message names, and that were deliberately removed.
+#
+# `bench/check-claimed-tests.py` asserts that every test a commit names exists in the tree. A
+# commit that removes a test names it too, and the guard cannot tell the two apart from the
+# words alone. So a removal is recorded here, with the commit that did it and the reason.
+#
+# One name per line: <name> <commit> <reason>
+a_bad_flag_value_falls_back_to_summary 2f807c4 asserted a silent fallback, which the owner's ruling reversed

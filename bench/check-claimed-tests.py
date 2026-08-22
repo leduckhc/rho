@@ -17,6 +17,7 @@ the guard is useful both in CI and on a branch with no upstream.
 It reports one line per missing name and exits non-zero. It prints VIOLATIONS 0 when clean.
 """
 
+import pathlib
 import re
 import subprocess
 import sys
@@ -34,6 +35,25 @@ def default_range() -> str:
     return "HEAD~20..HEAD"
 
 
+def deleted_names() -> set[str]:
+    """The names a commit removed on purpose, from `bench/deleted-tests.txt`.
+
+    A commit that deletes a test names it, and the words alone do not say whether the name was
+    added or removed. The guard found that on its first run over the whole branch, against a test
+    the owner's ruling had reversed. So a removal is recorded rather than guessed at.
+    """
+    path = pathlib.Path(__file__).with_name("deleted-tests.txt")
+    if not path.exists():
+        return set()
+    names = set()
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        names.add(line.split()[0])
+    return names
+
+
 def claimed_names(text: str) -> list[str]:
     # A test name in this project reads like a sentence: lowercase words joined by underscores.
     # Three underscores keeps ordinary identifiers such as `max_tokens` out of the set.
@@ -48,14 +68,27 @@ def main() -> int:
         print(f"VIOLATIONS 0 (no commits in {span})")
         return 0
 
+    allowed = deleted_names()
     missing = []
     for name in claimed_names(body):
-        found = git("grep", "-l", f"fn {name}", "--", "crates").strip()
+        if name in allowed:
+            continue
+        # The name must end where the declaration does. A plain substring search passed
+        # `fn <name>_renamed`, which is exactly the loss this guard exists to catch, so the
+        # first version of it was satisfied by a rename.
+        found = git(
+            "grep", "-lE", rf"fn {re.escape(name)} *[(<]", "--", "crates"
+        ).strip()
         if not found:
             missing.append(name)
 
     for name in missing:
         print(f"a commit message names `{name}`, and no test of that name exists")
+    if missing:
+        print(
+            "add a test, or record a deliberate removal in bench/deleted-tests.txt "
+            "with the commit and the reason"
+        )
     print(f"VIOLATIONS {len(missing)} (range {span})")
     return 1 if missing else 0
 

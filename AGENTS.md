@@ -328,6 +328,9 @@ tree. A green suite cannot see a missing test, and on this branch three tests we
 concurrent writer while the suite stayed green and a commit claimed one of them by name. A test
 that exists only in a commit message is a false claim about the work.
 
+Record a deliberate removal in `bench/deleted-tests.txt`, with the commit and the reason. A
+commit that deletes a test names it too, and the guard cannot tell that from a loss.
+
 ## Prose rules
 
 Write prose in ASD-STE100 Simplified Technical English.

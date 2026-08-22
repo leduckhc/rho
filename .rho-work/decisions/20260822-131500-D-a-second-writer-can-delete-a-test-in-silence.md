@@ -48,6 +48,20 @@ pointed at a commit message.
 - No mutating agent runs in the controller's checkout again.
 - No "the suite is green" as evidence that a change is complete.
 
+## The guard found two flaws in itself, immediately
+
+Worth recording, because it is the argument for writing the guard rather than the rule.
+
+1. **It could not tell an added test from a deleted one.** Its first run over the whole branch
+   flagged `a_bad_flag_value_falls_back_to_summary`, which commit `2f807c4` deleted on purpose
+   because it asserted a silent fallback the owner had reversed. A deliberate removal is now
+   recorded in `bench/deleted-tests.txt`, with the commit and the reason, so the exception is
+   auditable rather than clever.
+2. **A prefix satisfied it.** `fn a_counter_stops_at_its_limit` matched
+   `fn a_counter_stops_at_its_limit_renamed`, so a rename passed the guard. That is the very
+   loss it exists to catch, wearing a different hat. The pattern now requires the declaration to
+   end where the name ends, and both a longer and a shorter rename trip it.
+
 ## The cost
 
 The guard reads commit messages, so it needs history, and CI checks out with
