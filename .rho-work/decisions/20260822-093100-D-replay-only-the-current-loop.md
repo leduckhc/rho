@@ -9,9 +9,13 @@ The prompt is append-only, so every message goes out again on every later turn. 
 version of the replay sent every stored reasoning block, with its full text and signature, on
 every request for the rest of the session.
 
-A review worked the cost out: turn one's trace is re-sent on turns two to twenty, so the extra
-bytes are B multiplied by the sum of one to nineteen, which is 190 times B. With a large
-`xhigh` trace that is tens of megabytes over a session, and the growth is O(turns squared).
+A review worked the cost out **from the code path, not from a measurement**: turn one's trace
+is re-sent on turns two to twenty, so the extra bytes are B multiplied by the sum of one to
+nineteen, which is 190 times B. With a large `xhigh` trace that is tens of megabytes over a
+session, and the growth is O(turns squared).
+
+No bench builds a twenty-turn request, so the number above is arithmetic over the append-only
+rule. The one measured number in this work is the TUI frame cost in `docs/benchmarks.md`.
 
 ## The decision
 

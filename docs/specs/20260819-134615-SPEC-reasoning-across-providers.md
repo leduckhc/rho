@@ -95,9 +95,19 @@ fx gives rho two things, one to copy and one to avoid:
   provider switch can send a foreign blob. rho tags the payload with its owner, and rule 8
   drops a mismatch.
 
-fx also gates the ask on a model capability, and it fails closed when the catalogue does not
-list the effort. See `fx-src/src/core/config/model_capabilities.zig:95`. A project file in fx
-may not set the model or the effort, so a cloned repository cannot raise your spend.
+fx also gates the ask on a model capability, and it fails closed. `reasoningEffortSupported`
+answers false for an effort the catalogue does not list, and the caller sets the field only
+when that answer is true. See `fx-src/src/core/config/model_capabilities.zig:124` and `:201`.
+
+**fx goes further than rho here, and its own test says so.** That file holds a test named
+"capabilities never infer reasoning or Fast controls from model IDs". fx reads a gateway
+catalogue instead. rho has no catalogue, and a Bedrock id does carry its version, so
+`model_supports_thinking` reads the id. That is a weaker source of truth, and section 9 states
+the cost: an inference profile ARN hides the model, so a capable model reads as incapable. rho
+fails closed and reports it, which is the best an id can do.
+
+A project file in fx may not set the model or the effort, so a cloned repository cannot raise
+your spend.
 
 ## 3. Where rho goes further
 
@@ -436,7 +446,9 @@ D-a-bad-reasoning-mode-is-refused.
 12. Only the current tool loop replays its reasoning. A block from before the last user
     prompt is history: the provider needs the thinking of the turns that carry the pending
     call, and nothing older. The prompt is append-only, so re-sending an old block costs its
-    bytes on every later turn, and a review measured that growth as O(turns squared).
+    bytes on every later turn. A review worked that growth out from the code path as O(turns
+    squared). It is arithmetic over the append-only rule, and not a measurement, because no
+    bench builds a twenty-turn request yet.
 13. A request builder has a named arm for every content block. A stream parser may keep a
     wildcard, because a wire event set is open and a provider adds events without rho.
     `rho-provider-azure/src/lib.rs:600` is a request builder, so its `_ => {}` goes.
