@@ -98,6 +98,10 @@ rho searches these locations in order:
 The first skill with a given name wins.
 If a later skill shares that name, rho warns you and ignores the duplicate.
 
+The skill walk stops at the git root. [Project instructions](project-instructions.md) walk
+further, up to your home directory. So an `AGENTS.md` in a directory above your repository
+still applies, and a skill in that directory does not.
+
 ## Project skills and trust
 
 A project skill is withheld by default.

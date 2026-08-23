@@ -42,6 +42,9 @@ rho stops the walk at your home directory.
 It never reads above home.
 The walk covers at most 32 ancestor directories.
 
+This walk is wider than the one for skills, which stops at the git root. So a file above
+your repository reaches the model, and a [skill](skills.md) in the same place does not.
+
 One directory contributes at most one file.
 When rho finds `AGENTS.md` in a directory, it stops looking in that directory.
 
