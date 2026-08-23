@@ -140,6 +140,10 @@ async fn calling_a_cached_tool_that_no_longer_exists_is_a_clear_error() {
         session_root: std::env::temp_dir(),
         cancel: rho_core::CancelToken::new(),
         updates: tx,
+        agent_events: {
+            let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(16);
+            agent_tx
+        },
     };
     let output = ghost.execute(serde_json::json!({}), ctx).await.unwrap();
     assert!(output.is_error, "a gone tool is a clear error");

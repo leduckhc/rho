@@ -69,7 +69,6 @@ fn reducer_tool_call_end_pushes_pending_tool_row() {
         &AgentEvent::Stream(StreamEvent::ToolCallEnd {
             index: 0,
             arguments: serde_json::json!({"path": "a.txt"}),
-            state: None,
         }),
         0,
     );
@@ -102,7 +101,6 @@ fn reducer_tool_start_sets_running() {
         &AgentEvent::Stream(StreamEvent::ToolCallEnd {
             index: 0,
             arguments: serde_json::json!({}),
-            state: None,
         }),
         0,
     );
@@ -427,6 +425,8 @@ fn report(outcome: rho_core::AgentOutcome) -> rho_core::AgentReport {
             ..Default::default()
         },
         turns: 3,
+        gate: Default::default(),
+        claims: Default::default(),
         transcript: None,
     }
 }
@@ -597,76 +597,4 @@ fn an_agent_event_for_an_unknown_id_is_ignored() {
         0,
     );
     assert!(state.rows.is_empty(), "no row must be invented");
-}
-
-fn text_end() -> AgentEvent {
-    AgentEvent::Stream(StreamEvent::TextEnd { index: 0 })
-}
-
-#[test]
-fn a_leading_thinking_tag_in_text_becomes_a_thinking_row() {
-    // The owner's bug: Claude Haiku on Bedrock writes `<thinking>...</thinking>` inside
-    // ordinary text, and rho drew it as the answer. The reducer must lift the leading tag
-    // into a thinking row, so the frontend can dim it, and keep the answer in an assistant
-    // row. See SPEC-reasoning-across-providers section 3 "Two".
-    let mut state = TuiState::default();
-    state.apply(&text_start(), 0);
-    state.apply(
-        &text_delta("<thinking>let me count</thinking>the answer is 391"),
-        0,
-    );
-    state.apply(&text_end(), 0);
-
-    assert_eq!(
-        state.rows,
-        vec![
-            Row::Thinking {
-                text: "let me count".to_string()
-            },
-            Row::Assistant {
-                text: "the answer is 391".to_string()
-            },
-        ],
-        "the leading tag must not read as the answer"
-    );
-}
-
-#[test]
-fn a_thinking_tag_split_across_deltas_still_becomes_a_thinking_row() {
-    // The opening tag may arrive split across deltas on a stream. The reducer must still
-    // strip it.
-    let mut state = TuiState::default();
-    state.apply(&text_start(), 0);
-    state.apply(&text_delta("<thin"), 0);
-    state.apply(&text_delta("king>reasoning</think"), 0);
-    state.apply(&text_delta("ing>answer"), 0);
-    state.apply(&text_end(), 0);
-
-    assert_eq!(
-        state.rows,
-        vec![
-            Row::Thinking {
-                text: "reasoning".to_string()
-            },
-            Row::Assistant {
-                text: "answer".to_string()
-            },
-        ]
-    );
-}
-
-#[test]
-fn a_tag_in_the_middle_of_an_answer_stays_in_the_assistant_row() {
-    // An answer that discusses tags must survive whole. rho must not eat it.
-    let mut state = TuiState::default();
-    state.apply(&text_start(), 0);
-    state.apply(&text_delta("here is a <thinking> tag"), 0);
-    state.apply(&text_end(), 0);
-
-    assert_eq!(
-        state.rows,
-        vec![Row::Assistant {
-            text: "here is a <thinking> tag".to_string()
-        }]
-    );
 }

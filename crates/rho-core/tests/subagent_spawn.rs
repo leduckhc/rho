@@ -42,8 +42,8 @@ fn a_depth_of_zero_forbids_spawning() {
         ..SubagentLimits::new()
     };
     let registry = AgentRegistry::new(limits);
-    let root = registry.root();
-    let error = root.spawn_child().unwrap_err();
+    let root = registry.new_tree();
+    let error = root.spawn_child("scout", CancelToken::new()).unwrap_err();
     match error {
         SubagentError::DepthExceeded { limit, attempted } => {
             assert_eq!(limit, 0);
@@ -60,15 +60,28 @@ fn depth_beyond_the_cap_is_refused_and_the_reason_names_the_limit() {
         ..SubagentLimits::new()
     };
     let registry = AgentRegistry::new(limits);
-    let root = registry.root();
-    let (child, _s1) = root.spawn_child().unwrap();
-    let (grandchild, _s2) = child.spawn_child().unwrap();
+    let root = registry.new_tree();
+    let _s1 = root.spawn_child("scout", CancelToken::new()).unwrap();
+    let child = &_s1.node;
+    let _s2 = child.spawn_child("scout", CancelToken::new()).unwrap();
+    let grandchild = &_s2.node;
     // The great-grandchild would be depth 3, past the cap of 2.
-    let error = grandchild.spawn_child().unwrap_err();
+    let error = grandchild
+        .spawn_child("scout", CancelToken::new())
+        .unwrap_err();
     let message = error.to_string();
     assert!(message.contains("depth limit is 2"), "{message}");
     assert!(message.contains("depth 3"), "{message}");
-    assert!(message.contains("--max-agent-depth"), "{message}");
+    // This assertion changed on purpose. It used to require the text
+    // `--max-agent-depth`, and that flag never existed, so the test pinned a
+    // refusal that sent the user after an impossible fix. A live sweep found it.
+    // See docs/verification/subagents-bedrock.md and decision D-cli-depth-is-zero.
+    // The refusal must still teach, so it now says what to do instead.
+    assert!(message.contains("Do the work here"), "{message}");
+    assert!(
+        !message.contains("--max-agent-depth"),
+        "the refusal must name no flag that cannot help: {message}"
+    );
 }
 
 #[test]
@@ -78,10 +91,12 @@ fn more_children_than_the_per_parent_cap_is_refused() {
         ..SubagentLimits::new()
     };
     let registry = AgentRegistry::new(limits);
-    let root = registry.root();
-    let (_c1, _s1) = root.spawn_child().unwrap();
-    let (_c2, _s2) = root.spawn_child().unwrap();
-    let error = root.spawn_child().unwrap_err();
+    let root = registry.new_tree();
+    let _s1 = root.spawn_child("scout", CancelToken::new()).unwrap();
+    let _c1 = &_s1.node;
+    let _s2 = root.spawn_child("scout", CancelToken::new()).unwrap();
+    let _c2 = &_s2.node;
+    let error = root.spawn_child("scout", CancelToken::new()).unwrap_err();
     match error {
         SubagentError::TooManyChildren { limit, current } => {
             assert_eq!(limit, 2);
@@ -106,15 +121,20 @@ fn the_process_wide_cap_is_refused_across_two_parents() {
         ..SubagentLimits::new()
     };
     let registry = AgentRegistry::new(limits);
-    let root = registry.root();
+    let root = registry.new_tree();
     // Two separate parents, each holding one live child. That is three live
     // agents once we add the two parents? No: the root does not count until it
     // is spawned. Build two sibling parents under the root, then a child of each.
-    let (parent_a, _sa) = root.spawn_child().unwrap(); // live total 1
-    let (parent_b, _sb) = root.spawn_child().unwrap(); // live total 2
-    let (_child_a, _sca) = parent_a.spawn_child().unwrap(); // live total 3
+    let _sa = root.spawn_child("scout", CancelToken::new()).unwrap();
+    let parent_a = &_sa.node; // live total 1
+    let _sb = root.spawn_child("scout", CancelToken::new()).unwrap();
+    let parent_b = &_sb.node; // live total 2
+    let _sca = parent_a.spawn_child("scout", CancelToken::new()).unwrap();
+    let _child_a = &_sca.node; // live total 3
     // The process-wide cap of 3 is now reached. Parent B cannot spawn.
-    let error = parent_b.spawn_child().unwrap_err();
+    let error = parent_b
+        .spawn_child("scout", CancelToken::new())
+        .unwrap_err();
     match error {
         SubagentError::TooManyLiveAgents { limit, current } => {
             assert_eq!(limit, 3);
@@ -135,15 +155,19 @@ fn a_finished_child_frees_its_slot() {
         ..SubagentLimits::new()
     };
     let registry = AgentRegistry::new(limits);
-    let root = registry.root();
+    let root = registry.new_tree();
     {
-        let (_child, _slot) = root.spawn_child().unwrap();
+        let _slot = root.spawn_child("scout", CancelToken::new()).unwrap();
+        let _child = &_slot.node;
         assert_eq!(registry.live_total(), 1);
     }
     // The slot dropped, so the counts are free again.
     assert_eq!(registry.live_total(), 0);
     assert_eq!(root.live_children(), 0);
-    let (_child, _slot) = root.spawn_child().expect("a freed slot allows a new child");
+    let _slot = root
+        .spawn_child("scout", CancelToken::new())
+        .expect("a freed slot allows a new child");
+    let _child = &_slot.node;
 }
 
 // --- The cycle guard ---
@@ -201,7 +225,13 @@ async fn a_parent_receives_a_summary_and_the_usage() {
     let session = child_session(vec![turn]);
     let cancel = CancelToken::new();
     let events = session.prompt(Vec::new(), cancel.clone());
-    let report = collect_report("scout", events, cancel, Duration::from_secs(60), None).await;
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60)),
+    )
+    .await;
 
     assert_eq!(report.outcome, AgentOutcome::Done);
     assert_eq!(report.summary, "The bug is in parser.rs at line 42.");
@@ -217,7 +247,13 @@ async fn a_long_child_summary_is_capped() {
     let session = child_session(vec![text_turn(&long)]);
     let cancel = CancelToken::new();
     let events = session.prompt(Vec::new(), cancel.clone());
-    let report = collect_report("scout", events, cancel, Duration::from_secs(60), None).await;
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60)),
+    )
+    .await;
     assert_eq!(
         report.summary.chars().count(),
         rho_core::MAX_SUMMARY_CHARS,
@@ -245,8 +281,8 @@ async fn a_child_transcript_never_enters_the_parent_context() {
         "scout",
         events,
         cancel,
-        Duration::from_secs(60),
-        Some(transcript.clone()),
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60))
+            .transcript(transcript.clone()),
     )
     .await;
 
@@ -265,6 +301,46 @@ async fn a_child_transcript_never_enters_the_parent_context() {
 }
 
 #[tokio::test]
+async fn a_transcript_writes_into_a_directory_that_does_not_exist_yet() {
+    // The shipped caller puts transcripts in `<root>/.rho/agent-transcripts/`, and
+    // nothing creates that directory. So every real run lost its transcript and
+    // only logged a warning. The test above passed against this bug, because a
+    // `tempdir` already exists. This test pins the real path shape.
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir
+        .path()
+        .join(".rho")
+        .join("agent-transcripts")
+        .join("agent-1.log");
+    assert!(
+        !transcript.parent().unwrap().exists(),
+        "the parent directory must be absent, or this test proves nothing"
+    );
+
+    let session = child_session(vec![text_turn("done")]);
+    let cancel = CancelToken::new();
+    let events = session.prompt(Vec::new(), cancel.clone());
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60))
+            .transcript(transcript.clone()),
+    )
+    .await;
+
+    assert_eq!(
+        report.transcript.as_deref(),
+        Some(transcript.as_path()),
+        "the report must name the transcript it wrote"
+    );
+    assert!(
+        transcript.exists(),
+        "the transcript must exist, so the missing parent directory was created"
+    );
+}
+
+#[tokio::test]
 async fn a_child_failure_returns_a_result_and_the_parent_continues() {
     // The provider stream ends with no `Done` event, which the driver reports as
     // a decode fault. A child failure is a result, not the end of the run.
@@ -274,7 +350,13 @@ async fn a_child_failure_returns_a_result_and_the_parent_continues() {
     let session = child_session(broken);
     let cancel = CancelToken::new();
     let events = session.prompt(Vec::new(), cancel.clone());
-    let report = collect_report("scout", events, cancel, Duration::from_secs(60), None).await;
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60)),
+    )
+    .await;
     assert!(
         matches!(report.outcome, AgentOutcome::Failed { .. }),
         "a failed child yields Failed, got {:?}",
@@ -289,7 +371,13 @@ async fn a_child_that_ends_without_reporting_is_reported_as_failed() {
     let session = child_session(vec![Vec::new()]);
     let cancel = CancelToken::new();
     let events = session.prompt(Vec::new(), cancel.clone());
-    let report = collect_report("scout", events, cancel, Duration::from_secs(60), None).await;
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60)),
+    )
+    .await;
     match report.outcome {
         AgentOutcome::Failed { reason } => assert!(!reason.is_empty()),
         other => panic!("expected Failed, got {other:?}"),
@@ -319,8 +407,7 @@ async fn a_child_past_its_timeout_is_cancelled_and_reported() {
         "scout",
         events,
         cancel.clone(),
-        Duration::from_millis(50),
-        None,
+        rho_core::CollectOptions::with_timeout(Duration::from_millis(50)),
     )
     .await;
     assert_eq!(report.outcome, AgentOutcome::Canceled);
@@ -338,7 +425,13 @@ async fn cancelling_the_parent_cancels_every_descendant() {
     let cancel = CancelToken::new();
     cancel.cancel();
     let events = session.prompt(Vec::new(), cancel.clone());
-    let report = collect_report("scout", events, cancel, Duration::from_secs(60), None).await;
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60)),
+    )
+    .await;
     assert_eq!(report.outcome, AgentOutcome::Canceled);
 }
 
@@ -364,6 +457,196 @@ async fn a_child_out_of_turns_is_reported() {
     );
     let cancel = CancelToken::new();
     let events = session.prompt(Vec::new(), cancel.clone());
-    let report = collect_report("scout", events, cancel, Duration::from_secs(60), None).await;
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60)),
+    )
+    .await;
     assert_eq!(report.outcome, AgentOutcome::OutOfTurns);
+}
+
+#[tokio::test]
+async fn the_tool_call_budget_stops_a_turn_that_asks_for_too_many_tools() {
+    // The case a turn cap cannot see. One turn asks for five tool calls, and the
+    // budget is three. A turn cap of 32 would let all five run.
+    let dir = tempfile::tempdir().unwrap();
+    // A counting tool, because the outcome alone cannot show an overrun. A review
+    // mutated the check from `>=` to `>` and this test still passed, so it proved
+    // only that the run ended, never that the cap held.
+    let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(common::CountingTool::new(
+        "probe",
+        Arc::clone(&calls),
+    )));
+
+    // One turn, five calls.
+    let mut turn = vec![StreamEvent::MessageStart {
+        role: rho_core::Role::Assistant,
+    }];
+    for index in 0..5u32 {
+        turn.push(StreamEvent::ToolCallStart {
+            index,
+            id: format!("c{index}"),
+            name: "probe".to_string(),
+        });
+        turn.push(StreamEvent::ToolCallEnd {
+            index,
+            arguments: serde_json::json!({}),
+        });
+    }
+    turn.push(StreamEvent::Done {
+        stop_reason: rho_core::StopReason::ToolUse,
+    });
+
+    let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::new(vec![turn]));
+    let config = rho_core::SessionConfig::new(
+        "child-model",
+        dir.path().to_path_buf(),
+        Arc::new(rho_core::AllowAllPolicy),
+    )
+    .with_max_tool_calls(3);
+    let session = Session::with_config(
+        config,
+        provider,
+        Arc::new(tools),
+        Arc::new(rho_core::HookChain::new()),
+        rho_core::Context::new(None, Vec::new()),
+    );
+
+    let cancel = CancelToken::new();
+    let events = session.prompt(Vec::new(), cancel.clone());
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60)),
+    )
+    .await;
+
+    // The budget is spent, so the child is out of room. The parent gets what it
+    // had rather than nothing.
+    assert_eq!(
+        report.outcome,
+        rho_core::AgentOutcome::OutOfTurns,
+        "spending the tool-call budget must end the run, got {:?}",
+        report.outcome
+    );
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "the budget is 3, so exactly 3 calls may run. A cap that is noticed after the \
+         fact is not a cap."
+    );
+}
+
+#[test]
+fn the_retry_ledger_does_not_grow_without_a_bound() {
+    // The ledger's key holds the whole prompt, which a model writes. A parent that
+    // fails many distinct tasks would grow the map for ever. A security review
+    // flagged it, and this project has already shipped one unbounded buffer.
+    let ledger = RetryLedger::new();
+    for index in 0..5_000 {
+        // Each key is distinct, so nothing is ever a repeat.
+        let _ = ledger.record_death(&format!("scout\u{1f}task number {index}"));
+    }
+    assert!(
+        ledger.tracked() <= 256,
+        "the ledger must stay bounded, tracked {}",
+        ledger.tracked()
+    );
+
+    // And the cap must not break the guarantee: the same work still hits the cap.
+    let fresh = RetryLedger::new();
+    let mut refused = false;
+    for _ in 0..MAX_CHILD_RETRIES {
+        if fresh.record_death("scout\u{1f}the poisoned task").is_err() {
+            refused = true;
+        }
+    }
+    assert!(refused, "repeated deaths of one task must still be refused");
+}
+
+// --- The child transcript: streamed, JSONL, and readable (round eight) ---
+
+#[tokio::test]
+async fn a_transcript_is_jsonl_and_one_line_per_event() {
+    // The transcript was `format!("{event:?}")`, which no reader can parse. pi writes
+    // JSONL, one entry per message, and a parent that is handed the path needs a
+    // format it can actually read.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("child.jsonl");
+    let session = child_session(vec![text_turn("the answer")]);
+    let cancel = CancelToken::new();
+    let events = session.prompt(Vec::new(), cancel.clone());
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_secs(60)).transcript(path.clone()),
+    )
+    .await;
+
+    assert_eq!(report.transcript.as_deref(), Some(path.as_path()));
+    let body = std::fs::read_to_string(&path).unwrap();
+    assert!(!body.trim().is_empty(), "the transcript must hold entries");
+    for line in body.lines() {
+        let entry: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("every line must be JSON: {e} in {line}"));
+        assert!(
+            entry["ts"].is_string(),
+            "each entry carries a timestamp: {line}"
+        );
+        assert_eq!(
+            entry["agent"], "scout",
+            "each entry names the agent: {line}"
+        );
+        assert!(
+            entry["type"].is_string(),
+            "each entry names its kind: {line}"
+        );
+    }
+    assert!(
+        body.contains("TurnStart"),
+        "a turn must appear, got: {body}"
+    );
+    assert!(
+        body.contains("the answer"),
+        "the child's text must appear, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_timed_out_child_still_leaves_the_lines_it_wrote() {
+    // The case a transcript is most wanted for, and the one that had none. The old
+    // writer buffered every line and wrote once at the end, so a child that was
+    // cancelled or crashed left an empty file or no file at all.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("timeout.jsonl");
+
+    // A tool that never returns, so the child is still working when the timeout fires.
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(common::HangingTool::new("probe")));
+    let session = child_session_with_tools(
+        vec![tool_call_turn("c1", "probe", serde_json::json!({}))],
+        tools,
+    );
+    let cancel = CancelToken::new();
+    let events = session.prompt(Vec::new(), cancel.clone());
+    let report = collect_report(
+        "scout",
+        events,
+        cancel,
+        rho_core::CollectOptions::with_timeout(Duration::from_millis(50)).transcript(path.clone()),
+    )
+    .await;
+
+    assert_eq!(report.outcome, AgentOutcome::Canceled);
+    let body = std::fs::read_to_string(&path).expect("a cancelled child still leaves its file");
+    assert!(
+        body.contains("TurnStart"),
+        "the lines written before the timeout must survive, got: {body:?}"
+    );
 }

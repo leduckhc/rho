@@ -9,6 +9,13 @@ This document is the contract for all later stages. The architect writes specs a
 - `partial` — some of the feature is in the tree, and the row says which part. The rest
   reports that it is not built, so a user never meets silence.
 - `considered` — not decided; requires a design spike first.
+- `superseded` — the feature shipped and was then replaced. The row stays, because an
+  older spec still names it, and a dangling reference is worse than a history note. The
+  row says which feature replaced it.
+
+A status states what the code proves, not what a plan intends. `agentic-workflow.yaml`
+holds the template that every unit of work follows. A filled copy lives in
+`.rho-work/tracks/`, and `.rho-work/progress.md` records what each sprint delivered.
 
 A status states what the code proves, not what a plan intends. `workflow-sprint-2.yaml`
 holds the current sprint. Sprint 2 is at work on config (`rho-config`), the session log,
@@ -30,7 +37,11 @@ and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
 | F-auto-continue | Auto-continue | When a turn ends with open todos, rho sends the model back to work without user input. | `rho-core` | `planned` | A `ContinuePolicy` trait will let callers control the auto-continue trigger condition. |
 | F-background-tasks | Background tasks | Long-running shell commands become named tasks the agent can list, tail, cancel, or wait on. The agent never writes polling loops. | `rho-core`, `rho-tools` | `sprint-2` | Tools register tasks on a shared `TaskRegistry`. Any tool can create or query tasks. |
 | F-message-queue | Message queue | A user message that arrives during a turn is queued. It is never dropped, and it never lands in the middle of a provider request. The queue is bounded. | `rho-core` | `planned` | Callers push a message from any thread. The queue is part of the session API. See `SPEC-steering`. |
+<<<<<<< ours
 | F-message-steering | Message steering | A queued message reaches the model after the current tool calls finish. It arrives before the next provider request. Arrival order is kept. | `rho-core` | `planned` | The TUI and `rho-acp` both steer through the same queue. See `SPEC-steering` and F-steer-command. |
+=======
+| F-message-steering | Message steering | A queued message reaches the model after the current tool calls finish. It arrives before the next provider request. Arrival order is kept. The queue is bounded, and a cancel keeps it. | `rho-core` | `built` | The TUI and `rho-acp` both steer through the same queue. See `SPEC-steering` and F-steer-command. |
+>>>>>>> theirs
 
 ---
 
@@ -39,8 +50,13 @@ and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
 | ID | Name | Outcome | Owning crate | Status | Extension point |
 |----|------|---------|--------------|--------|-----------------|
 | F-provider-trait | Provider trait | Any struct that implements `Provider` works in the agent loop. rho ships three providers. A caller adds a fourth without changing rho. | `rho-core` | `sprint-1` | Implement the `Provider` trait in any crate and pass an instance to the agent loop. No fork required. |
+<<<<<<< ours
 | F-openrouter-provider | OpenRouter provider | rho streams answers and tool calls from any model on OpenRouter over `POST /api/v1/chat/completions` with SSE. Reasoning tokens pass through: the delta reader takes the first non-empty of `reasoning_content`, `reasoning`, and `reasoning_text`. The effort level does not reach this crate yet. | `rho-provider-openrouter` | `sprint-1` | Callers set the base URL to any OpenAI-compatible endpoint to use a different service. |
 | F-aws-bedrock-provider | AWS Bedrock provider | rho streams answers and tool calls via Bedrock `ConverseStream`. SigV4 auth comes from the standard AWS credential chain: env vars, profile, SSO cache, IMDS. | `rho-provider-bedrock` | `sprint-1` | Callers supply a custom `CredentialProvider` (planned) to replace the standard chain. Until then, the chain is fixed. |
+=======
+| F-openrouter-provider | OpenRouter provider | rho streams answers and tool calls from any model on OpenRouter over `POST /api/v1/chat/completions` with SSE. Reasoning tokens pass through. | `rho-provider-openrouter` | `sprint-1` | Callers set the base URL to any OpenAI-compatible endpoint to use a different service. |
+| F-aws-bedrock-provider | AWS Bedrock provider | rho streams answers and tool calls via Bedrock `ConverseStream`. SigV4 auth comes from the standard AWS credential chain: env vars, profile, SSO cache, IMDS. | `rho-provider-bedrock` | `sprint-1` | Callers supply a custom `CredentialProvider` (planned) to replace the standard chain. Until then, the chain is fixed. The default model is the latest Haiku on the global inference profile. A Claude 4.5 model needs a profile, and a global one works in any region. See `D-bedrock-default-is-the-global-haiku`. |
+>>>>>>> theirs
 | F-azure-openai-provider | Azure OpenAI provider | rho streams answers and tool calls from Azure OpenAI `/responses`. Two auth modes: API key, and Entra token with audience `https://cognitiveservices.azure.com/`. | `rho-provider-azure` | `sprint-1` | Two auth modes are built in: API key and Entra token. Adding a new auth mode requires a change in `rho-provider-azure`. |
 | F-model-registry | Model registry | rho maintains a list of available models per provider. The caller selects a model by ID. | `rho-config` | `planned` | A third party adds models via the config file. Alternatively, pass a `ModelDescriptor` slice at startup. |
 | F-custom-provider-extension | Custom provider extension | A third party ships a crate that implements `Provider` and lists it as a cargo dependency. rho uses it without modification. | `n/a (caller crate)`, `rho-provider-testkit` | `sprint-2` | The `Provider` trait is the full extension point. No other mechanism is needed. |
@@ -119,10 +135,17 @@ and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
 
 | ID | Name | Outcome | Owning crate | Status | Extension point |
 |----|------|---------|--------------|--------|-----------------|
+<<<<<<< ours
 | F-layered-config | Layered config | Global config (`~/.config/rho/config.toml`) merges with project config (`.rho/config.toml`). Project values override global values. | `rho-config` merges, `rho-cli` calls it once | `yes` | `rho-cli` discovers both paths and calls `Config::load` once per process. A project file's `skill-paths` and `mcp-config` need `--trust-project`. Driven for real: `docs/verification/config-call-site.md`. |
 | F-environment-variable-override | Environment variable override | Every scalar config key can be set with an environment variable. The pattern is `RHO_<KEY>`. A table key has no environment form. | `rho-config` maps, `rho-cli` supplies layer 5 | `yes` | Layer 5 now reaches the product, and no `clap` `env` attribute remains to make a second precedence. `RHO_MODEL` and `RHO_PROVIDER` have regression guards, because dropping the clap attribute made both dead with a green suite. |
 | F-credential-resolution | Credential resolution | API keys resolve from: env var, config file, shell command (`!op read ...`), or env var interpolation. No key is ever logged. A hung helper times out after 30 seconds. | `rho-config` | `partial` | Resolution and the untrusted-project refusal are built and tested. **No provider calls it yet**, so a `credentials` block in a file reaches nothing: `provider.rs` still uses `std::env::var(...).unwrap_or_default()`. Proved by run 7 of `docs/verification/config-call-site.md`. |
 | F-profile-support | Profile support | The user selects a named profile at startup. Each profile overrides any subset of config keys. | `rho-config` merges, `rho-cli` owns `--profile` | `yes` | `--profile` selects a block, a profile key beats a plain file key, and an undefined profile is an error. |
+=======
+| F-layered-config | Layered config | Global config (`~/.config/rho/config.toml`) merges with project config (`.rho/config.toml`). Project values override global values. | `rho-config` | `partial` | The merge is built and tested. No binary reads a config file yet, so the file changes nothing. See `D-the-layered-config-has-no-caller`. |
+| F-environment-variable-override | Environment variable override | Every scalar config key can be set with an environment variable. The pattern is `RHO_<KEY>`. A table key has no environment form. | `rho-config` | `partial` | The mapping is built and tested. Only `RHO_TUI_MOUSE` reaches the product today, through `rho-cli`. The rest wait for the config call site. |
+| F-credential-resolution | Credential resolution | API keys resolve from: env var, config file, shell command (`!op read ...`), or env var interpolation. No key is ever logged. A hung helper times out after 30 seconds. | `rho-config` | `partial` | Resolution is built and tested, including the helper timeout. No binary calls it yet, so a key in the config file is not read. |
+| F-profile-support | Profile support | The user selects a named profile at startup. Each profile overrides any subset of config keys. | `rho-config` | `partial` | Profiles merge and are tested. Nothing reads the file yet, so a profile cannot be selected at startup. |
+>>>>>>> theirs
 
 ---
 
@@ -130,6 +153,7 @@ and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
 
 | ID | Name | Outcome | Owning crate | Status | Extension point |
 |----|------|---------|--------------|--------|-----------------|
+<<<<<<< ours
 | F-reasoning-trace-and-replay | Reasoning trace and replay | A model's reasoning is two block kinds. A trace is for the reader and never reaches a provider, and the type enforces that. A replay block carries one opaque payload, tagged with the provider and the model that wrote it. A payload from another provider or another model is dropped. | `rho-core` | `delivered` | A new provider puts its own wire shape inside the payload. Shared code never reads inside it, so no new provider changes `rho-core`. `ProviderState::for_owner` holds the owner rule in one place. |
 | F-bedrock-reasoning-replay | Bedrock reasoning replay | rho captures the signature Bedrock sends with a reasoning block. It replays the text and the signature unmodified on the next request. The AWS API requires that inside a tool loop. Encrypted reasoning rides as base64 and replays as a blob. | `rho-provider-bedrock` | `delivered` | A corrupted signature was rejected live with a 400, which proves the block travels. See `docs/verification/reasoning-replay.md`. |
 | F-reasoning-payload-bounds | Reasoning payload bounds | A payload over the record cap is dropped whole, and the drop is reported. A truncated token is useless, and an unreadable record breaks a whole session. A payload never reaches a log at any level, and it is stored verbatim, because a rewritten payload cannot replay. | `rho-core` | `delivered` | `redact_block` and `cap_block` each name every reasoning block, so no wildcard hides a new block kind. |
@@ -138,6 +162,8 @@ and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
 | F-reasoning-effort | Reasoning effort | The user sets how hard the model thinks. The levels are `off`, `low`, `medium`, `high`, and `xhigh`. The sources are `--reasoning-effort`, `RHO_REASONING_EFFORT`, and the `reasoning-effort` key. Unset means the provider's own default, so rho sends no field. A bad level stops the run and names its source. | `rho-core`, `rho-config`, `rho-cli` | `delivered` | `ReasoningEffort` is one user-facing word. A provider crate maps it to its own wire shape, so a new provider needs no change to shared code. See `docs/verification/reasoning-effort.md`. |
 | F-bedrock-asks-for-thinking | Bedrock asks for thinking | rho sends `thinking` in `additionalModelRequestFields` for a Claude model at version 3.7 or above, with the budget of the chosen level. Without the ask, Claude wrote `<thinking>` tags into the answer. A model that cannot think is asked for nothing. A thinking request also drops the temperature. It raises `max_tokens` above the budget. | `rho-provider-bedrock` | `delivered` | `model_supports_thinking` is one function with a table test of real model ids. It fails closed on an id it cannot read. |
 | F-headless-reasoning-output | Headless reasoning output | `rho run` prints the answer on stdout and the reasoning on stderr, so a pipe stays clean. A leading `<thinking>` tag becomes reasoning on this path too, which it did not before. Reasoning prints in `full` and `live` only. | `rho-cli` | `delivered` | `reasoning_is_shown` states the rule in one place, and a source guard proves the loop calls the splitter. |
+=======
+>>>>>>> theirs
 | F-minimal-tui | Minimal TUI | The user runs `rho` and sees a transcript, a streaming answer, and thinking blocks. Tool rows, an input editor, and a status line are also present. | `rho-tui` | `sprint-1` | `rho-tui` is an optional crate. A third party ships a different TUI or omits TUI entirely. |
 | F-pure-function-render | Pure-function render | TUI state is a pure function of events. Tests drive the renderer with a test backend, not a real terminal. | `rho-tui` | `sprint-1` | No external extension point. This is an internal design constraint. |
 | F-non-blocking-input | Non-blocking input | The input editor never blocks on model work. The user types while the model streams. Ctrl-C cancels the turn. A second Ctrl-C exits. | `rho-tui` | `sprint-1` | No external extension point. |
@@ -151,12 +177,27 @@ and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
 | F-attachments | Image attachments | An image attaches as a bounded chip. An oversize image is refused with the limit stated, and a path outside the session root is refused. | `rho-tui` | `partial` | `attach_image` is built and tested, and confinement is a security boundary. No key reaches it yet, so the chip cannot appear. |
 | F-concise-mode | Concise mode | A tool call and a thinking block collapse to one line each, and expand on a key. The mode is opt-in. | `rho-tui` | `partial` | The fold model is built and no key folds a row. The caret is not drawn either, because a caret promises a key. Both return together. |
 | F-working-motion | Working motion | One motion marks a working state. A raised-cosine band sweeps the working word, as a pure function of a tick, so a test asserts a frame. | `rho-tui` | `sprint-3` | An extension replaces the working word. The sweep reads no clock, by design. |
+<<<<<<< ours
 | F-theme-roles | Theme roles | Six roles carry the interface. Each resolves to a 256-colour value, a 16-colour fallback, and a no-colour modifier. | `rho-tui` | `sprint-3` | Style by role, never by a raw colour, so a user theme keeps working. See `SPEC-tui-plugins`. |
 | F-generated-help | Generated help | The help screen is generated from the binding table, so the keys and the help cannot drift apart. | `rho-tui` | `sprint-3` | Add a binding, and the help row follows. No second list to maintain. |
 | F-tui-plugin-view | Transcript plugin view | A third party contributes transcript rows through a Tier-1 trait. It returns data, never a frame, and it cannot read the transcript without a grant. | `rho-tui` | `planned` | Implement the view trait. See `SPEC-tui-plugins`. |
 | F-inline-band | Inline band | rho draws a fixed band at the bottom of the terminal. The band holds the live rows, the composer, and the footer. rho never enters the alternate screen, so the output above the band stays. | `rho-tui` | `sprint-4` | No extension point. See `D-inline-viewport-not-alternate-screen`. |
 | F-freeze-upward | Freeze a row upward | A row that can never change again moves into the terminal's own scrollback. So the wheel, a drag-select, and the terminal search all work on the transcript. | `rho-tui` | `sprint-4` | No extension point. A row freezes only when it is final, and only in order. See `D-a-frozen-row-never-repaints`. |
 | F-optional-mouse | Optional mouse capture | rho leaves the mouse to the terminal, so drag-select keeps working. One config key turns capture on for the wheel and the clickable list. | `rho-tui`, `rho-config` | `sprint-4` | Pass `--mouse`, or set `RHO_TUI_MOUSE`. The `tui-mouse` file key parses and waits for the config call site. |
+=======
+| F-theme-roles | Theme roles | Twelve roles carry the interface. Each states a 256-colour value, a 16-colour fallback, and a no-colour modifier set. The renderer reads the 256-colour value, the background, and the weight. | `rho-tui` | `partial` | Style by role, never by a raw colour. The 16-colour and no-colour tables are written and tested. **No code selects them yet**, so a low-colour terminal still receives 256-colour indices. See `D-the-colour-modes-are-not-wired`. |
+| F-generated-help | Generated help | The help screen is generated from the binding table, so the keys and the help cannot drift apart. | `rho-tui` | `sprint-3` | Add a binding, and the help row follows. No second list to maintain. |
+| F-tui-plugin-view | Transcript plugin view | A third party contributes transcript rows through a Tier-1 trait. It returns data, never a frame, and it cannot read the transcript without a grant. | `rho-tui` | `planned` | Implement the view trait. See `SPEC-tui-plugins`. |
+| F-alternate-screen | Alternate screen | rho opens the alternate screen at startup and owns the whole terminal. It restores every mode on every exit path, including a panic, a `SIGTERM`, and a `SIGHUP`. | `rho-tui` | `sprint-4` | No extension point. See `D-alternate-screen-after-all` and `SPEC-tui-alternate-screen`. |
+| F-owned-scroll | Owned scroll state | rho owns the transcript scroll, because the alternate screen has no scrollback. The wheel, `pageup`, `pagedown`, `home`, and `end` move the view, and the offset clamps where it changes. | `rho-tui` | `sprint-4` | No extension point. See `SPEC-tui-alternate-screen` section 3. |
+| F-markdown-colour | Markdown as colour | A heading, a fence, a code line, a quote, a list marker, and a rule each take a colour. Inline bold, italic, and code take a style too. Every marker is removed. A table draws with aligned columns and a bold header. Syntax highlighting is out of scope. | `rho-tui` | `sprint-4` | A row is a `StyledLine` of styled runs, and `put` owns the width. The subset is closed by design: a new element edits the scanner. See `D-markdown-line-level-first` and `SPEC-tui-markdown`. |
+| F-block-text-shape | Block text keeps its shape | An assistant answer keeps its line breaks, its blank lines, and the indent of each line. A list stays a list, and a code fence stays code. Every escape sequence is still dropped. | `rho-tui`, `rho-redact` | `sprint-4` | `sanitize_block` keeps a newline and drops an escape. `sanitize_line` stays for a one-row row. No flag turns the filter off. See `D-block-text-keeps-its-shape`. |
+| F-startup-notice | Startup notice | A startup notice draws in the transcript, wrapped, with the `!` glyph and the `Warn` role. rho used to print a notice and then open the alternate screen over it, so the user never read one. | `rho-tui`, `rho-cli` | `sprint-4` | A caller hands notices to `App::with_notices`. A row is `Row::Notice`, so a new frontend must answer for it. See `D-a-notice-reaches-the-transcript`. |
+| F-mouse-capture | Mouse capture | rho captures the mouse by default. The alternate screen has no scrollback, so the wheel is the only way to scroll. `--no-mouse` gives the mouse back to the terminal. | `rho-tui`, `rho-config` | `sprint-4` | Pass `--no-mouse`, or set `RHO_TUI_MOUSE`. Every target terminal keeps a modifier bypass for drag-select. See `D-the-wheel-needs-capture`. |
+| F-inline-band | Inline band | rho drew a fixed band at the bottom of the terminal. It never entered the alternate screen, so the output above the band stayed. | `rho-tui` | `superseded` | Replaced by F-alternate-screen. rho now owns the whole terminal. `plan_band` became `plan_screen`. See `D-alternate-screen-after-all`. |
+| F-freeze-upward | Freeze a row upward | A finished row moved into the terminal's own scrollback, so the terminal's wheel and search worked on the transcript. | `rho-tui` | `superseded` | Replaced by F-owned-scroll. The alternate screen has no scrollback, and rho can repaint any row. So the freeze became a defect that dropped late output. See `SPEC-tui-alternate-screen` section 6b. |
+| F-optional-mouse | Optional mouse capture | rho left the mouse to the terminal, and one config key turned capture on. | `rho-tui`, `rho-config` | `superseded` | Replaced by F-mouse-capture. The default flipped, because with capture off the wheel does nothing in the alternate screen. See `D-the-wheel-needs-capture`. |
+>>>>>>> theirs
 | F-composer-editing | Composer editing | The draft is a multi-row composer with paste chips and a cursor. It answers the newline keys and the readline motions. | `rho-tui` | `sprint-4` | No extension point. A chip is one unit for the cursor. See `SPEC-tui-scroll-copy-composer`. |
 | F-draft-history | Draft history | The user recalls a submitted draft with the arrows, and searches the session history with a key. | `rho-tui` | `sprint-4` | No extension point. The history lives for the session only. |
 | F-external-editor | External editor | The user edits the draft, or reads a selection, in `$EDITOR`. A failed editor run never discards the draft. | `rho-tui` | `sprint-4` | The editor comes from `$VISUAL`, then `$EDITOR`, then `vi`. |
@@ -173,7 +214,28 @@ and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
 | F-steer-command | Steer command | The client sends a steering message while the agent is running. The message delivers after the current tool calls finish. | `rho-acp` | `planned` | Same protocol extension point as F-prompt-command. |
 | F-abort-command | Abort command | The client sends a `session/cancel` notification. rho cancels the current turn and responds to `session/prompt` with `stopReason: cancelled`. | `rho-acp` | `planned` | Same protocol extension point as F-prompt-command. |
 | F-session-commands-over-acp | Session commands over ACP | The client creates new sessions, switches sessions, and forks sessions over the protocol. | `rho-acp` | `planned` | Same protocol extension point as F-prompt-command. |
+<<<<<<< ours
 | F-extension-ui-sub-protocol | Extension UI sub-protocol | An ACP client responds to `extension_ui_request` events for select, confirm, and input dialogs from hooks. | `rho-acp` | `planned` | Clients that do not implement the sub-protocol receive a default value after a timeout. |
+=======
+| F-extension-ui-sub-protocol | Permission and dialog requests | An ACP client answers `session/request_permission` for an approval, and the dialog requests a hook raises. | `rho-acp` | `planned` | Clients that do not implement the sub-protocol receive a default value after a timeout. The JSONL frontend has its own row, F-jsonl-dialog-sub-protocol. |
+
+---
+
+## Frontends — JSONL
+
+`docs/specs/20260819-102749-SPEC-jsonl-frontend.md` owns these rows. This protocol lands before
+ACP, because it is small. ACP stays the interop target and arrives as a bridge. See
+decision D-jsonl-before-acp.
+
+| ID | Name | Outcome | Owning crate | Status | Extension point |
+|----|------|---------|--------------|--------|-----------------|
+| F-jsonl-frontend | JSONL frontend | A client drives rho headlessly over stdin and stdout, one JSON object per line. Any process that reads and writes lines can embed rho. | `rho-jsonl` | `planned` | `rho-jsonl` is an optional crate. Any language implements a client. The protocol is documented. |
+| F-jsonl-prompt | JSONL prompt command | The client sends a `prompt` command. The agent streams events. The run ends with a settled event. | `rho-jsonl` | `planned` | The protocol is the extension point. Any language can implement a client. |
+| F-jsonl-steer | JSONL steer command | The client sends a `steer` command while the agent runs. The message delivers after the current tool calls finish. | `rho-jsonl` | `planned` | Same protocol extension point as F-jsonl-prompt. |
+| F-jsonl-abort | JSONL abort command | The client sends an `abort` command. rho cancels the current turn and settles with a cancelled stop reason. | `rho-jsonl` | `planned` | Same protocol extension point as F-jsonl-prompt. |
+| F-jsonl-session-commands | JSONL session commands | The client reads state, switches models, starts a session, and lists messages and commands over the protocol. | `rho-jsonl` | `planned` | Same protocol extension point as F-jsonl-prompt. |
+| F-jsonl-dialog-sub-protocol | JSONL dialog sub-protocol | The agent asks the client for a select, a confirm, an input, or a notify. A dialog blocks until the client answers. The agent side owns the timeout. | `rho-jsonl` | `planned` | A client that answers no dialog receives the default value after the timeout. |
+>>>>>>> theirs
 
 ---
 
@@ -226,7 +288,48 @@ restates them. See `F-lifecycle-hook-points` and `F-slash-commands` above.
 | F-cycle-guard | Cycle guard | The spawn walk carries a visited set. A cycle in the parent chain is refused rather than looped. | `rho-core` | `sprint-2` | No extension point. |
 | F-salvage-and-retry-cap | Salvage and retry cap | A child that dies without a report yields a failed result. A re-delegated task stops at the retry cap. | `rho-core` | `sprint-2` | A caller uses `RetryLedger`. |
 | F-agent-events | Agent events | The parent stream shows a child through three events: spawned, progressed, and finished. | `rho-core` | `sprint-2` | New `AgentEvent` variants. A frontend renders them. |
+<<<<<<< ours
 | F-agent-definitions | Agent definitions | An agent is a markdown file with frontmatter. A project definition is withheld until the project is trusted. | `rho-skills` | `sprint-2` | Author a definition file. The loader is shared with skills. |
+=======
+| F-background-subagent | Background subagent | The parent starts a child and returns at once. It polls with `agent_status`, and a finished child stays reportable after its handle is gone. | `rho-tools` | `built` | Pass `background: true` to `spawn_agent`. |
+| F-agent-status | Agent status | The parent asks what a child is doing, or what it did. It reports turns, tokens, queued steers, the outcome, the summary, and the transcript path. | `rho-tools` | `built` | Register a different `Tool` under the name `agent_status`. |
+| F-child-transcript | Child transcript | Every child streams a JSONL transcript to a per-user temp directory, and the parent is told the path. A child that never finished still leaves what it wrote. | `rho-core` | `built` | Read `AgentReport.transcript`, or implement a different writer. |
+| F-steer-subagent | Steer a subagent | A host sends a running child a new instruction. The child reads it at its next turn boundary, so it never lands inside a provider request. A model can call `steer_agent` only once a child can outlive a turn. | `rho-tools` | `built` | Register a different `Tool` under the name `steer_agent`, or hold the registry and call `LiveAgent::steer`. |
+| F-cancel-one-subagent | Cancel one subagent | The model stops one child. Its siblings and the parent keep running. | `rho-tools` | `built` | Register a different `Tool` under the name `cancel_agent`. |
+| F-live-agent-handle | Live agent handle | A running child is addressable. A caller lists live children, reads one child's progress, and cancels one child without touching its siblings. | `rho-core` | `built` | `AgentRegistry::live_under`, `descendant`, `status`, and `cancel_descendant`. Each takes the calling node, because the unscoped views are private. A frontend renders the list. |
+| F-agent-tool-call-budget | Agent tool-call budget | A run stops at a tool-call budget. A turn cap counts provider round trips, so it cannot bound a turn that asks for forty tools. | `rho-core` | `built` | `--max-agent-tool-calls`, or `SessionConfig::with_max_tool_calls`. |
+| F-agent-fan-out | Agent fan-out | `spawn_agents` runs several children at once in one tool call. A refused task is a per-task result, and results report in request order. | `rho-tools` | `sprint-2` | Register a different `Tool` under the name `spawn_agents`. See decision D-fan-out-is-one-tool-call. |
+| F-agent-definitions | Agent definitions | An agent is a markdown file with frontmatter. A project definition is withheld until the project is trusted. | `rho-skills` | `sprint-2` | Author a definition file. The loader is shared with skills. |
+| F-tool-list-keywords | Tool list keywords | A definition writes `tools: all` or `tools: *` to inherit every tool the parent holds, and `tools: none` to hold none. A keyword must stand alone, and a mixed line keeps the named tools and warns. | `rho-skills` | `built` | Author a definition file. See decision D-a-tool-keyword-stands-alone. |
+
+`docs/specs/20260820-115320-SPEC-subagent-slots-handles-grace.md` owns the three rows below.
+All three are proposed, and none is built.
+
+| ID | Name | Outcome | Owning crate | Status | Extension point |
+|----|------|---------|--------------|--------|-----------------|
+| F-agent-slot-queue | Agent slot queue | A spawn over a concurrency cap queues instead of refusing. It returns an id at once, and the child starts when a slot frees. A queued child can be polled, steered, and cancelled. `spawn_agent` and `spawn_agents` both use it, so a fan-out wider than the cap runs every task. | `rho-core`, `rho-tools` | `built` | `AgentNode::spawn_child` stays the immediate form, so a caller bypasses the queue. `--max-queued-per-parent` bounds the line. |
+| F-agent-handles | Agent handles | A model addresses a child by a derived name, such as `explore-2`. It can also set its own name with the `alias` argument. The id stays the identity, and a name resolves only inside the caller's own descendants. `agent_status` with no id lists the children. | `rho-core`, `rho-tools` | `built` | `AgentRegistry::set_alias` names a child. `AgentRef` accepts an id or a name, so the old integer shape keeps working. |
+| F-agent-grace-turns | Agent grace turns | rho warns a child a fixed number of turns before its turn cap, so the child writes its summary. The warning uses the steering queue, and it never displaces a user message. A child transcript records the delivery. | `rho-core` | `built` | `SessionConfig::with_grace_turns`, and `--agent-grace-turns`. Zero disables it, and a definition cannot set it. |
+
+`docs/specs/20260820-115310-SPEC-subagent-worktree-isolation.md` owns the two rows below. Both
+are proposed, and neither is built.
+
+| ID | Name | Outcome | Owning crate | Status | Extension point |
+|----|------|---------|--------------|--------|-----------------|
+| F-subagent-workspace-isolation | Subagent workspace isolation | A child works in its own tree, so a fan-out that writes files is safe. Only a trusted caller grants isolation. A definition and the model may refuse it, and neither may demand it. | `rho-core` | `planned` | Implement the `Workspace` trait and install it in `SpawnEnv`. `rho-tools` ships the git one. |
+| F-child-work-kept-on-a-branch | Child work kept on a branch | A child's changes are committed to a named branch when it stops, including after a cancel or a timeout. An unchanged tree leaves no branch, and a failed commit leaves the tree on disk. | `rho-tools` | `planned` | Implement `Workspace::reclaim` differently. Read `AgentReport.branch` and `AgentReport.isolation_root`. |
+| F-isolation-orphan-recovery | Isolation orphan recovery | A worktree and its branch carry the agent, the id, and a UTC timestamp. So a crash leftover is unique and findable. A later run lists an orphan and never deletes it. | `rho-tools` | `planned` | Not pluggable. The naming is a recovery contract a human relies on. |
+
+`docs/specs/20260819-102750-SPEC-agent-tasks.md` owns the four rows below. A child carries a
+task, and rho verifies the result. See decision D-a-child-does-not-grade-itself.
+
+| ID | Name | Outcome | Owning crate | Status | Extension point |
+|----|------|---------|--------------|--------|-----------------|
+| F-agent-task | Agent task | A child carries a goal, its declared artifacts, and its acceptance checks, not a bare prompt. The `spawn_agent` tool takes `artifacts`. | `rho-core` | `built` | Build an `AgentTask`, or pass `artifacts` to `spawn_agent`. |
+| F-artifact-spec | Artifact spec | A deliverable rho can check: a file, a command that exits zero, or a named kind. A new kind is a new variant or a registered checker. A file path obeys `confine`. | `rho-core` | `built` | Register an `ArtifactChecker` for a named kind. |
+| F-acceptance-gate | Acceptance gate | rho verifies the artifacts and runs the checks after the child stops. A child cannot certify its own work, because no public constructor builds a verdict. A failed gate reports `Rejected`, never `Done`. | `rho-core` | `built` | Implement the `Gate` trait. A `CommandRunner` supplies the sandbox. |
+| F-unverified-child-claims | Unverified child claims | The child reports its open questions and what it did not check. These stay separate from the gate verdict, and they are never proof. | `rho-core` | `built` | No extension point. This is a security boundary. |
+>>>>>>> theirs
 
 ## MCP client
 

@@ -10,6 +10,10 @@ sequence.
 Two escape hatches cover a terminal that refuses OSC 52. `o` opens the selection in
 `$EDITOR`. `ctrl-p` writes the transcript to the scrollback, where the mouse works.
 
+> **Amended on 2026-08-19.** The second hatch is gone, because rho builds no dump. See
+> `D-alternate-screen-after-all`. `$EDITOR` remains, and the terminal's own selection still
+> works. A user who needs the mouse for a selection passes `--no-mouse`.
+
 **Reason:** OSC 52 works over ssh and inside tmux, because the sequence travels with the
 terminal stream. A clipboard crate talks to the local display server, so it fails in the
 exact place a terminal agent runs most. It would also add a platform dependency tree to a

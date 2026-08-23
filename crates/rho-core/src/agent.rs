@@ -35,6 +35,11 @@ pub enum AgentStopReason {
     EndTurn,
     /// A turn hit the token limit.
     MaxTokens,
+    /// The run hit its tool-call budget.
+    ///
+    /// A turn cap counts provider round trips. It does not bound a run that makes
+    /// forty tool calls inside one turn, so the budget counts the work instead.
+    MaxToolCalls,
     /// The loop hit its per-run turn cap. See section 9.
     MaxTurnRequests,
     /// The model refused, or a content filter stopped the output.
@@ -81,6 +86,10 @@ pub enum AgentEvent {
     },
     /// The run is fully settled. No further turn will run.
     AgentEnd { stop_reason: AgentStopReason },
+    /// A user message was queued while a turn ran. `position` counts from one.
+    MessageQueued { position: usize },
+    /// Queued messages reached the model at a turn boundary. `count` is how many.
+    MessageDelivered { count: usize },
     /// A subagent was spawned under this session. See SPEC-subagents section 9.
     ///
     /// These variants are new, not reused `TaskStart` ones. A task is an
@@ -110,11 +119,26 @@ pub enum AgentEvent {
 pub struct AgentConfig {
     /// The per-run turn cap. The loop stops with `MaxTurnRequests` at the cap.
     pub max_turns: u32,
+    /// The per-run tool-call budget. The loop stops with `MaxToolCalls` at the cap.
+    pub max_tool_calls: u32,
+    /// Turns of warning before `max_turns`. Zero disables the warning.
+    ///
+    /// See `SPEC-subagent-slots-handles-grace` section 4 and decision
+    /// D-grace-turn-warning.
+    pub grace_turns: u32,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        Self { max_turns: 32 }
+        Self {
+            max_turns: 32,
+            // Off by default. A plain session gets no warning until a caller opts
+            // in, and a subagent opts in through `SubagentLimits`.
+            grace_turns: 0,
+            // Sixteen turns of four calls each. High enough that ordinary work
+            // never notices, low enough that a loop cannot run all night.
+            max_tool_calls: 64,
+        }
     }
 }
 
@@ -158,6 +182,8 @@ pub struct SessionConfig {
     pub approval: Arc<dyn ApprovalPolicy>,
     /// The per-run turn cap. The loop stops with `MaxTurnRequests` at the cap.
     pub max_turns: u32,
+    /// The per-run tool-call budget. The loop stops with `MaxToolCalls` at the cap.
+    pub max_tool_calls: u32,
     /// The `bash` confinement mode. `SessionConfig::new` sets `Off`, so the
     /// default is stated here, not hidden. Use `with_sandbox` to change it. See
     /// `SPEC-bash-sandbox` and decision D-bash-os-sandbox.
@@ -166,11 +192,20 @@ pub struct SessionConfig {
     /// sends no field. `SessionConfig::new` leaves it `None`, and a caller opts in with
     /// `with_reasoning_effort`. See `SPEC-reasoning-across-providers` section 9.
     pub reasoning_effort: Option<crate::ReasoningEffort>,
+    /// The bounded steering queue. New messages enqueued during a run are delivered
+    /// at a turn boundary. Defaults to a queue with the standard capacity.
+    pub queue: crate::MessageQueue,
+    /// Turns of warning before `max_turns`. Zero disables the warning.
+    ///
+    /// `new` sets zero, so a plain session is unchanged by this feature. A subagent
+    /// opts in, because a child that runs out of turns has nobody to ask. See
+    /// `SPEC-subagent-slots-handles-grace` section 4.
+    pub grace_turns: u32,
 }
 
 impl SessionConfig {
-    /// Build a config with an explicit model, root, and policy. The turn cap uses
-    /// the `AgentConfig` default.
+    /// Build a config with an explicit model, root, and policy. The turn cap uses the
+    /// `AgentConfig` default, and the queue uses the standard capacity.
     pub fn new(
         model: impl Into<String>,
         session_root: impl Into<PathBuf>,
@@ -181,11 +216,16 @@ impl SessionConfig {
             session_root: session_root.into(),
             approval,
             max_turns: AgentConfig::default().max_turns,
+            max_tool_calls: AgentConfig::default().max_tool_calls,
             // State the default out loud. `Off` runs `bash` unconfined, which is
             // today's behaviour. A caller opts in with `with_sandbox`.
             sandbox: SandboxMode::Off,
             // No level means no field on the wire, so a host keeps its own default.
             reasoning_effort: None,
+            queue: crate::MessageQueue::new(),
+            // State the default out loud. Zero means no warning, which is today's
+            // behaviour for every top-level session.
+            grace_turns: AgentConfig::default().grace_turns,
         }
     }
 
@@ -205,6 +245,12 @@ impl SessionConfig {
         self
     }
 
+    /// Set the per-run tool-call budget.
+    pub fn with_max_tool_calls(mut self, max_tool_calls: u32) -> Self {
+        self.max_tool_calls = max_tool_calls;
+        self
+    }
+
     /// Set the `bash` confinement mode. `new` leaves it `Off`. See `SPEC-bash-sandbox`.
     pub fn with_sandbox(mut self, sandbox: SandboxMode) -> Self {
         self.sandbox = sandbox;
@@ -214,6 +260,21 @@ impl SessionConfig {
     /// Set how hard the model should think. `new` leaves it unset, which sends no field.
     pub fn with_reasoning_effort(mut self, effort: Option<crate::ReasoningEffort>) -> Self {
         self.reasoning_effort = effort;
+        self
+    }
+
+    /// Set the steering queue.
+    pub fn with_queue(mut self, queue: crate::MessageQueue) -> Self {
+        self.queue = queue;
+        self
+    }
+
+    /// Set the grace window, in turns before `max_turns`. Zero disables it.
+    ///
+    /// The driver enforces it, and it delivers the warning through the steering
+    /// queue, so the sent prefix stays byte-identical.
+    pub fn with_grace_turns(mut self, grace_turns: u32) -> Self {
+        self.grace_turns = grace_turns;
         self
     }
 }
@@ -228,6 +289,9 @@ struct SessionInner {
     hooks: Arc<HookChain>,
     context: tokio::sync::Mutex<Context>,
     config: SessionConfig,
+    /// Messages that arrived while a turn ran. The driver drains it at a turn
+    /// boundary. See `SPEC-steering`.
+    queue: crate::MessageQueue,
 }
 
 impl Session {
@@ -240,6 +304,10 @@ impl Session {
         hooks: Arc<HookChain>,
         context: Context,
     ) -> Self {
+        // Take the queue from the config. Building a fresh one here ignored
+        // `SessionConfig::with_queue`, so a caller that set a queue there had every
+        // steering message silently dropped. A review found it.
+        let config_queue = config.queue.clone();
         Self {
             inner: Arc::new(SessionInner {
                 provider,
@@ -247,6 +315,7 @@ impl Session {
                 hooks,
                 context: tokio::sync::Mutex::new(context),
                 config,
+                queue: config_queue,
             }),
         }
     }
@@ -255,6 +324,40 @@ impl Session {
     /// the current directory and allows every tool call. Use it in a test where
     /// the model id and the root do not matter. A production caller uses
     /// `with_config` and states a real config.
+    /// Queue a message for the model, to arrive at the next turn boundary.
+    ///
+    /// It never injects into a running provider request, and it never rewrites an
+    /// already-sent turn, so the stable prompt prefix stays byte-identical and the
+    /// provider cache stays warm. It returns the queued position, counted from one.
+    ///
+    /// A message queued after the run ends stays queued, and the next run delivers
+    /// it. No user message is dropped in silence. See `SPEC-steering` section 3.
+    pub fn steer(&self, message: Vec<ContentBlock>) -> Result<usize, crate::QueueError> {
+        // The queue announces the push, so every pusher announces, including a
+        // subagent steered through `LiveAgent::steer`.
+        self.inner.queue.push(message)
+    }
+
+    /// This session's steering queue. A clone shares it, so a frontend and the
+    /// driver hold one queue.
+    pub fn queue(&self) -> crate::MessageQueue {
+        self.inner.queue.clone()
+    }
+
+    /// Build a session that shares an existing steering queue.
+    ///
+    /// A subagent needs this: the registry hands out a handle that steers the
+    /// child, and the handle and the child must hold the same queue.
+    pub fn with_queue(self, queue: crate::MessageQueue) -> Self {
+        // `SessionInner` is behind an `Arc`, so rebuild it rather than mutate a
+        // shared value. A session is built once, before it runs.
+        let inner = Arc::try_unwrap(self.inner)
+            .unwrap_or_else(|_| panic!("with_queue must run before the session is shared"));
+        Self {
+            inner: Arc::new(SessionInner { queue, ..inner }),
+        }
+    }
+
     /// Start one agent run. Append `input` to the context, then drive the loop.
     /// `cancel` stops the run. Dropping the returned value also stops the run.
     pub fn prompt(&self, input: Vec<ContentBlock>, cancel: CancelToken) -> AgentEvents {
@@ -262,9 +365,25 @@ impl Session {
         // bounded channel applies backpressure. A dropped receiver makes `send`
         // fail, so the driver task stops on its own.
         let (tx, rx) = tokio::sync::mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        // Let the queue announce a push for the length of this run. The driver stops
+        // it when the run ends.
+        let (queued_tx, mut queued_rx) = tokio::sync::mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        self.inner.queue.observe(queued_tx);
+        {
+            // Forward each announcement into the run's event stream.
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                while let Some(event) = queued_rx.recv().await
+                    && tx.send(Ok(event)).await.is_ok()
+                {}
+            });
+        }
         let driver = Driver {
+            tool_calls: std::sync::atomic::AtomicU32::new(0),
             config: AgentConfig {
                 max_turns: self.inner.config.max_turns,
+                max_tool_calls: self.inner.config.max_tool_calls,
+                grace_turns: self.inner.config.grace_turns,
             },
             inner: Arc::clone(&self.inner),
             tx,
@@ -312,6 +431,21 @@ struct Driver {
     tx: tokio::sync::mpsc::Sender<Result<AgentEvent, Error>>,
     cancel: CancelToken,
     config: AgentConfig,
+    /// Tool calls made in this run, against `AgentConfig::max_tool_calls`.
+    tool_calls: std::sync::atomic::AtomicU32,
+}
+
+/// The grace warning the driver delivers, with the true number of turns left.
+///
+/// The text is verbatim from `SPEC-subagent-slots-handles-grace` section 4.4. It
+/// states the real count at the moment of the push, so it never overstates the
+/// budget.
+fn grace_message(remaining: u32) -> String {
+    format!(
+        "You have {remaining} turns left before rho stops you. Write your final summary \
+         now. State what you did, what you did not check, and any open question. If you \
+         keep working past this, rho returns the last summary you wrote."
+    )
 }
 
 impl Driver {
@@ -326,6 +460,10 @@ impl Driver {
         }
 
         let mut turns = 0u32;
+        // One warning per run, and only once it lands. A push that a full queue
+        // refuses leaves this false, so the next boundary tries again. See
+        // `SPEC-subagent-slots-handles-grace` section 4.3.
+        let mut grace_warned = false;
         let stop_reason = loop {
             if self.cancel.is_cancelled() {
                 // The cancel landed before this turn started. Emit a paired
@@ -348,6 +486,65 @@ impl Driver {
             if turns >= self.config.max_turns {
                 break AgentStopReason::MaxTurnRequests;
             }
+
+            // Warn the child before its turn cap, so it can write a summary.
+            //
+            // The push happens here, just before the drain, so the warning is
+            // delivered by the same append-only path a steer uses. That keeps the
+            // sent prefix byte-identical and the provider cache warm.
+            //
+            // `turns >= 1` is the clamp that matters. A window wider than the cap
+            // would otherwise fire before the child has done anything, and a child
+            // asked to summarise nothing wastes its first turn. See section 4.1 and
+            // decision D-grace-turn-warning.
+            if self.config.grace_turns > 0 && !grace_warned && turns >= 1 {
+                let remaining = self.config.max_turns - turns;
+                if remaining <= self.config.grace_turns {
+                    // A full queue holds a user's own messages, and rho never drops
+                    // one to make room for its own. So the warning yields and the
+                    // next boundary retries it.
+                    if self
+                        .inner
+                        .queue
+                        .push(vec![ContentBlock::Text {
+                            text: grace_message(remaining),
+                        }])
+                        .is_ok()
+                    {
+                        grace_warned = true;
+                    }
+                }
+            }
+
+            // Deliver every steering message here, and nowhere else. This is a turn
+            // boundary: the previous turn's tool calls have finished and the next
+            // provider request is not built yet. So a message never races into the
+            // middle of a request. See `SPEC-steering` section 3.
+            //
+            // The append is through `Context::append`, which is append-only, so a
+            // steering message adds a new user turn and edits no earlier one. The
+            // stable prefix stays byte-identical and the provider cache stays warm.
+            if !self.inner.queue.is_empty() {
+                let queued = self.inner.queue.drain();
+                let count = queued.len();
+                {
+                    let mut context = self.inner.context.lock().await;
+                    for message in queued {
+                        context.append(Message {
+                            role: Role::User,
+                            content: message,
+                        });
+                    }
+                }
+                if self
+                    .emit(AgentEvent::MessageDelivered { count })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+
             turns += 1;
 
             match self.run_turn().await {
@@ -355,6 +552,7 @@ impl Driver {
                 TurnOutcome::Canceled => break AgentStopReason::Canceled,
                 TurnOutcome::Failed | TurnOutcome::Closed => return,
                 TurnOutcome::ToolCalls(calls) => match self.dispatch(calls).await {
+                    DispatchOutcome::BudgetSpent => break AgentStopReason::MaxToolCalls,
                     DispatchOutcome::Continue => continue,
                     DispatchOutcome::Canceled => {
                         if self
@@ -374,6 +572,9 @@ impl Driver {
         };
 
         let _ = self.emit(AgentEvent::AgentEnd { stop_reason }).await;
+        // The run is over, so a later push must not announce itself on a dead
+        // channel. It stays queued and the next run delivers it.
+        self.inner.queue.unobserve();
     }
 
     /// Run one provider turn. Forward each stream event. Build the assistant
@@ -519,8 +720,20 @@ impl Driver {
     }
 
     /// Run every requested tool call, one at a time, in call order.
+    ///
+    /// It stops at the tool-call budget. The turn cap counts provider round trips,
+    /// so it cannot bound a turn that asks for forty tools at once. The budget
+    /// counts the work, and it is checked **before** each call, so the cap is never
+    /// exceeded rather than merely noticed afterwards.
     async fn dispatch(&self, calls: Vec<PendingToolCall>) -> DispatchOutcome {
         for call in calls {
+            if self.tool_calls.load(std::sync::atomic::Ordering::SeqCst)
+                >= self.config.max_tool_calls
+            {
+                return DispatchOutcome::BudgetSpent;
+            }
+            self.tool_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match self.dispatch_one(call).await {
                 DispatchOutcome::Continue => continue,
                 other => return other,
@@ -599,10 +812,15 @@ impl Driver {
         // `ToolUpdate` while the tool runs.
         let (updates_tx, mut updates_rx) =
             tokio::sync::mpsc::channel::<String>(EVENT_CHANNEL_CAPACITY);
+        // A tool that runs a subagent sends typed events here. Forward each one
+        // unchanged, so a frontend sees the child while it runs.
+        let (agent_tx, mut agent_rx) =
+            tokio::sync::mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
         let context = ToolContext {
             session_root: self.inner.config.session_root.clone(),
             cancel: self.cancel.clone(),
             updates: updates_tx,
+            agent_events: agent_tx,
         };
         let execute = tool.execute(arguments, context);
         tokio::pin!(execute);
@@ -624,9 +842,24 @@ impl Driver {
                         return DispatchOutcome::Closed;
                     }
                 }
+                event = agent_rx.recv() => {
+                    if let Some(event) = event
+                        && self.emit(event).await.is_err()
+                    {
+                        return DispatchOutcome::Closed;
+                    }
+                }
                 done = &mut execute => break done,
             }
         };
+
+        // Drain any agent event the tool sent just before it returned. This is the
+        // arm that carries `AgentFinished`, so skipping it would lose the report.
+        while let Ok(event) = agent_rx.try_recv() {
+            if self.emit(event).await.is_err() {
+                return DispatchOutcome::Closed;
+            }
+        }
 
         // Drain any output line the tool sent just before it returned.
         while let Ok(line) = updates_rx.try_recv() {
@@ -723,6 +956,8 @@ impl Driver {
 enum DispatchOutcome {
     /// The loop may run the next turn.
     Continue,
+    /// The run spent its tool-call budget. The loop stops.
+    BudgetSpent,
     /// The caller cancelled the run.
     Canceled,
     /// The caller dropped the event stream.

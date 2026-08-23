@@ -6,12 +6,12 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rho_core::{
-    AgentEvent, AgentStopReason, ReasoningDisplay, StreamEvent, TaskId, TaskProgress, TaskState,
-    ThinkingPiece, ThinkingSplitter, ToolKind,
+    AgentEvent, AgentStopReason, ReasoningDisplay, StreamEvent, TaskId, TaskProgress, TaskState, ThinkingPiece, ThinkingSplitter, ToolKind,
 };
 
 use crate::concise::RowFold;
 use crate::paste::Composer;
+use crate::scroll::{PAGE_ROWS_MARGIN, Scroll};
 
 /// One rendered transcript row.
 #[derive(Clone, Debug, PartialEq)]
@@ -67,6 +67,13 @@ pub enum Row {
         message: String,
         /// The verbatim detail lines, indented under the message.
         detail: Vec<String>,
+    },
+    /// A startup notice. rho used to print these to the terminal and then open the
+    /// alternate screen, which hid every one of them. A notice is not an error, so it
+    /// carries its own row and the `Warn` role. See `D-a-notice-reaches-the-transcript`.
+    Notice {
+        /// The one-line notice, shown after the `!` glyph.
+        message: String,
     },
 }
 
@@ -160,6 +167,14 @@ pub fn filter_history(history: &[String], query: &str) -> Vec<usize> {
 /// local input buffer and one flag for the Ctrl-C exit gate.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TuiState {
+    /// How reasoning draws: `off`, `summary`, `full`, or `live`. See
+    /// `SPEC-reasoning-across-providers` section 5.
+    pub reasoning_display: ReasoningDisplay,
+    /// Splits a leading `<thinking>` tag out of an assistant text stream.
+    ///
+    /// A model that was never asked for a structured reasoning block writes one into its
+    /// answer, and rho drew it as the answer. See section 6 rule 7.
+    text_split: ThinkingSplitter,
     pub rows: Vec<Row>,
     /// The draft, with its paste chips and its cursor.
     pub draft: Composer,
@@ -204,18 +219,18 @@ pub struct TuiState {
     pub concise: bool,
     /// The transient panel, if any.
     pub panel: Panel,
-    /// The first binding the help window shows, counted from zero.
-    ///
-    /// The table is longer than the band, so the window scrolls. The arrows move it, and
-    /// they clamp it to `help_visible_rows`. See `D-ledger-wins-the-band`.
-    pub help_offset: usize,
-    /// The count of help rows the band can draw, set by the app loop each frame.
-    ///
-    /// The reducer needs it to clamp a scroll key. Without it the offset climbed past the
-    /// last row, and a press back moved nothing until every press was paid back.
-    pub help_visible_rows: usize,
     /// True when the last turn ended in an error, for the footer word.
     pub last_error: bool,
+    /// Where the transcript view sits, and whether it follows new output. The default
+    /// follows output, because `Scroll::default` is pinned. See `SPEC-tui-alternate-screen`
+    /// section 3.
+    scroll: Scroll,
+    /// The total transcript height in display rows, set by the app loop each frame. The
+    /// reducer reads it to clamp a scroll key, and never a terminal. See
+    /// `D-scroll-keys-yield-to-an-empty-draft`.
+    pub transcript_total: usize,
+    /// The transcript window height in display rows, set by the app loop each frame.
+    pub transcript_visible: usize,
     /// True after a Ctrl-C cancel while a turn runs, until the turn ends. It drives the
     /// footer word, so a cancel the model has not answered yet still shows on screen.
     pub canceling: bool,
@@ -226,16 +241,6 @@ pub struct TuiState {
     pub row_folds: Vec<RowFold>,
     /// The expanded body lines of each tool row, parallel to `rows`.
     pub row_bodies: Vec<Vec<String>>,
-    /// The count of rows the terminal already owns, oldest first.
-    ///
-    /// A row below this index is in the terminal's scrollback. rho can never repaint it,
-    /// so the reducer must never write it. See `D-a-frozen-row-never-repaints`.
-    pub frozen_rows: usize,
-    /// The count of events dropped because their row was already frozen.
-    ///
-    /// A provider that repeats itself is visible here. A silent drop would hide a defect.
-    /// See `D-a-late-event-for-a-frozen-row-is-dropped`.
-    pub late_events: usize,
     /// The start instant of each row, parallel to `rows`. The reducer writes it when it
     /// pushes the row, and reads it when the row finishes. This is private, because a
     /// duration is the public fact.
@@ -250,13 +255,6 @@ pub struct TuiState {
     history_pos: Option<usize>,
     /// The live draft, saved when a recall starts, so a forward recall restores it.
     history_stash: Option<String>,
-    /// How the frontend draws reasoning. It changes only what rho draws, never the
-    /// stream and never what reaches a provider. See `SPEC-reasoning-across-providers`.
-    pub reasoning_display: ReasoningDisplay,
-    /// The splitter that lifts a leading `<thinking>` tag out of the answer text. It is
-    /// reset at each text-block start, because the leading rule is per block. It is
-    /// private, so it is not part of the public state contract.
-    text_split: ThinkingSplitter,
 }
 
 /// What the app must do after a key press. The key handler is pure. It returns
@@ -308,6 +306,11 @@ impl TuiState {
             AgentEvent::TaskProgressed { id, progress } => self.on_task_progress(id, progress),
             AgentEvent::TaskEnd { id, state, .. } => self.on_task_end(id, state),
             AgentEvent::AgentEnd { stop_reason } => self.on_agent_end(*stop_reason, now_millis),
+            // Steering. The band shows nothing for either one: a queued message is the
+            // composer's business, and a delivery is visible as the next user row. They
+            // are matched by name rather than swept up by a wildcard, so the next event
+            // this enum gains stops the build here and gets a decision.
+            AgentEvent::MessageQueued { .. } | AgentEvent::MessageDelivered { .. } => {}
         }
     }
 
@@ -337,22 +340,109 @@ impl TuiState {
         self.provider = provider.into();
     }
 
-    /// The rows the band still owns, oldest first.
+    /// The transcript rows, oldest first. rho owns every row in the alternate screen, so
+    /// there is no frozen prefix and every row is reachable. See
+    /// `SPEC-tui-alternate-screen` section 6b.
     pub fn live_rows(&self) -> &[Row] {
-        let start = self.frozen_rows.min(self.rows.len());
-        &self.rows[start..]
+        &self.rows
     }
 
-    /// Record that `rows` more rows left the band. A count past the end saturates.
-    pub fn mark_frozen(&mut self, rows: usize) {
-        self.frozen_rows = self.frozen_rows.saturating_add(rows).min(self.rows.len());
+    /// The first transcript display row to draw, from the scroll state and the frame.
+    pub fn scroll_first_visible(&self) -> usize {
+        self.scroll
+            .first_visible(self.transcript_total, self.transcript_visible)
+    }
+
+    /// The first display row to draw for a transcript of `total` rows in a `visible`
+    /// window. The renderer computes its own total and visible, so it passes them here
+    /// rather than trust the stored pair. That keeps the draw exact even in a frame test
+    /// that never sets the stored metrics.
+    pub fn transcript_offset(&self, total: usize, visible: usize) -> usize {
+        self.scroll.first_visible(total, visible)
+    }
+
+    /// True while the transcript view follows the newest row.
+    pub fn is_scroll_pinned(&self) -> bool {
+        self.scroll.is_pinned()
+    }
+
+    /// The display rows hidden above and below the transcript view, for the rail.
+    pub fn scroll_hidden(&self) -> (usize, usize) {
+        self.scroll
+            .hidden(self.transcript_total, self.transcript_visible)
+    }
+
+    /// Move the transcript view toward the oldest row. The frontend calls it for a wheel
+    /// event and a scroll key. The clamp is inside `Scroll`, where the offset changes.
+    pub fn scroll_up(&mut self, rows: usize) {
+        self.scroll
+            .up(rows, self.transcript_total, self.transcript_visible);
+    }
+
+    /// Move the transcript view toward the newest row.
+    pub fn scroll_down(&mut self, rows: usize) {
+        self.scroll
+            .down(rows, self.transcript_total, self.transcript_visible);
+    }
+
+    /// Answer new output, so a pinned view follows the newest row and an unpinned view
+    /// stays put. The app loop calls it after the reducer folds an event.
+    pub fn scroll_on_new_rows(&mut self) {
+        self.scroll
+            .on_new_rows(self.transcript_total, self.transcript_visible);
+    }
+
+    /// Answer a resize, because the window height changed.
+    pub fn scroll_on_resize(&mut self) {
+        self.scroll
+            .on_resize(self.transcript_total, self.transcript_visible);
+    }
+
+    /// True when the transcript is taller than its window, so a scroll key has somewhere
+    /// to go. A scroll key answers only when this holds, no panel is open, and the draft
+    /// is empty. See `D-scroll-keys-yield-to-an-empty-draft`.
+    fn transcript_overflows(&self) -> bool {
+        self.transcript_total > self.transcript_visible.max(1)
+    }
+
+    /// Answer a scroll key, or return `false` when the key keeps its old meaning.
+    ///
+    /// A scroll key scrolls only when no panel is open, the draft is empty, and the
+    /// transcript overflows. Otherwise the readline, history, and exit keys keep their
+    /// meaning. See `D-scroll-keys-yield-to-an-empty-draft`.
+    /// Answer a scroll key, and return true when the key scrolled.
+    ///
+    /// Only a key with no other meaning scrolls. `ctrl-d` quits on an empty draft, `ctrl-u`
+    /// cuts to the line start, and `↑ ↓` recall the history. Those are shell habits, and a
+    /// habit that works only sometimes is worse than one that never worked. An earlier rule
+    /// let all six scroll on an empty draft, and it stopped `ctrl-d` quitting in the most
+    /// common state of a session. See `D-scroll-keys-yield-to-an-empty-draft`.
+    ///
+    /// So the wheel moves one row, `pageup` and `pagedown` move a page, and `home` and `end`
+    /// jump to the ends. `home` and `end` scroll only while the draft is empty, because a
+    /// draft with text needs them for the cursor.
+    fn scroll_key(&mut self, key: KeyEvent) -> bool {
+        if self.panel != Panel::None || !self.transcript_overflows() {
+            return false;
+        }
+        let visible = self.transcript_visible.max(1);
+        let page = visible.saturating_sub(PAGE_ROWS_MARGIN).max(1);
+        match key.code {
+            KeyCode::PageUp => self.scroll_up(page),
+            KeyCode::PageDown => self.scroll_down(page),
+            KeyCode::Home if self.draft.is_empty() => self.scroll.to_oldest(),
+            KeyCode::End if self.draft.is_empty() => self
+                .scroll
+                .to_newest(self.transcript_total, self.transcript_visible),
+            _ => return false,
+        }
+        true
     }
 
     fn apply_stream(&mut self, event: &StreamEvent, now_millis: i64) {
         match event {
             StreamEvent::TextStart { .. } => {
-                // A new text block, so the tag splitter starts fresh. A leading
-                // `<thinking>` tag is stripped only from the block's start.
+                // A new text block, so the splitter starts fresh: the leading rule is per block.
                 self.text_split = ThinkingSplitter::new();
                 self.push_row(
                     Row::Assistant {
@@ -410,104 +500,17 @@ impl TuiState {
                     );
                 }
             }
+            StreamEvent::TextEnd { .. } => {
+                // The splitter holds a lead buffer until it can decide, so a block that ends
+                // mid-decision must flush or its text would vanish.
+                let pieces = self.text_split.finish();
+                self.route_thinking_pieces(pieces, now_millis);
+            }
             StreamEvent::MessageStart { .. }
             | StreamEvent::ToolCallDelta { .. }
             | StreamEvent::Usage(_)
             | StreamEvent::Done { .. } => {}
-            StreamEvent::TextEnd { .. } => {
-                // Flush a held-back lead or an unclosed tag. An unclosed tag becomes
-                // reasoning, so a truncated stream loses no text.
-                let pieces = self.text_split.finish();
-                self.route_thinking_pieces(pieces, now_millis);
-                // A reasoning-only block left its thinking row open. Settle its span here,
-                // so the summary reads `thought for` and not a bare `thinking`.
-                if let Some(index) = self.open_split_thinking_index() {
-                    self.settle_duration(index, now_millis);
-                }
-            }
         }
-    }
-
-    /// Route the tag splitter's output to the right rows.
-    ///
-    /// Reasoning that leads the block goes to a thinking row, drawn dimmed. The answer
-    /// that follows goes to an assistant row. See `SPEC-reasoning-across-providers`.
-    fn route_thinking_pieces(&mut self, pieces: Vec<ThinkingPiece>, now_millis: i64) {
-        for piece in pieces {
-            match piece {
-                ThinkingPiece::Reasoning(text) => self.append_reasoning(&text, now_millis),
-                ThinkingPiece::Text(text) => self.append_answer(&text, now_millis),
-            }
-        }
-    }
-
-    /// The index of the newest live row, when it is within the live range.
-    fn newest_live_index(&self) -> Option<usize> {
-        let start = self.frozen_rows.min(self.rows.len());
-        let index = self.rows.len().checked_sub(1)?;
-        (index >= start).then_some(index)
-    }
-
-    /// Append reasoning to the open thinking row, or open one.
-    ///
-    /// Reasoning always leads a block. So the newest row is either the empty assistant
-    /// row from `TextStart`, which becomes the thinking row, or the thinking row itself.
-    fn append_reasoning(&mut self, delta: &str, now_millis: i64) {
-        match self.newest_live_index() {
-            Some(index) if matches!(self.rows[index], Row::Thinking { .. }) => {
-                if let Row::Thinking { text } = &mut self.rows[index] {
-                    text.push_str(delta);
-                }
-            }
-            Some(index) if matches!(&self.rows[index], Row::Assistant { text } if text.is_empty()) =>
-            {
-                // Reuse the empty assistant row and its start instant, so the span runs
-                // from the block start and no empty answer row is left behind.
-                self.rows[index] = Row::Thinking {
-                    text: delta.to_string(),
-                };
-            }
-            _ => self.push_row(
-                Row::Thinking {
-                    text: delta.to_string(),
-                },
-                Some(now_millis),
-            ),
-        }
-    }
-
-    /// Append answer text to the open assistant row, or open one after the reasoning.
-    fn append_answer(&mut self, delta: &str, now_millis: i64) {
-        match self.newest_live_index() {
-            Some(index) if matches!(self.rows[index], Row::Assistant { .. }) => {
-                if let Row::Assistant { text } = &mut self.rows[index] {
-                    text.push_str(delta);
-                }
-            }
-            other => {
-                // The answer begins after reasoning. Settle the reasoning span, then open
-                // the answer row, so `Live` mode collapses the reasoning at this point.
-                if let Some(index) = other
-                    && matches!(self.rows[index], Row::Thinking { .. })
-                {
-                    self.settle_duration(index, now_millis);
-                }
-                self.push_row(
-                    Row::Assistant {
-                        text: delta.to_string(),
-                    },
-                    Some(now_millis),
-                );
-            }
-        }
-    }
-
-    /// The newest live row when it is an unsettled thinking row, else `None`.
-    fn open_split_thinking_index(&self) -> Option<usize> {
-        let index = self.newest_live_index()?;
-        let is_thinking = matches!(self.rows[index], Row::Thinking { .. });
-        let unsettled = self.row_durations.get(index).copied().flatten().is_none();
-        (is_thinking && unsettled).then_some(index)
     }
 
     /// Write the span of the row at `index`, from its start instant to `now_millis`.
@@ -527,35 +530,23 @@ impl TuiState {
         }
     }
 
-    /// The index of the newest live row that matches, or `None`.
+    /// The index of the newest row that matches, or `None`.
     fn last_live_index(&self, matches: impl Fn(&Row) -> bool) -> Option<usize> {
-        let start = self.frozen_rows.min(self.rows.len());
         self.rows
             .iter()
             .enumerate()
-            .skip(start)
             .rev()
             .find(|(_, row)| matches(row))
             .map(|(index, _)| index)
     }
 
-    /// Find a subagent row by id, among the live rows only.
-    ///
-    /// A frozen row is unreachable here by design. See
-    /// `D-a-late-event-for-a-frozen-row-is-dropped`.
+    /// Find a subagent row by id. rho owns every row, so a row that scrolled out of view
+    /// is still reachable and a late event still updates it. See
+    /// `SPEC-tui-alternate-screen` section 6b.
     fn agent_row_mut(&mut self, id: u64) -> Option<&mut Row> {
-        let start = self.frozen_rows.min(self.rows.len());
-        self.rows[start..]
+        self.rows
             .iter_mut()
             .find(|row| matches!(row, Row::Agent { id: row_id, .. } if *row_id == id))
-    }
-
-    /// True when a frozen row already holds this subagent id.
-    fn frozen_has_agent(&self, id: u64) -> bool {
-        let end = self.frozen_rows.min(self.rows.len());
-        self.rows[..end]
-            .iter()
-            .any(|row| matches!(row, Row::Agent { id: row_id, .. } if *row_id == id))
     }
 
     fn on_agent_spawned(&mut self, id: u64, name: &str, depth: u32, now_millis: i64) {
@@ -585,8 +576,6 @@ impl TuiState {
         {
             *row_turns = turns;
             *row_cost = cost;
-        } else if self.frozen_has_agent(id) {
-            self.late_events += 1;
         }
     }
 
@@ -608,25 +597,14 @@ impl TuiState {
             *finished = true;
             *row_failed = failed;
             *outcome = word;
-        } else if self.frozen_has_agent(id) {
-            self.late_events += 1;
         }
     }
 
-    /// Find a task row by id, among the live rows only.
+    /// Find a task row by id. Every row is reachable, so a late event reaches it too.
     fn task_row_mut(&mut self, id: &str) -> Option<&mut Row> {
-        let start = self.frozen_rows.min(self.rows.len());
-        self.rows[start..]
+        self.rows
             .iter_mut()
             .find(|row| matches!(row, Row::Task { id: row_id, .. } if row_id == id))
-    }
-
-    /// True when a frozen row already holds this task id.
-    fn frozen_has_task(&self, id: &str) -> bool {
-        let end = self.frozen_rows.min(self.rows.len());
-        self.rows[..end]
-            .iter()
-            .any(|row| matches!(row, Row::Task { id: row_id, .. } if row_id == id))
     }
 
     fn on_task_start(&mut self, id: &TaskId, command: &str, now_millis: i64) {
@@ -653,8 +631,6 @@ impl TuiState {
         }) = self.task_row_mut(&id.0)
         {
             *row_progress = summary;
-        } else if self.frozen_has_task(&id.0) {
-            self.late_events += 1;
         }
     }
 
@@ -671,8 +647,6 @@ impl TuiState {
             *row_state = label;
             *finished = true;
             *row_failed = failed;
-        } else if self.frozen_has_task(&id.0) {
-            self.late_events += 1;
         }
     }
 
@@ -689,16 +663,15 @@ impl TuiState {
             }
             return;
         }
-        // A start for an id the terminal already owns is late. It must not push a second
-        // row, because the transcript would then report the call twice.
-        if self.frozen_has_tool(id) {
-            self.late_events += 1;
-            return;
-        }
         self.push_row(
             Row::Tool {
                 id: id.to_string(),
-                name: name.to_string(),
+                // An MCP server chooses its own tool names, so a name is untrusted like any other
+                // text from another process. A security review found this one raw while the agent
+                // name two hundred lines above was already filtered. Nothing escaped today, because
+                // ratatui drops an escape from a cell, but the invariant is that one filter guards
+                // the terminal and every path uses it.
+                name: crate::sanitize_line(name),
                 kind,
                 status: ToolRowStatus::Running,
                 preview: String::new(),
@@ -710,16 +683,11 @@ impl TuiState {
     fn on_tool_update(&mut self, id: &str, output: &str) {
         if let Some(Row::Tool { preview, .. }) = self.tool_row_mut(id) {
             *preview = output.to_string();
-        } else if self.frozen_has_tool(id) {
-            self.late_events += 1;
         }
     }
 
     fn on_tool_end(&mut self, id: &str, is_error: bool, now_millis: i64) {
         let Some(index) = self.live_tool_index(id) else {
-            if self.frozen_has_tool(id) {
-                self.late_events += 1;
-            }
             return;
         };
         if let Some(Row::Tool { status, .. }) = self.rows.get_mut(index) {
@@ -729,7 +697,7 @@ impl TuiState {
                 ToolRowStatus::Ok
             };
         }
-        // The status flip makes the row final, so its span settles in the same call.
+        // The status flip settles the row's span in the same call.
         self.settle_duration(index, now_millis);
     }
 
@@ -743,39 +711,99 @@ impl TuiState {
         }
     }
 
+    fn last_assistant_mut(&mut self) -> Option<&mut Row> {
+        self.rows
+            .iter_mut()
+            .rev()
+            .find(|row| matches!(row, Row::Assistant { .. }))
+    }
+
+    /// Send each classified piece to the row it belongs to.
+    fn route_thinking_pieces(&mut self, pieces: Vec<ThinkingPiece>, now_millis: i64) {
+        for piece in pieces {
+            match piece {
+                ThinkingPiece::Reasoning(text) => self.append_reasoning(&text, now_millis),
+                ThinkingPiece::Text(text) => self.append_answer(&text, now_millis),
+            }
+        }
+    }
+
+    /// Append reasoning to the open thinking row, or open one.
+    ///
+    /// Reasoning leads a block, so the newest row is either the empty assistant row that
+    /// `TextStart` pushed, which becomes the thinking row, or the thinking row itself.
+    fn append_reasoning(&mut self, delta: &str, now_millis: i64) {
+        match self.rows.len().checked_sub(1) {
+            Some(index) if matches!(self.rows[index], Row::Thinking { .. }) => {
+                if let Row::Thinking { text } = &mut self.rows[index] {
+                    text.push_str(delta);
+                }
+            }
+            Some(index)
+                if matches!(&self.rows[index], Row::Assistant { text } if text.is_empty()) =>
+            {
+                // Reuse the empty assistant row, so the span runs from the block start and no
+                // empty answer row is left behind.
+                self.rows[index] = Row::Thinking {
+                    text: delta.to_string(),
+                };
+            }
+            _ => self.push_row(
+                Row::Thinking {
+                    text: delta.to_string(),
+                },
+                Some(now_millis),
+            ),
+        }
+    }
+
+    /// Append answer text to the open assistant row, or open one after the reasoning.
+    fn append_answer(&mut self, delta: &str, now_millis: i64) {
+        match self.rows.len().checked_sub(1) {
+            Some(index) if matches!(self.rows[index], Row::Assistant { .. }) => {
+                if let Row::Assistant { text } = &mut self.rows[index] {
+                    text.push_str(delta);
+                }
+            }
+            other => {
+                // The answer starts, so a reasoning row's span settles here. `live` mode reads
+                // that span to collapse the reasoning.
+                if let Some(index) = other
+                    && matches!(self.rows[index], Row::Thinking { .. })
+                {
+                    self.settle_duration(index, now_millis);
+                }
+                self.push_row(
+                    Row::Assistant {
+                        text: delta.to_string(),
+                    },
+                    Some(now_millis),
+                );
+            }
+        }
+    }
+
     fn last_thinking_mut(&mut self) -> Option<&mut Row> {
-        let start = self.frozen_rows.min(self.rows.len());
-        self.rows[start..]
+        self.rows
             .iter_mut()
             .rev()
             .find(|row| matches!(row, Row::Thinking { .. }))
     }
 
-    /// Find a tool row by id, among the live rows only.
+    /// Find a tool row by id. Every row is reachable in the alternate screen.
     fn tool_row_mut(&mut self, id: &str) -> Option<&mut Row> {
-        let start = self.frozen_rows.min(self.rows.len());
-        self.rows[start..]
+        self.rows
             .iter_mut()
             .find(|row| matches!(row, Row::Tool { id: row_id, .. } if row_id == id))
     }
 
-    /// The absolute index of a live tool row with this id.
+    /// The index of a tool row with this id.
     fn live_tool_index(&self, id: &str) -> Option<usize> {
-        let start = self.frozen_rows.min(self.rows.len());
         self.rows
             .iter()
             .enumerate()
-            .skip(start)
             .find(|(_, row)| matches!(row, Row::Tool { id: row_id, .. } if row_id == id))
             .map(|(index, _)| index)
-    }
-
-    /// True when a frozen row already holds this tool id.
-    fn frozen_has_tool(&self, id: &str) -> bool {
-        let end = self.frozen_rows.min(self.rows.len());
-        self.rows[..end]
-            .iter()
-            .any(|row| matches!(row, Row::Tool { id: row_id, .. } if row_id == id))
     }
 
     /// Append the submitted draft as a `User` row and empty the draft.
@@ -879,6 +907,14 @@ impl TuiState {
         // A single `esc` arms the draft clear. Any other key disarms it.
         if key.code != KeyCode::Esc {
             self.esc_armed = false;
+        }
+
+        // A scroll key answers only when no panel is open, the draft is empty, and the
+        // transcript overflows. Otherwise it keeps its readline, history, or exit meaning.
+        // This is checked before the chord dispatch, so ctrl-u and ctrl-d can scroll. See
+        // `D-scroll-keys-yield-to-an-empty-draft`.
+        if self.scroll_key(key) {
+            return KeyAction::None;
         }
 
         // A chord is never text. The old handler pushed the letter of every chord into
@@ -1150,47 +1186,13 @@ impl TuiState {
     }
 
     /// Answer a key while the help panel is open. Esc closes it, and so does `?`.
-    /// The largest help offset the screen can show.
     ///
-    /// `help_visible_rows` is set by the app loop each frame, so the reducer clamps against
-    /// the same geometry the renderer draws with.
-    fn help_scroll_max(&self) -> usize {
-        // Zero means the app loop has not drawn yet, and it must not mean "one row". A
-        // zero here clamped the offset to almost nothing, so a scroll key banked presses
-        // that the screen never answered. The standard band is the honest fallback.
-        let visible = if self.help_visible_rows == 0 {
-            crate::render::help_visible_rows(crate::render::BAND_ROWS)
-        } else {
-            self.help_visible_rows
-        };
-        crate::bindings::bindings()
-            .len()
-            .saturating_sub(visible.max(1))
-    }
-
+    /// The help draws the whole binding table now, so it does not scroll. The old window
+    /// and its arrow-key scroll are gone. See `SPEC-tui-alternate-screen` section 6.
     fn handle_help_key(&mut self, code: KeyCode) -> KeyAction {
         match code {
             KeyCode::Esc | KeyCode::Char('?') => {
                 self.panel = Panel::None;
-                self.help_offset = 0;
-                KeyAction::None
-            }
-            // The window states `↓ n more below`, and the footer offers `↑ ↓ scroll`. Both
-            // are promises, so the arrows answer them. The panel drew both while these
-            // keys did nothing, which is `D-a-panel-nobody-can-open`.
-            // The offset is clamped here, where it moves, and not only where it draws.
-            // Clamping at draw time let this value climb past the last row, so a press
-            // back moved nothing until the user had paid back every press. Scroll state
-            // that the screen cannot show is scroll state that lies.
-            KeyCode::Down => {
-                self.help_offset = self
-                    .help_offset
-                    .saturating_add(1)
-                    .min(self.help_scroll_max());
-                KeyAction::None
-            }
-            KeyCode::Up => {
-                self.help_offset = self.help_offset.saturating_sub(1);
                 KeyAction::None
             }
             _ => KeyAction::None,
@@ -1267,6 +1269,21 @@ impl TuiState {
         self.run_selected_command(&list)
     }
 
+    /// Push a one-line notice row. The transcript is the only channel the user reads.
+    ///
+    /// A notice is not an error. A default model and an unloaded skill are both worth
+    /// saying, and neither one failed. rho printed these to the terminal and then opened
+    /// the alternate screen, so the user never read them. See
+    /// `D-a-notice-reaches-the-transcript`.
+    pub fn push_notice(&mut self, message: impl Into<String>) {
+        self.push_row(
+            Row::Notice {
+                message: crate::sanitize_line(&message.into()),
+            },
+            None,
+        );
+    }
+
     /// Push a one-line error row. The transcript is the only channel the user reads,
     /// so a message that matters goes here and not into a field nobody draws.
     pub fn push_error(&mut self, message: impl Into<String>) {
@@ -1305,60 +1322,6 @@ fn is_ctrl_c(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
 }
 
-/// True when nothing can change the row at `index` again.
-///
-/// A frozen row lives in the terminal's scrollback, and rho can never repaint it. So this
-/// answers the only question that matters before a row leaves the band.
-///
-/// There is one arm per `Row` variant and no wildcard arm, so a new variant fails the
-/// build. Its author must then state the rule. See `D-row-finality-is-explicit`.
-///
-/// Two invariants hold the assistant and thinking rules up. The row list is append-only,
-/// so no row moves. Both delta paths search from the newest row, so only the newest row of
-/// a kind can grow.
-pub fn row_is_final(state: &TuiState, index: usize) -> bool {
-    let Some(row) = state.rows.get(index) else {
-        return false;
-    };
-    // A finished turn settles every row, because no event can arrive for it.
-    let turn_ended = state.activity == ActivityState::Idle;
-    match row {
-        // No reducer path writes a user row after it is pushed.
-        Row::User { .. } => true,
-        // Nothing updates an error row.
-        Row::Error { .. } => true,
-        // `append_answer` writes only the newest assistant row.
-        Row::Assistant { .. } => turn_ended || newer_row_of_kind(state, index, RowKind::Assistant),
-        // `last_thinking_mut` reaches only the newest thinking row.
-        Row::Thinking { .. } => turn_ended || newer_row_of_kind(state, index, RowKind::Thinking),
-        // `tool_row_mut` finds a pending or a running row by id. A tool call cannot
-        // outlive its turn, so a finished turn settles it too.
-        Row::Tool { status, .. } => {
-            turn_ended || matches!(status, ToolRowStatus::Ok | ToolRowStatus::Failed)
-        }
-        // `agent_row_mut` finds a live child by id. A child outlives the turn that spawned
-        // it, so a finished turn proves nothing here.
-        Row::Agent { finished, .. } => *finished,
-        // `task_row_mut` finds a live task by id. A task outlives its turn too.
-        Row::Task { finished, .. } => *finished,
-    }
-}
-
-/// The two row kinds that grow by delta.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RowKind {
-    Assistant,
-    Thinking,
-}
-
-/// True when a newer row of the same kind exists, so a delta cannot reach `index`.
-fn newer_row_of_kind(state: &TuiState, index: usize, kind: RowKind) -> bool {
-    state.rows.iter().skip(index + 1).any(|row| match kind {
-        RowKind::Assistant => matches!(row, Row::Assistant { .. }),
-        RowKind::Thinking => matches!(row, Row::Thinking { .. }),
-    })
-}
-
 /// A short label for a stop reason, shown on the status line.
 fn stop_reason_label(reason: AgentStopReason) -> &'static str {
     match reason {
@@ -1367,6 +1330,7 @@ fn stop_reason_label(reason: AgentStopReason) -> &'static str {
         AgentStopReason::MaxTurnRequests => "max turns",
         AgentStopReason::Refusal => "refusal",
         AgentStopReason::Canceled => "canceled",
+        AgentStopReason::MaxToolCalls => "max tool calls",
     }
 }
 
@@ -1444,6 +1408,13 @@ fn outcome_label(outcome: &rho_core::AgentOutcome) -> (String, bool) {
         rho_core::AgentOutcome::Canceled => ("canceled".to_string(), true),
         rho_core::AgentOutcome::Failed { reason } => {
             (format!("failed: {}", crate::sanitize_line(reason)), true)
+        }
+        // rho verified the work and refused it. The child may still have said "done", so
+        // the label states which check failed, and it counts as a failure. Each label is
+        // sanitised, because a failing check can name a path a model chose.
+        rho_core::AgentOutcome::Rejected { failed } => {
+            let names: Vec<String> = failed.iter().map(|one| crate::sanitize_line(one)).collect();
+            (format!("rejected: {}", names.join(", ")), true)
         }
     }
 }

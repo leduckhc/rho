@@ -100,6 +100,26 @@ pub struct Cli {
     /// `SPEC-reasoning-across-providers` section 9.
     #[arg(long, global = true)]
     pub reasoning_effort: Option<String>,
+    #[arg(long, global = true, value_enum, default_value_t = SandboxArg::Off)]
+    pub sandbox: SandboxArg,
+
+    /// Let the TUI capture the mouse, so the wheel scrolls the transcript and a click
+    /// selects a list row.
+    ///
+    /// On by default. rho owns the alternate screen, which has no scrollback, so the wheel
+    /// is the only way to scroll. Pass `--no-mouse` to give the mouse back to the terminal.
+    /// Option and drag still selects text in Ghostty and in iTerm2. See decision
+    /// D-the-wheel-needs-capture.
+    #[arg(long, global = true)]
+    pub mouse: bool,
+
+    /// Give the mouse back to the terminal, so a drag selects text without a modifier.
+    ///
+    /// It wins over `--mouse`, over the config, and over the environment. The wheel then
+    /// does nothing, because the alternate screen has no scrollback. See decision
+    /// D-the-wheel-needs-capture.
+    #[arg(long = "no-mouse", global = true, conflicts_with = "mouse")]
+    pub no_mouse: bool,
 
     /// Load skills that live in this repository.
     ///
@@ -112,6 +132,49 @@ pub struct Cli {
     #[arg(long = "skill", global = true, value_name = "PATH")]
     pub skills: Vec<PathBuf>,
 
+    /// How many children one agent may run at once. Defaults to 4.
+    ///
+    /// A refusal names this flag, so it has to exist.
+    #[arg(long, global = true, value_name = "COUNT")]
+    pub max_children_per_parent: Option<usize>,
+
+    /// How many agents may be live in the whole process. Defaults to 32.
+    ///
+    /// This protects the machine, where --max-children-per-parent protects one run.
+    #[arg(long, global = true, value_name = "COUNT")]
+    pub max_live_agents: Option<usize>,
+
+    /// How long a child may run before rho cancels it. Defaults to 600 seconds.
+    #[arg(long, global = true, value_name = "SECONDS")]
+    pub child_timeout_secs: Option<u64>,
+
+    /// How many children one parent may queue for a slot. Defaults to 16.
+    ///
+    /// Over the per-parent child cap, rho queues a child instead of refusing it. This
+    /// bounds that line, because a waiting child holds a cancel token and a queue.
+    #[arg(long, global = true, value_name = "COUNT")]
+    pub max_queued_per_parent: Option<usize>,
+
+    /// How many children may wait for a slot in the whole process. Defaults to 128.
+    ///
+    /// A session root holds no live-child slot, so --max-live-agents bounds neither
+    /// the number of sessions nor the number of wait lines. This bounds the total.
+    #[arg(long, global = true, value_name = "COUNT")]
+    pub max_queued_total: Option<usize>,
+
+    /// Turns of warning before a subagent's turn cap. `0` turns the warning off.
+    ///
+    /// A child that runs out of turns has nobody to ask, so rho tells it to write
+    /// its summary this many turns early. The default is 5.
+    #[arg(long, global = true, value_name = "TURNS")]
+    pub agent_grace_turns: Option<u32>,
+
+    /// How many tool calls one subagent may make. Defaults to 64.
+    ///
+    /// A turn cap counts provider round trips. It does not bound a child that makes
+    /// forty tool calls inside one turn. This does.
+    #[arg(long, global = true, value_name = "COUNT")]
+    pub max_agent_tool_calls: Option<u32>,
     /// Do not search the skill directories. An explicit --skill still loads.
     #[arg(long, global = true, num_args = 0..=1, default_missing_value = "true")]
     pub no_skills: Option<bool>,
@@ -164,6 +227,28 @@ pub enum Command {
 fn build_config(config: &rho_config::Config) -> anyhow::Result<SessionConfig> {
     // A model comes from the merge, then the provider's default. Every source the user can
     // set now arrives through `Config`, so this reads one value instead of three.
+/// Build a `SessionConfig` from the parsed arguments, and print any notice.
+///
+/// This is the wrapper the non-interactive paths use, where a print is the right channel.
+/// The interactive path calls `build_config_with_notices`, because a print there lands on
+/// the primary screen and rho then opens the alternate screen over it.
+fn build_config(cli: &Cli) -> anyhow::Result<SessionConfig> {
+    let mut notices = Vec::new();
+    let config = build_config_with_notices(cli, &mut notices)?;
+    for notice in notices {
+        eprintln!("rho: {notice}");
+    }
+    Ok(config)
+}
+
+/// Build a `SessionConfig`, and collect every notice instead of printing it. State every
+/// choice. A notice is data here, so a frontend can draw it where the user is looking.
+/// See `D-a-notice-reaches-the-transcript`.
+fn build_config_with_notices(
+    cli: &Cli,
+    notices: &mut Vec<String>,
+) -> anyhow::Result<SessionConfig> {
+    // A model comes from the flag, then the environment, then the provider's default.
     //
     // The default is a convenience, not a security choice. Decision D-no-four-argument-session-new removed hidden
     // defaults for the session root and the approval policy, because a wrong value there is
@@ -175,10 +260,10 @@ fn build_config(config: &rho_config::Config) -> anyhow::Result<SessionConfig> {
         Some(model) => model,
         None => match provider::default_model(&provider_name) {
             Some(model) => {
-                eprintln!(
-                    "rho: no model given, so using the default for {provider_name}: {model}. \
+                notices.push(format!(
+                    "no model given, so using the default for {provider_name}: {model}. \
                      Set --model or {MODEL_ENV} to choose another."
-                );
+                ));
                 model.to_string()
             }
             None => {
@@ -276,7 +361,7 @@ async fn build_session(
             .into_iter()
             .chain(extensions.mcp_tools.iter().map(Arc::clone))
             .collect();
-    let (spawn_tool, subagents) = subagents::load(subagents::LoadRequest {
+    let (spawn_tools, subagents) = subagents::load(subagents::LoadRequest {
         session_root: config.session_root.clone(),
         trust_project: cli.trust_project,
         discover: loaded.discover_skills,
@@ -284,10 +369,10 @@ async fn build_session(
         provider: Arc::clone(&provider),
         hooks: Arc::clone(&hooks),
         parent_tools,
-        limits: rho_core::SubagentLimits::default(),
+        limits: subagent_limits(cli),
     })
     .await;
-    if let Some(tool) = spawn_tool {
+    for tool in spawn_tools {
         registry.register(tool);
     }
     let tools = Arc::new(registry);
@@ -472,6 +557,7 @@ where
 }
 
 /// The working directory, with the home directory shortened to `~`.
+#[cfg(feature = "tui")]
 fn display_cwd() -> String {
     let cwd = std::env::current_dir().unwrap_or_default();
     let text = cwd.to_string_lossy().to_string();
@@ -485,6 +571,7 @@ fn display_cwd() -> String {
 ///
 /// A failed command is not an error here. The banner simply omits the field, because a
 /// session outside a repository is normal.
+#[cfg(feature = "tui")]
 fn git_branch() -> String {
     std::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -499,6 +586,7 @@ fn git_branch() -> String {
 ///
 /// This is the one place the process environment is read for the interface. A test never
 /// reads the real environment, because `resolve_mouse` takes the list as data.
+#[cfg(feature = "tui")]
 fn rho_env_vars() -> Vec<(String, String)> {
     std::env::vars()
         .filter(|(name, _)| name.starts_with("RHO_"))
@@ -655,6 +743,26 @@ fn load_config_from(
             rho_config::ProjectTrust::Untrusted
         });
     Ok(rho_config::Config::load(&sources)?)
+/// Whether the TUI captures the mouse. The flag wins, then the environment, then off.
+///
+/// `--mouse` and `RHO_TUI_MOUSE` both reach this. The config file does not, because no
+/// binary reads a config file yet. See decision D-the-layered-config-has-no-caller.
+/// Whether the TUI captures the mouse. `--no-mouse` wins, then `--mouse`, then the
+/// environment, then the default, which is on.
+///
+/// The default flipped with `D-the-wheel-needs-capture`. rho owns the alternate screen, and
+/// that screen has no scrollback, so with capture off the wheel does nothing at all.
+#[cfg(feature = "tui")]
+fn resolve_mouse(flag: bool, no_flag: bool, env: &[(String, String)]) -> bool {
+    if no_flag {
+        return false;
+    }
+    if flag {
+        return true;
+    }
+    rho_config::ConfigLayer::from_env(env)
+        .tui_mouse
+        .unwrap_or(true)
 }
 
 /// Run the interactive TUI. Return a non-zero code on failure.
@@ -666,6 +774,10 @@ async fn run_interactive(cli: &Cli) -> i32 {
         Err(error) => return fail(error),
     };
     let config = match build_config(&loaded) {
+    // Collect the notices instead of printing them. A print here lands on the primary
+    // screen, and rho opens the alternate screen over it a few milliseconds later.
+    let mut notices: Vec<String> = Vec::new();
+    let config = match build_config_with_notices(cli, &mut notices) {
         Ok(config) => config,
         Err(error) => return fail(error),
     };
@@ -675,6 +787,10 @@ async fn run_interactive(cli: &Cli) -> i32 {
     // The interface reads the merged configuration, so a config file reaches both switches.
     let mouse = loaded.tui_mouse;
     let reasoning = loaded.reasoning;
+    let provider_name = provider::resolve_provider_name(cli.provider.as_deref(), None)
+        .unwrap_or_else(|_| String::new());
+    // The interface reads one switch. The flag wins, then the environment, then off.
+    let mouse = resolve_mouse(cli.mouse, cli.no_mouse, &rho_env_vars());
     // Hold `_tasks` and `_extras` for the whole run. Dropping the task registry kills
     // every background task, and dropping the MCP pool stops every server, so an early
     // drop would end work the model is still waiting on.
@@ -682,9 +798,11 @@ async fn run_interactive(cli: &Cli) -> i32 {
         Ok(triple) => triple,
         Err(error) => return fail(error),
     };
-    for notice in &extras.notices {
-        eprintln!("rho: {notice}");
-    }
+    // The notices go to the interface, not to stderr. rho used to print them here and then
+    // open the alternate screen over them, so the user never read one. One of them says a
+    // project skill stays unloaded until the user trusts it, which is a security notice.
+    // See `D-a-notice-reaches-the-transcript`.
+    notices.extend(extras.notices.iter().cloned());
     let _extras = extras;
 
     // The banner names where this session runs. Without it the banner drew separators
@@ -695,6 +813,8 @@ async fn run_interactive(cli: &Cli) -> i32 {
         .with_mouse(mouse)
         .with_reasoning(reasoning)
         .with_context(cwd, branch, provider_name);
+        .with_context(cwd, branch, provider_name)
+        .with_notices(notices);
     match app.run().await {
         Ok(()) => 0,
         Err(error) => fail(anyhow::anyhow!(error)),
@@ -714,6 +834,41 @@ async fn run_interactive(_cli: &Cli) -> i32 {
 fn fail(error: anyhow::Error) -> i32 {
     eprintln!("rho: {error}");
     EXIT_FAILURE
+}
+
+/// The subagent limits for this run, from the flags.
+///
+/// Every limit refusal in `rho-core` tells the user which flag to raise. The flags
+/// did not exist, so a refusal named something impossible. A live sweep found it.
+/// See `docs/verification/subagents-bedrock.md`.
+///
+/// `max_depth` is **not** a flag, and it is 1. `rho-cli` captures the parent tool
+/// set before `spawn_agent` joins it, so a child never holds a spawn tool and a
+/// grandchild cannot exist. Offering a depth flag would promise something the CLI
+/// cannot do. See decision D-cli-depth-is-zero.
+///
+/// It is 1 and not 0, because 0 forbids spawning altogether. The root session is
+/// depth 0, so a value of 0 refuses the very first child and the feature dies. A
+/// live run caught that after the unit tests passed.
+fn subagent_limits(cli: &Cli) -> rho_core::SubagentLimits {
+    let stated = rho_core::SubagentLimits::new();
+    rho_core::SubagentLimits {
+        max_depth: 1,
+        max_children_per_parent: cli
+            .max_children_per_parent
+            .unwrap_or(stated.max_children_per_parent),
+        max_live_total: cli.max_live_agents.unwrap_or(stated.max_live_total),
+        max_tool_calls: cli.max_agent_tool_calls.unwrap_or(stated.max_tool_calls),
+        grace_turns: cli.agent_grace_turns.unwrap_or(stated.grace_turns),
+        max_queued_per_parent: cli
+            .max_queued_per_parent
+            .unwrap_or(stated.max_queued_per_parent),
+        max_queued_total: cli.max_queued_total.unwrap_or(stated.max_queued_total),
+        child_timeout: cli
+            .child_timeout_secs
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(stated.child_timeout),
+    }
 }
 
 #[cfg(test)]
@@ -775,6 +930,142 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn subagent_limits_come_from_the_flags() {
+        // Every limit refusal in `rho-core` tells the user to raise a flag. Those
+        // flags did not exist, so the refusal taught something impossible. A live
+        // sweep found it. See docs/verification/subagents-bedrock.md.
+        let cli = Cli::try_parse_from([
+            "rho",
+            "--provider",
+            "openrouter",
+            "--max-children-per-parent",
+            "2",
+            "--max-live-agents",
+            "7",
+            "--child-timeout-secs",
+            "30",
+            "--max-agent-tool-calls",
+            "9",
+            "--max-queued-per-parent",
+            "5",
+            "--max-queued-total",
+            "11",
+        ])
+        .unwrap();
+        let limits = subagent_limits(&cli);
+        assert_eq!(limits.max_children_per_parent, 2);
+        assert_eq!(limits.max_live_total, 7);
+        assert_eq!(limits.child_timeout, std::time::Duration::from_secs(30));
+        assert_eq!(
+            limits.max_tool_calls, 9,
+            "a tool-call budget nobody can set is not a budget"
+        );
+        // A full wait line tells the user to raise one of these two flags. A flag that
+        // parses and changes nothing teaches a lie, which is the exact defect a live
+        // sweep found in the older limits. See `SubagentError::QueueFull`.
+        assert_eq!(
+            limits.max_queued_per_parent, 5,
+            "a wait line the caller cannot bound is not bounded by the caller"
+        );
+        assert_eq!(
+            limits.max_queued_total, 11,
+            "the process wait line must obey its flag too"
+        );
+    }
+
+    #[test]
+    fn the_grace_flag_reaches_the_limits() {
+        let cli = Cli::parse_from(["rho", "--agent-grace-turns", "2"]);
+        assert_eq!(subagent_limits(&cli).grace_turns, 2);
+    }
+
+    #[test]
+    fn the_grace_window_defaults_to_the_stated_subagent_value() {
+        let cli = Cli::parse_from(["rho"]);
+        assert_eq!(
+            subagent_limits(&cli).grace_turns,
+            rho_core::DEFAULT_SUBAGENT_GRACE_TURNS,
+            "a child is warned by default, because it has nobody to ask for more turns"
+        );
+    }
+
+    #[test]
+    fn the_grace_warning_can_be_turned_off_from_the_command_line() {
+        let cli = Cli::parse_from(["rho", "--agent-grace-turns", "0"]);
+        assert_eq!(subagent_limits(&cli).grace_turns, 0);
+    }
+
+    #[test]
+    fn subagent_limits_default_to_the_stated_values() {
+        // The defaults stay where `SubagentLimits::new` states them, so a flag that
+        // is absent changes nothing. See decision D-no-four-argument-session-new.
+        let cli = Cli::try_parse_from(["rho", "--provider", "openrouter"]).unwrap();
+        let limits = subagent_limits(&cli);
+        let stated = rho_core::SubagentLimits::new();
+        assert_eq!(
+            limits.max_children_per_parent,
+            stated.max_children_per_parent
+        );
+        assert_eq!(limits.max_live_total, stated.max_live_total);
+        assert_eq!(limits.child_timeout, stated.child_timeout);
+        assert_eq!(limits.max_tool_calls, stated.max_tool_calls);
+    }
+
+    #[test]
+    fn a_cli_allows_one_level_of_delegation_and_no_more() {
+        // The CLI depth is 1, so the root may spawn a child and the child may not
+        // spawn a grandchild. It must never be 0: the root session is itself depth 0,
+        // so 0 refuses the first child and the whole feature dies. A live run caught
+        // exactly that, after these unit tests passed. See
+        // docs/verification/subagents-bedrock.md and decision D-cli-depth-is-zero.
+        let cli = Cli::try_parse_from(["rho", "--provider", "openrouter"]).unwrap();
+        let limits = subagent_limits(&cli);
+        assert_eq!(
+            limits.max_depth, 1,
+            "the root must be able to spawn a child"
+        );
+
+        // Prove the shape end to end on the real registry, not on the number alone.
+        let registry = rho_core::AgentRegistry::new(limits);
+        let root = registry.new_tree();
+        let spawn = root
+            .spawn_child("scout", rho_core::CancelToken::new())
+            .expect("the root must be able to spawn one child");
+        assert!(
+            spawn
+                .node
+                .spawn_child("scout", rho_core::CancelToken::new())
+                .is_err(),
+            "a CLI child must not spawn a grandchild"
+        );
+    }
+
+    #[test]
+    fn the_default_model_notice_is_data_and_not_a_print() {
+        // The notice used to reach the user only through `eprintln!`, so the interactive
+        // path printed it to the terminal and then opened the alternate screen over it.
+        // A notice the interface can draw has to be a value the caller can carry.
+        // See `D-a-notice-reaches-the-transcript`.
+        let cli = Cli::try_parse_from(["rho", "--provider", "openrouter"]).unwrap();
+        let mut notices = Vec::new();
+        let config = build_config_with_notices(&cli, &mut notices).expect("a default model");
+        assert_eq!(config.model, "anthropic/claude-haiku-4.5");
+        assert!(
+            notices.iter().any(|line| line.contains("no model given")),
+            "the default-model choice must arrive as data: {notices:?}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_model_raises_no_notice() {
+        // rho must not narrate a choice the user already made.
+        let cli = Cli::try_parse_from(["rho", "--model", "openai/gpt-4o"]).unwrap();
+        let mut notices = Vec::new();
+        build_config_with_notices(&cli, &mut notices).expect("an explicit model");
+        assert!(notices.is_empty(), "no notice was needed: {notices:?}");
     }
 
     #[test]
@@ -887,6 +1178,7 @@ mod tests {
     fn sandbox_flag_defaults_to_off() {
         // The flag itself now writes nothing, because a clap default would beat a file.
         // The effective default is still `Off`, and it comes from the merge.
+        // The default is stated in the flag definition, not hidden. See D-no-four-argument-session-new.
         let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
         assert_eq!(
             cli.sandbox, None,
@@ -1675,5 +1967,60 @@ mod headless_loop_tests {
             "the error names itself: {err}"
         );
         assert!(out.trim().is_empty(), "no answer on stdout: {out}");
+    }
+}
+
+// `resolve_mouse` only exists in a build with the interface, so its tests follow it.
+// Without this the minimal test build fails to compile, and the gate does not catch that,
+// because the gate builds the minimal profile and never tests it.
+#[cfg(all(test, feature = "tui"))]
+mod mouse_tests {
+    use super::resolve_mouse;
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn the_mouse_is_on_by_default() {
+        // The default flipped with `D-the-wheel-needs-capture`. The alternate screen has no
+        // scrollback, so with capture off the wheel does nothing at all.
+        assert!(resolve_mouse(false, false, &[]));
+    }
+
+    #[test]
+    fn the_no_mouse_flag_gives_the_mouse_back() {
+        assert!(!resolve_mouse(false, true, &[]));
+    }
+
+    #[test]
+    fn the_no_mouse_flag_wins_over_the_env_var() {
+        assert!(!resolve_mouse(
+            false,
+            true,
+            &env(&[("RHO_TUI_MOUSE", "true")])
+        ));
+    }
+
+    #[test]
+    fn the_env_var_can_turn_the_mouse_off() {
+        assert!(!resolve_mouse(
+            false,
+            false,
+            &env(&[("RHO_TUI_MOUSE", "false")])
+        ));
+    }
+
+    #[test]
+    fn a_bad_env_value_keeps_the_default() {
+        // The layer omits an unaccepted boolean, so the resolution keeps the default.
+        assert!(resolve_mouse(
+            false,
+            false,
+            &env(&[("RHO_TUI_MOUSE", "yes please")])
+        ));
     }
 }

@@ -53,6 +53,18 @@ pub fn looks_like_a_secret(name: &str) -> bool {
         "SESSION_TOKEN",
         "REFRESH_TOKEN",
         "BEARER",
+        // A connection string carries its password inline, so the variable name
+        // never says "password". A security review proved `DATABASE_URL`,
+        // `REDIS_URL`, and `MYSQL_PWD` all survived the scrub.
+        "_PWD",
+        "PGPASS",
+        "DATABASE_URL",
+        "DB_URL",
+        "REDIS_URL",
+        "AMQP_URL",
+        "MONGO_URL",
+        "MONGODB_URI",
+        "CONNECTION_STRING",
     ];
     if NEEDLES.iter().any(|needle| upper.contains(needle)) {
         return true;
@@ -64,6 +76,63 @@ pub fn looks_like_a_secret(name: &str) -> bool {
 
 /// The character that replaces a stray control byte.
 const REPLACEMENT: char = '\u{fffd}';
+
+/// True for a character that is invisible or that reorders what follows it.
+///
+/// `char::is_control` is **false** for every one of these, so an earlier version of this filter let
+/// them through. The guarantee said "no control character", which was true and was not the point.
+///
+/// Two families matter, and a security review proved both survive the older filter:
+///
+/// - **Bidirectional overrides and isolates**, `U+202A` to `U+202E` and `U+2066` to `U+2069`. These
+///   are the Trojan Source trick: they reorder a line visually while the bytes say something else,
+///   so a reviewer reads one thing and the machine runs another.
+/// - **Zero-width and invisible marks**, including the byte order mark. Text can be hidden between
+///   visible characters, so two lines that look identical are not.
+///
+/// **The two joiners are deliberately absent, and that is a correction.** `U+200C` and `U+200D` sit
+/// inside the same numeric range and were swept in by the first version of this filter. They are not
+/// spoofing tools, they are spelling: an emoji family is joined by `U+200D`, and Persian, Arabic and
+/// several Indic scripts need `U+200C` to render a word correctly. Replacing them corrupted ordinary
+/// text, and a second-opinion review caught it. Neither is a Trojan Source vector, which is the bidi
+/// overrides and isolates below.
+///
+/// `U+2028` and `U+2029` are line and paragraph separators. They are one column wide, so they reach
+/// a terminal cell, and some terminals treat them as a line break and shift the grid.
+///
+/// Every one is replaced rather than dropped, so nothing goes silently missing.
+fn is_invisible_or_reordering(ch: char) -> bool {
+    // Both branches of this merge fixed the same hole, and this set is the union of the two,
+    // with one correction that only the other branch knew.
+    //
+    // The other branch listed characters. This branch asked the Unicode category instead, on the
+    // reasoning that a list loses to the next character somebody finds. Its tests then proved the
+    // category rule wrong: `Cf` holds `U+200C` and `U+200D`, which are **spelling** rather than
+    // spoofing, because an emoji family is joined by one and Persian, Arabic and several Indic
+    // scripts need the other. `Mn` holds every combining accent. Asking the category corrupted
+    // ordinary text, and the list did not. So the list stays, and the category rule is gone.
+    //
+    // What the category rule did find, and what is added here, is the invisible set the list had
+    // missed: a soft hyphen, the tag characters, and the two Hangul fillers.
+    matches!(
+        ch,
+        '\u{00ad}'                  // soft hyphen, invisible in a terminal
+            | '\u{061c}'            // arabic letter mark
+            | '\u{180e}'            // mongolian vowel separator
+            | '\u{200b}'            // zero width space
+            | '\u{200e}'            // left to right mark
+            | '\u{200f}'            // right to left mark
+            | '\u{202a}'..='\u{202e}' // bidi embedding and override
+            | '\u{2060}'..='\u{2064}' // word joiner, invisible operators
+            | '\u{2066}'..='\u{2069}' // bidi isolates
+            | '\u{2028}'            // line separator
+            | '\u{2029}'            // paragraph separator
+            | '\u{3164}'            // hangul filler, renders blank
+            | '\u{feff}'            // byte order mark
+            | '\u{ffa0}'            // halfwidth hangul filler, renders blank
+            | '\u{e0000}'..='\u{e007f}' // tag characters, invisible
+    )
+}
 
 /// Make untrusted text safe to print to a terminal.
 ///
@@ -80,14 +149,10 @@ const REPLACEMENT: char = '\u{fffd}';
 /// 2. Any other control character is replaced, so nothing invisible survives. A tab
 ///    and a newline are kept, because a caller may want the shape of the text.
 ///
-/// 3. A bidirectional control and a zero-width character are replaced too. `char::is_control`
-///    covers the Unicode `Cc` class only, so a right-to-left override passed straight through
-///    the first version. That is the Trojan Source class: the bytes reorder what a reader sees
-///    without changing what a program reads. A security review found it in a path that logs a
-///    string taken from a session file.
-///
-/// The guarantee to rely on: the result contains no escape character, no control character
-/// other than `\t` and `\n`, and no character that can reorder or hide what follows it.
+/// The guarantee to rely on: the result contains no escape character, no control character other
+/// than `\t` and `\n`, and **no invisible or reordering character**. The last clause was added after
+/// a security review proved that a bidirectional override and a line separator both survived the
+/// first two. See `is_invisible_or_reordering`.
 pub fn sanitize_text(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -99,7 +164,7 @@ pub fn sanitize_text(input: &str) -> String {
         }
         if ch == '\t' || ch == '\n' {
             out.push(ch);
-        } else if ch.is_control() || reorders_or_hides(ch) {
+        } else if ch.is_control() || is_invisible_or_reordering(ch) {
             out.push(REPLACEMENT);
         } else {
             out.push(ch);
@@ -108,36 +173,12 @@ pub fn sanitize_text(input: &str) -> String {
     out
 }
 
-/// Can this character reorder or hide the text around it?
-///
-/// This asks the Unicode category, not a list. A first version listed the bidi controls and the
-/// zero-width characters it had thought of, and a security review named seven it had missed,
-/// including `U+2028`. That one is a line separator: `char::is_control` answers false for it, so
-/// it survived and broke the one-line layout this module promises. A list of instances loses to
-/// the next character somebody finds, so the rule is now the property itself.
-///
-/// - `Cf`, the format class, holds every bidi control, the zero-width characters, the soft
-///   hyphen, the byte-order mark, and the tag characters.
-/// - `Zl` and `Zp`, the line and paragraph separators, break a line without being controls.
-/// - `Mn` variation selectors change how the character before them draws.
-fn reorders_or_hides(ch: char) -> bool {
-    use unicode_general_category::{GeneralCategory, get_general_category};
-
-    matches!(
-        get_general_category(ch),
-        GeneralCategory::Format
-            | GeneralCategory::LineSeparator
-            | GeneralCategory::ParagraphSeparator
-            | GeneralCategory::NonspacingMark
-    )
-}
-
+/// Sanitise text for a single line. Also folds a newline and a tab into a space, so the
+/// result cannot break a one-line layout.
 /// The longest line `sanitize_line` returns. A log line is for a human, and a megabyte of it
 /// helps nobody. A security review asked for the bound, because the input can come from a file.
 pub const MAX_LINE_CHARS: usize = 4096;
 
-/// Sanitise text for a single line. Also folds a newline and a tab into a space, so the
-/// result cannot break a one-line layout, and bounds the length.
 /// The head of `input` that `sanitize_line` may return, plus one character so a cut is visible.
 ///
 /// It returns a slice, so it allocates nothing. This exists because the bound must bound the
@@ -251,6 +292,46 @@ fn drop_escape_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_connection_string_variable_is_a_secret() {
+        // A security review proved these three survived the scrub. A connection
+        // string holds its password inline, so the variable name never says
+        // "password", and a name-based denylist misses it unless it is told.
+        for name in [
+            "DATABASE_URL",
+            "REDIS_URL",
+            "MYSQL_PWD",
+            "PGPASSWORD",
+            "MONGODB_URI",
+            "AMQP_URL",
+            "SPRING_DATASOURCE_CONNECTION_STRING",
+        ] {
+            assert!(
+                super::looks_like_a_secret(name),
+                "{name} carries a credential and must be scrubbed"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_variable_is_not_a_secret() {
+        // The denylist must not swallow the environment. A scrub that hides PATH
+        // breaks every command.
+        for name in [
+            "PATH",
+            "HOME",
+            "LANG",
+            "TERM",
+            "CARGO_TARGET_DIR",
+            "RHO_MODEL",
+        ] {
+            assert!(
+                !super::looks_like_a_secret(name),
+                "{name} is not a credential and must survive"
+            );
+        }
+    }
+
     use super::*;
 
     // --- credential names -------------------------------------------------
@@ -365,6 +446,128 @@ mod tests {
 }
 
 #[cfg(test)]
+mod invisible_tests {
+    use super::{sanitize_line, sanitize_text};
+
+    /// Found by a security review. `char::is_control` is false for all of these, so the filter let
+    /// them through while its guarantee said "no control character". True, and not the point.
+    #[test]
+    fn a_bidi_override_never_survives() {
+        // The Trojan Source trick: reorder a line visually while the bytes say something else.
+        for ch in [
+            '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}',
+        ] {
+            let text = format!("safe{ch}hidden");
+            let clean = sanitize_text(&text);
+            assert!(
+                !clean.contains(ch),
+                "{ch:?} (U+{:04X}) survived: {clean:?}",
+                ch as u32
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_width_character_never_survives() {
+        // Hidden text between visible characters makes two identical-looking lines differ.
+        //
+        // `U+200C` and `U+200D` were in this list and are deliberately gone. They are the zero width
+        // non-joiner and joiner, and they are spelling rather than spoofing: an emoji family is joined
+        // by `U+200D`, and Persian, Arabic and several Indic scripts need `U+200C`. Rejecting them
+        // corrupted ordinary text. `a_zero_width_joiner_survives_because_it_is_spelling` covers the
+        // other side, so neither behaviour can drift without a test failing.
+        for ch in [
+            '\u{200b}', '\u{200e}', '\u{200f}', '\u{feff}', '\u{2060}', '\u{061c}', '\u{180e}',
+        ] {
+            let clean = sanitize_text(&format!("a{ch}b"));
+            assert!(
+                !clean.contains(ch),
+                "{ch:?} (U+{:04X}) survived: {clean:?}",
+                ch as u32
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_separator_never_survives() {
+        // U+2028 and U+2029 are one column wide, so they reach a terminal cell, and some terminals
+        // treat them as a line break and shift the grid.
+        for ch in ['\u{2028}', '\u{2029}'] {
+            let clean = sanitize_text(&format!("AAA{ch}BBB"));
+            assert!(!clean.contains(ch), "{ch:?} survived: {clean:?}");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_character_is_untouched() {
+        // The filter must not become a blunt instrument. Accents, CJK, emoji, and a combining mark
+        // all stay, because a model writes them for a reason.
+        let text = "caf\u{e9} na\u{ef}ve \u{4e2d}\u{6587} \u{1f600} e\u{301} tab\there";
+        assert_eq!(sanitize_text(text), text);
+    }
+
+    #[test]
+    fn the_replacement_marks_the_removal() {
+        // Replaced, not dropped, so nothing goes silently missing.
+        let clean = sanitize_line("a\u{202e}b");
+        assert!(
+            clean.contains('\u{fffd}'),
+            "the removal is marked: {clean:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod joiner_tests {
+    use super::sanitize_text;
+
+    /// A regression the controller introduced and a second-opinion review caught.
+    ///
+    /// The filter that closed the Trojan Source hole took `U+200B` to `U+200F` as one range, which
+    /// swept in the zero width joiner and non-joiner. Those two are not spoofing tools, they are
+    /// **spelling**: an emoji family is joined by `U+200D`, and Persian, Arabic, and several Indic
+    /// scripts need `U+200C` to render words correctly.
+    ///
+    /// The first version of this test used a single emoji, which has no joiner, so it passed while a
+    /// family emoji and a Persian word were being corrupted.
+    #[test]
+    fn a_zero_width_joiner_survives_because_it_is_spelling() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        assert_eq!(
+            sanitize_text(family),
+            family,
+            "an emoji family keeps its joiners"
+        );
+        let persian = "\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645}";
+        assert_eq!(
+            sanitize_text(persian),
+            persian,
+            "a Persian word keeps its non-joiner"
+        );
+    }
+
+    /// The hole the joiners were swept up by is still closed.
+    #[test]
+    fn the_spoofing_characters_are_still_rejected() {
+        // A bidirectional override or isolate reorders a line visually. A zero width space hides
+        // between characters. A directional mark flips a run. None of these is spelling.
+        for ch in [
+            '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}', '\u{200b}', '\u{200e}', '\u{200f}', '\u{feff}', '\u{2028}',
+            '\u{2029}',
+        ] {
+            let text = format!("a{ch}b");
+            assert!(
+                !sanitize_text(&text).contains(ch),
+                "U+{:04X} must not survive",
+                ch as u32
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod trojan_source_tests {
     //! A bidirectional control and a zero-width character cannot survive a sanitised line.
     //!
@@ -379,6 +582,9 @@ mod trojan_source_tests {
     ///
     /// `U+2028` is the important one: it is a line separator, `char::is_control` answers false,
     /// and it broke the one-line layout this module promises.
+    ///
+    /// `U+200D` and a variation selector were in this list, and a merge removed them. Both are
+    /// spelling, not spoofing, and `invisible_tests` covers that side.
     #[test]
     fn a_reviewer_named_character_never_survives() {
         for ch in [
@@ -386,9 +592,10 @@ mod trojan_source_tests {
             '\u{2028}',  // line separator, not a control character
             '\u{2029}',  // paragraph separator
             '\u{180e}',  // mongolian vowel separator
-            '\u{fe0f}',  // variation selector 16
             '\u{e0001}', // a language tag character
             '\u{e0041}', // a tag character
+            '\u{00ad}', // soft hyphen
+            '\u{3164}', // hangul filler
         ] {
             let out = sanitize_line(&format!("safe{ch}text"));
             assert!(!out.contains(ch), "{ch:?} must not survive: {out:?}");
@@ -416,7 +623,6 @@ mod trojan_source_tests {
             '\u{202d}', // left-to-right override
             '\u{2066}', // left-to-right isolate
             '\u{200b}', // zero width space
-            '\u{200d}', // zero width joiner
             '\u{feff}', // byte order mark
             '\u{00ad}', // soft hyphen
         ] {

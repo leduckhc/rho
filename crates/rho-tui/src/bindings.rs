@@ -126,6 +126,26 @@ pub fn bindings() -> &'static [Binding] {
             built: true,
         },
         Binding {
+            keys: "pageup",
+            summary: "scroll the transcript one screen up",
+            built: true,
+        },
+        Binding {
+            keys: "pagedown",
+            summary: "scroll the transcript one screen down",
+            built: true,
+        },
+        Binding {
+            keys: "home",
+            summary: "jump to the oldest transcript row, while the draft is empty",
+            built: true,
+        },
+        Binding {
+            keys: "end",
+            summary: "jump to the newest transcript row, while the draft is empty",
+            built: true,
+        },
+        Binding {
             keys: "esc",
             summary: "close a panel · press twice to clear the draft",
             built: true,

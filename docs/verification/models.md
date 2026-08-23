@@ -98,3 +98,77 @@ lesson of the `nova-lite` row.
   likely to call tools well, not less, but that is an expectation and not a measurement.
 - No model was checked for a long session, for context compaction, or for a cache hit.
 - Only `us-east-1` was used. A model's availability varies by region.
+
+## The Bedrock default moved to the latest Haiku
+
+Date: 20260819. The owner asked for the latest Haiku from Bedrock. Everything below was run, not
+read.
+
+`aws bedrock list-inference-profiles` reports three Haiku profiles in `us-east-1`, all `ACTIVE`:
+
+```
+us.anthropic.claude-3-haiku-20240307-v1:0        ACTIVE
+us.anthropic.claude-haiku-4-5-20251001-v1:0      ACTIVE
+global.anthropic.claude-haiku-4-5-20251001-v1:0  ACTIVE
+```
+
+`ACTIVE` is not the same as callable. Three ids were run through `rho run`:
+
+| id | us-east-1 | eu-west-1 |
+| --- | --- | --- |
+| `anthropic.claude-haiku-4-5-20251001-v1:0` | 400 | 400 |
+| `us.anthropic.claude-haiku-4-5-20251001-v1:0` | works | 400 |
+| `global.anthropic.claude-haiku-4-5-20251001-v1:0` | works | works |
+
+The commands, verbatim:
+
+```sh
+./target/release/rho run "Reply with exactly: OK" \
+  --provider bedrock --model anthropic.claude-haiku-4-5-20251001-v1:0
+# rho: client error: status 400: Bedrock rejected the request as invalid.
+
+AWS_REGION=eu-west-1 ./target/release/rho run "Reply with exactly: OK" \
+  --provider bedrock --model us.anthropic.claude-haiku-4-5-20251001-v1:0
+# rho: client error: status 400: Bedrock rejected the request as invalid.
+
+AWS_REGION=eu-west-1 ./target/release/rho run "Reply with exactly: OK" \
+  --provider bedrock --model global.anthropic.claude-haiku-4-5-20251001-v1:0
+# OK
+```
+
+So a Claude 4.5 model needs an inference profile, and the profile must be the global one. The new
+default is `global.anthropic.claude-haiku-4-5-20251001-v1:0`. See
+`D-bedrock-default-is-the-global-haiku`.
+
+### What the new default was driven through
+
+```
+rho run --provider bedrock, no --model:
+  rho: no model given, so using the default for bedrock:
+       global.anthropic.claude-haiku-4-5-20251001-v1:0. Set --model or RHO_MODEL to choose another.
+  DEFAULT OK
+
+one tool call:   "How many files are in the crates directory?"  -> 15
+two tool calls:  "Run ls on crates, then ls on docs."           -> crates: 15, docs: 15
+```
+
+**Two tool calls in one turn is the sprint-1 Bedrock defect**, where rho answered one tool call
+and returned 400 for two. It passes.
+
+The interface was then driven on Bedrock, streaming, with markdown and a table. The banner reads
+`global.anthropic.claude-haiku-4-5-20251001-v1:0 · bedrock`, the heading and emphasis style, and
+the table's right-aligned column aligns. The screenshot is `shots/13-bedrock-haiku45.png`.
+
+### The old default
+
+`amazon.nova-micro-v1:0` is still `ACTIVE` and was not replaced because it broke. It was chosen
+when the question was the smallest model that calls a tool four times out of four. The rows above
+in this file still record that sweep, and they stay, because they were true when measured.
+
+### Two guards were added
+
+`the_bedrock_default_is_the_latest_haiku_on_a_global_profile` asserts the default names a
+`haiku-4-5` and starts with `global.`, so a later edit cannot quietly pin it to one region.
+
+`no_default_names_a_bare_claude_45_model` asserts no provider's default is a bare Claude 4.5 id,
+because Bedrock rejects those with a 400 on the first prompt.

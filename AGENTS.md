@@ -309,20 +309,29 @@ doc, because somebody will trust it.
 
 ## Gate
 
-All four must pass before you report work as done.
+All of these must pass before you report work as done.
 
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo build -p rho-cli --no-default-features --features minimal
+<<<<<<< ours
 python3 bench/check-ids.py
 python3 bench/check-claimed-tests.py
+=======
+cargo test -p rho-cli --no-default-features --features minimal --no-run
+python3 bench/check-ids.py
+python3 bench/check-prose.py $(find docs -name '*.md')
+python3 bench/check-agentic-workflow.py
+python3 bench/check-spec-tests.py
+>>>>>>> theirs
 ```
 
 `bench/check-ids.py` proves that every spec, ADR, decision, and feature reference resolves,
 and that no numeric id came back. See `docs/ids.md`.
 
+<<<<<<< ours
 `bench/check-claimed-tests.py` proves that every test a commit message names exists in the
 tree. A green suite cannot see a missing test, and on this branch three tests were lost to a
 concurrent writer while the suite stayed green and a commit claimed one of them by name. A test
@@ -330,6 +339,15 @@ that exists only in a commit message is a false claim about the work.
 
 Record a deliberate removal in `bench/deleted-tests.txt`, with the commit and the reason. A
 commit that deletes a test names it too, and the guard cannot tell that from a loss.
+=======
+`bench/check-spec-tests.py` proves that every test a delivered spec names really exists. A
+spec that names fifteen tests nobody wrote passes every other gate. A draft, a planned, and a
+superseded spec are exempt, and only the first word of the `Status:` line decides that.
+
+`bench/check-agentic-workflow.py` proves that `agentic-workflow.yaml` still holds together:
+every stage input resolves, every role exists, no agent authors its own definition of done,
+and this gate list matches `gate_sets.full`. See D-agentic-workflow-is-a-template.
+>>>>>>> theirs
 
 ## Prose rules
 

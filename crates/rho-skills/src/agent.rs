@@ -35,6 +35,9 @@ pub struct AgentDefinition {
     pub origin: SkillOrigin,
     /// The tools the definition asks for. `None` means inherit the parent's set.
     /// A name is intersected with the parent's set at spawn time.
+    ///
+    /// The frontmatter keywords `all` and `*` resolve to `None`, and `none`
+    /// resolves to an empty list. See [`resolve_tool_list`].
     pub tools: Option<Vec<String>>,
     /// The model to use, overriding the inherited model. `None` inherits.
     pub model: Option<String>,
@@ -195,7 +198,10 @@ pub async fn load_definition(path: &Path, origin: SkillOrigin) -> Option<AgentDe
     };
     warnings.extend(name_warnings(&name));
 
-    let tools = raw.tools.map(|tools| parse_tool_list(&tools));
+    let tools = match raw.tools {
+        Some(raw_tools) => resolve_tool_list(&raw_tools, &mut warnings),
+        None => None,
+    };
 
     let sandbox = match raw.sandbox {
         Some(text) => match text.parse::<SandboxMode>() {
@@ -230,6 +236,66 @@ struct RawFrontmatter {
     model: Option<String>,
     max_turns: Option<u32>,
     sandbox: Option<String>,
+}
+
+/// The keywords that mean "every tool the parent holds".
+const KEYWORDS_ALL: [&str; 2] = ["all", "*"];
+
+/// The keyword that means "no tool at all".
+const KEYWORD_NONE: &str = "none";
+
+/// Resolve a frontmatter tool list into the field's meaning.
+///
+/// `None` means inherit the parent's set, which is what an absent field means.
+/// `Some(list)` means intersect that list with the parent's set, so an empty list
+/// means no tools.
+///
+/// A keyword must stand alone. `all` and `*` inherit. `none` is an empty set, and
+/// no other spelling states that on purpose. A keyword beside a real name is a
+/// contradiction, so the keyword is dropped and the names stand. That narrows,
+/// and widening on an unclear line is the fail-open shape. See `SPEC-subagents`
+/// section 5 and decision D-a-tool-keyword-stands-alone.
+fn resolve_tool_list(raw: &str, warnings: &mut Vec<String>) -> Option<Vec<String>> {
+    let mut names = Vec::new();
+    let mut keywords = Vec::new();
+    let mut wants_all = false;
+    let mut wants_none = false;
+    for name in parse_tool_list(raw) {
+        let lower = name.to_ascii_lowercase();
+        if KEYWORDS_ALL.contains(&lower.as_str()) {
+            wants_all = true;
+            keywords.push(name);
+        } else if lower == KEYWORD_NONE {
+            wants_none = true;
+            keywords.push(name);
+        } else {
+            names.push(name);
+        }
+    }
+
+    if keywords.is_empty() {
+        return Some(names);
+    }
+    if !names.is_empty() {
+        warnings.push(format!(
+            "a tool keyword must stand alone. \"{}\" was dropped. These named tools stand: {}.",
+            keywords.join(", "),
+            names.join(", ")
+        ));
+        return Some(names);
+    }
+    if wants_all && wants_none {
+        warnings.push(
+            "the tool list asks for all and for none. The narrower one wins, so this agent \
+             gets no tools."
+                .to_string(),
+        );
+        return Some(Vec::new());
+    }
+    if wants_none {
+        return Some(Vec::new());
+    }
+    None
 }
 
 /// Parse a comma-or-space separated tool list into names.

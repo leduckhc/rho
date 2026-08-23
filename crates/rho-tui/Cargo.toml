@@ -16,7 +16,7 @@ ratatui = { version = "0.30.2", features = ["scrolling-regions"] }
 rho-core = { version = "0.1.0", path = "../rho-core" }
 rho-redact = { version = "0.1.0", path = "../rho-redact" }
 thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["rt", "macros", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["rt", "macros", "sync", "time", "signal"] }
 tracing = "0.1.44"
 unicode-width = "0.2.2"
 

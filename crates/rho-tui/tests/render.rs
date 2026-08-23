@@ -57,12 +57,12 @@ fn render_shows_status_line() {
     // a running turn reads `working` in the footer, not `running`. See the
     // controller finding on slice U4-D.
     assert!(text.contains("working"), "buffer was:\n{text}");
-    // The model id left the band for the banner, which freezes once above the band.
-    // See `SPEC-tui-inline-and-composer` section 2. So the band no longer holds it,
-    // and the banner does.
+    // The banner now draws on the top row of the screen, because rho owns the whole screen
+    // and nothing sits above it. It was frozen above the inline band before, so this test
+    // used to assert the opposite. See `D-alternate-screen-after-all`.
     assert!(
-        !text.contains("openai/gpt-4o"),
-        "the model id must not draw in the band:\n{text}"
+        text.contains("openai/gpt-4o"),
+        "the banner must carry the model id on screen:\n{text}"
     );
     assert!(
         rho_tui::banner_line(&state, 60).contains("openai/gpt-4o"),

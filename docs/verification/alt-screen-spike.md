@@ -19,8 +19,9 @@ again. Nothing in `crates/` changed for this record.
 | Does a resize hold? | Yes, at 24, then 40, then 12 rows. |
 | Does it exit cleanly? | Yes. |
 
-So the one real cost of the alternate screen, which is the loss of the terminal's own
-history, is recoverable with one key.
+So a dump is possible. **It is not shipped.** The owner tested iTerm2 and Ghostty, and the
+terminal's own search reaches the alternate screen in both, so the history is not lost and
+the dump answers no need. See `D-alternate-screen-after-all`.
 
 ## 2. The scroll direction cannot be detected, and must not be
 
