@@ -46,7 +46,8 @@ This page describes rho as of 2026-08-23.
 
 | If you try it today |
 |---|
-| `/model`, `/sessions`, `/guide` — each command is in the list and answers `<command> is not built yet.` |
+| `/model`, `/sessions`, `/guide` — each is in the command list and answers `✗ error · <command> is not built yet.` |
+| The first frame advertises `/guide` as one of four hints — so a new user is invited to run a command that fails. |
 | Ctrl+O is shown in the help screen. It is labelled as not built and does nothing. |
 | A `todo` tool — the model keeps no task list, so a long job has no checklist you can read. |
 | An `ask_user` tool — the model cannot ask you a question mid-turn. It guesses instead, or it stops. |

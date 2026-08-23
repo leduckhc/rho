@@ -10,6 +10,23 @@ rho
 
 `rho` with no subcommand opens the interactive terminal. It enters the alternate screen, draws a header and a footer, and waits for your first prompt.
 
+The first frame shows brand art, your directory, your git branch, the model, the provider,
+and four hints:
+
+```
+ρ rho  ~/Work/Vibe/rho · main · anthropic/claude-haiku-4.5 · openrouter
+                            rho · the harness, unbundled
+                  anthropic/claude-haiku-4.5 · openrouter · ready
+                          ❯       type a prompt to begin
+                          /       list the commands
+                          ?       show the keys
+                          /guide  take the two minute tour
+```
+
+> **Not built yet.** The fourth hint is wrong. `/guide` does not exist, and typing it answers
+> `✗ error · /guide is not built yet. See F-slash-commands in docs/features.md.` Use `?` for
+> the keys and `/` for the command list. Both work.
+
 ## Keys
 
 ### Sending and quitting
