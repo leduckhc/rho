@@ -82,6 +82,11 @@ is 5 000 or less, the result notes that the unit is milliseconds, not seconds.
 Use the `task` tool to probe it. If a foreground command exceeds its timeout and a
 task registry exists, rho adopts it into the background instead of killing it.
 
+> **Partly built.** The model can probe a task with the `task` tool, and you cannot watch one.
+> rho computes a progress summary for a background task and stores it on the task row, and the
+> renderer never draws that field. So a long build shows no percentage and no step count. Ask
+> the model to call `task`, or read the command's own output when it finishes.
+
 **Environment scrubbing.** Before the command starts, rho removes every
 environment variable whose name looks like a secret. The variable name and value
 both disappear. A command cannot see `OPENROUTER_API_KEY`, `AWS_SECRET_ACCESS_KEY`,
