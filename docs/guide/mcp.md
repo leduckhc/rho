@@ -2,6 +2,20 @@
 
 rho 0.1.0. An MCP server is a separate process that gives the model extra tools.
 
+> **Not built yet.** An MCP tool never reaches the model in this version. rho starts your
+> server, finishes the handshake, and asks for its tool list. It then advertises tools from a
+> schema cache, and nothing ever writes that cache, so the list stays empty. Every run prints
+> `1 MCP server(s) are configured, and no tool schema is cached yet. Their tools appear in the
+> next session.` That next session never comes.
+>
+> A live probe established each step. A stdio server received `initialize`, then
+> `notifications/initialized`, then `tools/list`, and it answered with one tool. It never
+> received a `tools/call`, and the model reported no such tool on two runs in a row. The
+> missing piece is a caller for the cache's `save` method, which has none.
+>
+> Read this page as the shape of the feature, not as something you can use today. Everything
+> below is parsed and honoured. Only the last step is missing.
+
 ## Add a server
 
 Create `~/.rho/mcp.json` and start rho:
@@ -30,13 +44,14 @@ Create `~/.rho/mcp.json` and start rho:
 }
 ```
 
-The first time you add a server with no cached schema, rho prints:
+Every run with a server configured prints this:
 
 ```
 2 MCP server(s) are configured, and no tool schema is cached yet. Their tools appear in the next session.
 ```
 
-Start rho again. The tools are now in the model's context.
+Starting rho again changes nothing, because nothing writes the cache. The notice is wrong
+about the next session. See the note at the top of this page.
 
 ### Field reference
 
