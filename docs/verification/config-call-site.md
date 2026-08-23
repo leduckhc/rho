@@ -77,6 +77,39 @@ file, and the error taxonomy is part of a contract that is already reviewed. See
 `SPEC-config-call-site` section 2. The message names the key and the value, so it is wrong
 prose rather than a wrong answer.
 
+## The merge completeness guard, added later
+
+`SPEC-config-call-site` promised `every_scalar_key_merges_and_reaches_the_config`, and no
+test carried the name. `bench/check-spec-tests.py` found the gap.
+
+`ConfigLayer::merge` assigns one field per line, by hand. Fifteen lines, and no test read
+more than one key. So a forgotten line dropped that value in silence.
+
+The new test writes one config file that sets every key. It merges the file over an empty
+layer. Then it sweeps the merged layer for a single unset field, and it reads the sweep from
+the Debug text. A hand-kept list of fields is the defect itself, so the assertion holds no
+list. It also loads the file through `Config::load`, to prove each value reaches the
+resolved config and not only the layer.
+
+Three deliberate breaks, each restored from a copy in `/tmp` and never with `git checkout`:
+
+| Break | Result |
+| --- | --- |
+| Delete `self.mcp_config = over.mcp_config.or(self.mcp_config);` | FAILED. `ConfigLayer::merge dropped a key it must carry: ... mcp_config: None ...` |
+| Merge the wrong field: `self.model = over.provider.or(self.model)` | FAILED. `left: Some("openrouter")`, `right: Some("a-model")` |
+| Delete `tui-mouse = true` from the fixture, which is a new field in miniature | FAILED. `EVERY_KEY must set every key of ConfigLayer, and it leaves one unset: ... tui_mouse: None ...` |
+
+The command:
+
+```sh
+cargo test -p rho-config --test merge_order
+```
+
+It reports `6 passed; 0 failed` with the file restored.
+
+The second break matters most. A sweep for `None` alone would pass it, because a wrongly
+assigned field is still set. The load half is what catches it.
+
 ## Not covered here
 
 - Azure and OpenRouter. Only Bedrock was exercised, and one provider is not every provider.

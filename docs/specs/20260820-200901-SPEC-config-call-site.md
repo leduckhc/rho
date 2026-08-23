@@ -234,8 +234,8 @@ Named, with the assertion each one proves.
 - `a_config_file_alone_changes_the_reasoning_mode` — the R7 defect, and it fails today.
 - `a_config_file_alone_changes_the_mouse_capture` — the same defect for `tui-mouse`, which
   `D-the-layered-config-has-no-caller` names beside it. Without this, mouse ships partial.
-- `the_flag_beats_the_config_and_the_environment` — the full precedence chain, which
-  replaces `the_flag_wins_over_the_env_var`.
+- `the_flag_beats_the_config_and_the_environment` — the full precedence chain. It replaces
+  an earlier test that compared the flag with the environment variable only.
 - `an_unset_flag_does_not_beat_a_file` — a `bool` flag the user never passed writes no
   value into layer 6.
 - `the_sandbox_flag_default_does_not_beat_a_file` — the enum half of rule 6, and the
@@ -244,6 +244,10 @@ Named, with the assertion each one proves.
   `--reasoning` each land in the right field. A wrong mapping is otherwise silent.
 - `every_scalar_key_merges_and_reaches_the_config` — the completeness guard for the
   hand-kept `merge` list, so a forgotten line fails a test instead of dropping a value.
+  It sets every key in one file, then sweeps the merged layer for a single unset field.
+  A new field on `ConfigLayer` fails it until the fixture and the merge both carry the
+  field. Three deliberate breaks trip it: a dropped merge line, a merge that assigns the
+  wrong field, and a fixture that misses a key. See `docs/verification/config-call-site.md`.
 - `from_paths_maps_the_two_paths` and `the_builder_carries_env_profile_and_flags` — the one
   constructor the whole contract rests on. `from_paths_maps_the_two_paths` gives **both**
   files the same key, so a swap of the two slots reverses the winner and fails the test.
@@ -253,16 +257,19 @@ Named, with the assertion each one proves.
 - `a_missing_config_file_is_not_an_error` — the run proceeds with defaults.
 - `an_unknown_profile_is_an_error` — `--profile` names a block no file defines.
 - `a_profile_key_beats_a_plain_file_key` — layer 4 over layer 3, through the call site.
-- `the_load_reports_which_files_it_read` — one line on stderr, naming each path.
-- `an_absent_global_path_is_reported` — rule 4, the unset `HOME` case.
+- `the_load_reports_which_files_it_read` — planned. Rule 7 is unbuilt. One line on stderr,
+  naming each path.
+- `an_absent_global_path_is_reported` — planned. Rule 4 is unbuilt. It is the unset `HOME`
+  case.
 - `loading_twice_gives_the_same_config` — rule 5.
 - `the_session_root_key_does_not_move_the_project_file` — no circular read.
-- `a_global_session_root_does_not_change_which_project_file_is_read` — the trap the review
-  found, with the stderr report of rule 7.
+- `a_global_session_root_does_not_change_which_project_file_is_read` — planned. It is the
+  trap the review found, and it needs the stderr report of rule 7.
 - `the_bootstrap_root_reads_the_session_root_variable` — the `RHO_SESSION_ROOT` branch.
 - `no_clap_env_attribute_remains` — a source guard, because the second precedence is the
   defect `SPEC-config` section 2 forbids.
-- `an_absent_credential_is_an_error_not_an_empty_key` — replaces `unwrap_or_default()`.
+- `a_missing_env_credential_is_an_error` — an absent credential stops the run. It replaces
+  an `unwrap_or_default()` that read an absent key as an empty key.
 
 Added while building it, each one for a reason the list above did not hold:
 
