@@ -1,0 +1,255 @@
+# Configuration
+
+This page describes every config key, environment variable, profile, and credential
+source for rho 0.1.0.
+
+## Config files
+
+rho reads two files.
+
+**Global file:** `$XDG_CONFIG_HOME/rho/config.toml`.
+When `XDG_CONFIG_HOME` is unset or empty, rho uses `$HOME/.config/rho/config.toml`.
+
+**Project file:** `<root>/.rho/config.toml`.
+The root is `--root`, then `RHO_SESSION_ROOT`, then the current directory.
+
+A missing file is not an error.
+An unreadable file, a malformed file, or an unknown key stops the run.
+
+## Precedence
+
+rho merges six sources.
+The list runs weakest first, strongest last.
+
+1. Built-in defaults
+2. Global file
+3. Project file
+4. Named profile (selected with `--profile NAME`)
+5. Environment variables (`RHO_*`)
+6. CLI flags
+
+A CLI flag beats every file value.
+An environment variable beats every file value and every profile value.
+
+## Keys
+
+All keys are kebab-case.
+An unknown key is an error, not a warning.
+
+| Key | Type | Default | Environment variable |
+|---|---|---|---|
+| `provider` | string | unset | `RHO_PROVIDER` |
+| `model` | string | unset | `RHO_MODEL` |
+| `session-root` | path | unset | `RHO_SESSION_ROOT` |
+| `session-file` | path | unset | `RHO_SESSION_FILE` |
+| `ephemeral` | bool | `false` | `RHO_EPHEMERAL` |
+| `sandbox` | string | `off` | `RHO_SANDBOX` |
+| `approval` | string | unset | `RHO_APPROVAL` |
+| `skill-paths` | list of paths | empty | `RHO_SKILL_PATHS` |
+| `no-skills` | bool | `false` | `RHO_NO_SKILLS` |
+| `tui-mouse` | bool | `true` | `RHO_TUI_MOUSE` |
+| `tui-reasoning` | string | `summary` | `RHO_TUI_REASONING` |
+| `reasoning-effort` | string | unset | `RHO_REASONING_EFFORT` |
+| `mcp-config` | path | unset | `RHO_MCP_CONFIG` |
+
+`RHO_SKILL_PATHS` uses the OS path separator (`:` on Unix, `;` on Windows).
+
+`RHO_LOG` controls log verbosity.
+It has no config-file key.
+
+### `sandbox`
+
+Valid values: `off`, `confined`, `strict`.
+The default is `off`.
+See [permissions](permissions.md) for what each value restricts.
+
+### `approval`
+
+Valid values: `read-only`, `ask`, `allow-all`.
+When unset, the frontend resolves the mode.
+
+`ask` is refused at runtime with:
+
+```
+approval = "ask" needs an interactive frontend, which this build does not have here. Use read-only or allow-all, or pass --read-only.
+```
+
+Use `--read-only` as the flag equivalent of `approval = "read-only"`.
+See [permissions](permissions.md) for the effect of each mode.
+
+### `tui-reasoning`
+
+Valid values: `off`, `summary`, `full`, `live`.
+The default is `summary`.
+
+### `reasoning-effort`
+
+Valid values: `off`, `low`, `medium`, `high`, `xhigh`.
+When unset, rho sends no effort field and the provider uses its own default.
+
+### Boolean environment variables
+
+A boolean variable accepts `1`, `true`, `yes`, `0`, `false`, or `no`.
+The match ignores case and trims surrounding space.
+Any other value stops the run.
+
+### `[subagents]`
+
+> **Partly built.** rho reads the `[subagents]` table from a config file and no
+> code applies it. The run is silent. Pass `--max-children-per-parent`,
+> `--max-live-agents`, and `--child-timeout-secs` as flags instead. There is no
+> `--max-depth` flag, and a subagent cannot spawn one of its own.
+> See [cli](cli.md) for those flags.
+
+The table accepts four keys:
+
+| Key | Type |
+|---|---|
+| `max-depth` | integer |
+| `max-children-per-parent` | integer |
+| `max-live-total` | integer |
+| `child-timeout-secs` | integer |
+
+### `session-file`
+
+> **Partly built.** `session-file` parses and no code reads it. The run is silent.
+> rho records no session file today.
+
+### `ephemeral`
+
+> **Partly built.** `ephemeral` parses and no code reads it. The run is silent.
+
+## Project file trust
+
+A project file is untrusted by default.
+An untrusted file silently drops `skill-paths` and `mcp-config`.
+It also refuses any `!command` credential from that file.
+
+Pass `--trust-project` to restore those keys.
+When rho refuses a `!command` credential, it stops the run and names `--trust-project`.
+
+## Profiles
+
+A profile is a named block inside a config file.
+It can hold every key, including `[credentials]`.
+
+```toml
+[profiles.work]
+provider = "openrouter"
+model = "anthropic/claude-sonnet-4.5"
+reasoning-effort = "high"
+```
+
+Select a profile with `--profile work`.
+An unknown profile name stops the run.
+
+A profile merges at layer 4.
+It beats any plain file value, but environment variables and CLI flags beat a profile.
+
+## Credentials
+
+A credential value takes four forms.
+
+| Form | Example | Effect |
+|---|---|---|
+| Literal string | `"sk-live-abc123"` | Used as-is |
+| `env:VAR` | `"env:ANTHROPIC_API_KEY"` | Reads that variable at runtime |
+| `${VAR}` interpolation | `"Bearer ${TOKEN}"` | Fills each span from the environment |
+| `!command args` | `"!pass show rho/key"` | Runs the command; stdout is the value |
+
+The `!command` form is blocked in an untrusted project file.
+A command helper runs with a minimal environment: it inherits only `PATH` and `HOME`.
+A command that exits non-zero, writes bad UTF-8, or runs for more than 30 seconds stops the run.
+
+> **Partly built.** rho reads and resolves `[credentials]`, and no provider reads the
+> result. A live probe confirmed it: no provider resolves a named credential today. So a
+> `[credentials]` block changes nothing. Give a provider its key through the environment
+> instead, as [providers](providers.md) shows.
+
+rho expands no `~` in any path. Write an absolute path, or rho creates a directory named `~`.
+
+## Example `config.toml`
+
+```toml
+# rho 0.1.0 — paste this file and edit what you need.
+# Path: $HOME/.config/rho/config.toml
+
+# Which provider to use: openrouter, bedrock, or azure.
+provider = "openrouter"
+
+# Model id passed to the provider.
+model = "anthropic/claude-haiku-4.5"
+
+# The boundary for every tool. rho refuses a path outside it. No ~ expansion.
+session-root = "/home/you/code/my-project"
+
+# session-file: partly built — do not set; it has no effect today.
+# session-file = "my-session.json"
+
+# ephemeral: partly built — do not set; it has no effect today.
+# ephemeral = false
+
+# Sandbox mode: off, confined, or strict.
+sandbox = "off"
+
+# Approval mode: read-only, allow-all. (ask is refused in this build.)
+approval = "allow-all"
+
+# Extra directories rho searches for skills. Absolute paths only.
+skill-paths = ["/home/you/.rho/skills", "/opt/shared-skills"]
+
+# Set true to skip all skill discovery.
+no-skills = false
+
+# Let the terminal interface capture the mouse (on by default).
+tui-mouse = true
+
+# How the terminal interface draws reasoning: off, summary, full, live.
+tui-reasoning = "summary"
+
+# How hard the model thinks: off, low, medium, high, xhigh. Unset = provider default.
+reasoning-effort = "medium"
+
+# Path to an MCP server file. No ~ expansion, so write it out in full.
+mcp-config = "/home/you/.rho/mcp.json"
+
+# [credentials] is partly built. rho resolves it, and no provider reads it.
+[credentials]
+# Literal value (avoid in shared files).
+my-key = "sk-live-abc123"
+
+# Read from an environment variable.
+anthropic-key = "env:ANTHROPIC_API_KEY"
+
+# Fill a template from environment variables.
+bearer-token = "Bearer ${MY_TOKEN}"
+
+# Run a command; its stdout is the value. Blocked in untrusted project files.
+vault-key = "!pass show rho/anthropic"
+
+# [subagents] is partly built — these keys parse but have no effect today.
+# Use --max-children-per-parent, --max-live-agents, --child-timeout-secs instead.
+# [subagents]
+# max-depth = 3
+# max-children-per-parent = 5
+# max-live-total = 10
+# child-timeout-secs = 300
+
+[profiles.fast]
+# Override the model and the effort for quick runs.
+model = "anthropic/claude-haiku-4.5"
+reasoning-effort = "low"
+
+[profiles.strict]
+# Deny every write, and confine the shell.
+sandbox = "strict"
+approval = "read-only"
+```
+
+## What does not work yet
+
+| Key | Symptom |
+|---|---|
+| `[subagents]` table | Parses silently, no effect. Use CLI flags. |
+| `session-file` | Parses silently, no effect. |
+| `ephemeral` | Parses silently, no effect. |
