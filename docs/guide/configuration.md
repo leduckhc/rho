@@ -123,10 +123,13 @@ The table accepts four keys:
 
 A project file is untrusted by default.
 An untrusted file silently drops `skill-paths` and `mcp-config`.
-It also refuses any `!command` credential from that file.
+It also marks any `!command` credential from that file as refused.
 
 Pass `--trust-project` to restore those keys.
-When rho refuses a `!command` credential, it stops the run and names `--trust-project`.
+
+A refused credential does not stop the run. rho marks it, and the error would appear only
+when something resolves it. Nothing resolves a credential today, so the run continues and the
+command never runs. I confirmed both halves with a live probe.
 
 ## Profiles
 
@@ -150,6 +153,11 @@ It beats any plain file value, but environment variables and CLI flags beat a pr
 
 A credential value takes four forms.
 
+> **Partly built.** rho parses `[credentials]` and nothing resolves an entry, so the whole
+> table changes nothing today. Give a provider its key through the environment instead, as
+> [providers](providers.md) shows. The four forms below describe what the library does when a
+> caller resolves one, which no part of the `rho` command does yet.
+
 | Form | Example | Effect |
 |---|---|---|
 | Literal string | `"sk-live-abc123"` | Used as-is |
@@ -157,14 +165,10 @@ A credential value takes four forms.
 | `${VAR}` interpolation | `"Bearer ${TOKEN}"` | Fills each span from the environment |
 | `!command args` | `"!pass show rho/key"` | Runs the command; stdout is the value |
 
-The `!command` form is blocked in an untrusted project file.
-A command helper runs with a minimal environment: it inherits only `PATH` and `HOME`.
-A command that exits non-zero, writes bad UTF-8, or runs for more than 30 seconds stops the run.
-
-> **Partly built.** rho reads and resolves `[credentials]`, and no provider reads the
-> result. A live probe confirmed it: no provider resolves a named credential today. So a
-> `[credentials]` block changes nothing. Give a provider its key through the environment
-> instead, as [providers](providers.md) shows.
+The `!command` form is blocked in an untrusted project file, and it never runs there.
+A command helper would run with a minimal environment, inheriting only `PATH` and `HOME`.
+A command that exits non-zero, writes bad UTF-8, or runs over 30 seconds would fail the
+resolve.
 
 rho expands no `~` in any path. Write an absolute path, or rho creates a directory named `~`.
 

@@ -75,6 +75,9 @@ By default it loads the `approval` and `sandbox` settings.
 It drops `skill-paths`, `mcp-config`, and any `!command` credential.
 Pass `--trust-project` to allow those fields.
 
+A `!command` credential in an untrusted project file never runs. A live probe put
+`!touch /tmp/marker` in one, and the marker was absent after the run.
+
 ### Project skills
 
 A skill file in the repository under edit is not loaded by default.

@@ -133,11 +133,18 @@ See [extending.md](../extending.md) for how to wire a new provider into the buil
 
 ## Storing credentials
 
-The `[credentials]` table in `config.toml` is an alternative to environment variables.
-See [configuration.md](configuration.md) for the format.
-For a first run, see [quickstart.md](quickstart.md).
+Give every provider its key through the environment. That is the only route that works.
+
+> **Partly built.** A `[credentials]` table in `config.toml` parses, and nothing resolves an
+> entry, and no provider asks for one. So the table changes nothing today, in silence. A live
+> probe confirmed it. See [configuration](configuration.md) for the format, and treat it as
+> unfinished.
+
+For a first run, see [quickstart](quickstart.md).
 
 ## What does not work yet
 
 Azure reasoning is not sent.
 `--reasoning-effort` logs a warning for Azure and has no effect on the request.
+
+No provider reads a credential from a config file. Use the environment.
