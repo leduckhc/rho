@@ -66,6 +66,18 @@ rho refuses a file for these reasons:
 | `the path escaped its directory` | A filename contained a path separator. |
 | `the instruction set reached its total byte budget` | The total budget was full before this file. |
 | `the ancestor directory cap was reached` | More than 32 ancestor directories were found. |
+| `the session root is not below the home directory` | You are working outside your home directory, for example in `/tmp` or `/opt`. rho then reads no ancestor file. |
+| `the home directory could not be resolved` | rho could not find your home directory, so it has no boundary to stop the walk at. |
+| `no session root was set` | rho had no root to start the walk from. |
+
+You are most likely to meet the home-directory one. A run from `/tmp` prints it:
+
+```
+rho: project instructions: skipped the search of the directories above the session root because the session root is not below the home directory
+```
+
+The `AGENTS.md` in the session root still loads. Only the walk above it stops. A live probe
+confirmed it: a file in `/tmp/rho-inst` reached the model while that notice printed.
 
 rho never silently skips a file.
 Every refusal prints a notice before the session starts.
