@@ -225,11 +225,65 @@ The skill loaded, but rho noticed a problem in its metadata. The message names t
 `skill-paths`, `mcp-config`, and `!command` credentials in a project config file are dropped unless you pass `--trust-project`.
 A project config can change the model or sandbox without trust. It cannot add skills or credentials without trust.
 
+### The model cannot delegate, and `spawn_agent` is missing
+
+You wrote an agent definition, and the model says it has no way to spawn a subagent. Check
+whether you passed `--no-skills`.
+
+> **Partly built.** `--no-skills` also turns subagent discovery off, and it warns about
+> neither. rho then registers no `spawn_agent` and ignores every definition. Drop the flag to
+> get subagents back. No flag keeps subagents while dropping skills.
+
+When discovery works, rho says so at startup:
+
+```
+rho: 1 agent definition(s) available to spawn_agent: summariser
+```
+
+No such line means no definition was found.
+
+### A `[credentials]` block has no effect
+
+Nothing resolves a named credential in this version, and no provider asks for one. So the
+whole table is inert. Give the provider its key through the environment instead, as
+[providers](providers.md) shows.
+
+### Instructions above your project are skipped
+
+```
+rho: project instructions: skipped the search of the directories above the session root because the session root is not below the home directory
+```
+
+You are working outside your home directory, for example in `/tmp` or `/opt`. rho then reads
+no ancestor `AGENTS.md`. The file in the session root itself still loads. Move the project
+under your home directory to get the wider search.
+
+### Nothing was saved after the run
+
+rho records no session file, so there is no history to reopen. Redirect `rho run` output to
+keep a copy. See [sessions](sessions.md).
+
 ```
 project instructions: skipped .rho/AGENTS.md because the file is a symlink
 ```
 
 rho skips instruction files that are symlinks, non-regular files, or cannot be read. It prints the reason. Replace the symlink with a plain file.
+
+### MCP tools do not appear
+
+```
+rho: 1 MCP server(s) are configured, and no tool schema is cached yet. Their tools appear in the next session.
+```
+
+This is the most likely MCP problem, and no run fixes it. Starting rho again changes nothing.
+
+> **Not built yet.** An MCP tool never reaches the model in this version. rho starts your
+> server and reads its tool list, then advertises tools from a schema cache that nothing ever
+> writes. So the list is always empty. A live probe watched the whole handshake succeed and no
+> tool call follow. See [MCP servers](mcp.md) and
+> `docs/verification/mcp-live-probe.md`.
+
+There is no workaround. Ask the model to use `bash` for the work instead.
 
 ### MCP config does not parse
 
@@ -261,6 +315,8 @@ The server process started but did not speak MCP. Check the server is an MCP ser
 
 ### Slash command not built yet
 
-> **Not built yet.** `/model` and `/sessions` are in the slash list and do nothing. rho answers `<command> is not built yet. See F-slash-commands in docs/features.md.` Use `--model` and `--provider` on the command line instead.
+> **Not built yet.** `/model`, `/sessions`, and `/guide` are in the slash list and do nothing.
+> rho answers `<command> is not built yet. See F-slash-commands in docs/features.md.` Use
+> `--model` and `--provider` on the command line instead.
 
-`/help` and `/quit` are built. `/model`, `/sessions`, and `/guide` are not.
+`/help` and `/quit` are the two that work.
