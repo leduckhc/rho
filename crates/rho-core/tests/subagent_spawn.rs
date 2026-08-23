@@ -495,6 +495,7 @@ async fn the_tool_call_budget_stops_a_turn_that_asks_for_too_many_tools() {
         turn.push(StreamEvent::ToolCallEnd {
             index,
             arguments: serde_json::json!({}),
+            state: None,
         });
     }
     turn.push(StreamEvent::Done {

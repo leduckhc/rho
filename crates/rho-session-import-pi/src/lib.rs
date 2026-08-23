@@ -203,9 +203,12 @@ fn map_content_block(block: &Value) -> Result<ContentBlock, Drop> {
         "text" => Ok(ContentBlock::Text {
             text: string_field(block, "text").unwrap_or_default(),
         }),
-        "thinking" => Ok(ContentBlock::Thinking {
-            thinking: string_field(block, "thinking").unwrap_or_default(),
-            signature: string_field(block, "thinkingSignature"),
+        // A trace, never a replay block. pi's `thinkingSignature` belongs to a provider
+        // and a model that this file does not record, so rho can build no honest owner.
+        // A guessed owner would be replayed, and rule 8 exists to refuse exactly that.
+        // The text is kept, and the signature is dropped.
+        "thinking" => Ok(ContentBlock::ReasoningTrace {
+            text: string_field(block, "thinking").unwrap_or_default(),
         }),
         "toolCall" => Ok(ContentBlock::ToolCall {
             id: string_field(block, "id").ok_or_else(|| Drop {
@@ -215,6 +218,8 @@ fn map_content_block(block: &Value) -> Result<ContentBlock, Drop> {
                 reason: "toolCall with no name".to_string(),
             })?,
             arguments: block.get("arguments").cloned().unwrap_or(Value::Null),
+            // pi records no replay payload for a call, and a guessed one would travel.
+            state: None,
         }),
         "toolResult" => Ok(ContentBlock::ToolResult {
             tool_call_id: string_field(block, "tool_call_id").ok_or_else(|| Drop {

@@ -94,6 +94,7 @@ impl Provider for BackgroundBashProvider {
                 StreamEvent::ToolCallEnd {
                     index: 0,
                     arguments: serde_json::json!({ "command": "echo hi", "run_in_background": true }),
+                    state: None,
                 },
                 StreamEvent::Done {
                     stop_reason: StopReason::ToolUse,

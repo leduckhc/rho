@@ -13,6 +13,10 @@ use rho_provider_bedrock::{
     BedrockMapState, ConverseStreamEvent, map_converse_error, map_converse_event,
 };
 
+/// A real Bedrock id that supports extended thinking. A message builder needs a model,
+/// because a stored reasoning payload may only travel back to the model that made it.
+const THINKING_MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+
 /// Parse one recorded event from JSON.
 fn event(json: &str) -> ConverseStreamEvent {
     serde_json::from_str(json).expect("the event JSON must parse")
@@ -286,11 +290,13 @@ fn two_tool_results_conversation() -> Vec<rho_core::Message> {
                     id: "call_1".to_string(),
                     name: "read".to_string(),
                     arguments: serde_json::json!({ "path": "a.txt" }),
+                    state: None,
                 },
                 ContentBlock::ToolCall {
                     id: "call_2".to_string(),
                     name: "read".to_string(),
                     arguments: serde_json::json!({ "path": "b.txt" }),
+                    state: None,
                 },
             ],
         },
@@ -331,7 +337,10 @@ fn build_messages_never_emits_two_messages_with_the_same_role_in_a_row() {
     // This defect is in the request.
     use aws_sdk_bedrockruntime::types::ConversationRole;
 
-    let built = rho_provider_bedrock::build_messages(&two_tool_results_conversation());
+    let built = rho_provider_bedrock::build_messages_for_model(
+        &two_tool_results_conversation(),
+        THINKING_MODEL,
+    );
     let roles: Vec<&ConversationRole> = built.iter().map(|message| message.role()).collect();
     for pair in roles.windows(2) {
         assert_ne!(
@@ -347,7 +356,10 @@ fn build_messages_merges_tool_results_into_one_user_message() {
     // one would lose a tool result in silence, which is worse than the 400.
     use aws_sdk_bedrockruntime::types::{ContentBlock as SdkBlock, ConversationRole};
 
-    let built = rho_provider_bedrock::build_messages(&two_tool_results_conversation());
+    let built = rho_provider_bedrock::build_messages_for_model(
+        &two_tool_results_conversation(),
+        THINKING_MODEL,
+    );
     assert_eq!(
         built.len(),
         3,
@@ -377,7 +389,54 @@ fn build_messages_keeps_a_single_tool_result_working() {
 
     let mut conversation = two_tool_results_conversation();
     conversation.pop();
-    let built = rho_provider_bedrock::build_messages(&conversation);
+    let built = rho_provider_bedrock::build_messages_for_model(&conversation, THINKING_MODEL);
     assert_eq!(built.len(), 3);
     assert_eq!(built[2].role(), &ConversationRole::User);
+}
+
+#[test]
+fn every_content_block_has_an_explicit_arm() {
+    // The request builder must name every content-block kind. A `_ => {}` arm dropped a
+    // block in silence, which SPEC-reasoning-across-providers section 3 "Three" calls a
+    // defect. The match in `build_messages` is now exhaustive, so a new block kind breaks
+    // the build instead of hiding. This test proves the two non-travelling kinds are
+    // dropped in their named arms, and the travelling kinds still travel.
+    use aws_sdk_bedrockruntime::types::ContentBlock as SdkBlock;
+    use rho_core::{ContentBlock, ImageSource, Message, Role};
+
+    let conversation = vec![Message {
+        role: Role::Assistant,
+        content: vec![
+            ContentBlock::Text {
+                text: "answer".to_string(),
+            },
+            // A trace must not travel. A replay block with a matching owner does, and the
+            // unit tests in the crate cover that. See `SPEC-reasoning-across-providers`.
+            ContentBlock::ReasoningTrace {
+                text: "private".to_string(),
+            },
+            // An image in an assistant message is out of scope for the request builder.
+            ContentBlock::Image {
+                source: ImageSource {
+                    data: "AAAA".to_string(),
+                    mime_type: "image/png".to_string(),
+                },
+            },
+        ],
+    }];
+
+    let built = rho_provider_bedrock::build_messages_for_model(&conversation, THINKING_MODEL);
+    assert_eq!(built.len(), 1, "the one assistant message survives");
+
+    let text_blocks = built[0]
+        .content()
+        .iter()
+        .filter(|block| matches!(block, SdkBlock::Text(_)))
+        .count();
+    assert_eq!(text_blocks, 1, "the text block travels");
+    assert_eq!(
+        built[0].content().len(),
+        1,
+        "only the text block travels; reasoning and image are dropped in named arms"
+    );
 }

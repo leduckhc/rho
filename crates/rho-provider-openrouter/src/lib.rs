@@ -276,8 +276,31 @@ struct Delta {
     content: Option<String>,
     #[serde(default)]
     reasoning: Option<String>,
+    /// The name pi added for llama.cpp. Some hosts send this instead of `reasoning`.
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    /// A third name some hosts use for the same reasoning text.
+    #[serde(default)]
+    reasoning_text: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<ToolCallFragment>>,
+}
+
+impl Delta {
+    /// The reasoning text for this delta, reading the accepted field names in order and
+    /// taking the first non-empty one. One host sends two fields with the same text, so a
+    /// reader that added every field would double it. An empty field is skipped, so an
+    /// empty reasoning delta starts no block. See SPEC-reasoning-across-providers section 3.
+    fn first_reasoning(&self) -> Option<&str> {
+        [
+            self.reasoning_content.as_deref(),
+            self.reasoning.as_deref(),
+            self.reasoning_text.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|text| !text.is_empty())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -399,7 +422,7 @@ impl SseState {
                     delta: text.clone(),
                 });
             }
-            if let Some(reasoning) = &choice.delta.reasoning {
+            if let Some(reasoning) = choice.delta.first_reasoning() {
                 if !self.thinking_open {
                     events.push(StreamEvent::ThinkingStart {
                         index: Self::TEXT_INDEX,
@@ -408,7 +431,7 @@ impl SseState {
                 }
                 events.push(StreamEvent::ThinkingDelta {
                     index: Self::TEXT_INDEX,
-                    delta: reasoning.clone(),
+                    delta: reasoning.to_string(),
                 });
             }
             if let Some(fragments) = &choice.delta.tool_calls {
@@ -500,7 +523,8 @@ impl SseState {
         if self.thinking_open {
             events.push(StreamEvent::ThinkingEnd {
                 index: Self::TEXT_INDEX,
-                signature: None,
+                // This wire carries no replay token, so the reducer keeps a trace.
+                state: None,
             });
             self.thinking_open = false;
         }
@@ -518,7 +542,11 @@ impl SseState {
                     }
                 }
             };
-            events.push(StreamEvent::ToolCallEnd { index, arguments });
+            events.push(StreamEvent::ToolCallEnd {
+                index,
+                arguments,
+                state: None,
+            });
         }
         None
     }
@@ -538,6 +566,26 @@ fn finish_reason_to_stop(reason: &str) -> StopReason {
 // --- The request body. ---------------------------------------------------
 
 /// Build the chat-completions request body. See `SPEC-provider-interface` section 4.
+/// The `reasoning` field for one effort level, or `None` when rho must send nothing.
+///
+/// A review found that this crate ignored the level entirely: the agent carried it, Bedrock
+/// consumed it, and here `unset` and `set` collapsed to the same wire. Silence is the defect,
+/// so the level now travels.
+///
+/// OpenRouter accepts `minimal`, `low`, `medium`, and `high`. It has no `xhigh`, and rho must
+/// not invent a value a host rejects, because an unknown field is a failed turn. So `xhigh`
+/// maps to `high`, and the mapping lives here rather than in four call sites.
+fn reasoning_field(effort: Option<rho_core::ReasoningEffort>) -> Option<Value> {
+    use rho_core::ReasoningEffort;
+    match effort? {
+        // An instruction, not a silence. A host that thinks by default is told to stop.
+        ReasoningEffort::Off => Some(json!({ "enabled": false })),
+        ReasoningEffort::Low => Some(json!({ "effort": "low" })),
+        ReasoningEffort::Medium => Some(json!({ "effort": "medium" })),
+        ReasoningEffort::High | ReasoningEffort::XHigh => Some(json!({ "effort": "high" })),
+    }
+}
+
 pub fn build_request_body(request: &CompletionRequest) -> Value {
     let mut messages = Vec::new();
     if let Some(system) = &request.system {
@@ -561,6 +609,9 @@ pub fn build_request_body(request: &CompletionRequest) -> Value {
         "usage": { "include": true },
     });
     let map = body.as_object_mut().expect("the body is an object");
+    if let Some(reasoning) = reasoning_field(request.reasoning) {
+        map.insert("reasoning".to_string(), reasoning);
+    }
     if !request.tools.is_empty() {
         let tools: Vec<Value> = request
             .tools
@@ -604,6 +655,8 @@ fn message_to_json(message: &Message) -> Value {
                 id,
                 name,
                 arguments,
+                // No replay payload travels on this wire yet. Gemini binds one to a call.
+                state: _,
             } => {
                 tool_calls.push(json!({
                     "id": id,
@@ -626,8 +679,15 @@ fn message_to_json(message: &Message) -> Value {
                     }
                 }
             }
-            // Thinking replay and image input are out of scope for sprint 1.
-            _ => {}
+            // A trace is for the reader, so it never travels.
+            ContentBlock::ReasoningTrace { .. } => {}
+            // A replay block does not travel to OpenRouter yet. The hosts behind this one
+            // wire format disagree: Kimi and DeepSeek require the field back, and Mistral
+            // answers 422 when it is present. rho has no host row and no live proof for
+            // either, so it sends nothing and says so here. A wrong guess is a broken turn
+            // in both directions. See SPEC-reasoning-across-providers section 3 "One".
+            ContentBlock::ReasoningReplay { .. } => {}
+            ContentBlock::Image { .. } => {}
         }
     }
 

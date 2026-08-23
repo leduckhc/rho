@@ -15,8 +15,10 @@ async-trait = "0.1.92"
 aws-config = { version = "1.8.13", default-features = false, features = ["default-https-client", "behavior-version-latest", "sso", "rt-tokio"] }
 aws-sdk-bedrockruntime = { version = "1.124.0", default-features = false, features = ["default-https-client", "behavior-version-latest"] }
 aws-smithy-types = "1"
+base64 = "0.23.1"
 futures = "0.3.34"
 rho-core = { version = "0.1.0", path = "../rho-core" }
+rho-redact = { version = "0.1.0", path = "../rho-redact" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"
@@ -26,3 +28,4 @@ tracing = "0.1.44"
 [dev-dependencies]
 rho-provider-testkit = { path = "../rho-provider-testkit" }
 tokio = { version = "1.53.1", features = ["full"] }
+tracing-subscriber = "0.3.23"

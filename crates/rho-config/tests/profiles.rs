@@ -6,8 +6,8 @@
 
 mod common;
 
-use common::{temp_dir, write_file};
-use rho_config::{Config, ConfigError, Sources};
+use common::{project_sources, temp_dir, write_file};
+use rho_config::{Config, ConfigError};
 
 #[test]
 fn a_named_profile_overrides_the_base_keys() {
@@ -22,11 +22,7 @@ fn a_named_profile_overrides_the_base_keys() {
          [profiles.fast]\n\
          model = \"fast-model\"\n",
     );
-    let sources = Sources {
-        project_file: Some(path),
-        profile: Some("fast".to_string()),
-        ..Sources::default()
-    };
+    let sources = project_sources(path).with_profile(Some("fast".to_string()));
     let config = Config::load(&sources).expect("the profile is defined");
     assert_eq!(config.model.as_deref(), Some("fast-model"));
     // The base value the profile omits still survives.
@@ -38,11 +34,7 @@ fn an_unknown_profile_name_is_an_error() {
     // A profile the user names but no file defines is `ConfigError::UnknownProfile`.
     let dir = temp_dir();
     let path = write_file(&dir, "config.toml", "model = \"base-model\"\n");
-    let sources = Sources {
-        project_file: Some(path),
-        profile: Some("missing".to_string()),
-        ..Sources::default()
-    };
+    let sources = project_sources(path).with_profile(Some("missing".to_string()));
     match Config::load(&sources) {
         Err(ConfigError::UnknownProfile { name }) => assert_eq!(name, "missing"),
         other => panic!("an unknown profile must be UnknownProfile, got {other:?}"),

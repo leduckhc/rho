@@ -293,3 +293,45 @@ fn an_image_block_survives_the_import() {
     assert_eq!(image.data, "aGVsbG8=", "the image data is kept verbatim");
     assert_eq!(image.mime_type, "image/png", "the mime type is kept");
 }
+
+/// An imported pi signature never replays.
+///
+/// pi stores a `thinkingSignature` with no provider and no model, so rho can build no honest
+/// owner for it. A guessed owner would be replayed, and rule 8 of
+/// `SPEC-reasoning-across-providers` exists to refuse that. The text is kept as a trace, and
+/// the signature is dropped. See `D-reasoning-replay-is-opaque-provider-state`.
+#[test]
+fn an_imported_pi_signature_never_replays() {
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("pi.jsonl");
+    let line = serde_json::json!({
+        "id": "a",
+        "parentId": serde_json::Value::Null,
+        "timestamp": "2026-08-21T10:00:00.000Z",
+        "type": "message",
+        "message": {
+            "role": "assistant",
+            "content": [{
+                "type": "thinking",
+                "thinking": "a plan",
+                "thinkingSignature": "pi-sig"
+            }]
+        }
+    });
+    std::fs::write(&path, format!("{line}\n")).expect("write the fixture");
+
+    let entries = import_pi_session(&path).expect("import").entries;
+    let encoded = serde_json::to_string(&entries).expect("the entries encode");
+    assert!(
+        encoded.contains("a plan"),
+        "the reasoning text survives: {encoded}"
+    );
+    assert!(
+        !encoded.contains("pi-sig"),
+        "the signature never survives, because it could not be replayed: {encoded}"
+    );
+    assert!(
+        !encoded.contains("\"replay\":true"),
+        "an imported block is history, not a replay block: {encoded}"
+    );
+}

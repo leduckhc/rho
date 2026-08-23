@@ -188,6 +188,10 @@ pub struct SessionConfig {
     /// default is stated here, not hidden. Use `with_sandbox` to change it. See
     /// `SPEC-bash-sandbox` and decision D-bash-os-sandbox.
     pub sandbox: SandboxMode,
+    /// How hard the model should think. `None` means the provider's own default, so rho
+    /// sends no field. `SessionConfig::new` leaves it `None`, and a caller opts in with
+    /// `with_reasoning_effort`. See `SPEC-reasoning-across-providers` section 9.
+    pub reasoning_effort: Option<crate::ReasoningEffort>,
     /// The bounded steering queue. New messages enqueued during a run are delivered
     /// at a turn boundary. Defaults to a queue with the standard capacity.
     pub queue: crate::MessageQueue,
@@ -200,9 +204,8 @@ pub struct SessionConfig {
 }
 
 impl SessionConfig {
-    /// Build a config with an explicit model, root, and policy. The turn cap uses
-    /// the provider default. The queue uses the standard capacity.
-    /// the `AgentConfig` default.
+    /// Build a config with an explicit model, root, and policy. The turn cap uses the
+    /// `AgentConfig` default, and the queue uses the standard capacity.
     pub fn new(
         model: impl Into<String>,
         session_root: impl Into<PathBuf>,
@@ -217,6 +220,8 @@ impl SessionConfig {
             // State the default out loud. `Off` runs `bash` unconfined, which is
             // today's behaviour. A caller opts in with `with_sandbox`.
             sandbox: SandboxMode::Off,
+            // No level means no field on the wire, so a host keeps its own default.
+            reasoning_effort: None,
             queue: crate::MessageQueue::new(),
             // State the default out loud. Zero means no warning, which is today's
             // behaviour for every top-level session.
@@ -249,6 +254,12 @@ impl SessionConfig {
     /// Set the `bash` confinement mode. `new` leaves it `Off`. See `SPEC-bash-sandbox`.
     pub fn with_sandbox(mut self, sandbox: SandboxMode) -> Self {
         self.sandbox = sandbox;
+        self
+    }
+
+    /// Set how hard the model should think. `new` leaves it unset, which sends no field.
+    pub fn with_reasoning_effort(mut self, effort: Option<crate::ReasoningEffort>) -> Self {
+        self.reasoning_effort = effort;
         self
     }
 
@@ -927,6 +938,7 @@ impl Driver {
             tools: self.inner.tools.specs(),
             max_tokens: None,
             temperature: None,
+            reasoning: self.inner.config.reasoning_effort,
         }
     }
 
@@ -1006,23 +1018,31 @@ impl AssistantBuilder {
                     thinking.push_str(delta);
                 }
             }
-            StreamEvent::ThinkingEnd { signature, .. } => {
-                if let Some(thinking) = self.thinking.take() {
-                    self.content.push(ContentBlock::Thinking {
-                        thinking,
-                        signature: signature.clone(),
+            // A payload makes the block replayable. Without one it is history for the
+            // reader, and the type stops it reaching a provider at all.
+            StreamEvent::ThinkingEnd { state, .. } => {
+                if let Some(text) = self.thinking.take() {
+                    self.content.push(match state {
+                        Some(state) => ContentBlock::ReasoningReplay {
+                            text,
+                            state: Some(state.clone()),
+                        },
+                        None => ContentBlock::ReasoningTrace { text },
                     });
                 }
             }
             StreamEvent::ToolCallStart { id, name, .. } => {
                 self.tool_call = Some((id.clone(), name.clone()));
             }
-            StreamEvent::ToolCallEnd { arguments, .. } => {
+            StreamEvent::ToolCallEnd {
+                arguments, state, ..
+            } => {
                 if let Some((id, name)) = self.tool_call.take() {
                     self.content.push(ContentBlock::ToolCall {
                         id: id.clone(),
                         name: name.clone(),
                         arguments: arguments.clone(),
+                        state: state.clone(),
                     });
                     self.tool_calls.push(PendingToolCall {
                         id,

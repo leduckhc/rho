@@ -112,6 +112,15 @@ impl App {
         self
     }
 
+    /// Set how the TUI draws reasoning. Default is `Summary`.
+    ///
+    /// The mode reaches the renderer through `TuiState`, so a config file, a variable, and a
+    /// flag all arrive here through the merge. See `SPEC-reasoning-across-providers` section 5.
+    pub fn with_reasoning(mut self, mode: rho_core::ReasoningDisplay) -> Self {
+        self.state.reasoning_display = mode;
+        self
+    }
+
     /// Seed the startup notices into the transcript, in the order the caller gives them.
     ///
     /// The caller used to print a notice to the terminal, and rho then opened the

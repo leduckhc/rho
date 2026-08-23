@@ -564,6 +564,7 @@ fn no_credential_reaches_the_file() {
         id: "call-2".to_string(),
         name: "http".to_string(),
         arguments: serde_json::json!({ "api_key": secret }),
+        state: None,
     }]);
     let bytes = fs::read(&path).expect("read file");
     let text = String::from_utf8_lossy(&bytes);
@@ -593,6 +594,7 @@ fn a_redacted_tool_argument_is_masked_on_the_way_in() {
         id: "c1".to_string(),
         name: "aws".to_string(),
         arguments: serde_json::json!({ "access_key": secret, "region": "eu-west-1" }),
+        state: None,
     }]);
     let text = fs::read_to_string(&path).expect("read");
     assert!(

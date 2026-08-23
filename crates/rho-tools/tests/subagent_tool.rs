@@ -81,6 +81,7 @@ fn tool_call_turn(id: &str, tool_name: &str, arguments: serde_json::Value) -> Ve
         StreamEvent::ToolCallEnd {
             index: 0,
             arguments,
+            state: None,
         },
         StreamEvent::Done {
             stop_reason: StopReason::ToolUse,
@@ -1105,6 +1106,7 @@ fn spawn_call_turn(id: &str, tool: &str, arguments: serde_json::Value) -> Vec<St
         StreamEvent::ToolCallEnd {
             index: 0,
             arguments,
+            state: None,
         },
         StreamEvent::Done {
             stop_reason: rho_core::StopReason::ToolUse,

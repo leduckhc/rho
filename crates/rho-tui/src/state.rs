@@ -6,7 +6,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rho_core::{
-    AgentEvent, AgentStopReason, StreamEvent, TaskId, TaskProgress, TaskState, ToolKind,
+    AgentEvent, AgentStopReason, ReasoningDisplay, StreamEvent, TaskId, TaskProgress, TaskState,
+    ThinkingPiece, ThinkingSplitter, ToolKind,
 };
 
 use crate::concise::RowFold;
@@ -167,6 +168,14 @@ pub fn filter_history(history: &[String], query: &str) -> Vec<usize> {
 /// local input buffer and one flag for the Ctrl-C exit gate.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TuiState {
+    /// How reasoning draws: `off`, `summary`, `full`, or `live`. See
+    /// `SPEC-reasoning-across-providers` section 5.
+    pub reasoning_display: ReasoningDisplay,
+    /// Splits a leading `<thinking>` tag out of an assistant text stream.
+    ///
+    /// A model that was never asked for a structured reasoning block writes one into its
+    /// answer, and rho drew it as the answer. See section 6 rule 7.
+    text_split: ThinkingSplitter,
     pub rows: Vec<Row>,
     /// The draft, with its paste chips and its cursor.
     pub draft: Composer,
@@ -434,6 +443,8 @@ impl TuiState {
     fn apply_stream(&mut self, event: &StreamEvent, now_millis: i64) {
         match event {
             StreamEvent::TextStart { .. } => {
+                // A new text block, so the splitter starts fresh: the leading rule is per block.
+                self.text_split = ThinkingSplitter::new();
                 self.push_row(
                     Row::Assistant {
                         text: String::new(),
@@ -442,9 +453,8 @@ impl TuiState {
                 );
             }
             StreamEvent::TextDelta { delta, .. } => {
-                if let Some(Row::Assistant { text }) = self.last_assistant_mut() {
-                    text.push_str(delta);
-                }
+                let pieces = self.text_split.push(delta);
+                self.route_thinking_pieces(pieces, now_millis);
             }
             StreamEvent::ThinkingStart { .. } => {
                 self.push_row(
@@ -491,8 +501,13 @@ impl TuiState {
                     );
                 }
             }
+            StreamEvent::TextEnd { .. } => {
+                // The splitter holds a lead buffer until it can decide, so a block that ends
+                // mid-decision must flush or its text would vanish.
+                let pieces = self.text_split.finish();
+                self.route_thinking_pieces(pieces, now_millis);
+            }
             StreamEvent::MessageStart { .. }
-            | StreamEvent::TextEnd { .. }
             | StreamEvent::ToolCallDelta { .. }
             | StreamEvent::Usage(_)
             | StreamEvent::Done { .. } => {}
@@ -697,11 +712,68 @@ impl TuiState {
         }
     }
 
-    fn last_assistant_mut(&mut self) -> Option<&mut Row> {
-        self.rows
-            .iter_mut()
-            .rev()
-            .find(|row| matches!(row, Row::Assistant { .. }))
+    /// Send each classified piece to the row it belongs to.
+    fn route_thinking_pieces(&mut self, pieces: Vec<ThinkingPiece>, now_millis: i64) {
+        for piece in pieces {
+            match piece {
+                ThinkingPiece::Reasoning(text) => self.append_reasoning(&text, now_millis),
+                ThinkingPiece::Text(text) => self.append_answer(&text, now_millis),
+            }
+        }
+    }
+
+    /// Append reasoning to the open thinking row, or open one.
+    ///
+    /// Reasoning leads a block, so the newest row is either the empty assistant row that
+    /// `TextStart` pushed, which becomes the thinking row, or the thinking row itself.
+    fn append_reasoning(&mut self, delta: &str, now_millis: i64) {
+        match self.rows.len().checked_sub(1) {
+            Some(index) if matches!(self.rows[index], Row::Thinking { .. }) => {
+                if let Row::Thinking { text } = &mut self.rows[index] {
+                    text.push_str(delta);
+                }
+            }
+            Some(index) if matches!(&self.rows[index], Row::Assistant { text } if text.is_empty()) =>
+            {
+                // Reuse the empty assistant row, so the span runs from the block start and no
+                // empty answer row is left behind.
+                self.rows[index] = Row::Thinking {
+                    text: delta.to_string(),
+                };
+            }
+            _ => self.push_row(
+                Row::Thinking {
+                    text: delta.to_string(),
+                },
+                Some(now_millis),
+            ),
+        }
+    }
+
+    /// Append answer text to the open assistant row, or open one after the reasoning.
+    fn append_answer(&mut self, delta: &str, now_millis: i64) {
+        match self.rows.len().checked_sub(1) {
+            Some(index) if matches!(self.rows[index], Row::Assistant { .. }) => {
+                if let Row::Assistant { text } = &mut self.rows[index] {
+                    text.push_str(delta);
+                }
+            }
+            other => {
+                // The answer starts, so a reasoning row's span settles here. `live` mode reads
+                // that span to collapse the reasoning.
+                if let Some(index) = other
+                    && matches!(self.rows[index], Row::Thinking { .. })
+                {
+                    self.settle_duration(index, now_millis);
+                }
+                self.push_row(
+                    Row::Assistant {
+                        text: delta.to_string(),
+                    },
+                    Some(now_millis),
+                );
+            }
+        }
     }
 
     fn last_thinking_mut(&mut self) -> Option<&mut Row> {

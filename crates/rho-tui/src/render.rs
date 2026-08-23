@@ -28,6 +28,7 @@ use crate::state::{
 };
 use crate::styled::{StyledLine, one};
 use crate::theme::{Role, role_16, role_256, role_bg_256};
+use rho_core::ReasoningDisplay;
 
 /// The brand mark. The `ρ` renders in the accent role, so it is the first accent
 /// on screen.
@@ -534,12 +535,46 @@ fn push_row(
                 }
             }
         }
-        Row::Thinking { text: _ } => {
-            let body = match format_duration(row_duration(state, index)) {
+        Row::Thinking { text } => {
+            // Reasoning draws in `Role::Muted`, never `Role::Text`, because it is the model's
+            // private work and must not read as the answer. The mode decides how much shows.
+            // See `SPEC-reasoning-across-providers` section 5.
+            let summary = match format_duration(row_duration(state, index)) {
                 Some(span) => format!("{GLYPH_THINKING} thought for {span}"),
                 None => format!("{GLYPH_THINKING} thinking"),
             };
-            out.push(one((pad(&body, width), style_for(Role::Muted))));
+            let draw_text = |out: &mut Vec<StyledLine>| {
+                // The whole text is wrapped, not a tail of it.
+                //
+                // This branch sliced the tail, because its renderer drew a fixed band of
+                // fourteen rows and could never show an older line. That saved real work: a
+                // frame went from 2769 microseconds to 95 at 504 kB. **The premise is gone.**
+                // This renderer scrolls the transcript and can repaint any row, so an older
+                // line is reachable and a tail would lose it. Correctness first, and the cost
+                // needs measuring again on this renderer. See `docs/benchmarks.md`.
+                for line in wrap(&sanitize_line(text), measure) {
+                    out.push(one((pad(&line, width), style_for(Role::Muted))));
+                }
+            };
+            match state.reasoning_display {
+                ReasoningDisplay::Off => {}
+                ReasoningDisplay::Summary => {
+                    out.push(one((pad(&summary, width), style_for(Role::Muted))));
+                }
+                ReasoningDisplay::Full => {
+                    out.push(one((pad(&summary, width), style_for(Role::Muted))));
+                    draw_text(out);
+                }
+                ReasoningDisplay::Live => {
+                    // A settled span means the answer started, so the reasoning collapses to
+                    // the summary row. While it streams, the text shows.
+                    if row_duration(state, index).is_some() {
+                        out.push(one((pad(&summary, width), style_for(Role::Muted))));
+                    } else {
+                        draw_text(out);
+                    }
+                }
+            }
         }
         Row::Tool {
             name,

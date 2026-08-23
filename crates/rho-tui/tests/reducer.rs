@@ -69,6 +69,7 @@ fn reducer_tool_call_end_pushes_pending_tool_row() {
         &AgentEvent::Stream(StreamEvent::ToolCallEnd {
             index: 0,
             arguments: serde_json::json!({"path": "a.txt"}),
+            state: None,
         }),
         0,
     );
@@ -101,6 +102,7 @@ fn reducer_tool_start_sets_running() {
         &AgentEvent::Stream(StreamEvent::ToolCallEnd {
             index: 0,
             arguments: serde_json::json!({}),
+            state: None,
         }),
         0,
     );

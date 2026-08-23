@@ -32,6 +32,8 @@ fn config_holding(source: CredentialSource) -> Config {
         skill_paths: Vec::new(),
         discover_skills: true,
         tui_mouse: false,
+        reasoning: rho_core::ReasoningDisplay::Summary,
+        reasoning_effort: None,
         mcp_config: None,
         subagents: SubagentLimits::default(),
         credentials,

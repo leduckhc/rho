@@ -126,6 +126,14 @@ pub struct SessionHeader {
 /// error, never an allocation. See section 6a.
 pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 
+/// How many records may fail to decode before a read gives up.
+///
+/// A bad record in the middle is skipped and counted, so a corrupt file no longer loses its
+/// tail. A crafted file of nothing but bad lines would then buy a full pass, so the pass has a
+/// ceiling. A security review asked for it. The number is generous: real corruption is a byte
+/// or a line, not a thousand.
+pub const MAX_DROPPED_RECORDS: usize = 1024;
+
 /// A typed session error.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -480,6 +488,7 @@ fn cap_block(block: ContentBlock, spills: &mut Vec<String>) -> ContentBlock {
             id,
             name,
             arguments,
+            state,
         } if max_json_string(&arguments) > STRING_HEAD_LIMIT => {
             // A `ToolCall` is never rewritten to a text note. Keep the id and the name,
             // spill the full arguments, and cap the oversize string values inside them.
@@ -488,9 +497,159 @@ fn cap_block(block: ContentBlock, spills: &mut Vec<String>) -> ContentBlock {
                 id,
                 name,
                 arguments: cap_json_strings(arguments),
+                state: cap_state(state),
+            }
+        }
+        ContentBlock::ToolCall {
+            id,
+            name,
+            arguments,
+            state,
+        } => ContentBlock::ToolCall {
+            id,
+            name,
+            arguments,
+            state: cap_state(state),
+        },
+        // Reasoning text is capped exactly as assistant text is. A named arm, because a
+        // wildcard here let a new block join the file uncapped. See rule 10.
+        ContentBlock::ReasoningTrace { text } if text.len() > STRING_HEAD_LIMIT => {
+            let capped = cap_string_value(&text);
+            spills.push(text);
+            ContentBlock::ReasoningTrace { text: capped }
+        }
+        ContentBlock::ReasoningTrace { text } => ContentBlock::ReasoningTrace { text },
+        ContentBlock::ReasoningReplay { text, state } => {
+            let state = cap_state(state);
+            if text.len() > STRING_HEAD_LIMIT {
+                let capped = cap_string_value(&text);
+                spills.push(text);
+                ContentBlock::ReasoningReplay {
+                    text: capped,
+                    state,
+                }
+            } else {
+                ContentBlock::ReasoningReplay { text, state }
             }
         }
         other => other,
+    }
+}
+
+/// A sink that counts encoded bytes and stops as soon as the count passes a limit.
+///
+/// It allocates nothing, and it short-circuits, so measuring a record costs at most the limit
+/// rather than the size of the record.
+struct ByteCounter {
+    count: usize,
+    limit: usize,
+}
+
+impl Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.count += buf.len();
+        if self.count > self.limit {
+            // Any error stops the serializer. The caller reads the stop as "does not fit".
+            return Err(std::io::Error::other("the record is over the limit"));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Does this record fit the record cap once its fields are bounded?
+///
+/// A record that does not fit was not written by rho, because the write path caps the whole
+/// encoded line. Dropping it is the same answer the write path would have given.
+///
+/// **The first version gated this on the raw line length**, on the reasoning that a line under
+/// the cap could not encode to more than the cap. That is false, and a probe measured it: a
+/// line packed with floats in exponent form re-encodes 3.8 times larger, because `1e15` becomes
+/// `1000000000000000.0`. A 60 kB record therefore slipped the gate and landed at 228 kB. The
+/// count is now exact and runs for **every** record. `ByteCounter` stops at the cap, so
+/// measuring one record costs no more than the cap however large the record is.
+fn record_fits(entry: &Entry) -> bool {
+    #[cfg_attr(feature = "fast-json", allow(unused_mut))]
+    let mut counter = ByteCounter {
+        count: 0,
+        limit: MAX_RECORD_BYTES,
+    };
+    // One mechanism, not two. A first version also compared `counter.count` at the end, and a
+    // mutation showed that each guard masked the other: deleting either changed nothing a test
+    // could see. The same redundant-guard trap appeared in `ProviderState::for_owner`, and the
+    // answer is the same. The abort is the guard, and `a_counter_stops_at_its_limit` pins it.
+    #[cfg(not(feature = "fast-json"))]
+    {
+        serde_json::to_writer(&mut counter, entry).is_ok()
+    }
+    // `sonic_rs` writes through its own `WriteExt`, which `ByteCounter` does not implement, so
+    // the optional fast codec measures by encoding instead. One allocation, bounded by the line
+    // cap. The answer is the same, and only the cost differs, on a path that is opt-in.
+    #[cfg(feature = "fast-json")]
+    {
+        let _ = counter;
+        matches!(encode(entry), Ok(line) if line.len() <= MAX_RECORD_BYTES)
+    }
+}
+
+/// Bound one record read from a file, with the **same** caps the write path applies.
+///
+/// A security review found the first version of this bounded the payload and not the text, so
+/// a crafted file could carry a megabyte of reasoning text and re-upload it on every turn:
+/// the very cost the read-side bound was added to stop. One field bounded on one side only is
+/// the same defect wearing a different field name, so read and write now share `cap_block`.
+///
+/// The spilled text is dropped rather than written to a sidecar. A sidecar belongs to a record
+/// rho wrote, and this record came from somewhere else.
+fn cap_entry_state(mut entry: Entry) -> Entry {
+    if let Record::Message { message } = &mut entry.record {
+        let content = std::mem::take(&mut message.content);
+        let mut dropped = Vec::new();
+        message.content = content
+            .into_iter()
+            .map(|block| cap_block(block, &mut dropped))
+            .collect();
+        if !dropped.is_empty() {
+            tracing::warn!(
+                fields = dropped.len(),
+                "a record read from a file carried oversize content; it was bounded"
+            );
+        }
+    }
+    entry
+}
+
+/// Bound one replay payload. Rule 10: a payload over `MAX_RECORD_BYTES` is dropped whole.
+///
+/// A payload is opaque, so it cannot be trimmed. Half a signature still looks like a
+/// signature and would be replayed as one, and a record that cannot be read back makes the
+/// whole session unresumable. So the answer is all or nothing, and the drop is reported.
+fn cap_state(state: Option<crate::ProviderState>) -> Option<crate::ProviderState> {
+    let state = state?;
+    let size = serde_json::to_string(&state.value).map(|text| text.len());
+    match size {
+        Ok(size) if size <= MAX_RECORD_BYTES => Some(state),
+        Ok(size) => {
+            // The report names the size and the owner, and never the value, per rule 9. It
+            // is a log line and not a spill, because a spilled payload cannot be replayed
+            // from a sidecar and would only carry opaque bytes into a second file.
+            // The provider name may come from a file, so it is sanitised. See
+            // `D-one-redaction-home`.
+            tracing::warn!(
+                provider = %rho_redact::sanitize_line(&state.owner.provider),
+                size,
+                "a reasoning payload exceeded the record cap and was dropped"
+            );
+            None
+        }
+        // A value that cannot be encoded cannot be written either, so it goes the same way.
+        Err(_) => {
+            tracing::warn!("a reasoning payload could not be encoded and was dropped");
+            None
+        }
     }
 }
 
@@ -519,6 +678,13 @@ pub struct ReadResult {
     pub entries: Vec<Entry>,
     /// True when the last line was partial and dropped. Resume warns on this.
     pub truncated_tail: bool,
+    /// How many records in the **middle** of the file did not decode.
+    ///
+    /// A security review found that any bad line stopped the read, so one flipped byte
+    /// silently discarded every later record and reported it as a truncated tail. A bad
+    /// record in the middle is now skipped and counted, and the tail rule is unchanged.
+    /// See `D-a-bad-middle-record-is-skipped-and-counted`.
+    pub dropped_records: usize,
 }
 
 /// A cheap summary for a list. It reads only the first line of a file.
@@ -627,6 +793,8 @@ impl SessionReader {
 
         let mut entries = Vec::new();
         let mut truncated_tail = false;
+        let mut pending_bad_line = false;
+        let mut dropped_records = 0usize;
         while read_capped_line(&mut source, &mut buf)? {
             let line = String::from_utf8_lossy(&buf);
             let line = line.trim_end_matches(['\n', '\r']);
@@ -634,14 +802,80 @@ impl SessionReader {
                 continue;
             }
             match decode::<Entry>(line) {
-                Ok(entry) => entries.push(entry),
+                // A payload from a file rho did not write is bounded here as well as on the
+                // way in. A security review found the bound was write-only, so a foreign
+                // file could carry a payload up to the line cap and replay it every turn.
+                Ok(entry) => {
+                    // A bad line with a good record after it was corruption in the middle,
+                    // not a truncated tail. Count it and keep going, so one flipped byte
+                    // cannot discard the rest of the session in silence.
+                    if pending_bad_line {
+                        dropped_records += 1;
+                        pending_bad_line = false;
+                    }
+                    let entry = cap_entry_state(entry);
+                    // The write path checks the **whole** encoded record against
+                    // `MAX_RECORD_BYTES`, and the read path checked only each field. So a
+                    // record of ten thousand small blocks passed every field cap and still
+                    // weighed megabytes. A security review named that asymmetry as a class, and
+                    // this is the second member of it.
+                    //
+                    // The count runs for every record, and it stops at the cap, so it costs no
+                    // more than the cap however large the record is. An earlier version gated it
+                    // on the raw line length, and a probe showed that a line under the cap can
+                    // re-encode past it.
+                    if !record_fits(&entry) {
+                        dropped_records += 1;
+                        tracing::warn!(
+                            bytes = line.len(),
+                            "a record exceeded the record cap after its fields were bounded; \
+                             it was dropped"
+                        );
+                        // The same ceiling as a decode failure. A security review found it
+                        // covered only that path, so a file of valid but oversize records
+                        // walked to the end while the ceiling never fired.
+                        if dropped_records >= MAX_DROPPED_RECORDS {
+                            tracing::warn!(
+                                dropped = dropped_records,
+                                "the session file had too many records that did not fit; \
+                                 the read stopped"
+                            );
+                            break;
+                        }
+                        continue;
+                    }
+                    entries.push(entry);
+                }
                 Err(_) => {
-                    // A line that does not decode is a truncated tail. Drop it, keep
-                    // every whole record before it, and flag the tail. See section 6.
-                    truncated_tail = true;
-                    break;
+                    // Two bad lines in a row means the first one was in the middle.
+                    if pending_bad_line {
+                        dropped_records += 1;
+                    }
+                    pending_bad_line = true;
+                    // A file of nothing but bad lines is no longer a stop, so it is now a full
+                    // pass. A security review asked for a ceiling, because a crafted file of a
+                    // million bad lines would otherwise buy a million iterations.
+                    if dropped_records >= MAX_DROPPED_RECORDS {
+                        tracing::warn!(
+                            dropped = dropped_records,
+                            "the session file had too many records that did not decode; \
+                             the read stopped"
+                        );
+                        break;
+                    }
+                    continue;
                 }
             }
+        }
+        // The last bad line, if any, is the tail. Every earlier one was counted above.
+        if pending_bad_line {
+            truncated_tail = true;
+        }
+        if dropped_records > 0 {
+            tracing::warn!(
+                dropped = dropped_records,
+                "the session file had records that did not decode; they were skipped"
+            );
         }
         if truncated_tail {
             // A crash can cut the last line in half. Drop it, but never silently. See
@@ -652,6 +886,7 @@ impl SessionReader {
             header,
             entries,
             truncated_tail,
+            dropped_records,
         })
     }
 }
@@ -966,10 +1201,23 @@ fn redact_block(block: &ContentBlock) -> ContentBlock {
             id,
             name,
             arguments,
+            state,
         } => ContentBlock::ToolCall {
             id: id.clone(),
             name: name.clone(),
             arguments: rho_redact::redact_json_secrets(arguments),
+            // A payload is opaque provider bytes, and a rewritten payload cannot replay.
+            // Rule 9 keeps it verbatim, and rule 10 bounds it instead.
+            state: state.clone(),
+        },
+        // Named arms, because a wildcard let a new block bypass redaction in silence. A
+        // reasoning text is model output, so it gets the same treatment as assistant text.
+        ContentBlock::ReasoningTrace { text } => {
+            ContentBlock::ReasoningTrace { text: text.clone() }
+        }
+        ContentBlock::ReasoningReplay { text, state } => ContentBlock::ReasoningReplay {
+            text: text.clone(),
+            state: state.clone(),
         },
         ContentBlock::ToolResult {
             tool_call_id,
@@ -1053,6 +1301,8 @@ impl SessionRecorder {
                     id: id.clone(),
                     name: name.clone(),
                     arguments: serde_json::json!({}),
+                    // The payload is not known here, and a guessed one would be replayed.
+                    state: None,
                 })
                 .collect();
             last = self.log.record(
@@ -1085,5 +1335,82 @@ impl SessionRecorder {
     /// True when the log is ephemeral, or degraded to ephemeral.
     pub fn is_ephemeral(&self) -> bool {
         self.log.is_ephemeral()
+    }
+}
+
+#[cfg(test)]
+mod byte_counter_tests {
+    //! The counter that bounds the cost of measuring a record.
+    //!
+    //! Without an early stop, measuring an eight-megabyte record would walk all of it to learn
+    //! that it exceeds sixty-four kilobytes. A mutation review found that the stop and a final
+    //! length comparison masked each other, so the comparison went and this pins the stop.
+    //!
+    //! **These tests were written once and lost.** A review agent whose isolation failed
+    //! restored an older copy of this file over them, and the loss was invisible: a missing test
+    //! fails nothing. A commit message then claimed `a_counter_stops_at_its_limit` existed while
+    //! it did not. So they are here again, and an audit of every test name claimed in a commit
+    //! message now runs against the tree.
+
+    use super::*;
+
+    /// The boundary itself: exactly the limit fits, and one byte more does not.
+    ///
+    /// A mutation review changed `>` to `>=`. A record that encodes to exactly the cap must be
+    /// kept, because the write path would have written it.
+    #[test]
+    fn a_counter_accepts_exactly_its_limit_and_no_more() {
+        let mut counter = ByteCounter {
+            count: 0,
+            limit: 100,
+        };
+        assert!(
+            counter.write(&[b'x'; 100]).is_ok(),
+            "exactly the limit fits, so a record at the cap is kept"
+        );
+        assert_eq!(counter.count, 100);
+        assert!(
+            counter.write(&[b'x'; 1]).is_err(),
+            "one byte past the limit does not"
+        );
+    }
+
+    #[test]
+    fn a_counter_stops_at_its_limit() {
+        let mut counter = ByteCounter {
+            count: 0,
+            limit: 4096,
+        };
+        let chunk = [b'x'; 1024];
+        let mut writes = 0;
+        let mut failed = false;
+        for _ in 0..1000 {
+            writes += 1;
+            if counter.write(&chunk).is_err() {
+                failed = true;
+                break;
+            }
+        }
+        assert!(failed, "the counter must stop rather than count for ever");
+        assert!(
+            writes <= 6,
+            "it stops just past the limit, not at the end of the input: {writes} writes"
+        );
+        assert!(
+            counter.count <= 4096 + chunk.len(),
+            "the work is bounded by the limit, not by the input: {} bytes",
+            counter.count
+        );
+    }
+
+    #[test]
+    fn a_counter_under_its_limit_accepts_every_write() {
+        let mut counter = ByteCounter {
+            count: 0,
+            limit: 4096,
+        };
+        assert!(counter.write(&[b'y'; 100]).is_ok());
+        assert!(counter.write(&[b'y'; 100]).is_ok());
+        assert_eq!(counter.count, 200);
     }
 }

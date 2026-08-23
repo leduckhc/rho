@@ -134,11 +134,13 @@ fn two_tool_results_conversation() -> Vec<rho_core::Message> {
                     id: "call_1".to_string(),
                     name: "read".to_string(),
                     arguments: serde_json::json!({ "path": "a.txt" }),
+                    state: None,
                 },
                 ContentBlock::ToolCall {
                     id: "call_2".to_string(),
                     name: "read".to_string(),
                     arguments: serde_json::json!({ "path": "b.txt" }),
+                    state: None,
                 },
             ],
         },
@@ -173,6 +175,7 @@ fn request_with(messages: Vec<rho_core::Message>) -> rho_core::CompletionRequest
         tools: Vec::new(),
         max_tokens: None,
         temperature: None,
+        reasoning: None,
     }
 }
 
@@ -309,4 +312,54 @@ async fn provider_azure_reports_cache_tokens() {
     assert_eq!(usage.cache_write_tokens, 300);
     // Azure reports no charge, so the field stays absent rather than reading as free.
     assert_eq!(usage.cost_usd, None);
+}
+
+/// A set effort level that cannot travel must be reported, not swallowed.
+///
+/// A review called the silence the defect: the agent carries the level, Bedrock consumes it,
+/// and here nothing happened at all, so `unset` and `set` looked the same. rho has no Azure
+/// account to drive, so it does not guess a field name. It says the level had no effect.
+#[test]
+fn a_set_effort_is_reported_as_having_no_effect() {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for BufferWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufferWriter {
+        type Writer = BufferWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(BufferWriter(Arc::clone(&buffer)))
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    let body = tracing::subscriber::with_default(subscriber, || {
+        let mut request = common::sample_request();
+        request.reasoning = Some(rho_core::ReasoningEffort::Medium);
+        let body = rho_provider_azure::build_request_body(&request, "deployment");
+        tracing::warn!("the capture is live");
+        body
+    });
+    let logged = String::from_utf8(buffer.lock().unwrap().clone()).expect("utf8");
+    assert!(logged.contains("the capture is live"), "the capture works");
+    assert!(
+        logged.contains("had no effect"),
+        "the gap is reported: {logged}"
+    );
+    // And rho invents no field, because an unknown field is a failed turn.
+    assert!(body.get("reasoning").is_none(), "no guessed field: {body}");
+    assert!(body.get("reasoning_effort").is_none());
 }

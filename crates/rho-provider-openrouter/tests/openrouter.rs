@@ -71,7 +71,9 @@ async fn provider_openrouter_assembles_parallel_tool_calls() {
     let mut ends: Vec<(u32, serde_json::Value)> = events
         .iter()
         .filter_map(|item| match item {
-            Ok(StreamEvent::ToolCallEnd { index, arguments }) => Some((*index, arguments.clone())),
+            Ok(StreamEvent::ToolCallEnd {
+                index, arguments, ..
+            }) => Some((*index, arguments.clone())),
             _ => None,
         })
         .collect();
@@ -298,4 +300,140 @@ async fn usage_arriving_after_the_finish_chunk_is_still_reported() {
         usage_at < done_at,
         "usage must precede Done, or a consumer that stops at Done misses it"
     );
+}
+
+// --- Reading the reasoning wire. -----------------------------------------
+//
+// SPEC-reasoning-across-providers section 3 "One": rho must read `reasoning`,
+// `reasoning_content`, and `reasoning_text`, and take the first non-empty one.
+
+/// Collect every reasoning delta as one string.
+fn reasoning_text(events: &[Result<StreamEvent, rho_core::ProviderError>]) -> String {
+    events
+        .iter()
+        .filter_map(|item| match item {
+            Ok(StreamEvent::ThinkingDelta { delta, .. }) => Some(delta.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_first_non_empty_reasoning_field_wins() {
+    let (stream, _server) = stream_body(common::sse_reasoning_two_fields_same_text()).await;
+    let events = drain(stream).await;
+    assert_eq!(
+        reasoning_text(&events),
+        "B",
+        "two fields with the same text must yield the text once, not twice"
+    );
+}
+
+#[tokio::test]
+async fn reasoning_content_is_read() {
+    let (stream, _server) = stream_body(common::sse_reasoning_content_only()).await;
+    let events = drain(stream).await;
+    assert_eq!(reasoning_text(&events), "why");
+}
+
+#[tokio::test]
+async fn reasoning_text_is_read() {
+    let (stream, _server) = stream_body(common::sse_reasoning_text_only()).await;
+    let events = drain(stream).await;
+    assert_eq!(reasoning_text(&events), "hmm");
+}
+
+#[tokio::test]
+async fn an_empty_reasoning_delta_starts_no_block() {
+    let (stream, _server) = stream_body(common::sse_reasoning_empty()).await;
+    let events = drain(stream).await;
+    let starts = events
+        .iter()
+        .filter(|item| matches!(item, Ok(StreamEvent::ThinkingStart { .. })))
+        .count();
+    assert_eq!(starts, 0, "an empty reasoning field must start no block");
+}
+
+/// The effort level must reach the OpenRouter body, or the setting is a lie on this provider.
+///
+/// A review found this: the agent carried the level faithfully, Bedrock consumed it, and this
+/// crate ignored it. A user running `--reasoning-effort high` here got silence, so `unset` and
+/// `set` collapsed to the same wire.
+#[test]
+fn the_request_body_carries_the_effort() {
+    let mut request = common::sample_request();
+    request.reasoning = Some(rho_core::ReasoningEffort::High);
+    let body = rho_provider_openrouter::build_request_body(&request);
+    assert_eq!(
+        body["reasoning"]["effort"], "high",
+        "the level reaches the wire: {body}"
+    );
+}
+
+/// `off` asks the host not to think, rather than saying nothing.
+#[test]
+fn an_off_effort_disables_reasoning_on_the_wire() {
+    let mut request = common::sample_request();
+    request.reasoning = Some(rho_core::ReasoningEffort::Off);
+    let body = rho_provider_openrouter::build_request_body(&request);
+    assert_eq!(
+        body["reasoning"]["enabled"], false,
+        "off is an instruction, not a silence: {body}"
+    );
+    assert!(body["reasoning"].get("effort").is_none());
+}
+
+/// An unset level sends no field, so the host keeps its own default.
+#[test]
+fn an_absent_effort_sends_no_reasoning_field() {
+    let request = common::sample_request();
+    let body = rho_provider_openrouter::build_request_body(&request);
+    assert!(
+        body.get("reasoning").is_none(),
+        "unset must not send a field: {body}"
+    );
+}
+
+/// `xhigh` is not in OpenRouter's set, and rho must not invent a value the host rejects.
+/// It maps to the highest level the host accepts, and the mapping is stated in one place.
+#[test]
+fn xhigh_maps_to_the_highest_accepted_level() {
+    let mut request = common::sample_request();
+    request.reasoning = Some(rho_core::ReasoningEffort::XHigh);
+    let body = rho_provider_openrouter::build_request_body(&request);
+    assert_eq!(body["reasoning"]["effort"], "high");
+}
+
+/// Every level maps to its own wire value, and the table says which.
+///
+/// A mutation review swapped `low` for `high` and every test still passed: the tests covered
+/// `off`, `high`, and `xhigh`, so nothing pinned the middle of the ladder. A level that maps
+/// upward costs a user money they did not ask to spend, so the whole mapping is now a table.
+#[test]
+fn every_level_maps_to_its_own_wire_value() {
+    let cases = [
+        (rho_core::ReasoningEffort::Off, None),
+        (rho_core::ReasoningEffort::Low, Some("low")),
+        (rho_core::ReasoningEffort::Medium, Some("medium")),
+        (rho_core::ReasoningEffort::High, Some("high")),
+        // The host has no `xhigh`, so rho sends the highest it accepts rather than inventing one.
+        (rho_core::ReasoningEffort::XHigh, Some("high")),
+    ];
+    for (effort, expected) in cases {
+        let mut request = common::sample_request();
+        request.reasoning = Some(effort);
+        let body = rho_provider_openrouter::build_request_body(&request);
+        match expected {
+            Some(word) => assert_eq!(
+                body["reasoning"]["effort"],
+                word,
+                "{} must send {word}: {body}",
+                effort.as_str()
+            ),
+            None => assert_eq!(
+                body["reasoning"]["enabled"], false,
+                "off disables rather than choosing a level: {body}"
+            ),
+        }
+    }
 }

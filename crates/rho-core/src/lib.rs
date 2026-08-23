@@ -15,12 +15,14 @@ mod event;
 mod hook;
 mod provider;
 mod queue;
+mod reasoning;
 mod retry;
 mod sandbox;
 mod secret;
 mod session;
 mod subagent;
 mod tasks;
+mod thinking;
 mod tool;
 mod transcript;
 mod usage;
@@ -31,21 +33,22 @@ pub use agent_task::{
     CommandRunner, DefaultGate, Gate, GateContext, GateReport,
 };
 pub use cancel::CancelToken;
-pub use content::{ContentBlock, ImageSource, Message, Role};
+pub use content::{ContentBlock, ImageSource, Message, ProviderState, ReasoningOwner, Role};
 pub use context::Context;
 pub use error::{Error, ProviderError};
 pub use event::StreamEvent;
 pub use hook::{Hook, HookChain, HookOutcome, ToolCallView};
 pub use provider::{CompletionRequest, Provider, ProviderStream, ToolSpec};
 pub use queue::{MessageQueue, QueueError, STEER_QUEUE_CAPACITY};
+pub use reasoning::{MIN_THINKING_BUDGET, ReasoningDisplay, ReasoningEffort};
 pub use retry::RetryPolicy;
 pub use sandbox::SandboxMode;
 pub use secret::Secret;
 pub use session::{
-    Entry, MAX_LINE_BYTES, MAX_RECORD_BYTES, ReadResult, Record, RecordId, SessionError,
-    SessionHeader, SessionLog, SessionReader, SessionRecorder, SessionStore, SessionSummary,
-    SessionWriter, StoredApproval, StoredSandbox, branch_messages, check_resume_permission, decode,
-    encode,
+    Entry, MAX_DROPPED_RECORDS, MAX_LINE_BYTES, MAX_RECORD_BYTES, ReadResult, Record, RecordId,
+    SessionError, SessionHeader, SessionLog, SessionReader, SessionRecorder, SessionStore,
+    SessionSummary, SessionWriter, StoredApproval, StoredSandbox, branch_messages,
+    check_resume_permission, decode, encode,
 };
 pub use subagent::{
     Admission, AgentId, AgentNode, AgentOutcome, AgentProgress, AgentRef, AgentRegistry,
@@ -59,6 +62,7 @@ pub use tasks::{
     BackgroundReason, DEFAULT_FOREGROUND_LIMIT_MS, RunMode, TaskError, TaskHandle, TaskId,
     TaskLimits, TaskProgress, TaskRegistry, TaskSnapshot, TaskState, WaitUntil, decide_run_mode,
 };
+pub use thinking::{ThinkingPiece, ThinkingSplitter};
 pub use tool::{
     AllowAllPolicy, ApprovalDecision, ApprovalPolicy, ReadOnlyPolicy, Tool, ToolContext, ToolError,
     ToolKind, ToolOutput, ToolRegistry, confine,

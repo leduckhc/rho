@@ -391,7 +391,11 @@ impl ResponsesState {
                     .or_else(|| event.arguments.clone())
                     .unwrap_or_default();
                 match parse_arguments(&buffer) {
-                    Ok(arguments) => events.push(StreamEvent::ToolCallEnd { index, arguments }),
+                    Ok(arguments) => events.push(StreamEvent::ToolCallEnd {
+                        index,
+                        arguments,
+                        state: None,
+                    }),
                     Err(error) => {
                         return EventOutcome {
                             events,
@@ -495,6 +499,36 @@ fn parse_arguments(buffer: &str) -> Result<Value, ProviderError> {
 // --- The request body. ---------------------------------------------------
 
 /// Build the Responses request body. See `SPEC-provider-interface` section 6.
+/// Report once that a set effort level does not reach this provider.
+///
+/// Once per level, not once per turn. A warning a user learns to scroll past stops working.
+/// Is this the first sighting of `effort`? The state is a parameter, so a test can pin the
+/// once-ness without process-global state, which no test could observe.
+fn first_sighting(
+    seen: &mut std::collections::HashSet<&'static str>,
+    effort: &'static str,
+) -> bool {
+    seen.insert(effort)
+}
+
+fn report_effort_gap(effort: rho_core::ReasoningEffort) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+
+    static REPORTED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let reported = REPORTED.get_or_init(|| Mutex::new(HashSet::new()));
+    let first = match reported.lock() {
+        Ok(mut set) => first_sighting(&mut set, effort.as_str()),
+        Err(_) => true,
+    };
+    if first {
+        tracing::warn!(
+            effort = effort.as_str(),
+            "this provider does not send a reasoning effort yet, so the level had no effect"
+        );
+    }
+}
+
 pub fn build_request_body(request: &CompletionRequest, deployment: &str) -> Value {
     let mut input = Vec::new();
     if let Some(system) = &request.system {
@@ -510,6 +544,15 @@ pub fn build_request_body(request: &CompletionRequest, deployment: &str) -> Valu
         "stream": true,
     });
     let map = body.as_object_mut().expect("the body is an object");
+    // The effort level does not travel here yet, and a review was right that silence is the
+    // defect rather than the absence. rho has no Azure account to drive, and the sprint-1
+    // lesson is exact about this: every fixture described a response, and every defect was in
+    // the request. Guessing a field name earns a 400 for the whole turn, so rho reports the
+    // gap once per level instead of inventing a field. See
+    // `SPEC-reasoning-across-providers` section 9.
+    if let Some(effort) = request.reasoning {
+        report_effort_gap(effort);
+    }
     if !request.tools.is_empty() {
         let tools: Vec<Value> = request
             .tools
@@ -566,6 +609,8 @@ fn message_to_items(message: &Message) -> Vec<Value> {
                 id,
                 name,
                 arguments,
+                // No replay payload travels on this wire yet. Gemini binds one to a call.
+                state: _,
             } => {
                 // Flush any prose that came before the call, so order survives.
                 if !text.is_empty() {
@@ -596,8 +641,15 @@ fn message_to_items(message: &Message) -> Vec<Value> {
                     "output": output,
                 }));
             }
-            // Thinking replay and image input are out of scope for sprint 1.
-            _ => {}
+            // A trace is for the reader, so it never travels.
+            ContentBlock::ReasoningTrace { .. } => {}
+            // Azure returns a reasoning summary and no replay token on this path, so rho
+            // stores no payload and has nothing to send back. The named arm replaces a
+            // `_ => {}` that a review found: a wildcard in a request builder hides the next
+            // block kind, and that is how a reasoning block was dropped in silence before.
+            ContentBlock::ReasoningReplay { .. } => {}
+            // Image input in a request is out of scope for sprint 1.
+            ContentBlock::Image { .. } => {}
         }
     }
 
@@ -618,5 +670,41 @@ fn role_name(role: Role) -> &'static str {
     match role {
         Role::User | Role::Tool => "user",
         Role::Assistant => "assistant",
+    }
+}
+
+#[cfg(test)]
+mod once_tests {
+    //! The once-ness of the effort-gap report, pinned without process-global state.
+
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn the_first_sighting_is_reported_and_the_second_is_not() {
+        let mut seen = HashSet::new();
+        assert!(first_sighting(&mut seen, "medium"));
+        assert!(!first_sighting(&mut seen, "medium"), "once means once");
+        assert!(
+            first_sighting(&mut seen, "high"),
+            "a new level is its own first"
+        );
+    }
+
+    /// The set holds one entry per level, and there are five levels, so it is bounded by the
+    /// type rather than by a ceiling.
+    #[test]
+    fn the_set_is_bounded_by_the_level_count() {
+        let mut seen = HashSet::new();
+        for effort in ["off", "low", "medium", "high", "xhigh"] {
+            first_sighting(&mut seen, effort);
+        }
+        assert_eq!(seen.len(), 5);
+        for effort in ["off", "low", "medium", "high", "xhigh"] {
+            assert!(
+                !first_sighting(&mut seen, effort),
+                "each level reports once"
+            );
+        }
     }
 }

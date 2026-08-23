@@ -15,16 +15,20 @@ fn content_block_text_roundtrips_json() {
 
 #[test]
 fn content_block_thinking_omits_absent_signature() {
-    let block = ContentBlock::Thinking {
-        thinking: "reasoning".to_string(),
-        signature: None,
+    // `Thinking { thinking, signature }` is split into a trace and a replay block. The
+    // rule this test guards is unchanged: an absent payload writes no key. The typed
+    // signature is gone, because a payload is now opaque and owned by one provider. See
+    // `D-reasoning-replay-is-opaque-provider-state`.
+    let block = ContentBlock::ReasoningReplay {
+        text: "reasoning".to_string(),
+        state: None,
     };
     let json = serde_json::to_value(&block).unwrap();
-    // The `signature` key must be absent when it is `None`.
     assert_eq!(
         json,
         serde_json::json!({ "type": "thinking", "thinking": "reasoning" })
     );
+    assert!(json.get("state").is_none());
     assert!(json.get("signature").is_none());
 }
 
@@ -34,6 +38,7 @@ fn content_block_tool_call_roundtrips_json() {
         id: "call_1".to_string(),
         name: "read".to_string(),
         arguments: serde_json::json!({ "path": "a.txt" }),
+        state: None,
     };
     let json = serde_json::to_value(&block).unwrap();
     assert_eq!(
@@ -76,4 +81,223 @@ fn content_block_tool_result_roundtrips_json() {
     );
     let back: ContentBlock = serde_json::from_value(json).unwrap();
     assert_eq!(back, block);
+}
+
+// ---- The reasoning split, and the opaque replay payload. ----
+// See SPEC-reasoning-across-providers section 4, and the two decisions
+// D-reasoning-replay-is-opaque-provider-state and D-two-variants-cannot-share-a-serde-tag.
+
+use rho_core::{ProviderState, ReasoningOwner};
+
+fn state(provider: &str, model: &str) -> ProviderState {
+    ProviderState {
+        owner: ReasoningOwner {
+            provider: provider.to_string(),
+            model: model.to_string(),
+        },
+        value: serde_json::json!({ "signature": "sig-1" }),
+    }
+}
+
+#[test]
+fn a_trace_serialises_under_the_old_thinking_tag() {
+    let block = ContentBlock::ReasoningTrace {
+        text: "reasoning".to_string(),
+    };
+    let json = serde_json::to_value(&block).unwrap();
+    // An old rho reads `thinking` and ignores what it does not know, so it still loads.
+    assert_eq!(
+        json,
+        serde_json::json!({ "type": "thinking", "thinking": "reasoning" })
+    );
+}
+
+#[test]
+fn a_state_round_trips_through_the_session_file() {
+    let block = ContentBlock::ReasoningReplay {
+        text: "reasoning".to_string(),
+        state: Some(state("bedrock", "claude")),
+    };
+    let line = serde_json::to_string(&block).unwrap();
+    let back: ContentBlock = serde_json::from_str(&line).unwrap();
+    assert_eq!(back, block, "the payload survives the file unchanged");
+    let json: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        json["type"], "thinking",
+        "the old tag carries both variants"
+    );
+    assert_eq!(json["replay"], true);
+}
+
+#[test]
+fn an_old_thinking_block_imports_as_a_trace() {
+    // A file written before this change. Its signature is stale, so it never replays.
+    let json = serde_json::json!({
+        "type": "thinking", "thinking": "old", "signature": "stale"
+    });
+    let back: ContentBlock = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        back,
+        ContentBlock::ReasoningTrace {
+            text: "old".to_string()
+        }
+    );
+}
+
+#[test]
+fn a_replay_key_with_no_state_reads_as_a_trace() {
+    // Fail closed. There is nothing to replay, so it is history.
+    let json = serde_json::json!({ "type": "thinking", "thinking": "x", "replay": true });
+    let back: ContentBlock = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        back,
+        ContentBlock::ReasoningTrace {
+            text: "x".to_string()
+        }
+    );
+}
+
+#[test]
+fn a_new_block_is_readable_by_an_old_rho() {
+    // The old shape: a tagged enum with one `thinking` variant and no `replay` key.
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum OldBlock {
+        Thinking {
+            thinking: String,
+            #[serde(default)]
+            signature: Option<String>,
+        },
+    }
+    let line = serde_json::to_string(&ContentBlock::ReasoningReplay {
+        text: "new".to_string(),
+        state: Some(state("bedrock", "claude")),
+    })
+    .unwrap();
+    let old: OldBlock = serde_json::from_str(&line).expect("an old rho loads the file");
+    assert_eq!(
+        old,
+        OldBlock::Thinking {
+            thinking: "new".to_string(),
+            signature: None
+        }
+    );
+}
+
+#[test]
+fn a_state_answers_only_for_its_own_owner() {
+    // Rule 8, in one place, so no provider hand-rolls it. The value is unreachable for
+    // any other provider or model.
+    let state = state("bedrock", "claude-haiku");
+    assert!(state.for_owner("bedrock", "claude-haiku").is_some());
+    assert!(
+        state.for_owner("bedrock", "claude-opus").is_none(),
+        "another model gets nothing"
+    );
+    assert!(
+        state.for_owner("openrouter", "claude-haiku").is_none(),
+        "another provider gets nothing"
+    );
+}
+
+#[test]
+fn a_tool_call_carries_a_state() {
+    // Gemini binds a replay token to the call itself. The field exists now, so that crate
+    // needs no edit to shared code.
+    let block = ContentBlock::ToolCall {
+        id: "1".to_string(),
+        name: "read".to_string(),
+        arguments: serde_json::json!({}),
+        state: Some(state("gemini", "flash")),
+    };
+    let line = serde_json::to_string(&block).unwrap();
+    let back: ContentBlock = serde_json::from_str(&line).unwrap();
+    assert_eq!(back, block);
+}
+
+#[test]
+fn an_old_tool_call_loads_with_no_state() {
+    let json = serde_json::json!({
+        "type": "tool_call", "id": "1", "name": "read", "arguments": {}
+    });
+    let back: ContentBlock = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, ContentBlock::ToolCall { state: None, .. }));
+}
+
+#[test]
+fn an_empty_owner_never_matches_anything() {
+    // A second review found this. Two empty strings compare equal, so a payload minted with
+    // no model would replay on any request that also had no model. `events_to_stream` and
+    // the legacy `build_messages` both pass `""`, so the two ends met in the middle and the
+    // owner check passed while nothing had been checked.
+    //
+    // An empty owner is not an owner. It never matches, in either direction.
+    let unowned = ProviderState {
+        owner: ReasoningOwner {
+            provider: "bedrock".to_string(),
+            model: String::new(),
+        },
+        value: serde_json::json!({ "signature": "sig" }),
+    };
+    assert!(unowned.for_owner("bedrock", "").is_none());
+    assert!(unowned.for_owner("bedrock", "claude").is_none());
+
+    let no_provider = ProviderState {
+        owner: ReasoningOwner {
+            provider: String::new(),
+            model: "claude".to_string(),
+        },
+        value: serde_json::json!({ "signature": "sig" }),
+    };
+    assert!(no_provider.for_owner("", "claude").is_none());
+
+    // And a request with no model reaches nothing, even from a well-owned payload.
+    let owned = ProviderState {
+        owner: ReasoningOwner {
+            provider: "bedrock".to_string(),
+            model: "claude".to_string(),
+        },
+        value: serde_json::json!({ "signature": "sig" }),
+    };
+    assert!(owned.for_owner("bedrock", "").is_none());
+    assert!(owned.for_owner("", "claude").is_none());
+    assert!(owned.for_owner("bedrock", "claude").is_some());
+}
+
+#[test]
+fn an_unknown_key_in_a_record_is_ignored() {
+    // A future rho adds a key. This rho must load the record and keep what it understands,
+    // because the alternative is a session file that a newer rho can write and an older one
+    // cannot read. A review asked for this case by name, and it had no test.
+    let json = serde_json::json!({
+        "type": "thinking",
+        "thinking": "a plan",
+        "replay": true,
+        "state": {
+            "owner": { "provider": "bedrock", "model": "claude" },
+            "value": { "signature": "sig" }
+        },
+        "a_key_from_a_later_rho": { "nested": [1, 2, 3] }
+    });
+    let back: ContentBlock = serde_json::from_value(json).expect("an unknown key is ignored");
+    match back {
+        ContentBlock::ReasoningReplay { text, state } => {
+            assert_eq!(text, "a plan");
+            let state = state.expect("the payload survives beside the unknown key");
+            assert_eq!(state.value["signature"], "sig");
+        }
+        other => panic!("expected a replay block, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_lowest_budget_is_the_anthropic_minimum() {
+    // A review found this unpinned: the ladder was proved to grow and to clear 1024, but no
+    // test held the documented value. Anthropic refuses a budget under 1024, so the constant
+    // and the bottom rung must stay equal.
+    assert_eq!(rho_core::MIN_THINKING_BUDGET, 1024);
+    assert_eq!(
+        rho_core::ReasoningEffort::Low.budget_tokens(),
+        Some(rho_core::MIN_THINKING_BUDGET)
+    );
 }

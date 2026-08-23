@@ -50,7 +50,7 @@ fn the_reducer_writes_a_thinking_duration() {
     state.apply(
         &AgentEvent::Stream(StreamEvent::ThinkingEnd {
             index: 0,
-            signature: None,
+            state: None,
         }),
         3_500,
     );

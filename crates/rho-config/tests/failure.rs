@@ -81,10 +81,13 @@ fn a_broken_approval_key_stops_the_run() {
     let path = write_file(&dir, "config.toml", "approval = \"bananas\"\n");
     let sources = sources_with_project_file(path);
     match Config::load(&sources) {
-        // The value is bad, so the error must name the parse, not something else. Per
+        // The value is bad, so the error must name the bad value, not something else. Per
         // SPEC-config section 6 the message names the key and the offending value, so a
         // generic parse error cannot pass a test about a security key.
-        Err(err @ ConfigError::Parse { .. }) => {
+        //
+        // The variant is `Value`, because a merged value has no file to name. See
+        // `D-a-merged-value-error-names-no-file`.
+        Err(err @ ConfigError::Value { .. }) => {
             let rendered = err.to_string();
             assert!(
                 rendered.contains("approval"),
@@ -112,10 +115,13 @@ fn a_broken_sandbox_key_stops_the_run() {
     let path = write_file(&dir, "config.toml", "sandbox = \"loose\"\n");
     let sources = sources_with_project_file(path);
     match Config::load(&sources) {
-        // The value is bad, so the error must name the parse, not something else. Per
+        // The value is bad, so the error must name the bad value, not something else. Per
         // SPEC-config section 6 the message names the key and the offending value, so a
         // generic parse error cannot pass a test about a security key.
-        Err(err @ ConfigError::Parse { .. }) => {
+        //
+        // The variant is `Value`, because a merged value has no file to name. See
+        // `D-a-merged-value-error-names-no-file`.
+        Err(err @ ConfigError::Value { .. }) => {
             let rendered = err.to_string();
             assert!(
                 rendered.contains("sandbox"),
@@ -132,5 +138,35 @@ fn a_broken_sandbox_key_stops_the_run() {
              It must never fall back to a weaker mode.",
             config.sandbox
         ),
+    }
+}
+
+/// A refusal that came from the merge must read as a sentence.
+///
+/// It printed "cannot parse the config file the merged configuration: ...". A live run
+/// found it, first for `tui-reasoning` and then again for `reasoning-effort`. The merge
+/// has no path to name, so the error must not pretend it does. See
+/// `D-the-merge-cannot-name-a-values-source`.
+#[test]
+fn a_merged_value_error_reads_as_a_sentence() {
+    for (key, value) in [
+        ("reasoning-effort", "ludicrous"),
+        ("tui-reasoning", "loud"),
+        ("sandbox", "sideways"),
+        ("approval", "maybe"),
+    ] {
+        let dir = temp_dir();
+        let project = write_file(&dir, "project.toml", &format!("{key} = \"{value}\"\n"));
+        let sources = sources_with_project_file(project);
+        let error = Config::load(&sources).expect_err("a bad value fails closed");
+        let text = error.to_string();
+        assert!(
+            !text.contains("the config file the merged configuration"),
+            "the merge has no file to name: {text}"
+        );
+        assert!(
+            text.contains(key) && text.contains(value),
+            "the error names the key and the value: {text}"
+        );
     }
 }
