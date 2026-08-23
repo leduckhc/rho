@@ -81,8 +81,6 @@ to avoid: an empty `old_string` with `replace_all` rewrites the whole file, beca
 empty pattern matches at every character boundary.
 
 See `docs/specs/20260817-164906-SPEC-tool-interface.md` section 6a, and decision D-jcode-edit-lessons.
-<<<<<<< ours
-=======
 
 ---
 
@@ -105,4 +103,3 @@ to argue a structural advantage that does not exist. The real advantage is measu
 The lesson: the spec argued from a remembered design. Reading the actual source took minutes
 and found the error. AGENTS.md step 1 says to read the real source, not your memory of it.
 This section is the proof that step 1 pays.
->>>>>>> theirs

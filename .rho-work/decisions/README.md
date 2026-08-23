@@ -8,20 +8,14 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | Decision | Date | Title |
 | --- | --- | --- |
 | [D-a-budget-is-measured-not-asserted](20260818-120304-D-a-budget-is-measured-not-asserted.md) | 20260818 | A cost budget is measured, or it is prose |
-<<<<<<< ours
 | [D-a-bad-middle-record-is-skipped-and-counted](20260822-093000-D-a-bad-middle-record-is-skipped-and-counted.md) | 20260822 | A bad record in the middle of a session file is skipped and counted |
 | [D-a-merged-value-error-names-no-file](20260821-231500-D-a-merged-value-error-names-no-file.md) | 20260821 | A merged value error names the key and the value, and never a file |
 | [D-a-second-writer-can-delete-a-test-in-silence](20260822-131500-D-a-second-writer-can-delete-a-test-in-silence.md) | 20260822 | A second writer can delete a test in silence, so a commit's claims are checked |
-=======
->>>>>>> theirs
 | [D-a-panel-nobody-can-open](20260818-171500-D-a-panel-nobody-can-open.md) | 20260818 | A rendered panel with no key that opens it is not a feature |
 | [D-a-role-column-is-not-a-stack](20260818-181500-D-a-role-column-is-not-a-stack.md) | 20260818 | A theme role resolves in one mode, and the columns never stack |
 | [D-acp-cancelled-spelling](20260817-171334-D-acp-cancelled-spelling.md) | 20260817 | The ACP cancelled stop reason needs an explicit serde rename |
 | [D-acp-is-real-acp](20260817-164906-D-acp-is-real-acp.md) | 20260817 | The headless frontend is ACP, and it is the real ACP |
-<<<<<<< ours
-=======
 | [D-agentic-workflow-is-a-template](20260820-120345-D-agentic-workflow-is-a-template.md) | 20260820 | One agentic workflow template, filled per unit of work |
->>>>>>> theirs
 | [D-alternate-screen-after-all](20260819-093316-D-alternate-screen-after-all.md) | 20260819 | rho takes the whole screen, and it gives the transcript back with one key |
 | [D-append-only-jsonl](20260818-014343-D-append-only-jsonl.md) | 20260818 | The session file is append-only JSONL with a per-record parent pointer |
 | [D-approval-default-ask](20260818-020639-D-approval-default-ask.md) | 20260818 | The approval default is Ask where answerable, read-only where not |
@@ -52,10 +46,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-mcp-shared-by-default](20260817-215003-D-mcp-shared-by-default.md) | 20260817 | An MCP server is shared between sessions by default |
 | [D-measured-codec-choice](20260818-014343-D-measured-codec-choice.md) | 20260818 | A JSONL codec choice is measured, and the fast codec stays optional |
 | [D-measured-cost-and-cache](20260817-234608-D-measured-cost-and-cache.md) | 20260817 | Report the cache hit rate and the real cost, because a competitor only claims them |
-<<<<<<< ours
 | [D-no-caller-writes-a-session-file](20260821-234500-D-no-caller-writes-a-session-file.md) | 20260821 | No production caller writes a session file, and the persisted format has no reader |
-=======
->>>>>>> theirs
 | [D-no-cross-session-cache](20260817-235346-D-no-cross-session-cache.md) | 20260817 | No cross-session shared file cache, because rho has no tenancy model |
 | [D-no-four-argument-session-new](20260817-180735-D-no-four-argument-session-new.md) | 20260817 | Remove the four-argument `Session::new` |
 | [D-no-git-writes-by-a-subagent](20260817-184709-D-no-git-writes-by-a-subagent.md) | 20260817 | A subagent must never run a git command that changes the working tree |
@@ -69,14 +60,10 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-provider-contract-crate](20260817-175201-D-provider-contract-crate.md) | 20260817 | The provider contract suite is a real crate, not a private test file |
 | [D-provider-extension-verified-outside](20260817-200505-D-provider-extension-verified-outside.md) | 20260817 | The provider extension point is verified from outside the workspace |
 | [D-pty-teardown-closes-before-it-waits](20260818-155000-D-pty-teardown-closes-before-it-waits.md) | 20260818 | A pty harness closes the master, then kills, then waits with a deadline |
-<<<<<<< ours
 | [D-replay-only-the-current-loop](20260822-093100-D-replay-only-the-current-loop.md) | 20260822 | Only the current tool loop replays its reasoning |
 | [D-read-only-maps-onto-approval](20260820-214512-D-read-only-maps-onto-approval.md) | 20260820 | `--read-only` writes the approval key, and only when true |
 | [D-reader-line-cap](20260818-020639-D-reader-line-cap.md) | 20260818 | The session reader caps one line |
 | [D-reasoning-replay-is-opaque-provider-state](20260821-220620-D-reasoning-replay-is-opaque-provider-state.md) | 20260821 | A provider replays its own reasoning through one opaque, owner-tagged state value |
-=======
-| [D-reader-line-cap](20260818-020639-D-reader-line-cap.md) | 20260818 | The session reader caps one line |
->>>>>>> theirs
 | [D-recorder-consumes-events](20260818-014343-D-recorder-consumes-events.md) | 20260818 | The session log is an event-stream consumer, not a field in Session |
 | [D-redact-json-secrets](20260818-020639-D-redact-json-secrets.md) | 20260818 | Session redaction uses one new function in rho-redact |
 | [D-redact-tool-arguments](20260818-014343-D-redact-tool-arguments.md) | 20260818 | A tool argument is redacted on the way into the file |
@@ -94,12 +81,9 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-slug-ids](20260818-041358-D-slug-ids.md) | 20260818 | An artifact is named by a timestamp and a slug, never by a counter |
 | [D-sprint-one-hook-interfaces](20260817-170455-D-sprint-one-hook-interfaces.md) | 20260817 | The Hook trait and the approval gate are sprint-1 interfaces |
 | [D-staged-server-serves-every-connection](20260818-043346-D-staged-server-serves-every-connection.md) | 20260818 | A test double must answer every connection |
-<<<<<<< ours
 | [D-the-merge-cannot-name-a-values-source](20260820-214513-D-the-merge-cannot-name-a-values-source.md) | 20260820 | The merge loses which layer held a bad value |
 | [D-three-reasoning-costs-stay-open](20260822-101500-D-three-reasoning-costs-stay-open.md) | 20260822 | Three reasoning costs stay open, and each one names its trigger |
-=======
 | [D-the-wheel-needs-capture](20260819-120429-D-the-wheel-needs-capture.md) | 20260819 | rho captures the mouse, because the wheel is the only way to scroll |
->>>>>>> theirs
 | [D-three-tiers](20260817-232444-D-three-tiers.md) | 20260817 | Three tiers, named for what each contributes |
 | [D-todo-in-a-green-stage](20260817-175834-D-todo-in-a-green-stage.md) | 20260817 | Three `todo!()` bodies survived stage S4, and one is a security boundary |
 | [D-truncated-tail-warns](20260818-014343-D-truncated-tail-warns.md) | 20260818 | Resume drops a truncated last line and warns, and keeps every whole record |
@@ -107,10 +91,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-tui-plugin-render-budget](20260818-055346-D-tui-plugin-render-budget.md) | 20260818 | A terminal view render has an 8 ms budget and a worker thread |
 | [D-tui-plugin-trust-default-no-transcript](20260818-055346-D-tui-plugin-trust-default-no-transcript.md) | 20260818 | A terminal view reads nothing until the user opts in |
 | [D-two-weak-tests](20260818-003819-D-two-weak-tests.md) | 20260818 | Two weak tests found by breaking the code, and one design consequence recorded |
-<<<<<<< ours
 | [D-two-variants-cannot-share-a-serde-tag](20260821-221500-D-two-variants-cannot-share-a-serde-tag.md) | 20260821 | Two enum variants cannot share one serde tag, and the reader says nothing |
-=======
->>>>>>> theirs
 | [D-unmappable-pi-record-drops](20260818-030907-D-unmappable-pi-record-drops.md) | 20260818 | An unmappable pi record drops with a count, and the import finishes |
 | [D-website-direction](20260817-170455-D-website-direction.md) | 20260817 | Website direction is mockup C, with A's command-prompt labels |
 | [D-write-failure-degrades](20260818-014343-D-write-failure-degrades.md) | 20260818 | A write failure degrades a session to ephemeral, and never ends the run |

@@ -581,7 +581,6 @@ and then this section must run again.
 - First frame on Windows. Neither the script nor CI covers it.
 - Frame time on Linux. The example builds there, but this run was macOS only.
 
-<<<<<<< ours
 ## Reasoning in `full` mode: the frame cost of a growing row
 
 Date: 20260823, re-measured after the merge with `main`.
