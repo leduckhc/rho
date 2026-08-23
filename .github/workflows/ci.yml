@@ -115,7 +115,6 @@ jobs:
           python3 bench/check-prose.py $(find docs -name '*.md') | tee prose.txt
           grep -q '^VIOLATIONS 0$' prose.txt
 
-<<<<<<< ours
   claimed-tests:
     name: every test a commit names must exist
     runs-on: ubuntu-latest
@@ -132,8 +131,6 @@ jobs:
           python3 bench/check-claimed-tests.py | tee claimed.txt
           grep -qE '^VIOLATIONS 0' claimed.txt
 
-=======
->>>>>>> theirs
   pty-harness:
     name: pty harness teardown guards
     runs-on: ubuntu-latest
