@@ -147,6 +147,27 @@ When rho refuses a spawn, it names the flag to raise.
 Grace turns exist because a child cannot ask for more turns.
 When a child is this many turns from its cap, rho tells it to write its summary early.
 
+## Watch, redirect, or stop a running child
+
+rho gives the model three more tools beside the two that spawn. They appear under the same
+condition: at least one agent definition loaded.
+
+| Tool | What it does |
+|---|---|
+| `agent_status` | Poll one child by id or handle. Call it with no id to list every child this session runs. |
+| `steer_agent` | Send a message to a child that is still running. The child reads it as its next instruction, after its current tool calls finish. |
+| `cancel_agent` | Stop one child. Its siblings keep running, and your session keeps running. |
+
+Steering a child is the way to redirect work without throwing it away. Say what you want
+changed, and the child picks it up at its next turn boundary.
+
+`--read-only` denies `steer_agent` and `cancel_agent`, because both change what a child does.
+It allows `agent_status`, which only reads.
+
+> **Not built yet.** This is steering for a **child**. You cannot steer your own turn. A
+> message you type in the terminal interface while a turn runs does not reach that turn.
+> See [status](status.md).
+
 ## Timeouts, cancellation, and retries
 
 A child that times out gets outcome `canceled`.

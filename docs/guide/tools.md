@@ -19,6 +19,9 @@ and why a large result came back cut.
 | `read_tool_result` | Read a stored large result | When a result store exists | 64 KiB per read; 20 matches per search |
 | `spawn_agent` | Start one subagent | When agent definitions exist | See [subagents](subagents.md) |
 | `spawn_agents` | Start several subagents at once | When agent definitions exist | See [subagents](subagents.md) |
+| `agent_status` | Poll one subagent, or list the running ones | When agent definitions exist | Read-only; call it with no id to list |
+| `steer_agent` | Send a new instruction to a running subagent | When agent definitions exist | Denied by `--read-only` |
+| `cancel_agent` | Stop one running subagent | When agent definitions exist | Denied by `--read-only`; siblings keep running |
 | `mcp__<server>__<tool>` | Call an MCP server tool | When MCP servers are configured | Varies by server |
 
 ## Path confinement
