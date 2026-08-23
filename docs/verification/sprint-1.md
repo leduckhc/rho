@@ -55,6 +55,19 @@ the wire mapping and pin the Entra audience `https://cognitiveservices.azure.com
 but **nobody has yet seen rho talk to a real Azure endpoint.** Treat Azure as
 untested until somebody runs this file's OpenRouter commands against it.
 
+> **Correction, 2026-08-23.** This file contradicts itself about Azure. The table at the top
+> marks five Azure rows as **pass**, and this section says the provider was never run. The
+> section below, "The Azure tool-call defect", also says "Verified live after the fix".
+> Both cannot be true.
+>
+> A later attempt could not settle it. An Azure key and endpoint were available, and the
+> endpoint answered `DeploymentNotFound` for four guessed deployment names. So the
+> credential authenticates, no deployment name is known, and rho still has no live Azure run
+> behind it. `docs/guide/providers.md` therefore tells a user that Azure is unverified.
+>
+> Whoever holds a deployment name should run this file's commands against Azure, then
+> correct the table and delete this note.
+
 ### Tool call, end to end
 
 ```sh

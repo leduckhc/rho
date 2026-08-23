@@ -6,13 +6,17 @@ rho is small on purpose. The runtime, the providers, the tools, and the
 frontends are separate crates. You pick the parts you need. You can replace
 any part with your own crate.
 
-Status: sprint 1 delivered. The repository is private until the first release; see
+Status: pre-release, version 0.1.0. The repository is private until the first release; see
 [docs/release-checklist.md](docs/release-checklist.md).
 
-Sprint 1 delivered. 224 tests. See
-[docs/verification/sprint-1.md](docs/verification/sprint-1.md) for what was actually run
-against real services. [agentic-workflow.yaml](agentic-workflow.yaml) holds the workflow
-that agents follow to build a feature.
+**New to rho? Read the [user guide](docs/guide/index.md).** It covers install, the terminal
+interface, configuration, providers, permissions, and
+[what is not built yet](docs/guide/status.md).
+
+1464 tests pass in the workspace. See
+[docs/verification/](docs/verification/) for what was actually run against real services.
+[agentic-workflow.yaml](agentic-workflow.yaml) holds the workflow that agents follow to
+build a feature.
 
 `rho` streams answers and runs tools today, against OpenRouter and AWS Bedrock.
 Azure OpenAI is implemented and unit-tested, but nobody has yet run it live.
@@ -39,12 +43,12 @@ comparison that favours the others.
 | `rho-core` | Session, agent loop, event stream, provider and tool traits, hooks. No HTTP. |
 | `rho-config` | Layered configuration and profiles. |
 | `rho-tools` | Built-in file and shell tools. |
-| `rho-plugin` | Out-of-process plugin host over stdio JSON-RPC. |
+| `rho-plugin` | Out-of-process plugin host over stdio JSON-RPC. A library today; the `rho` binary loads no plugin. |
 | `rho-provider-openrouter` | OpenRouter and OpenAI-compatible endpoints. |
 | `rho-provider-bedrock` | AWS Bedrock Converse. |
 | `rho-provider-azure` | Azure OpenAI Responses. |
 | `rho-tui` | Minimal terminal interface. |
-| `rho-acp` | Agent Client Protocol server frontend. |
+| `rho-acp` | Agent Client Protocol server frontend. A library today; the `rho` binary exposes no ACP command. |
 | `rho-provider-testkit` | A reusable conformance suite. Run it against your own `Provider`. |
 | `rho-cli` | The `rho` binary. Frontends and providers are cargo features. |
 

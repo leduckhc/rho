@@ -4,6 +4,8 @@ One row per document. Find the document that answers your question.
 
 | Document | Who reads it | Why |
 |----------|-------------|-----|
+| `docs/guide/` | **Anyone who uses rho** | The user guide. Install, first run, the terminal interface, configuration, providers, permissions, tools, skills, MCP, subagents, and troubleshooting. Start at `docs/guide/index.md`. |
+| `docs/guide/status.md` | Everyone | What works today, what is partly built, and what is missing. Written from the code, not from a plan. |
 | `docs/index.md` (this file) | Everyone | Find the right document fast. |
 | `docs/features.md` | Architect, developer, product owner | Every planned feature with ID, status, owning crate, and extension point. The primary contract for all later stages. |
 | `docs/extending.md` | Extension author | The three tiers: core tools, capability loaders, and extensions. How to add a tool and a hook, and the planned extension catalogue. |

@@ -77,6 +77,13 @@ file, and the error taxonomy is part of a contract that is already reviewed. See
 `SPEC-config-call-site` section 2. The message names the key and the value, so it is wrong
 prose rather than a wrong answer.
 
+> **Fixed since, 2026-08-23.** The error variant now exists, so this record is stale. rho
+> prints `rho: the tui-reasoning value "loud" is not valid: unknown reasoning mode "loud":
+> the valid names are off, summary, full, and live`. A regression test in
+> `crates/rho-config/tests/failure.rs` asserts the old wording is gone. I re-ran the case to
+> confirm. This note stays because a user-facing page was written from the stale text above,
+> which is what a stale record costs.
+
 ## The merge completeness guard, added later
 
 `SPEC-config-call-site` promised `every_scalar_key_merges_and_reaches_the_config`, and no
