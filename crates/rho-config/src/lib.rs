@@ -772,7 +772,10 @@ impl Config {
             skill_paths: merged.skill_paths.unwrap_or_default(),
             // `no-skills = true` disables discovery. The default is discovery on.
             discover_skills: !merged.no_skills.unwrap_or(false),
-            tui_mouse: merged.tui_mouse.unwrap_or(false),
+            // On by default. rho owns the alternate screen, which has no scrollback, so with
+            // capture off the wheel does nothing at all. The default flipped with
+            // `D-the-wheel-needs-capture`, and this merge adopts it, because that renderer won.
+            tui_mouse: merged.tui_mouse.unwrap_or(true),
             reasoning,
             reasoning_effort,
             mcp_config: merged.mcp_config,

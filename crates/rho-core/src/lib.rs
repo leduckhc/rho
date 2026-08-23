@@ -14,8 +14,8 @@ mod error;
 mod event;
 mod hook;
 mod provider;
-mod reasoning;
 mod queue;
+mod reasoning;
 mod retry;
 mod sandbox;
 mod secret;
@@ -39,13 +39,16 @@ pub use error::{Error, ProviderError};
 pub use event::StreamEvent;
 pub use hook::{Hook, HookChain, HookOutcome, ToolCallView};
 pub use provider::{CompletionRequest, Provider, ProviderStream, ToolSpec};
-pub use reasoning::{MIN_THINKING_BUDGET, ReasoningDisplay, ReasoningEffort};
 pub use queue::{MessageQueue, QueueError, STEER_QUEUE_CAPACITY};
+pub use reasoning::{MIN_THINKING_BUDGET, ReasoningDisplay, ReasoningEffort};
 pub use retry::RetryPolicy;
 pub use sandbox::SandboxMode;
 pub use secret::Secret;
 pub use session::{
-    Entry, MAX_DROPPED_RECORDS, MAX_LINE_BYTES, MAX_RECORD_BYTES, ReadResult, Record, RecordId, SessionError, SessionHeader, SessionLog, SessionReader, SessionRecorder, SessionStore, SessionSummary, SessionWriter, StoredApproval, StoredSandbox, branch_messages, check_resume_permission, decode, encode,
+    Entry, MAX_DROPPED_RECORDS, MAX_LINE_BYTES, MAX_RECORD_BYTES, ReadResult, Record, RecordId,
+    SessionError, SessionHeader, SessionLog, SessionReader, SessionRecorder, SessionStore,
+    SessionSummary, SessionWriter, StoredApproval, StoredSandbox, branch_messages,
+    check_resume_permission, decode, encode,
 };
 pub use subagent::{
     Admission, AgentId, AgentNode, AgentOutcome, AgentProgress, AgentRef, AgentRegistry,

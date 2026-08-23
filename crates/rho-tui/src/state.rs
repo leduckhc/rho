@@ -6,7 +6,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rho_core::{
-    AgentEvent, AgentStopReason, ReasoningDisplay, StreamEvent, TaskId, TaskProgress, TaskState, ThinkingPiece, ThinkingSplitter, ToolKind,
+    AgentEvent, AgentStopReason, ReasoningDisplay, StreamEvent, TaskId, TaskProgress, TaskState,
+    ThinkingPiece, ThinkingSplitter, ToolKind,
 };
 
 use crate::concise::RowFold;
@@ -711,13 +712,6 @@ impl TuiState {
         }
     }
 
-    fn last_assistant_mut(&mut self) -> Option<&mut Row> {
-        self.rows
-            .iter_mut()
-            .rev()
-            .find(|row| matches!(row, Row::Assistant { .. }))
-    }
-
     /// Send each classified piece to the row it belongs to.
     fn route_thinking_pieces(&mut self, pieces: Vec<ThinkingPiece>, now_millis: i64) {
         for piece in pieces {
@@ -739,8 +733,7 @@ impl TuiState {
                     text.push_str(delta);
                 }
             }
-            Some(index)
-                if matches!(&self.rows[index], Row::Assistant { text } if text.is_empty()) =>
+            Some(index) if matches!(&self.rows[index], Row::Assistant { text } if text.is_empty()) =>
             {
                 // Reuse the empty assistant row, so the span runs from the block start and no
                 // empty answer row is left behind.

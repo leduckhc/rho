@@ -75,15 +75,6 @@ pub struct Cli {
     #[arg(long, global = true, value_enum)]
     pub sandbox: Option<SandboxArg>,
 
-    /// Let the TUI capture the mouse, so the wheel scrolls the band and a click
-    /// selects a list row.
-    ///
-    /// Off by default, because capture takes drag-select away from the terminal. With
-    /// capture off, the wheel, a drag, and the terminal search all work on the
-    /// transcript. See decision D-native-selection-is-the-default.
-    #[arg(long, global = true, num_args = 0..=1, default_missing_value = "true")]
-    pub mouse: Option<bool>,
-
     /// How the TUI draws reasoning: `off`, `summary`, `full`, or `live`.
     ///
     /// Default is `summary`, a one-row `∴ thought for 2.4s`. `full` also draws the
@@ -100,8 +91,6 @@ pub struct Cli {
     /// `SPEC-reasoning-across-providers` section 9.
     #[arg(long, global = true)]
     pub reasoning_effort: Option<String>,
-    #[arg(long, global = true, value_enum, default_value_t = SandboxArg::Off)]
-    pub sandbox: SandboxArg,
 
     /// Let the TUI capture the mouse, so the wheel scrolls the transcript and a click
     /// selects a list row.
@@ -223,29 +212,30 @@ pub enum Command {
     },
 }
 
-/// Build a `SessionConfig` from the loaded configuration. State every choice.
-fn build_config(config: &rho_config::Config) -> anyhow::Result<SessionConfig> {
-    // A model comes from the merge, then the provider's default. Every source the user can
-    // set now arrives through `Config`, so this reads one value instead of three.
-/// Build a `SessionConfig` from the parsed arguments, and print any notice.
+/// Build a `SessionConfig` from the loaded configuration, and print any notice.
 ///
 /// This is the wrapper the non-interactive paths use, where a print is the right channel.
-/// The interactive path calls `build_config_with_notices`, because a print there lands on
-/// the primary screen and rho then opens the alternate screen over it.
-fn build_config(cli: &Cli) -> anyhow::Result<SessionConfig> {
+/// The interactive path calls `build_config_with_notices`, because a print there lands on the
+/// primary screen and rho then opens the alternate screen over it.
+///
+/// It takes the loaded `Config`, not the flags. Every source the user can set arrives through
+/// the merge, so this reads one value instead of three. That is the call-site contract of
+/// `SPEC-config-call-site`, and this merge kept it while adopting the notices of
+/// `D-a-notice-reaches-the-transcript`.
+fn build_config(config: &rho_config::Config) -> anyhow::Result<SessionConfig> {
     let mut notices = Vec::new();
-    let config = build_config_with_notices(cli, &mut notices)?;
+    let built = build_config_with_notices(config, &mut notices)?;
     for notice in notices {
         eprintln!("rho: {notice}");
     }
-    Ok(config)
+    Ok(built)
 }
 
 /// Build a `SessionConfig`, and collect every notice instead of printing it. State every
 /// choice. A notice is data here, so a frontend can draw it where the user is looking.
 /// See `D-a-notice-reaches-the-transcript`.
 fn build_config_with_notices(
-    cli: &Cli,
+    config: &rho_config::Config,
     notices: &mut Vec<String>,
 ) -> anyhow::Result<SessionConfig> {
     // A model comes from the flag, then the environment, then the provider's default.
@@ -584,9 +574,12 @@ fn git_branch() -> String {
 
 /// The `RHO_*` variables, as the config layer wants them.
 ///
-/// This is the one place the process environment is read for the interface. A test never
-/// reads the real environment, because `resolve_mouse` takes the list as data.
-#[cfg(feature = "tui")]
+/// This is the one place the process environment is read. A test never reads the real
+/// environment, because every caller takes the list as data.
+///
+/// It carried a `tui` gate, because only the interface read the environment. `load_config` reads
+/// it now, on every path, so the gate broke the minimal build. The gate command in `AGENTS.md`
+/// builds that profile and never tests it, which is why only a build caught this.
 fn rho_env_vars() -> Vec<(String, String)> {
     std::env::vars()
         .filter(|(name, _)| name.starts_with("RHO_"))
@@ -617,7 +610,14 @@ fn flag_layer(cli: &Cli) -> rho_config::ConfigLayer {
         sandbox: cli
             .sandbox
             .map(|arg| SandboxMode::from(arg).as_str().to_string()),
-        tui_mouse: cli.mouse,
+        // Two flags over one boolean, so an unset pair writes nothing and a file still
+        // decides. `--no-mouse` wins, per `D-the-wheel-needs-capture`, and layer 6 must not
+        // send a value the user never asked for, per `SPEC-config-call-site` rule 6.
+        tui_mouse: match (cli.mouse, cli.no_mouse) {
+            (_, true) => Some(false),
+            (true, false) => Some(true),
+            (false, false) => None,
+        },
         tui_reasoning: cli.reasoning.clone(),
         reasoning_effort: cli.reasoning_effort.clone(),
         no_skills: cli.no_skills,
@@ -743,28 +743,17 @@ fn load_config_from(
             rho_config::ProjectTrust::Untrusted
         });
     Ok(rho_config::Config::load(&sources)?)
-/// Whether the TUI captures the mouse. The flag wins, then the environment, then off.
+}
+
+/// Whether the TUI captures the mouse.
 ///
-/// `--mouse` and `RHO_TUI_MOUSE` both reach this. The config file does not, because no
-/// binary reads a config file yet. See decision D-the-layered-config-has-no-caller.
+/// The merge decides it now: the flag, then the variable, then the file, then off. The old
+/// note here said a config file never reached this, which stopped being true when the call
+/// site landed. See `SPEC-config-call-site`.
 /// Whether the TUI captures the mouse. `--no-mouse` wins, then `--mouse`, then the
 /// environment, then the default, which is on.
 ///
 /// The default flipped with `D-the-wheel-needs-capture`. rho owns the alternate screen, and
-/// that screen has no scrollback, so with capture off the wheel does nothing at all.
-#[cfg(feature = "tui")]
-fn resolve_mouse(flag: bool, no_flag: bool, env: &[(String, String)]) -> bool {
-    if no_flag {
-        return false;
-    }
-    if flag {
-        return true;
-    }
-    rho_config::ConfigLayer::from_env(env)
-        .tui_mouse
-        .unwrap_or(true)
-}
-
 /// Run the interactive TUI. Return a non-zero code on failure.
 #[cfg(feature = "tui")]
 async fn run_interactive(cli: &Cli) -> i32 {
@@ -773,11 +762,10 @@ async fn run_interactive(cli: &Cli) -> i32 {
         Ok(loaded) => loaded,
         Err(error) => return fail(error),
     };
-    let config = match build_config(&loaded) {
     // Collect the notices instead of printing them. A print here lands on the primary
     // screen, and rho opens the alternate screen over it a few milliseconds later.
     let mut notices: Vec<String> = Vec::new();
-    let config = match build_config_with_notices(cli, &mut notices) {
+    let config = match build_config_with_notices(&loaded, &mut notices) {
         Ok(config) => config,
         Err(error) => return fail(error),
     };
@@ -785,12 +773,11 @@ async fn run_interactive(cli: &Cli) -> i32 {
     let provider_name = provider::resolve_provider_name(loaded.provider.as_deref(), None)
         .unwrap_or_else(|_| String::new());
     // The interface reads the merged configuration, so a config file reaches both switches.
+    // The other branch read the flag and the variable here, through `resolve_mouse`. The
+    // merge keeps the merged read, because a file must reach the interface as well. See
+    // `SPEC-config-call-site`.
     let mouse = loaded.tui_mouse;
     let reasoning = loaded.reasoning;
-    let provider_name = provider::resolve_provider_name(cli.provider.as_deref(), None)
-        .unwrap_or_else(|_| String::new());
-    // The interface reads one switch. The flag wins, then the environment, then off.
-    let mouse = resolve_mouse(cli.mouse, cli.no_mouse, &rho_env_vars());
     // Hold `_tasks` and `_extras` for the whole run. Dropping the task registry kills
     // every background task, and dropping the MCP pool stops every server, so an early
     // drop would end work the model is still waiting on.
@@ -812,7 +799,6 @@ async fn run_interactive(cli: &Cli) -> i32 {
     let mut app = rho_tui::App::new(session, model)
         .with_mouse(mouse)
         .with_reasoning(reasoning)
-        .with_context(cwd, branch, provider_name);
         .with_context(cwd, branch, provider_name)
         .with_notices(notices);
     match app.run().await {
@@ -886,7 +872,7 @@ mod tests {
     }
 
     /// Load with an explicit `RHO_*` list and an explicit home lookup.
-    fn try_load(
+    pub(super) fn try_load(
         cli: &Cli,
         env: &[(&str, &str)],
         home: &[(&str, &str)],
@@ -1051,7 +1037,8 @@ mod tests {
         // See `D-a-notice-reaches-the-transcript`.
         let cli = Cli::try_parse_from(["rho", "--provider", "openrouter"]).unwrap();
         let mut notices = Vec::new();
-        let config = build_config_with_notices(&cli, &mut notices).expect("a default model");
+        let config =
+            build_config_with_notices(&loaded(&cli), &mut notices).expect("a default model");
         assert_eq!(config.model, "anthropic/claude-haiku-4.5");
         assert!(
             notices.iter().any(|line| line.contains("no model given")),
@@ -1064,7 +1051,7 @@ mod tests {
         // rho must not narrate a choice the user already made.
         let cli = Cli::try_parse_from(["rho", "--model", "openai/gpt-4o"]).unwrap();
         let mut notices = Vec::new();
-        build_config_with_notices(&cli, &mut notices).expect("an explicit model");
+        build_config_with_notices(&loaded(&cli), &mut notices).expect("an explicit model");
         assert!(notices.is_empty(), "no notice was needed: {notices:?}");
     }
 
@@ -1309,9 +1296,13 @@ mod tests {
     // ---- because a reader now takes `&Config` and never a `ConfigLayer`.
 
     #[test]
-    fn the_mouse_is_off_by_default() {
+    fn the_mouse_is_on_by_default_through_the_merge() {
+        // This test asserted the opposite, under `D-native-selection-is-the-default`, when the
+        // interface drew an inline band and the terminal kept the scrollback. The merge with the
+        // alternate-screen renderer reversed the default: that screen has no scrollback, so with
+        // capture off the wheel does nothing. See `D-the-wheel-needs-capture`.
         let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
-        assert!(!loaded(&cli).tui_mouse);
+        assert!(loaded(&cli).tui_mouse);
     }
 
     #[test]
@@ -1328,11 +1319,13 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_env_value_leaves_the_mouse_off() {
-        // The layer omits an unaccepted boolean, so the resolution fails closed.
+    fn a_bad_env_value_leaves_the_mouse_at_its_default() {
+        // The layer omits an unaccepted boolean, so the value falls through to the default
+        // rather than to `false`. The default is now on, per `D-the-wheel-needs-capture`, and
+        // this test moved with it rather than pinning the old answer.
         let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
         let config = try_load(&cli, &[("RHO_TUI_MOUSE", "yes please")], &[]).unwrap();
-        assert!(!config.tui_mouse);
+        assert!(config.tui_mouse);
     }
 
     #[test]
@@ -1970,57 +1963,57 @@ mod headless_loop_tests {
     }
 }
 
-// `resolve_mouse` only exists in a build with the interface, so its tests follow it.
-// Without this the minimal test build fails to compile, and the gate does not catch that,
-// because the gate builds the minimal profile and never tests it.
+// The mouse rules, asserted through the merge rather than through a helper.
+//
+// The other branch read the flag and the variable in `resolve_mouse`. This branch loads a
+// config once and passes it, so a file reaches the interface as well. The rules are the same,
+// and they are checked where they now live: `flag_layer` writes layer 6, and `Config` merges it
+// over the variable, the file, and the default. See `D-the-wheel-needs-capture` and
+// `SPEC-config-call-site`.
 #[cfg(all(test, feature = "tui"))]
 mod mouse_tests {
-    use super::resolve_mouse;
+    use super::*;
+    use clap::Parser;
 
-    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect()
+    fn merged(args: &[&str], env: &[(&str, &str)]) -> bool {
+        let cli = Cli::try_parse_from(args).expect("the arguments parse");
+        tests::try_load(&cli, env, &[])
+            .expect("the config loads")
+            .tui_mouse
     }
 
     #[test]
     fn the_mouse_is_on_by_default() {
-        // The default flipped with `D-the-wheel-needs-capture`. The alternate screen has no
-        // scrollback, so with capture off the wheel does nothing at all.
-        assert!(resolve_mouse(false, false, &[]));
+        // The alternate screen has no scrollback, so with capture off the wheel does nothing.
+        assert!(merged(&["rho"], &[]));
     }
 
     #[test]
     fn the_no_mouse_flag_gives_the_mouse_back() {
-        assert!(!resolve_mouse(false, true, &[]));
+        assert!(!merged(&["rho", "--no-mouse"], &[]));
     }
 
     #[test]
     fn the_no_mouse_flag_wins_over_the_env_var() {
-        assert!(!resolve_mouse(
-            false,
-            true,
-            &env(&[("RHO_TUI_MOUSE", "true")])
+        assert!(!merged(
+            &["rho", "--no-mouse"],
+            &[("RHO_TUI_MOUSE", "true")]
         ));
     }
 
     #[test]
     fn the_env_var_can_turn_the_mouse_off() {
-        assert!(!resolve_mouse(
-            false,
-            false,
-            &env(&[("RHO_TUI_MOUSE", "false")])
-        ));
+        assert!(!merged(&["rho"], &[("RHO_TUI_MOUSE", "false")]));
     }
 
     #[test]
-    fn a_bad_env_value_keeps_the_default() {
-        // The layer omits an unaccepted boolean, so the resolution keeps the default.
-        assert!(resolve_mouse(
-            false,
-            false,
-            &env(&[("RHO_TUI_MOUSE", "yes please")])
-        ));
+    fn an_unset_flag_writes_nothing_so_a_file_still_decides() {
+        // Rule 6 of `SPEC-config-call-site`: a flag the user did not pass must not send a value.
+        let cli = Cli::try_parse_from(["rho"]).expect("the arguments parse");
+        assert_eq!(flag_layer(&cli).tui_mouse, None);
+        let with_flag = Cli::try_parse_from(["rho", "--mouse"]).expect("the arguments parse");
+        assert_eq!(flag_layer(&with_flag).tui_mouse, Some(true));
+        let with_off = Cli::try_parse_from(["rho", "--no-mouse"]).expect("the arguments parse");
+        assert_eq!(flag_layer(&with_off).tui_mouse, Some(false));
     }
 }

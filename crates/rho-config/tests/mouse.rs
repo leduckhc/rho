@@ -17,11 +17,15 @@ fn load(file: &str, env: &[(&str, &str)]) -> Config {
 }
 
 #[test]
-fn the_config_key_defaults_to_false() {
+fn the_config_key_defaults_to_true() {
+    // It asserted `false` under `D-native-selection-is-the-default`, when the interface drew an
+    // inline band and the terminal kept the scrollback. The merge with the alternate-screen
+    // renderer reversed it: that screen has no scrollback, so with capture off the wheel does
+    // nothing at all. See `D-the-wheel-needs-capture`.
     let config = load("", &[]);
     assert!(
-        !config.tui_mouse,
-        "capture stays off unless the user asks for it"
+        config.tui_mouse,
+        "capture is on unless the user turns it off"
     );
 }
 

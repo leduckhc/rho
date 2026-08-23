@@ -6,3 +6,15 @@
 #
 # One name per line: <name> <commit> <reason>
 a_bad_flag_value_falls_back_to_summary 2f807c4 asserted a silent fallback, which the owner's ruling reversed
+a_long_reasoning_row_draws_only_its_tail a33c958 the renderer it guarded was replaced by main's scrolling transcript, where a tail would lose a reachable line
+a_long_answer_row_draws_only_its_tail a33c958 same reason: the fixed band it assumed is gone
+the_budget_is_a_multiple_of_four a33c958 pinned the arithmetic of tail_for_band, which the merge removed
+a_three_byte_character_is_never_cut a33c958 pinned the boundary walk inside tail_for_band, which the merge removed
+a_short_text_is_returned_whole a33c958 tail_for_band test, removed with the function
+a_text_of_exactly_the_budget_is_returned_whole a33c958 tail_for_band test, removed with the function
+one_byte_over_the_budget_takes_the_tail a33c958 tail_for_band test, removed with the function
+a_zero_width_never_divides_by_nothing a33c958 tail_for_band test, removed with the function
+the_mouse_is_off_by_default a33c958 renamed to the_mouse_is_on_by_default_through_the_merge; the alternate-screen renderer reversed the default
+a_bad_env_value_leaves_the_mouse_off a33c958 renamed to a_bad_env_value_leaves_the_mouse_at_its_default, for the same reason
+resolve_mouse a33c958 the helper is gone; the merged config decides, and mouse_tests asserts the same rules through it
+the_config_key_defaults_to_false a33c958 renamed to the_config_key_defaults_to_true; the alternate-screen renderer reversed the default

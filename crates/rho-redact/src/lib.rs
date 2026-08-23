@@ -594,8 +594,8 @@ mod trojan_source_tests {
             '\u{180e}',  // mongolian vowel separator
             '\u{e0001}', // a language tag character
             '\u{e0041}', // a tag character
-            '\u{00ad}', // soft hyphen
-            '\u{3164}', // hangul filler
+            '\u{00ad}',  // soft hyphen
+            '\u{3164}',  // hangul filler
         ] {
             let out = sanitize_line(&format!("safe{ch}text"));
             assert!(!out.contains(ch), "{ch:?} must not survive: {out:?}");

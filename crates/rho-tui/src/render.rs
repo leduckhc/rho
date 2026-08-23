@@ -27,8 +27,8 @@ use crate::state::{
     filter_history,
 };
 use crate::styled::{StyledLine, one};
-use rho_core::ReasoningDisplay;
 use crate::theme::{Role, role_16, role_256, role_bg_256};
+use rho_core::ReasoningDisplay;
 
 /// The brand mark. The `ρ` renders in the accent role, so it is the first accent
 /// on screen.
@@ -456,7 +456,6 @@ pub fn banner_line(state: &TuiState, width: usize) -> String {
 // ---- The transcript rows. -------------------------------------------------
 
 /// Render one transcript row into its lines.
-
 fn push_row(
     out: &mut Vec<StyledLine>,
     state: &TuiState,
@@ -544,7 +543,7 @@ fn push_row(
                 Some(span) => format!("{GLYPH_THINKING} thought for {span}"),
                 None => format!("{GLYPH_THINKING} thinking"),
             };
-            let mut draw_text = |out: &mut Vec<StyledLine>| {
+            let draw_text = |out: &mut Vec<StyledLine>| {
                 // The whole text is wrapped, not a tail of it.
                 //
                 // This branch sliced the tail, because its renderer drew a fixed band of
