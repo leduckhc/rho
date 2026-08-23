@@ -40,7 +40,7 @@ An unknown key is an error, not a warning.
 |---|---|---|---|
 | `provider` | string | unset | `RHO_PROVIDER` |
 | `model` | string | unset | `RHO_MODEL` |
-| `session-root` | path | unset | `RHO_SESSION_ROOT` |
+| `session-root` | path | unset, so rho uses the current directory | `RHO_SESSION_ROOT` |
 | `session-file` | path | unset | `RHO_SESSION_FILE` |
 | `ephemeral` | bool | `false` | `RHO_EPHEMERAL` |
 | `sandbox` | string | `off` | `RHO_SANDBOX` |
@@ -129,7 +129,7 @@ Pass `--trust-project` to restore those keys.
 
 A refused credential does not stop the run. rho marks it, and the error would appear only
 when something resolves it. Nothing resolves a credential today, so the run continues and the
-command never runs. I confirmed both halves with a live probe.
+command never runs. A live probe confirmed both halves.
 
 ## Profiles
 
@@ -217,7 +217,7 @@ reasoning-effort = "medium"
 # Path to an MCP server file. No ~ expansion, so write it out in full.
 mcp-config = "/home/you/.rho/mcp.json"
 
-# [credentials] is partly built. rho resolves it, and no provider reads it.
+# [credentials] is partly built. Nothing resolves an entry, so this block does nothing.
 [credentials]
 # Literal value (avoid in shared files).
 my-key = "sk-live-abc123"
@@ -254,6 +254,7 @@ approval = "read-only"
 
 | Key | Symptom |
 |---|---|
+| `[credentials]` table | Parses, and nothing resolves an entry. No provider asks for one. Use an environment variable. |
 | `[subagents]` table | Parses silently, no effect. Use CLI flags. |
 | `session-file` | Parses silently, no effect. |
 | `ephemeral` | Parses silently, no effect. |

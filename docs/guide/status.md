@@ -48,6 +48,7 @@ This page describes rho as of 2026-08-23.
 | A `todo` tool — the model keeps no task list, so a long job has no checklist you can read. |
 | An `ask_user` tool — the model cannot ask you a question mid-turn. It guesses instead, or it stops. |
 | A token count or a cost display — the interface shows neither, so you cannot see what a turn spent. |
+| A way to stop the sweep animation — the code holds a `--no-motion` flag and three other switches. Nothing sets any of them, and the renderer never checks, so the sweep always runs. |
 | Context compaction — rho has no compaction logic. A turn that writes too much output stops with a `max tokens` reason. An input that outgrows the window returns a provider error. Either way there is no recovery path. |
 | A model registry — rho passes whatever model id you give it straight to the provider. An invalid id returns a provider error. |
 | A subagent spawning its own subagent — the CLI sets the depth limit to 1 and offers no flag to raise it. |

@@ -136,6 +136,12 @@ Reasons after `done`: `end turn`, `max tokens`, `max turns`, `refusal`, `cancele
 > **Not built yet.** rho draws no token count and no cost. The interface keeps a token
 > field and never puts it on screen. So you cannot see what a turn spent.
 
+> **Not built yet.** You cannot turn the sweep animation off. The code holds four ways to
+> stop it, including a `--no-motion` flag and an `RHO_REDUCE_MOTION` variable, and nothing
+> sets any of them. The renderer never asks whether motion is allowed, so the sweep always
+> runs. If the movement bothers you, the only escape today is `rho run`, which draws no
+> footer at all.
+
 ## Startup notices
 
 Notices appear as rows with a `!` glyph on startup.

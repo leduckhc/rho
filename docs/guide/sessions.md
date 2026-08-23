@@ -69,8 +69,13 @@ The transcript directory is not removed by rho when the session ends. It is unde
 
 > **Not built yet.** The `ephemeral` config key parses without error, and nothing reads it. Setting it has no effect today.
 
-Because no session file exists, there is no resume command and no way to continue a past conversation.
-The library holds a resume rule: it refuses a resume that would widen the approval or sandbox mode. For example, a session saved under `ask` approval cannot resume under `allow-all`. The flag `--allow-widen` would bypass that check. None of this runs today, because the CLI does not write a session file in the first place.
+Because no session file exists, there is no resume command and no way to continue a past
+conversation.
+
+The library holds a resume rule. It refuses a resume that would widen the approval or the
+sandbox mode. A session saved under `read-only` cannot come back as allow-all. The refusal
+tells the caller to pass `--allow-widen`, and that flag does not exist on the command line.
+Nothing here reaches you today, because the command writes no session file to resume.
 
 See [status.md](status.md) for the full list of what is not yet wired.
 
