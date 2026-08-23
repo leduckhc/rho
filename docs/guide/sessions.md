@@ -45,13 +45,23 @@ See [tools.md](tools.md) for `read_tool_result`.
 ## Subagent transcripts
 
 rho writes one JSONL transcript file for every subagent it spawns.
-The path on Unix is:
+The path sits under the system temporary directory:
 
 ```
-/tmp/rho-transcripts-<uid>/<pid>/tasks/<task-id>.jsonl
+<temp>/rho-transcripts-<uid>/<pid>/tasks/<task-id>.jsonl
 ```
 
-The directory and file are private to the owning user (`0o700` / `0o600`).
+On Linux `<temp>` is usually `/tmp`. On macOS it is your private `$TMPDIR`, which looks like
+`/var/folders/lx/.../T`. Run `echo $TMPDIR` to see yours.
+
+A real run produced this file, with these permissions:
+
+```
+/var/folders/lx/.../T/rho-transcripts-501/87155/tasks/agent-1.jsonl
+-rw-------  531 bytes, 4 lines
+```
+
+The directory and file are private to the owning user (`0o700` and `0o600`).
 The file streams one event per line as the subagent runs.
 You can read it with `tail -f` while rho is running.
 Each line carries a timestamp in epoch milliseconds and the agent name.

@@ -80,7 +80,7 @@ A build without it prints: `this build has no terminal UI. Use "rho run <prompt>
 |---|---|
 | `--trust-project` | Load skills from the repository you are editing. Off by default. A skill can instruct the model and carry scripts. |
 | `--skill <PATH>` | Load a skill from this path. Repeatable. Works even with `--no-skills`. |
-| `--no-skills` | Stop the skill directory search. An explicit `--skill` still loads. |
+| `--no-skills` | Stop the skill directory search. An explicit `--skill` still loads. It also stops subagent discovery, in silence. See below. |
 | `--mcp-config <PATH>` | Read MCP servers from this file instead of `~/.rho/mcp.json`. |
 
 ## Subagents
@@ -114,3 +114,9 @@ When the queue hits `--max-queued-per-parent`, rho refuses with an error that na
 
 > **Not built yet.** rho records no session file today. There is no `--resume` flag
 > and no session list. Each run starts fresh. Nothing persists between sessions.
+
+> **Partly built.** `--no-skills` also turns off subagent discovery, and it says nothing.
+> rho then registers no `spawn_agent`, so the model cannot delegate, and your agent
+> definitions are ignored. A live run proved it: with `--no-skills` the tool list stopped at
+> `read_tool_result`, and without it five subagent tools appeared. There is no flag that
+> keeps subagents while dropping skills.

@@ -138,6 +138,10 @@ rho --no-skills
 This stops the directory search.
 An explicit `--skill` still loads.
 
+> **Partly built.** `--no-skills` also stops subagent discovery, and it warns you about
+> neither. rho then registers no `spawn_agent` and ignores every agent definition. If you
+> want subagents without skills, no flag does that today. See [subagents](subagents.md).
+
 ## Other files beside SKILL.md
 
 A skill directory may hold scripts, config files, or any other asset.

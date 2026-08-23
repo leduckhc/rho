@@ -210,6 +210,10 @@ Rename the file to avoid a silent override.
 > `max_depth` is fixed at 1 in this version.
 > A definition that sets it has no effect.
 
+> **Partly built.** `--no-skills` also turns subagents off, and it says so nowhere. rho then
+> registers no `spawn_agent` and ignores every definition you wrote. Drop the flag to get
+> subagents back. A live run proved both halves.
+
 ## See also
 
 - [Tools](tools.md) — the full list of tools a parent or child may hold.
