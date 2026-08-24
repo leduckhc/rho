@@ -12,6 +12,8 @@
 //! that already exists is overwritten, so no per-cell or per-span value is
 //! allocated. See `docs/benchmarks.md`.
 
+use std::borrow::Cow;
+
 use ratatui::Frame;
 use ratatui::style::{Color, Modifier, Style};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -835,6 +837,14 @@ fn panel_demand(state: &TuiState) -> (usize, usize) {
             // The matches, or one row saying there were none, plus the query row.
             (matches.clamp(1, HISTORY_MATCH_ROWS) + 1, 0)
         }
+        // The guide asks for the current page, title included, and yields every row on a
+        // short screen. A page is capped, so the loss stays small. See SPEC-tui-guide
+        // rule 10.
+        Panel::Guide(guide) => {
+            let pages = crate::guide_pages(&state.model, &state.provider);
+            let rows = pages.get(guide.page).map_or(0, |page| page.rows.len() + 1);
+            (rows, 0)
+        }
     }
 }
 
@@ -851,6 +861,7 @@ fn panel_lines(state: &TuiState, width: usize, budget: usize) -> Vec<StyledLine>
         Panel::SlashList(list) => slash_panel(list, width),
         Panel::Help => help_panel(width),
         Panel::HistorySearch(search) => history_search_panel(search, &state.history, width),
+        Panel::Guide(guide) => guide_panel(state, guide.page, width),
     };
     // A panel never overruns its grant. This is the backstop that keeps the arithmetic
     // honest when the screen is short.
@@ -946,11 +957,20 @@ fn slash_panel(list: &SlashList, width: usize) -> Vec<StyledLine> {
         } else {
             "   ".to_string()
         };
-        let body = format!("{prefix}{:<12}{}", command.name, command.summary);
+        // An unbuilt command says so, so a user does not spend a keystroke to find out.
+        // The help screen already does this for an unwired key. See D-a-panel-nobody-can-open.
+        let note = if command.built {
+            ""
+        } else {
+            " · not built yet"
+        };
+        let body = format!("{prefix}{:<12}{}{note}", command.name, command.summary);
         let style = if index == list.selected {
             text_style().add_modifier(Modifier::REVERSED)
-        } else {
+        } else if command.built {
             text_style()
+        } else {
+            style_for(Role::Muted)
         };
         lines.push(one((pad(&body, width), style)));
     }
@@ -986,6 +1006,26 @@ fn help_panel(width: usize) -> Vec<StyledLine> {
             ))
         })
         .collect()
+}
+
+/// The guide panel: the page title, then its rows.
+///
+/// The title leads, in the heading role, so a reader sees where they are. Every row is
+/// padded to the width and cut on a character boundary by `pad`, so a narrow terminal
+/// never splits a character. See `SPEC-tui-guide` section 2.
+fn guide_panel(state: &TuiState, page: usize, width: usize) -> Vec<StyledLine> {
+    let pages = crate::guide_pages(&state.model, &state.provider);
+    let Some(current) = pages.get(page) else {
+        return Vec::new();
+    };
+    let mut lines = vec![one((
+        pad(&format!("  {}", current.title), width),
+        style_for(Role::MdHeading),
+    ))];
+    for row in &current.rows {
+        lines.push(one((pad(row, width), text_style())));
+    }
+    lines
 }
 
 // ---- The composer. --------------------------------------------------------
@@ -1147,29 +1187,34 @@ fn restyle(frame: &mut Frame<'_>, y: usize, start: usize, end: usize, style: Sty
 /// reduce to `? help`, as the design's 40-column tier requires.
 const FULL_HINTS_MIN_WIDTH: usize = 80;
 
-fn footer_hints(state: &TuiState, width: usize) -> &'static str {
+fn footer_hints(state: &TuiState, width: usize) -> Cow<'static, str> {
     // The armed exit gate outranks every other hint. `state.status` held this message
     // for a whole sprint and no code drew it, so a user reported that Ctrl-C does not
     // quit, when it quits 11 ms after the second press.
     if state.exit_armed {
         if width < FULL_HINTS_MIN_WIDTH {
-            return "ctrl-c again quits";
+            return Cow::Borrowed("ctrl-c again quits");
         }
-        return "press ctrl-c again to quit · any key to stay";
+        return Cow::Borrowed("press ctrl-c again to quit · any key to stay");
     }
     if width < FULL_HINTS_MIN_WIDTH {
-        return "? help";
+        return Cow::Borrowed("? help");
     }
     match &state.panel {
-        Panel::SlashList(_) => "↑ ↓ choose · enter run · esc close",
-        Panel::Help => "esc close · / lists commands",
-        Panel::HistorySearch(_) => "type to search · enter accept · esc close",
-        Panel::Approval(_) => "ctrl-c cancel · / commands · ? help",
+        Panel::SlashList(_) => Cow::Borrowed("↑ ↓ choose · enter run · esc close"),
+        Panel::Help => Cow::Borrowed("esc close · / lists commands"),
+        Panel::HistorySearch(_) => Cow::Borrowed("type to search · enter accept · esc close"),
+        Panel::Approval(_) => Cow::Borrowed("ctrl-c cancel · / commands · ? help"),
+        // The hint carries the page number, so it cannot be a literal.
+        Panel::Guide(guide) => {
+            let pages = crate::guide_pages(&state.model, &state.provider).len();
+            Cow::Owned(crate::guide_footer_hint(guide.page, pages))
+        }
         Panel::None => {
             if state.activity == ActivityState::Running {
-                "ctrl-c cancel · / commands · ? help"
+                Cow::Borrowed("ctrl-c cancel · / commands · ? help")
             } else {
-                "enter send · / commands · ? help"
+                Cow::Borrowed("enter send · / commands · ? help")
             }
         }
     }
@@ -1642,4 +1687,36 @@ fn style_for(role: Role) -> Style {
         style = style.add_modifier(Modifier::ITALIC);
     }
     style
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bindings::slash_commands;
+
+    /// A starter hint may not name a command that answers "not built yet".
+    ///
+    /// The first frame advertised `/guide  take the two minute tour` while `/guide` was
+    /// unbuilt, so the first screen a new user saw invited them to run a command that
+    /// failed. A pseudo-terminal capture found it; see
+    /// `docs/verification/tui-slash-commands.md`. This guard is the general rule, because
+    /// the next hint could repeat the mistake.
+    #[test]
+    fn a_starter_hint_names_a_built_command() {
+        for (label, _) in STARTERS {
+            // `/` alone is the key that opens the list, not a command name. A command
+            // carries a name after the slash.
+            if !label.starts_with('/') || label.len() < 2 {
+                continue;
+            }
+            let command = slash_commands()
+                .iter()
+                .find(|candidate| candidate.name == label)
+                .unwrap_or_else(|| panic!("the starter hint {label} names no known command"));
+            assert!(
+                command.built,
+                "the first frame may not advertise {label}, which is not built"
+            );
+        }
+    }
 }

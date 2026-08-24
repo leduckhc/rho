@@ -65,13 +65,40 @@ try:
     pump(2.5)
     show("idle frame")
 
-    for command in ("/model", "/sessions", "/guide"):
+    os.write(fd, b"/")
+    pump(1.2)
+    show("the command list")
+    os.write(fd, b"\x1b")
+    pump(0.8)
+
+    for command in ("/model", "/sessions"):
         os.write(fd, command.encode() + b"\r")
         pump(1.5)
         print(f"--- after {command}")
         for line in rows():
             if "built" in line.lower() or command in line:
                 print("   |" + line)
+
+    # Walk the guide, page by page, the way a reader does.
+    os.write(fd, b"/guide\r")
+    pump(1.5)
+    show("guide page 1")
+    os.write(fd, b" ")
+    pump(1.0)
+    show("guide page 2 (space)")
+    os.write(fd, b"\x1b[C")
+    pump(1.0)
+    show("guide page 3 (right)")
+    os.write(fd, b"\x1b[C")
+    pump(1.0)
+    print("--- a next press on the last page: still page 3 below")
+    show("guide last page holds")
+    os.write(fd, b"\x1b[D")
+    pump(1.0)
+    show("guide back to page 2 (left)")
+    os.write(fd, b"\x1b")
+    pump(1.0)
+    show("after esc")
 
     # Ctrl+O claims to expand a tool row. Nothing should change.
     before = rows()

@@ -402,10 +402,12 @@ fn a_click_runs_the_command_on_that_row() {
     let mut state = TuiState::default();
     state.handle_key(key(KeyCode::Char('/')));
     let commands = rho_tui::filter_slash_commands("/");
+    // A row below the first, and still unbuilt, so the click reports it. `/guide` used to
+    // serve here and now it opens the tour, which reports nothing. See SPEC-tui-guide.
     let index = commands
         .iter()
-        .position(|command| command.name == "/guide")
-        .expect("/guide is in the list");
+        .position(|command| command.name == "/sessions")
+        .expect("/sessions is in the list");
     assert!(index > 0, "this test needs a row below the first one");
 
     state.click_slash_row(index);
@@ -418,7 +420,7 @@ fn a_click_runs_the_command_on_that_row() {
         })
         .collect();
     assert!(
-        messages.iter().any(|message| message.contains("/guide")),
+        messages.iter().any(|message| message.contains("/sessions")),
         "the click must run the clicked row: {messages:?}"
     );
     assert!(

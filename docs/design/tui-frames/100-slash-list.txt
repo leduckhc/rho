@@ -14,8 +14,8 @@
 ❯ add a duration to every tool row, and keep the text beside it still                               
                                                                                                     
 Done. Every tool row now carries a duration, and 214 tests pass.                                    
- ❯ /model      pick the model for this session                                                      
-   /sessions   list, resume, or branch a session                                                    
+ ❯ /model      pick the model for this session · not built yet                                      
+   /sessions   list, resume, or branch a session · not built yet                                    
    /guide      the two minute tour                                                                  
    /help       every key and every command                                                          
    /quit       leave rho                                                                            

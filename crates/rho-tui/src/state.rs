@@ -110,6 +110,8 @@ pub enum Panel {
     Help,
     /// The reverse history search, opened by `ctrl-r`.
     HistorySearch(HistorySearch),
+    /// The paged tour, opened by `/guide`.
+    Guide(crate::Guide),
 }
 
 /// The approval prompt content. The command is verbatim, so the user sees exactly
@@ -931,6 +933,7 @@ impl TuiState {
             Panel::HistorySearch(search) => {
                 return self.handle_search_key(key.code, search.clone());
             }
+            Panel::Guide(_) => return self.handle_guide_key(key.code),
             // An approval prompt answers its own keys, which stage U6 wires.
             Panel::Approval(_) | Panel::None => {}
         }
@@ -1023,7 +1026,7 @@ impl TuiState {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         // A panel owns the keyboard. A chord while the search is open still edits the
         // query through its own handler, so a stray chord never leaks into the draft.
-        if matches!(self.panel, Panel::HistorySearch(_)) {
+        if matches!(self.panel, Panel::HistorySearch(_) | Panel::Guide(_)) {
             return KeyAction::None;
         }
         match key.code {
@@ -1192,6 +1195,41 @@ impl TuiState {
         }
     }
 
+    /// Route a key while the guide is open. The panel owns the keyboard here.
+    ///
+    /// A next press on the last page holds, and a previous press on the first page holds.
+    /// Neither closes the panel: overloading a forward key with "destroy this panel" hides
+    /// a state change behind a key that meant "more". See `D-the-guide-is-a-paged-panel`.
+    fn handle_guide_key(&mut self, code: KeyCode) -> KeyAction {
+        let Panel::Guide(guide) = self.panel else {
+            return KeyAction::None;
+        };
+        let last = crate::guide_pages(&self.model, &self.provider)
+            .len()
+            .saturating_sub(1);
+        match code {
+            KeyCode::Right | KeyCode::Char(' ') => {
+                self.panel = Panel::Guide(crate::Guide {
+                    page: guide.page.saturating_add(1).min(last),
+                });
+            }
+            KeyCode::Left => {
+                self.panel = Panel::Guide(crate::Guide {
+                    page: guide.page.saturating_sub(1),
+                });
+            }
+            KeyCode::Esc => self.panel = Panel::None,
+            // Every other key means nothing here, and it reaches nothing else.
+            _ => {}
+        }
+        KeyAction::None
+    }
+
+    /// Open the guide at its first page. A second run is not a resume.
+    pub fn open_guide(&mut self) {
+        self.panel = Panel::Guide(crate::Guide::default());
+    }
+
     /// Run the selected row of the slash list. A command never reaches the model, and
     /// a command that does nothing yet says so, because silence reads as a defect.
     fn run_selected_command(&mut self, list: &SlashList) -> KeyAction {
@@ -1219,6 +1257,10 @@ impl TuiState {
             "/quit" => KeyAction::Exit,
             "/help" => {
                 self.panel = Panel::Help;
+                KeyAction::None
+            }
+            "/guide" => {
+                self.open_guide();
                 KeyAction::None
             }
             other => {

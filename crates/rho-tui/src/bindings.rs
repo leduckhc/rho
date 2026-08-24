@@ -177,6 +177,9 @@ pub struct SlashCommand {
     pub name: &'static str,
     /// The one-line summary shown beside it in the list.
     pub summary: &'static str,
+    /// False means the command answers "not built yet". The list marks it, and no
+    /// starter hint may name it. `Binding` carries the same flag for a key.
+    pub built: bool,
 }
 
 /// The whole slash-command list, in display order.
@@ -185,22 +188,27 @@ pub fn slash_commands() -> &'static [SlashCommand] {
         SlashCommand {
             name: "/model",
             summary: "pick the model for this session",
+            built: false,
         },
         SlashCommand {
             name: "/sessions",
             summary: "list, resume, or branch a session",
+            built: false,
         },
         SlashCommand {
             name: "/guide",
             summary: "the two minute tour",
+            built: true,
         },
         SlashCommand {
             name: "/help",
             summary: "every key and every command",
+            built: true,
         },
         SlashCommand {
             name: "/quit",
             summary: "leave rho",
+            built: true,
         },
     ];
     COMMANDS

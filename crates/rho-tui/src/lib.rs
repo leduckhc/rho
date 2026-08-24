@@ -10,6 +10,7 @@ mod bindings;
 mod concise;
 mod duration;
 mod editor;
+mod guide;
 mod markdown;
 mod motion;
 mod paste;
@@ -52,6 +53,7 @@ pub use bindings::{
 pub use concise::{
     CONCISE_MODE_DEFAULT, RowFold, fold_caret, initial_tool_fold, toggle_fold, tool_row_lines,
 };
+pub use guide::{Guide, GuidePage, MAX_GUIDE_PAGE_ROWS, guide_footer_hint, guide_pages};
 pub use motion::{
     MotionCell, MotionInputs, SWEEP_PERIOD_TICKS, motion_cell, motion_enabled, sweep_frame,
     sweep_weight,

@@ -23,7 +23,8 @@ This page describes rho as of 2026-08-23.
 | Background tasks the agent can tail or cancel | [tools](tools.md) |
 | OS sandbox for bash (`--sandbox confined` or `strict`) | [tools](tools.md) |
 | Skills loaded from `SKILL.md` files | [skills](skills.md) |
-| `/help` and `/quit` slash commands | [terminal interface](terminal.md) |
+| `/help`, `/quit`, and `/guide` slash commands | [terminal interface](terminal.md) |
+| The two minute tour, three pages, keys generated from the binding table | [terminal interface](terminal.md) |
 | Slash-command list (`/` opens it, typing filters it) | [terminal interface](terminal.md) |
 | 1464 tests passing in the workspace | — |
 
@@ -46,8 +47,7 @@ This page describes rho as of 2026-08-23.
 
 | If you try it today |
 |---|
-| `/model`, `/sessions`, `/guide` — each is in the command list and answers `✗ error · <command> is not built yet.` |
-| The first frame advertises `/guide` as one of four hints. A new user is invited to run a command that fails. |
+| `/model` and `/sessions` — each answers `✗ error · <command> is not built yet.` The list marks both, so you see it before you press Enter. |
 | Ctrl+O is shown in the help screen. It is labelled as not built and does nothing. |
 | A `todo` tool — the model keeps no task list, so a long job has no checklist you can read. |
 | An `ask_user` tool — the model cannot ask you a question mid-turn. It guesses instead, or it stops. |

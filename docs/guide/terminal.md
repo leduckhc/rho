@@ -23,9 +23,7 @@ and four hints:
                           /guide  take the two minute tour
 ```
 
-> **Not built yet.** The fourth hint is wrong. `/guide` does not exist, and typing it answers
-> `✗ error · /guide is not built yet. See F-slash-commands in docs/features.md.` Use `?` for
-> the keys and `/` for the command list. Both work.
+All four hints work. `/guide` opens the two minute tour, described below.
 
 ## Keys
 
@@ -105,10 +103,39 @@ Type `/` to open the command list. Tab completes. Enter runs the selected comman
 
 | Command | What it does |
 |---------|-------------|
+| `/guide` | Open the two minute tour |
 | `/help` | Open the help screen |
 | `/quit` | Leave rho |
 
-> **Not built yet.** `/model`, `/sessions`, and `/guide` appear in the list. Running any of them prints a row that reads, for example: `/model is not built yet. See F-slash-commands in docs/features.md.`
+The list marks a command that does not work, so you see it before you press Enter:
+
+```
+ ❯ /model      pick the model for this session · not built yet
+   /sessions   list, resume, or branch a session · not built yet
+   /guide      the two minute tour
+```
+
+> **Not built yet.** `/model` and `/sessions` appear in the list and run nothing. Each prints a row that reads, for example: `/model is not built yet. See F-slash-commands in docs/features.md.`
+
+## The two minute tour
+
+```
+/guide
+```
+
+Three pages. Page one says what rho is, and names the model and the provider this session
+uses. Page two says what rho may do to your machine, and the two switches that narrow it.
+Page three lists the keys that matter.
+
+| Key | What it does |
+|-----|-------------|
+| Right arrow, or Space | Next page |
+| Left arrow | Previous page |
+| Esc | Close the tour |
+
+The footer names the page, as in `page 2 of 3 · ← → pages · esc close`. A next press on the
+last page holds there, so the tour never closes under your hand. Every key the tour lists comes
+from the same table as the help screen, so the two cannot disagree.
 
 ## Reasoning display
 
@@ -172,8 +199,8 @@ Notices appear as rows with a `!` glyph on startup.
 
 ## What does not work yet
 
-> **Not built yet.** `/model`, `/sessions`, and `/guide` sit in the command list and run
-> nothing. Each prints `<command> is not built yet. See F-slash-commands in
-> docs/features.md.` Ctrl+O is on the help screen as "expand or collapse the newest tool
-> row", and no code handles the key, so rho ignores it. There is no token count and no cost
-> display anywhere in the interface.
+> **Not built yet.** `/model` and `/sessions` sit in the command list and run nothing. Each
+> prints `<command> is not built yet. See F-slash-commands in docs/features.md.` The list
+> marks both with `· not built yet`, so you see it before you press Enter. Ctrl+O is on the
+> help screen as "expand or collapse the newest tool row", and no code handles the key, so rho
+> ignores it. There is no token count and no cost display anywhere in the interface.
