@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AgentEvent, AgentStopReason, ContentBlock, Message, Role, StreamEvent, Usage};
 
+mod key;
+pub use key::{GIT_ENTRY_MAX_BYTES, PrefixMatch, ProjectKey, SessionId, default_store_root};
+
 // ---------------------------------------------------------------------------
 // Section 2. The record set.
 // ---------------------------------------------------------------------------
