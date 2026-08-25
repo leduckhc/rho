@@ -1,0 +1,54 @@
+stage: recon
+role: scout
+lane_verdict: confirmed
+lane_verdict_evidence: >
+  The library exists and no production caller reaches it. So this is new public surface,
+  not a fix. See D-no-caller-writes-a-session-file.
+
+where_the_code_goes:
+  - slot: the store, the id, the key, the reader, the row builder
+    where: crates/rho-core/src/session/mod.rs
+    evidence: 'create at 913, list at 966, delete at 1003, fork at 1028, branch_messages at 1084'
+  - slot: the command surface and the printed views
+    where: crates/rho-cli/src/cli.rs
+    evidence: 'the Run subcommand prompt positional at 211'
+  - slot: the two dead config keys
+    where: crates/rho-config/src/lib.rs
+    evidence: 'session_file and ephemeral read at 768 and 769, and nothing consumes them'
+  - slot: the features rows
+    where: docs/features.md
+    evidence: 'F-session-store, F-session-title, F-session-crash-continue added'
+
+prior_art:
+  - claim: pi keys on the absolute working directory, and takes no session lock.
+    evidence: 'dist/core/session-manager.js:242 for the key; appendFileSync at 730 and 751'
+  - claim: pi truncates on a rewrite, so a migration can lose a file.
+    evidence: 'dist/core/session-manager.js:693 opens with "w"'
+  - claim: jcode has no per-session lock, and one daemon owns every write.
+    evidence: 'jcode-app-core/src/server/socket.rs:96 holds a flock for the process life'
+  - claim: jcode wrote down the interleave risk, and guarantees one whole line per write.
+    evidence: 'jcode-storage/src/lib.rs:663'
+  - claim: fx holds a per-session advisory lock, and refuses when the filesystem cannot lock.
+    evidence: 'session_log.zig:34 and 1144; SessionBusy at 1527; SessionLockUnsupported'
+  - claim: fx creates a session exclusively, so a collision cannot truncate.
+    evidence: 'session_log.zig:1132 and 1460, with truncate false and exclusive true'
+  - claim: claude keeps per-file version history, and no tool consults git to unify worktrees.
+    evidence: '~/.claude/file-history/<uuid>/<hash>@vN; no rev-parse in any source read'
+
+decisions_that_apply:
+  - D-session-store-layout
+  - D-a-session-id-sorts-by-time
+  - D-chain-records-are-frozen
+  - D-a-record-id-is-minted-against-the-set
+  - D-a-bad-session-file-is-one-row
+  - D-no-list-cache-until-a-budget-fails
+  - D-a-session-title-costs-nothing
+  - D-recording-is-on-by-default
+  - D-continue-is-scoped-to-the-project
+  - D-resume-is-a-flag-on-run
+  - D-a-stale-result-handle-expires-on-resume
+  - D-retention-is-not-in-the-wiring-lane
+  - D-a-session-file-is-private
+  - D-a-project-key-cannot-escape-the-store
+  - D-a-live-session-holds-a-lock
+  - D-the-record-id-is-visible-on-the-command-line

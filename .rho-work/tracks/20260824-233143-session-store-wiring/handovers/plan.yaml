@@ -1,0 +1,59 @@
+stage: plan
+role: architect
+spec_path: docs/specs/20260824-222153-SPEC-session-store-wiring.md
+
+sides:
+  - pair: the library and the command line
+    owns: 'rho-core owns the store; rho-cli owns the selector and the views'
+  - pair: the library and the terminal
+    owns: 'rho-core owns the rows; rho-tui owns the picker'
+  - pair: today's rho and a later rho
+    owns: 'the persisted format owns the version rule in section 6'
+  - pair: rho and the user
+    owns: 'rho-config owns the keys; rho-cli owns the flags'
+  - pair: rho and a third party
+    owns: 'a caller injects the store root and the project key'
+
+contract: docs/specs/20260824-222153-SPEC-session-store-wiring.md
+contract_evidence: >
+  Pasted verbatim into /tmp/rho-contract-check, a crate outside the repository. It builds.
+  The compile found two errors that prose review missed. RecordId had no Display impl, and
+  PathBuf has none either, so two error messages did not compile.
+
+error_taxonomy:
+  - variant: AmbiguousPrefix
+    handled_by: rho-cli, which lists every match and stops
+  - variant: NoSuchSession
+    handled_by: rho-cli, which points at sessions list
+  - variant: NoSessionToContinue
+    handled_by: rho-cli, which says to start one without the flag
+  - variant: Orphan
+    handled_by: rho-core refuses the file; rho-cli tells the user to update rho
+  - variant: DuplicateId
+    handled_by: rho-core refuses the file; rho-cli calls the file damaged
+  - variant: Busy
+    handled_by: rho-cli names the other session and moves on
+  - variant: LockUnsupported
+    handled_by: rho-cli stops, and names a local disk
+
+extension_point: >
+  A caller injects the store root and the project key. rho-core owns the sanitizer and the
+  digest, which are the security part. A different storage backend is a fork, and section
+  10 says so with the reason.
+
+test_names: 105
+test_names_evidence: >
+  Section 11 of the spec names each one with its assertion. The spec status is draft, so
+  bench/check-spec-tests.py exempts it until the tests exist.
+
+out_of_scope: >
+  The rewind, the replay, retention, a turn count in a row, compaction, a branch summary,
+  a search, an export, a graft, a session file per subagent, an ACP method, a second
+  storage backend, and the terminal record navigator.
+
+build_stages: [core-red, core-green, cli-red, cli-green]
+
+dod_per_build_stage: track.yaml
+dod_per_build_stage_note: >
+  Each build stage in track.yaml carries four DoD items with evidence. The architect wrote
+  them, and neither tester nor developer may edit the one it is scored against.

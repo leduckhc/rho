@@ -1,0 +1,58 @@
+stage: core-red.slice.keys-and-ids.verify
+role: controller
+verdict: pass
+note: >
+  The controller re-ran every gate itself. A subagent report is a claim, not a result.
+
+gate_commands:
+  - command: cargo test -p rho-core --no-run
+    exit: 0
+    line: 'Executable tests/session_key_id.rs'
+  - command: cargo test -p rho-core --test session_key_id
+    exit: 101
+    line: 'test result: FAILED. 0 passed; 12 failed'
+  - command: cargo test -p rho-core --test session_key_id 2>&1 | grep -c 'not yet implemented'
+    exit: 0
+    line: '12'
+  - command: cargo fmt --all --check
+    exit: 0
+    line: '(no output)'
+  - command: cargo clippy -p rho-core --all-targets --all-features
+    exit: 0
+    line: 'no warning and no error'
+
+diff_read: yes
+diff: >
+  Two new files, and two lines added. `crates/rho-core/src/session/key.rs` and
+  `crates/rho-core/tests/session_key_id.rs` are new. `session/mod.rs` gained `mod key;` and
+  one `pub use`. `lib.rs` gained five names in the existing re-export. No existing test file
+  changed, which `git diff --name-only crates/ | grep tests/` confirms.
+
+test_names_checked: >
+  Every name the spec lists under "The project key" and "The id" is present, except the four
+  prefix tests. Those need `resolve_prefix`, which reads a directory, so they belong to the
+  store slice. The spec now says so. `the_key_resolver_spawns_no_process` was cut earlier,
+  because no seam can observe a spawn.
+
+findings:
+  - severity: minor
+    finding: >
+      The counting source returned the whole remaining slice from `fill_buf`, so an
+      implementation could borrow ten megabytes and consume nothing. The counter would read
+      zero and the test would pass. That is the bypass class of section 5a.
+    fix: >
+      The source now hands back at most 512 bytes per `fill_buf`, as a real `BufReader` does.
+      Any reader that wants more must consume, and consuming is counted. Re-verified red.
+    evidence: 'crates/rho-core/tests/session_key_id.rs, fill_buf; 12 tests still fail'
+  - severity: minor
+    finding: The contract implied a `BufRead` seam for the key, and never gave its signature.
+    fix: 'Section 3 now holds `ProjectKey::resolve_from` verbatim.'
+    evidence: docs/specs/20260824-222153-SPEC-session-store-wiring.md
+
+for_the_mutate_stage:
+  - break: 'read the whole `.git` entry with `read_to_string`, then truncate to the cap'
+    expect: 'a_giant_git_entry_stops_at_the_cap fails, because `read` counts every byte'
+  - break: 'skip the sanitizer, and use the raw last path component as the key'
+    expect: 'a_hostile_gitdir_cannot_escape_the_store fails on the first hostile row'
+  - break: 'return an empty string when a name sanitizes to nothing'
+    expect: 'a_key_that_sanitizes_to_nothing_gets_a_placeholder fails'

@@ -7,12 +7,20 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 
 | Decision | Date | Title |
 | --- | --- | --- |
+| [D-a-bad-session-file-is-one-row](20260824-221849-D-a-bad-session-file-is-one-row.md) | 20260824 | One unreadable session file must not fail a list |
 | [D-a-budget-is-measured-not-asserted](20260818-120304-D-a-budget-is-measured-not-asserted.md) | 20260818 | A cost budget is measured, or it is prose |
 | [D-a-bad-middle-record-is-skipped-and-counted](20260822-093000-D-a-bad-middle-record-is-skipped-and-counted.md) | 20260822 | A bad record in the middle of a session file is skipped and counted |
+| [D-a-live-session-holds-a-lock](20260824-224512-D-a-live-session-holds-a-lock.md) | 20260824 | A live session holds an advisory lock, because fx is the only prior art that solved this |
 | [D-a-merged-value-error-names-no-file](20260821-231500-D-a-merged-value-error-names-no-file.md) | 20260821 | A merged value error names the key and the value, and never a file |
+| [D-a-project-key-cannot-escape-the-store](20260824-223011-D-a-project-key-cannot-escape-the-store.md) | 20260824 | A hostile repository must not choose where rho writes |
+| [D-a-record-id-is-minted-against-the-set](20260824-221848-D-a-record-id-is-minted-against-the-set.md) | 20260824 | A record id is minted against the set, because a counter mints a duplicate |
 | [D-a-second-writer-can-delete-a-test-in-silence](20260822-131500-D-a-second-writer-can-delete-a-test-in-silence.md) | 20260822 | A second writer can delete a test in silence, so a commit's claims are checked |
 | [D-a-panel-nobody-can-open](20260818-171500-D-a-panel-nobody-can-open.md) | 20260818 | A rendered panel with no key that opens it is not a feature |
 | [D-a-role-column-is-not-a-stack](20260818-181500-D-a-role-column-is-not-a-stack.md) | 20260818 | A theme role resolves in one mode, and the columns never stack |
+| [D-a-session-file-is-private](20260824-223010-D-a-session-file-is-private.md) | 20260824 | The session store carries the transcript's mode bits |
+| [D-a-session-id-sorts-by-time](20260824-221846-D-a-session-id-sorts-by-time.md) | 20260824 | A session id is a stamp and four hex characters, so a list sorts with no read |
+| [D-a-session-title-costs-nothing](20260824-221851-D-a-session-title-costs-nothing.md) | 20260824 | A title comes from the first prompt or a name record, and never from a model |
+| [D-a-stale-result-handle-expires-on-resume](20260824-221855-D-a-stale-result-handle-expires-on-resume.md) | 20260824 | A stale result handle expires on resume, and the model is told |
 | [D-acp-cancelled-spelling](20260817-171334-D-acp-cancelled-spelling.md) | 20260817 | The ACP cancelled stop reason needs an explicit serde rename |
 | [D-acp-is-real-acp](20260817-164906-D-acp-is-real-acp.md) | 20260817 | The headless frontend is ACP, and it is the real ACP |
 | [D-agentic-workflow-is-a-template](20260820-120345-D-agentic-workflow-is-a-template.md) | 20260820 | One agentic workflow template, filled per unit of work |
@@ -31,10 +39,12 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-cancel-keeps-the-session-open](20260818-014343-D-cancel-keeps-the-session-open.md) | 20260818 | Cancel reuses the existing CancelToken and keeps the session open |
 | [D-cancel-wake-race](20260817-175024-D-cancel-wake-race.md) | 20260817 | Fix the `CancelToken::cancelled` wake race |
 | [D-cap-a-large-tool-result](20260818-014343-D-cap-a-large-tool-result.md) | 20260818 | A large tool result is capped in the record, not stored verbatim |
+| [D-chain-records-are-frozen](20260824-221847-D-chain-records-are-frozen.md) | 20260824 | A chain record set is frozen, a leaf record may be new, and an orphan is refused |
 | [D-child-confined-by-composition](20260818-000223-D-child-confined-by-composition.md) | 20260818 | A child is confined by composition, not by comparison |
 | [D-concise-mode-opt-in](20260818-090746-D-concise-mode-opt-in.md) | 20260818 | concise mode is opt-in and off by default |
 | [D-config-fails-closed](20260818-014343-D-config-fails-closed.md) | 20260818 | Config fails closed on a malformed file, an unknown key, or an unreadable file |
 | [D-confine-needs-a-traversal-test](20260818-115706-D-confine-needs-a-traversal-test.md) | 20260818 | A path boundary is tested with a traversal, not a sibling |
+| [D-continue-is-scoped-to-the-project](20260824-221853-D-continue-is-scoped-to-the-project.md) | 20260824 | Continue takes the newest session for the project, across worktrees |
 | [D-core-event-model-widens](20260817-170455-D-core-event-model-widens.md) | 20260817 | The architect may widen the core event model to fit ACP |
 | [D-credential-command-allowlist](20260818-014343-D-credential-command-allowlist.md) | 20260818 | A credential command inherits an allowlist, stricter than the bash denylist |
 | [D-duration-rounds-once](20260818-090744-D-duration-rounds-once.md) | 20260818 | the duration ladder rounds exactly once |
@@ -50,6 +60,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-no-cross-session-cache](20260817-235346-D-no-cross-session-cache.md) | 20260817 | No cross-session shared file cache, because rho has no tenancy model |
 | [D-no-four-argument-session-new](20260817-180735-D-no-four-argument-session-new.md) | 20260817 | Remove the four-argument `Session::new` |
 | [D-no-git-writes-by-a-subagent](20260817-184709-D-no-git-writes-by-a-subagent.md) | 20260817 | A subagent must never run a git command that changes the working tree |
+| [D-no-list-cache-until-a-budget-fails](20260824-221850-D-no-list-cache-until-a-budget-fails.md) | 20260824 | No list cache ships until a measured budget fails |
 | [D-no-remembered-execute-allow](20260818-020639-D-no-remembered-execute-allow.md) | 20260818 | A remembered allow never covers a tool that runs a program |
 | [D-one-redaction-home](20260817-222057-D-one-redaction-home.md) | 20260817 | Redaction has one home, because the copies had already drifted |
 | [D-one-timestamp-format](20260818-060126-D-one-timestamp-format.md) | 20260818 | One session file holds one timestamp format, and it is epoch milliseconds |
@@ -60,6 +71,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-provider-contract-crate](20260817-175201-D-provider-contract-crate.md) | 20260817 | The provider contract suite is a real crate, not a private test file |
 | [D-provider-extension-verified-outside](20260817-200505-D-provider-extension-verified-outside.md) | 20260817 | The provider extension point is verified from outside the workspace |
 | [D-pty-teardown-closes-before-it-waits](20260818-155000-D-pty-teardown-closes-before-it-waits.md) | 20260818 | A pty harness closes the master, then kills, then waits with a deadline |
+| [D-recording-is-on-by-default](20260824-221852-D-recording-is-on-by-default.md) | 20260824 | Recording is on by default, because an unwritten session cannot be resumed |
 | [D-replay-only-the-current-loop](20260822-093100-D-replay-only-the-current-loop.md) | 20260822 | Only the current tool loop replays its reasoning |
 | [D-read-only-maps-onto-approval](20260820-214512-D-read-only-maps-onto-approval.md) | 20260820 | `--read-only` writes the approval key, and only when true |
 | [D-reader-line-cap](20260818-020639-D-reader-line-cap.md) | 20260818 | The session reader caps one line |
@@ -68,13 +80,16 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-redact-json-secrets](20260818-020639-D-redact-json-secrets.md) | 20260818 | Session redaction uses one new function in rho-redact |
 | [D-redact-tool-arguments](20260818-014343-D-redact-tool-arguments.md) | 20260818 | A tool argument is redacted on the way into the file |
 | [D-reopen-stated-on-disk](20260818-060126-D-reopen-stated-on-disk.md) | 20260818 | A reopen is stated on disk, and every io error names its path |
+| [D-resume-is-a-flag-on-run](20260824-221854-D-resume-is-a-flag-on-run.md) | 20260824 | One session flag on run, two spellings, and an optional value |
 | [D-resume-never-widens](20260818-020639-D-resume-never-widens.md) | 20260818 | A resume must not widen a permission |
+| [D-retention-is-not-in-the-wiring-lane](20260824-221856-D-retention-is-not-in-the-wiring-lane.md) | 20260824 | Retention waits, because a config key that nothing reads is dead surface |
 | [D-retry-numbers-configurable](20260818-001918-D-retry-numbers-configurable.md) | 20260818 | Retry is configurable in its numbers and fixed in its rules |
 | [D-sandbox-is-correctness](20260817-235346-D-sandbox-is-correctness.md) | 20260817 | The bash sandbox is a correctness win, not a structural lead |
 | [D-secret-in-core](20260817-181635-D-secret-in-core.md) | 20260817 | `Secret` and `RetryPolicy` belong in `rho-core` |
 | [D-serde-json-default-codec](20260818-014343-D-serde-json-default-codec.md) | 20260818 | serde_json is the default codec, and sonic-rs is an off-by-default feature |
 | [D-session-config](20260817-175834-D-session-config.md) | 20260817 | `Session` needs a `SessionConfig` |
 | [D-session-context-accessor](20260817-175024-D-session-context-accessor.md) | 20260817 | `Session` gets a read-only context accessor |
+| [D-session-store-layout](20260824-221845-D-session-store-layout.md) | 20260824 | A session lives under a project key that every worktree shares |
 | [D-seven-column-duration-slot](20260818-090745-D-seven-column-duration-slot.md) | 20260818 | every duration sits in a seven-column slot |
 | [D-shared-working-tree](20260817-224703-D-shared-working-tree.md) | 20260817 | Another agent shares this working tree, so read the diff before you commit |
 | [D-skill-allowed-tools-ignored](20260817-215003-D-skill-allowed-tools-ignored.md) | 20260817 | `allowed-tools` in a skill is parsed, warned about, and ignored |
@@ -82,6 +97,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-sprint-one-hook-interfaces](20260817-170455-D-sprint-one-hook-interfaces.md) | 20260817 | The Hook trait and the approval gate are sprint-1 interfaces |
 | [D-staged-server-serves-every-connection](20260818-043346-D-staged-server-serves-every-connection.md) | 20260818 | A test double must answer every connection |
 | [D-the-merge-cannot-name-a-values-source](20260820-214513-D-the-merge-cannot-name-a-values-source.md) | 20260820 | The merge loses which layer held a bad value |
+| [D-the-record-id-is-visible-on-the-command-line](20260824-224710-D-the-record-id-is-visible-on-the-command-line.md) | 20260824 | A fork needs a record id that a user can actually see |
 | [D-three-reasoning-costs-stay-open](20260822-101500-D-three-reasoning-costs-stay-open.md) | 20260822 | Three reasoning costs stay open, and each one names its trigger |
 | [D-the-wheel-needs-capture](20260819-120429-D-the-wheel-needs-capture.md) | 20260819 | rho captures the mouse, because the wheel is the only way to scroll |
 | [D-three-tiers](20260817-232444-D-three-tiers.md) | 20260817 | Three tiers, named for what each contributes |

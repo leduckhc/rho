@@ -1,0 +1,50 @@
+stage: mutate
+slice: keys-and-ids
+role: controller
+status: partial
+note: >
+  The prove phase runs after the last green stage. The controller ran the slice-1 portion
+  early, because a vacuous test is cheapest to find while the slice is fresh. The three
+  breaks came from `core-red-keys.verify.yaml`, written before the implementation existed,
+  so the test could not be tuned to the break.
+
+restore_method: >
+  The file was copied to /tmp/key.rs.good first, and restored by copying it back. No git
+  command ran. See D-jcode-bash-lessons, where a git checkout destroyed the change it had
+  just written.
+
+mutations:
+  - break: 'read_to_string on the whole .git entry, then truncate to the cap'
+    command: cargo test -p rho-core --test session_key_id
+    result: 'FAILED. 11 passed; 1 failed'
+    failing_test: a_giant_git_entry_stops_at_the_cap
+    real_output: >
+      the seam handed out 10485760 bytes, past the cap of 4096; an implementation that reads
+      the whole file and then truncates fails here
+    verdict: 'the seam is real. it counted ten megabytes against a cap of four kilobytes'
+  - break: 'return the raw path component as the key name, with no sanitizer'
+    command: cargo test -p rho-core --test session_key_id
+    result: 'FAILED. 11 passed; 1 failed'
+    failing_test: a_hostile_gitdir_cannot_escape_the_store
+    verdict: 'the path boundary is proved by a table of hostile lines, not by one example'
+  - break: 'return an empty name when every byte sanitizes away'
+    command: cargo test -p rho-core --test session_key_id
+    result: 'FAILED. 11 passed; 1 failed'
+    failing_test: a_key_that_sanitizes_to_nothing_gets_a_placeholder
+    verdict: 'the placeholder is load-bearing, and a test holds it'
+
+restored:
+  command: cargo test -p rho-core --test session_key_id
+  result: 'ok. 12 passed; 0 failed'
+  fmt: 'cargo fmt --all --check; exit 0'
+
+rewritten: []
+rewritten_note: >
+  No test passed against its break, so none needed rewriting. Each break failed exactly one
+  test, so no test is coupled to another slice's behaviour.
+
+still_owed_at_the_prove_phase:
+  - The real worktree drive. This tree is a git worktree, and its `.git` is a file naming
+    `/Users/le/Work/Vibe/rho/.git/worktrees/worktree-e56c35`. The unification test uses a
+    synthetic file, so the real one belongs to the drive stage with the real binary.
+  - A break on the digest, to prove two same-named directories really do get two keys.

@@ -1,0 +1,62 @@
+stage: plan.review
+role: [reviewer, secops]
+verdict: pass
+rounds: 3
+note: >
+  Six reviews in three rounds. One correctness pass and one security pass, then four
+  hostile passes with one mandate each: test quality, architecture, product, operations.
+
+findings:
+  - severity: blocker
+    finding: The row test could not fail, because the seam took both a source and a path.
+    fix: 'RowMeta replaces the path, and the test passes a path that does not exist. Section 5a'
+  - severity: blocker
+    finding: The version rule was fail-open, because a tagged enum hides an unknown kind.
+    fix: 'Referential integrity from the child side. Section 6a'
+  - severity: blocker
+    finding: A hostile .git file could choose the store path.
+    fix: 'A bounded read and a one-segment key. Section 3a'
+  - severity: blocker
+    finding: An id collision truncated a live session, at 1.87 percent for fifty at once.
+    fix: 'An exclusive create and a bounded re-mint. Section 7c'
+  - severity: blocker
+    finding: Two worktrees could append to one file with no lock.
+    fix: 'An advisory lock, modelled on fx. Section 7d'
+  - severity: blocker
+    finding: The owner's ask had no path, and two commands were advertised unbuilt.
+    fix: 'show prints the record id, and the navigator leaves the lane. Section 8a'
+  - severity: major
+    finding: The store had no mode bits, so a default umask exposed every conversation.
+    fix: 'The transcript precedent, 0o600 and 0o700. Section 9'
+  - severity: major
+    finding: A test name claimed a redaction guarantee the code does not give.
+    fix: 'Renamed to name the tool-argument path only, and the gap is written down'
+  - severity: major
+    finding: The pi importer keeps a parent id that points at a dropped record.
+    fix: 'Open. It needs an edit to SPEC-sessions, and it is recorded in the findings file'
+  - severity: major
+    finding: Four named tests were theatre, and two were vacuous.
+    fix: 'Each rewritten, or cut. Section 11'
+  - severity: major
+    finding: The budget test asserted wall-clock time, so it would be flaky and vacuous.
+    fix: 'It asserts bytes read and files opened. The millisecond number only reports'
+  - severity: minor
+    finding: seed_ids was public surface that the spec forbade anyone to call.
+    fix: 'Deleted. The writer seeds itself inside append_to and fork'
+
+public_items_with_no_test:
+  - item: default_store_root
+    state: 'fixed. the_default_store_root_sits_under_the_passed_home'
+  - item: 'Display for RecordId'
+    state: 'fixed. a_record_id_prints_as_its_own_text'
+  - item: delete
+    state: 'fixed. three tests, where the first draft had none'
+  - item: 'six SessionSummary fields'
+    state: 'three cut, three now asserted'
+
+open_findings:
+  - The pi import must re-parent around a dropped record. It edits another spec.
+  - Windows gets no hardening, and no document says the platform is unsupported.
+  - The start path has no measured budget, and measure owns that.
+  - A sidecar spill has no size bound.
+  - Nothing logs at error level when the store degrades or a row is unreadable.

@@ -1,0 +1,14 @@
+stage: classify
+role: controller
+lane: feature
+one_sentence: >
+  rho keeps every session on disk, and a user lists, resumes, deletes, and forks one from
+  the command line.
+skips: []
+skips_evidence: >
+  The feature lane skips nothing. This adds new public API in rho-core and a new command
+  surface in rho-cli, so every stage applies.
+notes: >
+  The owner asked for persistence, resume, delete, and fork from any turn and any
+  assistant message. The owner then chose the wiring lane only. The rewind and the replay
+  are out of scope, and the brainstorm file records them.
