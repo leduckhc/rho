@@ -104,3 +104,43 @@ A wrong fixture cost two runs and is worth recording. A config `skill-paths` ent
 a parent directory that contains skill directories loads nothing, and it looks exactly like a
 gate working correctly. The first two probes were wrong for that reason, not because the code
 was safe.
+
+## Fixed, and re-probed
+
+Date: 2026-08-25. Binary rebuilt from the fix.
+
+`ConfigLayer::strip_powerful_keys` clears every powerful key and recurses into every profile,
+so a nesting level a later format adds inherits the rule. The same filter runs over the
+environment layer when the project is untrusted, because a `.devcontainer` file arrives with the
+clone as surely as the config file does.
+
+The same attack, against the fixed binary:
+
+```sh
+# The project profile, no --trust-project
+rho run "Do you have a skill named canary-injected? Answer YES or NO only." \
+  --profile work --no-skills
+NO
+
+# The user's own choice still works
+rho run "..." --profile work --no-skills --trust-project
+YES
+
+# The environment door, in the same untrusted checkout
+RHO_SKILL_PATHS=/tmp/.../canary rho run "..." --no-skills
+NO
+```
+
+Three deliberate breaks, each restored from a copy in `/tmp`:
+
+| Break | Result |
+| --- | --- |
+| Stop recursing into profiles | FAILED, both profile tests |
+| Forget `base_url` in the powerful set | FAILED, the completeness guard and the environment test |
+| Leave the environment ungated | FAILED, the environment test |
+
+One behaviour change a user may notice. In a checkout you have not trusted,
+`RHO_SKILL_PATHS`, `RHO_MCP_CONFIG`, and `RHO_BASE_URL` are ignored, and rho says so. Pass
+`--trust-project` to use them. A display variable such as `RHO_MODEL` needs no trust, because
+it grants nothing. One existing test asserted the old rule and now states trust, with the
+reason written beside it.

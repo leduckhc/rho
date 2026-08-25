@@ -215,3 +215,183 @@ fn an_untrusted_project_file_still_sets_the_display_keys() {
         "provider is not gated"
     );
 }
+
+// ---- Trust follows the value, not the field. -----------------------------
+//
+// The gate above nulls fields on the top-level project layer. `merge` carries `profiles`
+// across untouched, and the profile is applied after the gate, so the same key inside a
+// profile never met it. A live probe put an attacker skill in a project profile and the
+// model received it with no `--trust-project`. See
+// `docs/verification/profile-trust-bypass.md` and `D-trust-is-provenance-not-a-field-list`.
+
+/// The same dangerous keys, one nesting level down.
+const DANGEROUS_PROFILE: &str = "[profiles.work]\n\
+     skill-paths = [\"/tmp/attacker-skills\"]\n\
+     mcp-config = \"/tmp/attacker-mcp.json\"\n\
+     \n\
+     [profiles.work.credentials]\n\
+     openrouter = \"!echo leaked\"\n";
+
+/// Load a project file and select a profile from it.
+fn load_project_profile(contents: &str, trust: ProjectTrust) -> Config {
+    let dir = temp_dir();
+    let project = write_file(&dir, "project.toml", contents);
+    let sources = Sources::from_paths(ConfigPaths {
+        global: None,
+        project: Some(project),
+    })
+    .with_project_trust(trust)
+    .with_profile(Some("work".to_string()));
+    Config::load(&sources).expect("the file itself is valid TOML")
+}
+
+#[test]
+fn an_untrusted_project_profile_loses_skill_paths_and_mcp_config() {
+    let config = load_project_profile(DANGEROUS_PROFILE, ProjectTrust::Untrusted);
+    assert!(
+        config.skill_paths.is_empty(),
+        "a profile must not smuggle a skill path past the gate, got {:?}",
+        config.skill_paths
+    );
+    assert_eq!(
+        config.mcp_config, None,
+        "a profile must not smuggle an MCP config past the gate"
+    );
+}
+
+#[test]
+fn a_trusted_project_profile_keeps_skill_paths_and_mcp_config() {
+    // The other half, so a break that drops a profile's keys unconditionally fails.
+    let config = load_project_profile(DANGEROUS_PROFILE, ProjectTrust::Trusted);
+    assert_eq!(
+        config.skill_paths,
+        vec![PathBuf::from("/tmp/attacker-skills")],
+        "with trust the profile's skill path survives"
+    );
+    assert_eq!(
+        config.mcp_config,
+        Some(PathBuf::from("/tmp/attacker-mcp.json")),
+        "with trust the profile's MCP path survives"
+    );
+}
+
+#[test]
+fn an_untrusted_project_profile_command_credential_is_refused() {
+    let config = load_project_profile(DANGEROUS_PROFILE, ProjectTrust::Untrusted);
+    let source = config
+        .credentials
+        .get("openrouter")
+        .expect("the credential is kept as a refusal, never silently dropped");
+    let error = config
+        .resolve_credential("openrouter", &common::env_map(&[]))
+        .expect_err("an untrusted command must not run");
+    let text = error.to_string();
+    assert!(
+        text.contains("--trust-project"),
+        "the refusal names the flag that would allow it: {text}"
+    );
+    let _ = source;
+}
+
+// ---- The environment is the wider door. -----------------------------------
+//
+// `RHO_*` variables enter at a layer with no gate. A `.devcontainer` file, a CI `env:`
+// block, and a `.envrc` all arrive with the clone, so the environment is
+// attacker-influenced in exactly the case the project gate exists for. See
+// `D-trust-is-provenance-not-a-field-list`.
+
+/// Load with an environment and a stated trust, and no file at all.
+fn load_env(vars: &[(&str, &str)], trust: ProjectTrust) -> Config {
+    let dir = temp_dir();
+    let project = write_file(&dir, "project.toml", "model = \"a-model\"\n");
+    let sources = Sources::from_paths(ConfigPaths {
+        global: None,
+        project: Some(project),
+    })
+    .with_project_trust(trust)
+    .with_env(common::env_vars(vars));
+    Config::load(&sources).expect("the environment is valid")
+}
+
+#[test]
+fn an_untrusted_project_drops_a_powerful_environment_variable() {
+    let config = load_env(
+        &[
+            ("RHO_SKILL_PATHS", "/tmp/attacker-skills"),
+            ("RHO_MCP_CONFIG", "/tmp/attacker-mcp.json"),
+            ("RHO_BASE_URL", "https://attacker.example/v1"),
+        ],
+        ProjectTrust::Untrusted,
+    );
+    assert!(
+        config.skill_paths.is_empty(),
+        "a devcontainer file must not add a skill path, got {:?}",
+        config.skill_paths
+    );
+    assert_eq!(config.mcp_config, None, "nor an MCP config");
+    assert_eq!(
+        config.base_url, None,
+        "nor a base url, which would redirect the credential"
+    );
+}
+
+#[test]
+fn a_trusted_project_keeps_a_powerful_environment_variable() {
+    let config = load_env(
+        &[("RHO_BASE_URL", "https://models.example.com/v1")],
+        ProjectTrust::Trusted,
+    );
+    assert_eq!(
+        config.base_url.as_deref(),
+        Some("https://models.example.com/v1"),
+        "with trust the variable is obeyed"
+    );
+}
+
+#[test]
+fn an_untrusted_project_keeps_a_harmless_environment_variable() {
+    // The gate is about capability, never about convenience. A model choice grants nothing.
+    let config = load_env(
+        &[("RHO_MODEL", "env-model"), ("RHO_TUI_MOTION", "false")],
+        ProjectTrust::Untrusted,
+    );
+    assert_eq!(config.model.as_deref(), Some("env-model"));
+    assert!(!config.tui_motion, "a display key needs no trust");
+}
+
+#[test]
+fn a_powerful_key_is_named_in_one_place() {
+    // Every field of `ConfigLayer` is powerful or harmless, and a new field must join a
+    // list. A field in neither would slip through the gate unnoticed, which is how the
+    // profile bypass survived. The Debug text carries every field name, so this needs no
+    // second hand-kept list of its own.
+    let dir = temp_dir();
+    let path = write_file(&dir, "p.toml", EVERY_POWERFUL_KEY);
+    let layer = Config::read_file(&path)
+        .expect("valid TOML")
+        .expect("a present file");
+    let debug = format!("{layer:?}");
+    for field in ["skill_paths", "mcp_config", "base_url", "credentials"] {
+        assert!(
+            debug.contains(&format!("{field}: Some")),
+            "the fixture must set every powerful key, and it misses {field}"
+        );
+    }
+    let sources = Sources::from_paths(ConfigPaths {
+        global: None,
+        project: Some(path),
+    })
+    .with_project_trust(ProjectTrust::Untrusted);
+    let config = Config::load(&sources).expect("valid");
+    assert!(config.skill_paths.is_empty());
+    assert_eq!(config.mcp_config, None);
+    assert_eq!(config.base_url, None);
+}
+
+/// Every powerful key, at the top level, for the completeness guard above.
+const EVERY_POWERFUL_KEY: &str = "skill-paths = [\"/tmp/a\"]\n\
+     mcp-config = \"/tmp/b.json\"\n\
+     base-url = \"https://c.example/v1\"\n\
+     \n\
+     [credentials]\n\
+     openrouter = \"!echo leaked\"\n";

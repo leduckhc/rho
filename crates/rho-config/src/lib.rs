@@ -75,6 +75,14 @@ pub struct ConfigLayer {
     pub reasoning_effort: Option<String>,
     /// A path to the MCP server file. See section 6.
     pub mcp_config: Option<PathBuf>,
+    /// The provider endpoint. Unset means the provider's own default. It is powerful: it
+    /// redirects the credential, so an untrusted source may not set it.
+    pub base_url: Option<String>,
+    /// False stops the terminal's sweep animation.
+    pub tui_motion: Option<bool>,
+    /// True stops the agent-definition search. It is separate from `no_skills`, because a
+    /// skill and a worker are two capabilities.
+    pub no_agents: Option<bool>,
     pub subagents: Option<SubagentLimitsLayer>,
     /// Credential sources, by name. Each value is one string, parsed in section 5.
     pub credentials: Option<BTreeMap<String, String>>,
@@ -296,6 +304,13 @@ pub struct Config {
     pub approval: Option<ApprovalMode>,
     pub skill_paths: Vec<PathBuf>,
     pub discover_skills: bool,
+    /// Whether rho searches for agent definitions. Separate from `discover_skills`, so one
+    /// switch never removes two capabilities. See `D-skills-and-agents-are-two-switches`.
+    pub discover_agents: bool,
+    /// The provider endpoint, when a user chose one. `None` keeps the provider's default.
+    pub base_url: Option<String>,
+    /// Whether the terminal animates the working word. True by default.
+    pub tui_motion: bool,
     /// Whether the TUI captures the mouse. False by default.
     pub tui_mouse: bool,
     /// How the TUI draws reasoning. `Summary` by default.
@@ -325,12 +340,49 @@ impl ConfigLayer {
         self.tui_reasoning = over.tui_reasoning.or(self.tui_reasoning);
         self.reasoning_effort = over.reasoning_effort.or(self.reasoning_effort);
         self.mcp_config = over.mcp_config.or(self.mcp_config);
+        self.base_url = over.base_url.or(self.base_url);
+        self.tui_motion = over.tui_motion.or(self.tui_motion);
+        self.no_agents = over.no_agents.or(self.no_agents);
         self.subagents = over.subagents.or(self.subagents);
         self.credentials = over.credentials.or(self.credentials);
         // A profile is a named block, not a merged value. Keep the union, so a
         // profile defined in either file is reachable by name.
         self.profiles.extend(over.profiles);
         self
+    }
+
+    /// Clear every key an untrusted source may not contribute, at every depth.
+    ///
+    /// The gate used to null two fields on one layer. `merge` carries `profiles` across
+    /// untouched and a profile is applied after the gate, so the same key one level down
+    /// never met it. A live probe put an attacker skill in a project profile and the model
+    /// received it with no `--trust-project`. See `D-trust-is-provenance-not-a-field-list`
+    /// and `docs/verification/profile-trust-bypass.md`.
+    ///
+    /// It returns the `!command` credentials it found, by name, so the caller can refuse
+    /// them rather than drop them. A dropped credential would read as "no such name",
+    /// which teaches the user nothing.
+    fn strip_powerful_keys(&mut self) -> BTreeMap<String, String> {
+        // Every powerful key, in one place. `a_powerful_key_is_named_in_one_place` fails
+        // when a new field is neither listed here nor listed as harmless.
+        self.skill_paths = None;
+        self.mcp_config = None;
+        self.base_url = None;
+
+        let mut refused: BTreeMap<String, String> = self
+            .credentials
+            .iter()
+            .flatten()
+            .filter(|(_, raw)| raw.starts_with('!'))
+            .map(|(name, raw)| (name.clone(), raw.clone()))
+            .collect();
+
+        // Recurse, so a nesting level a later format adds inherits the rule instead of
+        // defeating it.
+        for profile in self.profiles.values_mut() {
+            refused.extend(profile.strip_powerful_keys());
+        }
+        refused
     }
 
     /// Build a layer from the `RHO_*` variables. This maps every scalar config key,
@@ -357,6 +409,16 @@ impl ConfigLayer {
                 "RHO_TUI_REASONING" => layer.tui_reasoning = Some(value.clone()),
                 "RHO_REASONING_EFFORT" => layer.reasoning_effort = Some(value.clone()),
                 "RHO_MCP_CONFIG" => layer.mcp_config = Some(PathBuf::from(value)),
+                "RHO_BASE_URL" => layer.base_url = Some(value.clone()),
+                "RHO_TUI_MOTION" => layer.tui_motion = parse_env_bool("tui-motion", value).ok(),
+                "RHO_NO_AGENTS" => layer.no_agents = parse_env_bool("no-agents", value).ok(),
+                // The code already documented this name, so a user who sets it once for
+                // every tool is obeyed. `1` stops the sweep, as the convention expects.
+                "RHO_REDUCE_MOTION"
+                    if parse_env_bool("reduce-motion", value).ok() == Some(true) =>
+                {
+                    layer.tui_motion = Some(false);
+                }
                 _ => {}
             }
         }
@@ -392,6 +454,15 @@ fn validate_env_booleans(vars: &[(String, String)]) -> Result<(), ConfigError> {
             }
             "RHO_NO_SKILLS" => {
                 parse_env_bool("no-skills", value)?;
+            }
+            "RHO_NO_AGENTS" => {
+                parse_env_bool("no-agents", value)?;
+            }
+            "RHO_TUI_MOTION" => {
+                parse_env_bool("tui-motion", value)?;
+            }
+            "RHO_REDUCE_MOTION" => {
+                parse_env_bool("reduce-motion", value)?;
             }
             _ => {}
         }
@@ -705,16 +776,9 @@ impl Config {
             if sources.project_trust == ProjectTrust::Untrusted {
                 // `skill-paths` would load attacker skills, and that walks around
                 // `D-project-skill-needs-trust`, a gate this repository already ships.
-                // `mcp-config` would launch attacker server processes at startup.
-                layer.skill_paths = None;
-                layer.mcp_config = None;
-                let commands = layer
-                    .credentials
-                    .iter()
-                    .flatten()
-                    .filter(|(_, raw)| raw.starts_with('!'))
-                    .map(|(name, raw)| (name.clone(), raw.clone()))
-                    .collect::<BTreeMap<_, _>>();
+                // `mcp-config` would launch attacker server processes at startup, and
+                // `base-url` would point the credential at a host the file chose.
+                let commands = layer.strip_powerful_keys();
                 if !commands.is_empty() {
                     refused_commands = Some((path.clone(), commands));
                 }
@@ -731,7 +795,18 @@ impl Config {
                 .ok_or_else(|| ConfigError::UnknownProfile { name: name.clone() })?;
             merged = merged.merge(profile);
         }
-        merged = merged.merge(ConfigLayer::from_env(&sources.env));
+        // The environment is the wider door. A `.devcontainer` file, a CI `env:` block,
+        // and a `.envrc` all arrive with the clone, so a powerful variable needs the same
+        // trust as a powerful key in the file beside it. A display key needs none, because
+        // it grants nothing. See `D-trust-is-provenance-not-a-field-list`.
+        let mut env_layer = ConfigLayer::from_env(&sources.env);
+        if sources.project_trust == ProjectTrust::Untrusted {
+            let refused_env = env_layer.strip_powerful_keys();
+            if !refused_env.is_empty() && refused_commands.is_none() {
+                refused_commands = Some((PathBuf::from("the environment"), refused_env));
+            }
+        }
+        merged = merged.merge(env_layer);
         merged = merged.merge(sources.flags.clone());
 
         // The environment layer fails closed on an unaccepted boolean, before use.
@@ -772,6 +847,9 @@ impl Config {
             skill_paths: merged.skill_paths.unwrap_or_default(),
             // `no-skills = true` disables discovery. The default is discovery on.
             discover_skills: !merged.no_skills.unwrap_or(false),
+            discover_agents: !merged.no_agents.unwrap_or(false),
+            base_url: merged.base_url.clone(),
+            tui_motion: merged.tui_motion.unwrap_or(true),
             // On by default. rho owns the alternate screen, which has no scrollback, so with
             // capture off the wheel does nothing at all. The default flipped with
             // `D-the-wheel-needs-capture`, and this merge adopts it, because that renderer won.
