@@ -1,0 +1,65 @@
+stage: mutate
+slice: keys-and-ids-fixes
+role: controller
+status: done
+restore_method: 'copied to /tmp/key2.good first, restored by copying back. no git command ran'
+
+mutations:
+  - break: 'shift the epoch by one day in civil_from_millis (z = days + 719_469)'
+    failing_test: mint_formats_a_known_instant_in_utc
+    result: 'FAILED. 16 passed; 1 failed'
+    real_output: 'mint(0, 0x0000) must format the exact UTC id'
+    verdict: >
+      The most important mutation of the set. Only the new guard caught it. The three id
+      tests that existed before this fix all passed against the break, because both mint
+      calls shift together, so the sort still holds and the shape still holds. This is the
+      memory-cap defect class, and it is now closed.
+  - break: 'change FNV_PRIME in the code from 0x0000_0100_0000_01b3 to ...01b5'
+    failing_test: the_digest_of_a_known_path_never_changes
+    result: 'FAILED. 16 passed; 1 failed'
+    real_output: 'the key "example-project-54492448" must end with the pinned digest "783befb6"'
+    verdict: 'the digest is pinned to a value, not to an implementation'
+  - break: 'put the original DefaultHasher implementation back into digest_hex'
+    failing_test: the_digest_of_a_known_path_never_changes
+    result: 'FAILED. 16 passed; 1 failed'
+    verdict: 'the exact shipped defect is now caught by name'
+  - break: 'return the gitdir parent unchanged, which is the old walk'
+    failing_test: a_relative_gitdir_shares_the_key_with_the_main_checkout
+    result: 'FAILED. 16 passed; 1 failed'
+    verdict: 'worktree unification is now pinned by a test, not by an absolute-path fixture'
+  - break: 'stop stripping the leading dot in sanitize_name'
+    failing_tests:
+      - a_dot_named_project_does_not_hide_the_store
+      - a_key_that_sanitizes_to_nothing_gets_a_placeholder
+      - a_hostile_gitdir_cannot_escape_the_store
+    result: 'FAILED. 14 passed; 3 failed'
+    verdict: >
+      Three tests fired, and the third is the security boundary. So the sanitizer is guarded
+      from more than one direction, which is what defence in depth looks like in a test suite.
+  - break: 'return a constant key for every identity, ProjectKey("project-00000000")'
+    failing_tests:
+      - a_plain_directory_keys_on_its_own_path
+      - the_digest_of_a_known_path_never_changes
+      - two_directories_of_one_name_get_two_keys
+    result: 'FAILED. 14 passed; 3 failed'
+    verdict: >
+      This is the proof that the rewrite worked. The old form of
+      a_plain_directory_keys_on_its_own_path asserted only that the key was not empty, so a
+      constant key passed it. Now it fails.
+
+a_mutation_that_did_not_fail:
+  break: 'the first attempt at the FNV prime edited line 78, which is the doc comment'
+  result: 'ok. 17 passed'
+  what_it_means: >
+    The mutation was wrong, not the test. The prime appears twice, once in prose and once in
+    code, and the patch hit the prose. A break that changes no executable line proves nothing.
+    The controller checked why rather than recording a pass, and the corrected break failed as
+    it should. A mutation stage must read the diff of its own break.
+
+restored:
+  command: cargo test -p rho-core --test session_key_id
+  result: 'ok. 17 passed; 0 failed'
+  fmt: 'cargo fmt --all --check; exit 0'
+
+rewritten: []
+rewritten_note: 'no test passed against a corrected break, so none needed rewriting'

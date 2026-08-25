@@ -28,7 +28,15 @@ repository. So rho spawns no git process and adds no git dependency.
 - The store root is separate from the project root. `rho-cli` already calls the project
   root `session_root`, and that name keeps its meaning. The store gets another name.
 - The identity function is one function with a fallback. It never fails a run. An
-  unreadable `.git` falls back to the physical path.
+  unreadable `.git` falls back to the physical path, and it says so at debug level, because
+  a silent fallback stops a worktree sharing its sessions.
+- A relative `gitdir:` resolves against the project root before it is hashed. git writes one
+  when `worktree.useRelativePaths` is set, and after a worktree moves. An unresolved
+  relative path hashes differently from the absolute one, so the worktrees would not share.
+- **The digest algorithm is part of the contract.** It is FNV-1a over the path bytes, and
+  `SPEC-session-store-wiring` section 3b states it exactly. `DefaultHasher` is forbidden
+  here, because Rust does not promise its output across releases, and this digest names a
+  directory a user keeps. A change to the algorithm is a migration, never a refactor.
 - A session file states its own `cwd`, so a list shows where a session ran.
 - `session-file <path>` still names one exact file, and it overrides the store.
 

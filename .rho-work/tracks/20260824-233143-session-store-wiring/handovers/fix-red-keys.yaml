@@ -1,0 +1,66 @@
+stage: red
+slice: keys-and-ids-fixes
+tests_added:
+  - name: the_digest_of_a_known_path_never_changes
+    state: fails now (B1)
+  - name: a_relative_gitdir_shares_the_key_with_the_main_checkout
+    state: fails now (M2)
+  - name: a_dot_named_project_does_not_hide_the_store
+    state: fails now (m2)
+  - name: mint_formats_a_known_instant_in_utc
+    state: guard, passes now (M1)
+  - name: a_minted_id_parses_back
+    state: guard, passes now (M1, M3; covers SessionId::as_str)
+  - name: a_plain_directory_keys_on_its_own_path
+    state: rewritten, passes now (m3; was vacuous)
+  - name: an_unreadable_git_entry_falls_back_and_never_fails
+    state: rewritten, passes now (m3; was vacuous)
+
+failing_now:
+  - name: the_digest_of_a_known_path_never_changes
+    message: >
+      the key "example-project-f4039de6" for "/tmp/example-project" must end with the
+      pinned FNV-1a digest "783befb6"; a DefaultHasher digest makes every stored session
+      unreachable after a toolchain upgrade
+    cause: digest_hex uses std::hash::DefaultHasher, not FNV-1a over the path bytes
+  - name: a_relative_gitdir_shares_the_key_with_the_main_checkout
+    message: >
+      assertion left == right failed. left ProjectKey("main-checkout-fd8f6f03"),
+      right ProjectKey("main-checkout-00d79b97"). a relative gitdir must resolve against
+      the worktree root, so both share one key.
+    cause: identity_from_gitdir returns ../main-checkout unchanged, so the two digests differ
+  - name: a_dot_named_project_does_not_hide_the_store
+    message: >
+      a project named .config must not make a hidden store directory; the key
+      ".config-43337400" starts with a dot
+    cause: sanitize_name keeps a leading dot
+
+guards:
+  - name: mint_formats_a_known_instant_in_utc
+    break_that_fails_it: >
+      any wrong field in civil_from_millis. a wrong leap-day rule fails the two 2024-02-29
+      rows, a wrong day carry fails the 23:59:59 rows, a wrong month rollover fails the
+      2024-03-01 row.
+  - name: a_minted_id_parses_back
+    break_that_fails_it: >
+      mint emits a shape parse rejects, such as a five-digit year past 9999, or as_str
+      returns the wrong bytes.
+  - name: a_plain_directory_keys_on_its_own_path
+    break_that_fails_it: >
+      the key stops following the physical path, e.g. a name-only key. two same-named
+      directories on two paths would then collide.
+  - name: an_unreadable_git_entry_falls_back_and_never_fails
+    break_that_fails_it: >
+      a junk .git file keys on anything but the physical path, e.g. deriving a name from
+      the file content instead of falling back.
+
+gate_commands:
+  - command: cargo test -p rho-core --no-run
+    exit_code: 0
+    last_line: "Executable tests/tasks.rs (target/debug/deps/tasks-6f16409a7ca5379a)"
+  - command: cargo test -p rho-core --test session_key_id
+    exit_code: 101
+    last_line: "test result: FAILED. 14 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out"
+    note: exactly the 3 predicted failures, no others. all fail on an assertion, never a type error.
+
+findings: []

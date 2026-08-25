@@ -9,12 +9,10 @@
 //!
 //! This note names no stub macro on purpose. The ship gate greps every crate source for
 //! one, so a comment that spelled it would fail a gate that is meant to catch real stubs.
-#![allow(dead_code)]
 
 use std::ffi::OsStr;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::BufRead;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::session::SessionError;
 
@@ -37,8 +35,9 @@ fn is_name_byte(b: u8) -> bool {
 /// Reduce a raw name to exactly one safe path segment.
 ///
 /// It drops every byte outside `[A-Za-z0-9._-]`, then collapses any run of two or more
-/// dots to one. So the result never holds `/`, `\`, or `..`. An empty result becomes the
-/// placeholder, never an empty segment.
+/// dots to one. So the result never holds `/`, `\`, or `..`. It then strips every leading
+/// dot, so the name never starts a hidden store directory on unix. An empty result becomes
+/// the placeholder, never an empty segment.
 fn sanitize_name(raw: &str) -> String {
     let kept: String = raw
         .bytes()
@@ -60,18 +59,39 @@ fn sanitize_name(raw: &str) -> String {
         out.push(ch);
     }
 
-    if out.is_empty() || out == "." {
+    // Strip every leading dot, next to the empty-name branch. A name that starts with a
+    // dot is a hidden directory on unix, so a project named `.config` would vanish from a
+    // listing. See finding m2.
+    let trimmed = out.trim_start_matches('.');
+    if trimmed.is_empty() {
         NAME_PLACEHOLDER.to_string()
     } else {
-        out
+        trimmed.to_string()
     }
 }
 
-/// Eight lowercase hex digits, a digest of the full identity path.
+/// The digest of an identity path, as eight lowercase hex digits.
+///
+/// FNV-1a, 64 bit, over the path bytes. The low 32 bits are printed.
+///
+/// - offset basis `0xcbf2_9ce4_8422_2325`
+/// - prime `0x0000_0100_0000_01b3`
+/// - the input is `identity.as_os_str().as_encoded_bytes()`, never `Path::hash`
+///
+/// `Path::hash` is wrong here, because it normalizes and so can differ per platform. The
+/// bytes are hashed directly instead.
+///
+/// The algorithm is fixed for ever. A change renames a directory a user already has, so a
+/// change is a migration, never a refactor.
 fn digest_hex(identity: &Path) -> String {
-    let mut hasher = DefaultHasher::new();
-    identity.hash(&mut hasher);
-    format!("{:08x}", hasher.finish() as u32)
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in identity.as_os_str().as_encoded_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{:08x}", hash as u32)
 }
 
 /// Build the key from the resolved identity path.
@@ -91,16 +111,47 @@ fn key_from_identity(identity: &Path) -> ProjectKey {
 ///
 /// A worktree `.git` file points at `<repo>/.git/worktrees/<name>`. The repository root is
 /// the parent of the `.git` directory, so every worktree of one repository shares it. A
-/// path with no `.git` component is returned as is, and the sanitizer keeps its name safe.
-fn identity_from_gitdir(gitdir: &Path) -> PathBuf {
-    for ancestor in gitdir.ancestors() {
+/// relative gitdir resolves against the project `root` before anything hashes it, because
+/// git writes a relative gitdir when `worktree.useRelativePaths` is set and after a
+/// worktree moves. The resolved path is normalized, so `a/b/../c` and `a/c` give one
+/// digest. A path with no `.git` component is returned normalized, and the sanitizer keeps
+/// its name safe. See section 3c.
+fn identity_from_gitdir(gitdir: &Path, root: &Path) -> PathBuf {
+    let absolute = if gitdir.is_absolute() {
+        gitdir.to_path_buf()
+    } else {
+        root.join(gitdir)
+    };
+    let normalized = normalize_path(&absolute);
+    for ancestor in normalized.ancestors() {
         if ancestor.file_name() == Some(OsStr::new(".git"))
             && let Some(parent) = ancestor.parent()
         {
             return parent.to_path_buf();
         }
     }
-    gitdir.to_path_buf()
+    normalized
+}
+
+/// Fold `.` and `..` in a path without touching the filesystem.
+///
+/// `canonicalize` is wrong here, because the path may not exist, and it also resolves
+/// symlinks. So the components are folded by hand, and two paths that name one place give
+/// one digest.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(Component::ParentDir);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// The identity of one project. Every worktree of one repository shares it.
@@ -124,10 +175,31 @@ impl ProjectKey {
         match std::fs::metadata(&git) {
             Ok(meta) if meta.is_file() => match std::fs::File::open(&git) {
                 Ok(file) => Self::resolve_from(std::io::BufReader::new(file), root),
-                Err(_) => key_from_identity(root),
+                Err(error) => {
+                    // The `.git` file exists but cannot be read. A worktree whose `.git`
+                    // is unreadable silently stops sharing sessions, so leave a trace.
+                    tracing::debug!(
+                        path = %git.display(),
+                        %error,
+                        "the .git file could not be opened; the key fell back to the physical path"
+                    );
+                    key_from_identity(root)
+                }
             },
-            // A `.git` directory, or a missing or unreadable entry, keys on the root.
-            _ => key_from_identity(root),
+            // A `.git` directory keys on the root. This is the normal main-checkout case.
+            Ok(_) => key_from_identity(root),
+            // A missing `.git` is a plain directory, which is not a fallback. Any other
+            // metadata error is a broken git entry, so the fallback leaves a trace.
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::debug!(
+                        path = %git.display(),
+                        %error,
+                        "the .git metadata could not be read; the key fell back to the physical path"
+                    );
+                }
+                key_from_identity(root)
+            }
         }
     }
 
@@ -147,7 +219,7 @@ impl ProjectKey {
         let line = String::from_utf8_lossy(&buffer);
         match line.trim().strip_prefix(GITDIR_PREFIX) {
             Some(path) => {
-                let identity = identity_from_gitdir(Path::new(path.trim()));
+                let identity = identity_from_gitdir(Path::new(path.trim()), root);
                 key_from_identity(&identity)
             }
             // A line that is not a gitdir entry falls back to the physical root.
@@ -182,6 +254,10 @@ impl SessionId {
     /// Both inputs are parameters, so a test mints a known id and never sleeps.
     pub fn mint(epoch_millis: u64, suffix: u16) -> Self {
         let (year, month, day, hour, minute, second) = civil_from_millis(epoch_millis);
+        // The id shape holds a four-digit year, so a year past 9999 is clamped to 9999.
+        // That is the year 10000 problem, far past any real session, and the clamp keeps
+        // mint output the exact shape parse accepts. See section 4.
+        let year = year.clamp(0, 9999);
         Self(format!(
             "{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}-{suffix:04x}"
         ))
@@ -248,14 +324,4 @@ fn civil_from_millis(epoch_millis: u64) -> (i64, u32, u32, u32, u32, u32) {
     let year = year + i64::from(month <= 2);
 
     (year, month, day, hour, minute, second)
-}
-
-/// What a prefix resolved to.
-///
-/// `Many` carries every match, so the error can list them. A prefix never picks one.
-#[derive(Clone, Debug, PartialEq)]
-pub enum PrefixMatch {
-    One(SessionId),
-    None,
-    Many(Vec<SessionId>),
 }

@@ -84,6 +84,8 @@ The rules, each testable:
 - An empty name after the replacement becomes a fixed placeholder, never an empty segment.
 - The 8 hex characters come from a digest of the full identity path, so two sanitized names
   that collide still get two directories.
+- **The digest is stable for ever.** It is FNV-1a over the path bytes, and section 3b states
+  it exactly. A digest that changes would rename a directory a user already has.
 - `store_root.join(key.as_str())` can never leave `store_root`. That is the invariant, and
   the test drives a malicious `gitdir:` line at it.
 
@@ -115,6 +117,57 @@ impl ProjectKey {
     pub fn resolve_from<R: std::io::BufRead>(source: R, root: &Path) -> Self;
 }
 ```
+
+### 3b. The digest is stable, and the algorithm is named
+
+A review found the first implementation used `std::hash::DefaultHasher`. Rust documents that
+hasher as unspecified, and says its hashes must not be relied on across releases.
+
+The digest names a **persistent directory**. So a toolchain upgrade would change the key, and
+every session a user already has would sit under a name rho no longer computes. `--continue`
+would report an empty project, and nothing would look broken.
+
+So the algorithm is part of the contract, not an implementation choice.
+
+```rust
+/// The digest of an identity path, as eight lowercase hex digits.
+///
+/// FNV-1a, 64 bit, over the path bytes. The low 32 bits are printed.
+///
+/// - offset basis `0xcbf2_9ce4_8422_2325`
+/// - prime `0x0000_0100_0000_01b3`
+/// - the input is `identity.as_os_str().as_encoded_bytes()`, never `Path::hash`
+///
+/// `Path::hash` is also wrong here, because it normalizes and so can differ per platform.
+/// The bytes are hashed directly instead.
+///
+/// The algorithm is fixed for ever. A change renames a directory a user already has, so a
+/// change is a migration, never a refactor.
+fn digest_hex(identity: &Path) -> String;
+```
+
+Two values are stated here, so a test can pin them and a reader can check them by hand:
+
+| identity path | digest |
+| --- | --- |
+| `/tmp/example-project` | `783befb6` |
+| `/Users/le/Work/Vibe/rho` | `2ddec135` |
+
+### 3c. A relative gitdir must resolve before it is hashed
+
+A review found this, and it breaks the feature this section exists for.
+
+git writes a relative `gitdir:` when `worktree.useRelativePaths` is set, and after a worktree
+moves. So a `.git` file can hold `gitdir: ../../main/.git/worktrees/name`.
+
+The first implementation walked to the `.git` component and returned its parent unchanged.
+For that input it returned `../../main`, whose digest differs from the main checkout's
+absolute path. **So two worktrees of one repository got two keys, which is the opposite of
+what this section promises.**
+
+- A relative gitdir resolves against the project root before anything hashes it.
+- The resolved path is then normalized, so `a/b/../c` and `a/c` give one digest.
+- A test drives a relative gitdir, and it must fail against the walk that returns it as is.
 
 ## 4. The session id
 
