@@ -1,0 +1,92 @@
+stage: core-green.slice.keys-and-ids.review
+role: [reviewer, controller]
+verdict: fail
+note: >
+  Two reviews of one commit. An external tool, open-code-review, ran Claude Opus 4.6 over
+  the diff. A reviewer subagent then read the same code through the code knowledge graph.
+  The graph-backed pass found two major defects the tool missed, and it refuted one of the
+  tool's findings with arithmetic.
+
+tools:
+  - name: open-code-review
+    invocation: 'ocr review --audience human --commit 5f81708'
+    cost: '~413357 tokens, 15m5s, 5 findings'
+    outcome: 'round 2 timed out, so its coverage is incomplete. it barely read the test file'
+  - name: reviewer subagent with cbm tools
+    invocation: 'cbm_index, then cbm_search, cbm_snippet, cbm_query on the indexed worktree'
+    cost: '7 tool calls, 181s'
+    outcome: 'found the two majors, refuted one tool finding, named four untested items'
+
+findings:
+  - id: B1
+    severity: blocking
+    finding: >
+      digest_hex used std::hash::DefaultHasher, whose output Rust does not promise across
+      releases, and the digest names a persistent directory. A toolchain upgrade renames every
+      project key, so every session a user has becomes unreachable and nothing looks broken.
+    evidence: 'crates/rho-core/src/session/key.rs:70-74; both reviews agree'
+    cause: >
+      The controller's own dispatch brief said to use DefaultHasher, and the contract never
+      said the digest must be stable. So this is a contract defect first.
+    fix: 'spec section 3b names FNV-1a over path bytes, with two pinned values'
+  - id: M2
+    severity: major
+    finding: >
+      A relative gitdir breaks worktree unification, which is the whole point of the key.
+      identity_from_gitdir returned the parent of the .git component unchanged, so
+      `gitdir: ../../main/.git/worktrees/wt` yielded `../../main`. Its digest differs from the
+      main checkout's absolute path, so the two worktrees got two keys.
+    evidence: 'cbm_snippet identity_from_gitdir, key.rs:95-104. git writes a relative gitdir when worktree.useRelativePaths is set, and after a worktree moves'
+    fix: 'spec section 3c resolves a relative gitdir against the root, then normalizes'
+  - id: M1
+    severity: major
+    finding: >
+      The id date has no assertion anywhere. No test names a concrete date string, and no test
+      round-trips mint through parse. Break the arithmetic and both mint calls shift together,
+      so the sort test still passes and the shape test still passes. The suite stays green
+      while every id's date is wrong. This is the memory-cap defect class of D-bash-line-cap.
+    evidence: 'tests/session_key_id.rs holds only an_id_sorts_by_time, two_sessions_in_one_second_get_two_ids, a_malformed_id_is_refused'
+    note: >
+      The reviewer re-implemented civil_from_millis in Python and checked the epoch, both ends
+      of 2024-02-29, 2024-12-31, two month boundaries, and 9999-12-31. Every one matches. So
+      the algorithm is right today, and nothing would catch it going wrong.
+    fix: 'assert a literal date string, and round-trip mint through parse'
+  - id: M3
+    severity: major
+    finding: >
+      Dead public surface, hidden by a module-wide allow. SessionId::as_str has in_degree 0 and
+      no test calls it. PrefixMatch has in_degree 0 and nothing in the commit uses it.
+    evidence: 'cbm_search on session/key.rs reports in_degree 0 for both'
+    fix: 'delete the blanket allow, move PrefixMatch to the slice that consumes it'
+  - id: m1
+    severity: refuted
+    finding: 'the tool claimed (epoch_millis / 1000) as i64 can wrap'
+    evidence: 'u64::MAX / 1000 is about 1.8e16, and i64::MAX is about 9.2e18, so it cannot'
+    real_edge: 'a year past 9999 makes the year field five digits, so mint output fails parse'
+  - id: m3
+    severity: minor
+    finding: >
+      Two vacuous tests. a_plain_directory_keys_on_its_own_path and
+      an_unreadable_git_entry_falls_back_and_never_fails each assert only that the key is not
+      empty. Any implementation that returns any non-empty string passes both, so neither
+      verifies the claim in its own name.
+    evidence: 'tests/session_key_id.rs; the controller reviewed these two and missed it'
+    fix: 'assert the behaviour each name claims'
+  - id: m5
+    severity: minor
+    finding: >
+      A silent fallback in resolve. A .git file that fails to open, or whose metadata errors,
+      falls back to the physical path with no signal. A worktree whose .git is transiently
+      unreadable stops sharing its repository's sessions, invisibly.
+    evidence: 'cbm_search reports cognitive 16 on resolve, the worst in the file'
+    fix: 'log at debug when the fallback fires'
+  - id: m2
+    severity: minor
+    finding: 'sanitize_name permits a leading dot, so a repo named .config yields a hidden store directory'
+    fix: 'strip or replace a leading dot, beside the existing placeholder branch'
+
+public_items_with_no_test:
+  - 'SessionId::as_str, in_degree 0'
+  - 'PrefixMatch and its three variants, in_degree 0'
+  - 'SessionId::mint, called by tests, but no test asserts its date output'
+  - 'is_id_shape accept path, because no valid id is ever parsed successfully'

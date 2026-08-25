@@ -1,0 +1,47 @@
+stage: core-red
+slice: keys-and-ids
+
+test_files:
+  - crates/rho-core/tests/session_key_id.rs
+
+failure_reason: >
+  Every one of the 12 tests fails on an unimplemented body, never on a type error or a
+  missing import. `cargo test -p rho-core --no-run` exits 0. `cargo test -p rho-core
+  --test session_key_id` reports "test result: FAILED. 0 passed; 12 failed", and each
+  failure is `panicked at crates/rho-core/src/session/key.rs:...: not yet implemented`
+  (ProjectKey::resolve at key.rs:39, resolve_from at key.rs:50, and the SessionId and
+  default_store_root bodies). The new module `key.rs` holds only the signatures the spec
+  gives, each body `todo!()`.
+
+dod_for_green:
+  - "ProjectKey::resolve(root) returns one shared key for every worktree of one repo, by parsing the `.git` gitdir line and walking to the common dir."
+  - "A plain directory keys on its own physical path; a junk `.git` falls back and never fails."
+  - "The digest of the full identity path keeps two same-named directories apart."
+  - "resolve_from<R: BufRead> reads at most GIT_ENTRY_MAX_BYTES (4096); the counting seam must stay at or under the cap on a 10 MB one-line file."
+  - "as_str() is always exactly one path segment: no `/`, no `\\`, no `..`; a name that sanitizes to nothing gets a placeholder, never an empty segment."
+  - "store_root.join(key.as_str()) can never leave store_root, over the hostile gitdir table."
+  - "default_store_root(home) == home/.rho/sessions and reads no real home."
+  - "SessionId::mint(epoch_millis, suffix) sorts by time; two suffixes in one second give two ids."
+  - "SessionId::parse rejects a non-shape id with SessionError::Decode."
+
+gate_commands:
+  - command: cargo test -p rho-core --no-run
+    exit: 0
+    last_line: "Executable tests/session_key_id.rs (target/debug/deps/session_key_id-...)"
+  - command: cargo test -p rho-core --test session_key_id
+    exit: 101
+    last_line: "test result: FAILED. 0 passed; 12 failed; 0 ignored; 0 measured; 0 filtered out"
+  - command: "grep -nE 'sleep|reqwest|home_dir' crates/rho-core/tests/session_key_id.rs"
+    exit: 1
+    last_line: "no match (no sleep, no network, no real home)"
+  - command: "git --no-pager diff --stat"
+    exit: 0
+    last_line: "names no existing test file; only lib.rs and session/mod.rs among tracked files (README.md and docs/features.md are a sibling agent's, not mine)"
+
+findings:
+  - "MINOR (contract gap, not a bug): the four prefix tests listed under section 11 'The id' (a_unique_prefix_resolves_to_one_session, an_ambiguous_prefix_lists_every_match, an_unknown_prefix_resolves_to_none, an_unknown_prefix_on_the_command_line_names_the_project) are NOT in this slice. They need SessionStore::resolve_prefix (spec section 7) or the command line (rho-cli), both outside my assigned sections 3/3a/4 and outside slice 1's 'project key and session id' boundary. resolve_prefix is not named in any of the four core-red slices either, and the command-line test belongs to cli-red. I did not invent an unspecced resolver, per 'transcribing not designing'. The controller should assign these to the store/cli slices."
+  - "The `BufRead` seam for the project key is not given verbatim in the spec (only row_from is). Per the task I added ProjectKey::resolve_from<R: BufRead>(git_entry, root) mirroring row_from, so a_giant_git_entry_stops_at_the_cap can drive a counting source. Confirm this name in green."
+  - "Controller-verify fix: CountingReader::fill_buf now hands back at most 512 bytes, not the whole remaining slice. Reason: an unbounded fill_buf let a reader borrow all 10 MB with zero consumes and pass the assertion (the section 5a bypass class). With a bounded chunk, any reader wanting more than 512 bytes must call consume and be counted; consume and read still count. So the seam still fails a read_to_string implementation, because read_to_string calls Read::read in a loop, and read counts every byte it serves, driving the count to 10 MB, well past GIT_ENTRY_MAX_BYTES."
+  - "Reachability required a crate-root re-export: `session` is a private module in lib.rs, so integration tests cannot see session::key::*. I added the 5 names to the existing `pub use session::{...}` block in lib.rs (a minimal anchored edit) in addition to `mod key;` + `pub use` in session/mod.rs. Without it the tests do not compile."
+
+open_questions: []

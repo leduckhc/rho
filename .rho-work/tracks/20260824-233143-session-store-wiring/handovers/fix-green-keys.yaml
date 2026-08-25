@@ -1,0 +1,58 @@
+stage: green
+slice: keys-and-ids-fixes
+files:
+  - crates/rho-core/src/session/key.rs
+  - crates/rho-core/src/session/mod.rs
+  - crates/rho-core/src/lib.rs
+items:
+  - id: B1
+    change: >
+      Replaced DefaultHasher in digest_hex with FNV-1a 64 bit over
+      identity.as_os_str().as_encoded_bytes(), offset basis 0xcbf2_9ce4_8422_2325,
+      prime 0x0000_0100_0000_01b3, low 32 bits as 8 lowercase hex. No dependency.
+      Doc says the algorithm is fixed for ever and a change is a migration.
+    proof: 'cargo test -p rho-core --test session_key_id the_digest_of_a_known_path_never_changes; pass'
+  - id: M2
+    change: >
+      identity_from_gitdir now takes root, resolves a relative gitdir against it,
+      then normalize_path folds . and .. by hand (no canonicalize). So a relative
+      gitdir shares one key with the main checkout.
+    proof: 'cargo test -p rho-core --test session_key_id a_relative_gitdir_shares_the_key_with_the_main_checkout; pass'
+  - id: m2
+    change: 'sanitize_name strips leading dots next to the empty-name placeholder branch, so no key starts with a dot.'
+    proof: 'cargo test -p rho-core --test session_key_id a_dot_named_project_does_not_hide_the_store; pass'
+  - id: M3
+    change: >
+      Deleted PrefixMatch from key.rs, and from the pub use in lib.rs and session/mod.rs.
+      Deleted the module-wide #![allow(dead_code)] from key.rs. Nothing became
+      genuinely unused; clippy -D warnings passes with no per-item allow added.
+    proof: 'cargo clippy -p rho-core --all-targets --all-features -- -D warnings; exit 0'
+  - id: m5
+    change: >
+      ProjectKey::resolve logs at tracing::debug and names the path when the .git file
+      cannot be opened, or when its metadata errors with a kind other than NotFound.
+      A missing .git stays silent, because it is the normal plain-directory case.
+    proof: 'cargo build -p rho-core; the two debug! calls compile in resolve'
+  - id: year-10000
+    change: >
+      SessionId::mint clamps the year to 9999 before formatting, so output always has
+      the 4-digit-year shape parse accepts. Doc states the year past 9999 is clamped.
+    proof: 'cargo test -p rho-core --test session_key_id a_minted_id_parses_back; pass'
+dod_state:
+  - item: 'cargo test -p rho-core --test session_key_id -> all pass'
+    command: 'cargo test -p rho-core --test session_key_id'
+    exit: 0
+    last_line: 'test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out'
+  - item: 'cargo test -p rho-core --all-features -> exit 0'
+    command: 'cargo test -p rho-core --all-features'
+    exit: 0
+    last_line: 'test result: ok. 0 passed (doc-tests); all crate test binaries ok'
+  - item: 'cargo fmt --all --check -> exit 0'
+    command: 'cargo fmt --all --check'
+    exit: 0
+    last_line: '(no diff)'
+  - item: 'cargo clippy -p rho-core --all-targets --all-features -- -D warnings -> exit 0'
+    command: 'cargo clippy -p rho-core --all-targets --all-features -- -D warnings'
+    exit: 0
+    last_line: 'Finished `dev` profile [unoptimized + debuginfo] target(s)'
+findings: []

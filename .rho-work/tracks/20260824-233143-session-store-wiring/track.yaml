@@ -1,0 +1,259 @@
+# Track: session store wiring
+#
+# A filled copy of `agentic-workflow.yaml`. The template is the blueprint. This file is
+# the record of one unit of work. See D-agentic-workflow-is-a-template.
+#
+# The frame phase is already complete. Its handovers sit beside this file, and each one
+# carries the evidence the template demands. The contract went through six reviews before
+# any code, which is step 9 run early and run hard.
+
+version: 2
+kind: task
+track: 20260824-233143-session-store-wiring
+status: open
+lane: feature
+spec: docs/specs/20260824-222153-SPEC-session-store-wiring.md
+
+one_sentence: >
+  rho keeps every session on disk, and a user lists, resumes, deletes, and forks one from
+  the command line.
+
+# The build phase is two red-to-green pairs. The library first, then the command surface.
+# A pair per crate boundary, because a test for `rho-cli` cannot compile until `rho-core`
+# holds the types.
+
+stages:
+  - kind: classify
+    id: classify
+    role: controller
+    status: done
+    handover: handovers/classify.yaml
+    gates: []
+
+  - kind: recon
+    id: recon
+    role: scout
+    status: done
+    depends_on: [classify]
+    handover: handovers/recon.yaml
+    gates: []
+
+  - kind: plan
+    id: plan
+    role: architect
+    status: done
+    depends_on: [recon]
+    handover: handovers/plan.yaml
+    reviewed_by: [reviewer, secops]
+    review_handover: handovers/plan.review.yaml
+    gates: [docs]
+    dod:
+      - text: The contract compiles outside the repository.
+        evidence: "/tmp/rho-contract-check; cargo build; exit 0; two errors found and fixed"
+      - text: Every reviewed finding is folded in, or refused with a reason.
+        evidence: .rho-work/lane-a-review-findings.md
+      - text: Every decision that constrains later work has a file.
+        evidence: "ls .rho-work/decisions/20260824-22*.md; 15 files"
+      - text: The docs gate passes.
+        evidence: "prose, ids, workflow, spec-tests; each exit 0"
+
+  - kind: red
+    id: core-red
+    role: tester
+    status: in-progress
+    progress: 'slice 1 of 4 done and verified. see handovers/core-red-keys.yaml'
+    depends_on: [plan]
+    crate: rho-core
+    note: >
+      The slices pair with the green stage one at a time. A later slice's test setup calls
+      an earlier slice's constructor, so a red test written before that constructor works
+      would fail in its setup rather than on its assertion. That is the wrong failure
+      reason, and the red stage forbids it. So slice N goes green before slice N plus one
+      goes red.
+    slices:
+      - The project key and the session id, including the hostile gitdir table.
+      - The store: an exclusive create, a minted retry, the advisory lock, and the modes.
+      - The reader: the orphan refusal, the duplicate id, and a walk with a hole.
+      - The row builder and its seam, plus every boundary the tail read must survive.
+    gates: []
+    gate_extra:
+      - cargo test -p rho-core --no-run
+      - "! cargo test -p rho-core --all-features --quiet"
+    dod:
+      - text: Every named test in the spec for these slices exists and fails.
+        evidence: "cargo test -p rho-core; each new test fails on an unimplemented body"
+      - text: No test sleeps, uses the network, or reads a real home directory.
+        evidence: "grep -n 'sleep\\|reqwest\\|home_dir' on the new test files; no hit"
+      - text: A seam test drives a counting source, so it can fail on a full read.
+        evidence: 'test name plus file:line for the counting reader'
+      - text: The suite is red for the new tests only, and no existing test changed.
+        evidence: "git diff --stat names no existing test file"
+
+  - kind: green
+    id: core-green
+    role: developer
+    status: in-progress
+    progress: 'slice 1 of 4 done, verified, and mutated. see handovers/core-green-keys.yaml'
+    depends_on: [core-red]
+    crate: rho-core
+    gates: [rust]
+    gate_extra:
+      - cargo test -p rho-core --all-features
+    dod:
+      - text: Every red test passes, and no test was edited.
+        evidence: "cargo test -p rho-core --all-features; exit 0; git diff on tests is empty"
+      - text: A create is exclusive, so a collision never truncates.
+        evidence: 'test create_twice_with_one_id_never_truncates; exit 0'
+      - text: The writer seeds its own ids, and no public method does it.
+        evidence: "grep -n 'seed_ids' crates/rho-core/src; no public fn"
+      - text: The rust gate passes on the whole workspace.
+        evidence: "fmt, clippy, test; each exit 0"
+
+  - kind: red
+    id: cli-red
+    role: tester
+    status: open
+    depends_on: [core-green]
+    crate: rho-cli
+    slices:
+      - The session flag: the alias, the equals rule, and the id-as-prompt refusal.
+      - The printed views: show with record ids, and list at eighty columns.
+      - The run path: recording by default, ephemeral, and the crash offer.
+      - The fork flow, driven end to end from the printed output.
+    gates: []
+    gate_extra:
+      - cargo test -p rho-cli --no-run
+      - "! cargo test -p rho-cli --quiet"
+    dod:
+      - text: Every named test in the spec for these slices exists and fails.
+        evidence: "cargo test -p rho-cli; each new test fails on an unimplemented body"
+      - text: The flag tests parse through the real command, not a hand-built parser.
+        evidence: 'file:line where the test builds the real Cli type'
+      - text: The fork test reads the record id from the real output of show.
+        evidence: 'test the_fork_flow_works_from_the_two_printed_commands; file:line'
+      - text: No test reads the real home directory or the real store.
+        evidence: "grep -n 'home_dir' on the new test files; no hit"
+
+  - kind: green
+    id: cli-green
+    role: developer
+    status: open
+    depends_on: [cli-red]
+    crate: rho-cli
+    gates: [rust, minimal-build]
+    gate_extra:
+      - cargo test -p rho-cli --all-features
+      - cargo build -p rho-cli --no-default-features --features minimal
+    dod:
+      - text: Every red test passes, and no test was edited.
+        evidence: "cargo test -p rho-cli --all-features; exit 0"
+      - text: The two dead config keys now do what they say.
+        evidence: 'tests for ephemeral and session-file; exit 0'
+      - text: The minimal build still links.
+        evidence: "cargo build -p rho-cli --no-default-features --features minimal; exit 0"
+      - text: No surface is advertised that this track did not build.
+        evidence: "grep -n '/tree\\|/fork' crates/rho-tui/src; no slash command added"
+
+  - kind: mutate
+    id: mutate
+    role: controller
+    status: in-progress
+    progress: >
+      slice 1 of 4 mutated early, while the slice was fresh. three breaks, three real
+      failures, nothing rewritten. see handovers/mutate-keys.yaml
+    depends_on: [cli-green]
+    gates: [rust]
+    dod:
+      - text: Every new invariant test is broken on purpose, and it fails.
+        evidence: 'break, command, the real failing output, then restore'
+      - text: The seam tests fail against a full read, and against a bypass.
+        evidence: 'two breaks per seam test'
+      - text: Any test that passed against its break is rewritten and proved again.
+        evidence: 'test name, the old form, and the new form'
+      - text: No file is restored with git checkout.
+        evidence: 'the /tmp copy path per mutated file'
+
+  - kind: sweep
+    id: sweep
+    role: controller
+    status: open
+    depends_on: [mutate]
+    gates: [surface]
+    dod:
+      - text: Every public item this track added has a test that names it.
+        evidence: 'item, then test name'
+      - text: No stub remains in any crate source.
+        evidence: "grep -rn 'todo!\\|unimplemented!' crates/*/src; no hit"
+      - text: Every new default is checked for fail-open, and each check is named.
+        evidence: 'the lock failure, the unknown record, the title fallback, the key fallback'
+      - text: Nothing computed stays unrendered.
+        evidence: 'every row field, and the reader that prints it'
+
+  - kind: review
+    id: review
+    role: reviewer
+    status: open
+    depends_on: [sweep]
+    reviewed_by: [reviewer, secops]
+    gates: [full]
+    dod:
+      - text: A reviewer that did not write the code returns findings with a severity.
+        evidence: the review handover
+      - text: The reviewer answers which public items have no test.
+        evidence: the list in the handover
+      - text: A security pass covers the store path, the lock, and the file modes.
+        evidence: the secops handover
+      - text: Every blocker and major finding is fixed, or refused with a reason.
+        evidence: 'finding, then the fix and its test'
+
+  - kind: measure
+    id: measure
+    role: devops
+    status: open
+    depends_on: [review]
+    gates: [docs]
+    dod:
+      - text: The list of five hundred sessions is measured, with its command.
+        evidence: 'the command, the machine, the date, and the number'
+      - text: The start path cost is measured against the recorded first frame.
+        evidence: 'the benchmarks row for time to first frame'
+      - text: The binary size and the resident memory are compared with the recorded rows.
+        evidence: 'the docs/benchmarks.md row per number'
+      - text: A measured regression fails this stage.
+        evidence: 'the number before and after'
+
+  - kind: drive
+    id: drive
+    role: controller
+    status: open
+    depends_on: [measure]
+    gates: [full]
+    dod:
+      - text: The real binary runs the whole flow, and the output is recorded.
+        evidence: "cargo build --release -p rho-cli, then the commands and their output"
+      - text: The failure paths are driven, including the same thing twice.
+        evidence: 'an absent session, a denied permission, and two runs at once'
+      - text: Every provider the change touches is exercised.
+        evidence: 'the provider name per command'
+      - text: The verification page holds what was really run.
+        evidence: docs/verification/
+
+  - kind: land
+    id: land
+    role: [devops, documenter]
+    status: open
+    depends_on: [drive]
+    gates: [full]
+    dod:
+      - text: The spec matches the code that shipped.
+        evidence: 'the amended section per divergence'
+      - text: The features rows carry the real status and the extension point.
+        evidence: docs/features.md
+      - text: The sessions guide states what is built, and what still is not.
+        evidence: docs/guide/sessions.md
+      - text: Every claim no test or benchmark proves is deleted.
+        evidence: 'the claim, and the reason it went'
+
+# Every skip must name the lane that permits it. This lane skips nothing, so the list is
+# empty and the design stage is absent because it is optional in the template.
+skips: []

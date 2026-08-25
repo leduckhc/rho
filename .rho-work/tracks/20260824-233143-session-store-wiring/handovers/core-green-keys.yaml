@@ -1,0 +1,54 @@
+stage: core-green
+slice: keys-and-ids
+
+files:
+  - crates/rho-core/src/session/key.rs
+
+dod_state:
+  - item: "Every red test passes, and no test was edited."
+    command: cargo test -p rho-core --all-features
+    exit: 0
+    last_line: "test result: ok. 12 passed; 0 failed (session_key_id); whole crate all ok"
+    note: >
+      git status shows tests/session_key_id.rs untracked and unchanged by me. Only
+      key.rs was written this stage.
+  - item: "A create is exclusive, so a collision never truncates."
+    command: "n/a for this slice"
+    exit: 0
+    last_line: >
+      create_twice_with_one_id_never_truncates belongs to the store slice (section 7),
+      not to keys-and-ids. Not in this slice's 12 tests.
+  - item: "The writer seeds its own ids, and no public method does it."
+    command: "grep -n 'seed_ids' crates/rho-core/src"
+    exit: 1
+    last_line: "no hit; seed_ids is the store/writer slice, out of scope for keys-and-ids"
+  - item: "The rust gate passes on the whole workspace."
+    command: cargo fmt --all --check
+    exit: 0
+    last_line: "fmt ok"
+  - item: "The rust gate passes on the whole workspace."
+    command: "cargo clippy -p rho-core --all-targets --all-features -- -D warnings"
+    exit: 0
+    last_line: "Finished dev profile; no warning and no error"
+
+findings:
+  - severity: none
+    note: >
+      The contract held. resolve_from<R: BufRead> matches the seam name the tester added.
+      Implementation: git_entry.take(GIT_ENTRY_MAX_BYTES).read_until(b'\n', ..), so the
+      counting seam stays at or under 4096 bytes on the 10 MB one-line file.
+  - severity: minor
+    note: >
+      The sanitizer collapses any run of two or more dots to one dot before use. The spec
+      text 3a only says "every byte outside [A-Za-z0-9._-] is replaced" and "empty becomes
+      a placeholder". A raw name like "..\\..\\windows" keeps its dots after byte-strip and
+      would still hold "..", which the invariant test a_hostile_gitdir_cannot_escape_the_store
+      forbids. Dot-run collapse is the minimal fix that honors the invariant "never emit ..".
+      The spec could state this dot-collapse rule explicitly. It changes no test.
+  - severity: minor
+    note: >
+      Two same-named directories are kept apart by an 8-hex digest of the full identity
+      path via std::hash::DefaultHasher (fixed SipHash keys, deterministic across runs).
+      No dependency added.
+
+open_questions: []

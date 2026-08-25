@@ -51,10 +51,10 @@ pub use retry::RetryPolicy;
 pub use sandbox::SandboxMode;
 pub use secret::Secret;
 pub use session::{
-    Entry, MAX_DROPPED_RECORDS, MAX_LINE_BYTES, MAX_RECORD_BYTES, ReadResult, Record, RecordId,
-    SessionError, SessionHeader, SessionLog, SessionReader, SessionRecorder, SessionStore,
-    SessionSummary, SessionWriter, StoredApproval, StoredSandbox, branch_messages,
-    check_resume_permission, decode, encode,
+    Entry, GIT_ENTRY_MAX_BYTES, MAX_DROPPED_RECORDS, MAX_LINE_BYTES, MAX_RECORD_BYTES, ProjectKey,
+    ReadResult, Record, RecordId, SessionError, SessionHeader, SessionId, SessionLog,
+    SessionReader, SessionRecorder, SessionStore, SessionSummary, SessionWriter, StoredApproval,
+    StoredSandbox, branch_messages, check_resume_permission, decode, default_store_root, encode,
 };
 pub use subagent::{
     Admission, AgentId, AgentNode, AgentOutcome, AgentProgress, AgentRef, AgentRegistry,
