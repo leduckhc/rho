@@ -14,6 +14,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-a-merged-value-error-names-no-file](20260821-231500-D-a-merged-value-error-names-no-file.md) | 20260821 | A merged value error names the key and the value, and never a file |
 | [D-a-project-key-cannot-escape-the-store](20260824-223011-D-a-project-key-cannot-escape-the-store.md) | 20260824 | A hostile repository must not choose where rho writes |
 | [D-a-record-id-is-minted-against-the-set](20260824-221848-D-a-record-id-is-minted-against-the-set.md) | 20260824 | A record id is minted against the set, because a counter mints a duplicate |
+| [D-a-rejected-definition-is-reported](20260826-184108-D-a-rejected-definition-is-reported.md) | 20260826 | A definition file that does not load says so |
 | [D-a-second-writer-can-delete-a-test-in-silence](20260822-131500-D-a-second-writer-can-delete-a-test-in-silence.md) | 20260822 | A second writer can delete a test in silence, so a commit's claims are checked |
 | [D-a-panel-nobody-can-open](20260818-171500-D-a-panel-nobody-can-open.md) | 20260818 | A rendered panel with no key that opens it is not a feature |
 | [D-a-role-column-is-not-a-stack](20260818-181500-D-a-role-column-is-not-a-stack.md) | 20260818 | A theme role resolves in one mode, and the columns never stack |
@@ -21,6 +22,8 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-a-session-id-sorts-by-time](20260824-221846-D-a-session-id-sorts-by-time.md) | 20260824 | A session id is a stamp and four hex characters, so a list sorts with no read |
 | [D-a-session-title-costs-nothing](20260824-221851-D-a-session-title-costs-nothing.md) | 20260824 | A title comes from the first prompt or a name record, and never from a model |
 | [D-a-stale-result-handle-expires-on-resume](20260824-221855-D-a-stale-result-handle-expires-on-resume.md) | 20260824 | A stale result handle expires on resume, and the model is told |
+| [D-a-tool-keyword-stands-alone](20260820-115845-D-a-tool-keyword-stands-alone.md) | 20260820 | A tool keyword stands alone, and a mixed line keeps the names |
+| [D-a-tool-list-accepts-a-yaml-sequence](20260826-184109-D-a-tool-list-accepts-a-yaml-sequence.md) | 20260826 | Both spellings of a tool list are right |
 | [D-acp-cancelled-spelling](20260817-171334-D-acp-cancelled-spelling.md) | 20260817 | The ACP cancelled stop reason needs an explicit serde rename |
 | [D-acp-is-real-acp](20260817-164906-D-acp-is-real-acp.md) | 20260817 | The headless frontend is ACP, and it is the real ACP |
 | [D-agentic-workflow-is-a-template](20260820-120345-D-agentic-workflow-is-a-template.md) | 20260820 | One agentic workflow template, filled per unit of work |
