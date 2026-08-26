@@ -121,9 +121,15 @@ impl McpSchemaCache {
 /// Record one server's tools in the cache file, keeping every other entry.
 ///
 /// It reads the file, updates one entry, writes a temporary file, and renames it over the
-/// old one. Two sessions, or two servers in one process, therefore never lose each other's
-/// entry, and no reader ever sees a half-written file. A whole-file write from an in-memory
-/// snapshot would drop whatever the other writer had added.
+/// old one, so no reader ever sees a half-written file and two servers in one process cannot
+/// share a temporary path.
+///
+/// **It does not hold a lock, so two processes can still lose an entry.** Both may read the
+/// same file, add a different entry, and the second rename wins. Two reviews found this, and
+/// an earlier version of this comment claimed the opposite. The cost is bounded: a lost entry
+/// means one more handshake in a later session, because a cache is a hint and a live
+/// connection always wins. An inter-process lock is the fix, and it is recorded as a
+/// follow-up rather than claimed here.
 pub fn record_tools(
     path: &Path,
     config: &McpServerConfig,

@@ -363,6 +363,18 @@ impl ConfigLayer {
     /// them rather than drop them. A dropped credential would read as "no such name",
     /// which teaches the user nothing.
     fn strip_powerful_keys(&mut self) -> BTreeMap<String, BTreeSet<String>> {
+        self.strip_powerful_keys_to_depth(0)
+    }
+
+    /// The recursion, with its own bound.
+    ///
+    /// A profile may hold profiles, so a config file controls the depth. The `toml` parser
+    /// bounds its own nesting today, and a guard that leans on a dependency's behaviour is
+    /// not a guard: a parser change would remove it in silence. A review named this, so the
+    /// bound lives here.
+    fn strip_powerful_keys_to_depth(&mut self, depth: usize) -> BTreeMap<String, BTreeSet<String>> {
+        /// Deeper than any real config, and shallow enough that no stack is at risk.
+        const MAX_PROFILE_DEPTH: usize = 16;
         // Every powerful key, in one place. `a_powerful_key_is_named_in_one_place` fails
         // when a new field is neither listed here nor listed as harmless.
         // `session_root` is the confinement boundary of every file tool and of the OS
@@ -388,7 +400,13 @@ impl ConfigLayer {
         // use one name and the merge keeps only the winner. Recording one value let the
         // other slip past the equality check at the call site.
         for profile in self.profiles.values_mut() {
-            for (name, values) in profile.strip_powerful_keys() {
+            if depth >= MAX_PROFILE_DEPTH {
+                // Past the bound the profiles are cleared wholesale, so nothing deeper can
+                // carry a powerful value past the gate.
+                profile.profiles.clear();
+                continue;
+            }
+            for (name, values) in profile.strip_powerful_keys_to_depth(depth + 1) {
                 refused.entry(name).or_default().extend(values);
             }
         }
