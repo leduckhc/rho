@@ -1,0 +1,16 @@
+# Public functions no code calls, with the reason each is allowed.
+#
+# One line: <path>::<function>  <reason>. The reason is mandatory. A reason naming a
+# SPEC- slug must resolve, so a lane cannot be invented to silence the guard. An entry
+# whose function gains a caller fails as unnecessary.
+#
+# See D-dead-surface-is-a-defect-class and D-the-dead-surface-allowlist-names-its-lane.
+
+# Landed ahead of its wiring lane. Each names the spec that consumes it.
+crates/rho-core/src/session/key.rs::default_store_root  SPEC-session-store-wiring consumes it. The wiring lane is a draft.
+crates/rho-core/src/session/key.rs::resolve_from  SPEC-session-store-wiring consumes it. The wiring lane is a draft.
+crates/rho-config/src/lib.rs::resolve_credential  No provider asks for a credential yet. The [credentials] table is documented as partly built, and item I15 wires it.
+crates/rho-session-import-pi/src/lib.rs::import_pi_session  A library for an importer nobody has built a command for. It is documented as a library only.
+
+# Library surface a caller outside this workspace uses.
+crates/rho-provider-openrouter/src/lib.rs::with_base_url  A third party points the client at its own mock of OpenRouter's path. The CLI uses with_openai_host.

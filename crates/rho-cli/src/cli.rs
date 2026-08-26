@@ -167,6 +167,23 @@ pub struct Cli {
     /// Do not search the skill directories. An explicit --skill still loads.
     #[arg(long, global = true, num_args = 0..=1, default_missing_value = "true")]
     pub no_skills: Option<bool>,
+    /// Do not search for agent definitions, so rho offers no subagent.
+    ///
+    /// It is separate from `--no-skills`. One flag used to stop both loaders, and it said
+    /// nothing about either. See decision D-skills-and-agents-are-two-switches.
+    #[arg(long, global = true, num_args = 0..=1, default_missing_value = "true")]
+    pub no_agents: Option<bool>,
+    /// Stop the animation that sweeps the working word.
+    ///
+    /// The footer still names the state in words, so nothing is lost but the movement.
+    #[arg(long, global = true)]
+    pub no_motion: bool,
+    /// The provider endpoint. Use it for a local model host, such as Ollama or vLLM.
+    ///
+    /// It redirects the credential, so a project file and the environment need
+    /// `--trust-project` to set it. A remote plain-http url is refused.
+    #[arg(long, global = true, value_name = "URL")]
+    pub base_url: Option<String>,
 
     /// Read MCP servers from this file instead of ~/.rho/mcp.json.
     #[arg(long, global = true, value_name = "PATH")]
@@ -318,7 +335,8 @@ async fn build_session(
     mut config: SessionConfig,
 ) -> anyhow::Result<(Session, Arc<rho_core::TaskRegistry>, SessionExtras)> {
     let name = provider::resolve_provider_name(loaded.provider.as_deref(), None)?;
-    let provider = provider::build_provider(&name)?;
+    let provider = provider::build_provider(&name, loaded.base_url.as_deref())?;
+    let wiring_notices = wiring_notices(loaded);
     let tasks = Arc::new(rho_core::TaskRegistry::new(rho_core::TaskLimits::default()));
 
     // Skills and MCP are optional. A failure in either degrades one capability and
@@ -372,7 +390,7 @@ async fn build_session(
     let (spawn_tools, subagents) = subagents::load(subagents::LoadRequest {
         session_root: config.session_root.clone(),
         trust_project: cli.trust_project,
-        discover: loaded.discover_skills,
+        discover: loaded.discover_agents,
         parent_config: config.clone(),
         provider: Arc::clone(&provider),
         hooks: Arc::clone(&hooks),
@@ -399,9 +417,9 @@ async fn build_session(
         Session::with_config(config, provider, tools, hooks, context),
         tasks,
         SessionExtras {
-            notices: extensions
-                .notices
+            notices: wiring_notices
                 .into_iter()
+                .chain(extensions.notices)
                 .chain(subagents.notices)
                 .chain(result_notices)
                 .collect(),
@@ -721,6 +739,11 @@ fn flag_layer(cli: &Cli) -> rho_config::ConfigLayer {
         tui_reasoning: cli.reasoning.clone(),
         reasoning_effort: cli.reasoning_effort.clone(),
         no_skills: cli.no_skills,
+        no_agents: cli.no_agents,
+        // One flag over one boolean. An unpassed flag writes nothing, so a file still
+        // decides, per `SPEC-config-call-site` rule 6.
+        tui_motion: if cli.no_motion { Some(false) } else { None },
+        base_url: cli.base_url.clone(),
         mcp_config: cli.mcp_config.clone(),
         // An empty `--skill` list is no request at all, so it writes nothing.
         skill_paths: if cli.skills.is_empty() {
@@ -878,6 +901,13 @@ async fn run_interactive(cli: &Cli) -> i32 {
     // `SPEC-config-call-site`.
     let mouse = loaded.tui_mouse;
     let reasoning = loaded.reasoning;
+    // A non-terminal stdout, and `RHO_REDUCE_MOTION`, are conditions the interface reads
+    // for itself. The config key and the flag arrive through the merge.
+    let motion = rho_tui::motion_enabled(rho_tui::MotionInputs {
+        tui_motion: loaded.tui_motion,
+        stdout_is_terminal: std::io::IsTerminal::is_terminal(&std::io::stdout()),
+        reduce_motion_env: false,
+    });
     // Hold `_tasks` and `_extras` for the whole run. Dropping the task registry kills
     // every background task, and dropping the MCP pool stops every server, so an early
     // drop would end work the model is still waiting on.
@@ -898,6 +928,9 @@ async fn run_interactive(cli: &Cli) -> i32 {
     let branch = git_branch();
     let mut app = rho_tui::App::new(session, model)
         .with_mouse(mouse)
+        // The renderer read `state.animate` and nothing ever assigned it, so the sweep
+        // never drew. See `D-motion-answers-to-one-switch`.
+        .with_motion(motion)
         .with_reasoning(reasoning)
         .with_context(cwd, branch, provider_name)
         .with_notices(notices);
@@ -920,6 +953,32 @@ async fn run_interactive(_cli: &Cli) -> i32 {
 fn fail(error: anyhow::Error) -> i32 {
     eprintln!("rho: {error}");
     EXIT_FAILURE
+}
+
+/// What rho tells the user about a switch it obeyed.
+///
+/// A base url redirects the credential, so rho says where the key is going. A silent
+/// redirect is the defect. See `D-a-provider-base-url-is-a-config-key`. Agent discovery
+/// says so too, because a missing `spawn_agent` otherwise reads as a broken feature.
+fn wiring_notices(loaded: &rho_config::Config) -> Vec<String> {
+    let mut notices = Vec::new();
+    if let Some(url) = &loaded.base_url {
+        let host = url::Url::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_string))
+            .unwrap_or_else(|| url.clone());
+        notices.push(format!(
+            "base-url is set, so {} goes to {host}. Unset base-url to use the default endpoint.",
+            provider::OPENROUTER_KEY_ENV
+        ));
+    }
+    if !loaded.discover_agents {
+        notices.push(
+            "agent discovery is off, so rho offers no subagent. Remove --no-agents to use one."
+                .to_string(),
+        );
+    }
+    notices
 }
 
 /// The subagent limits for this run, from the flags.
@@ -1408,6 +1467,47 @@ mod tests {
         // `strict` could never win.
         let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
         assert_eq!(flag_layer(&cli).sandbox, None);
+    }
+
+    /// A resolved config from one flag layer, so a notice test needs no file and no provider.
+    fn resolved_with(flags: rho_config::ConfigLayer) -> rho_config::Config {
+        let sources =
+            rho_config::Sources::from_paths(rho_config::ConfigPaths::default()).with_flags(flags);
+        rho_config::Config::load(&sources).expect("a flag layer resolves")
+    }
+
+    #[test]
+    fn setting_a_base_url_names_the_host_in_a_notice() {
+        // A silent redirect of the credential is the defect. The notice names the host and
+        // the variable, so a user sees where the key is going.
+        let loaded = resolved_with(rho_config::ConfigLayer {
+            base_url: Some("https://models.example.com/v1".to_string()),
+            ..Default::default()
+        });
+        let notices = wiring_notices(&loaded);
+        assert_eq!(notices.len(), 1, "one notice: {notices:?}");
+        assert!(notices[0].contains("models.example.com"), "{}", notices[0]);
+        assert!(notices[0].contains("OPENROUTER_API_KEY"), "{}", notices[0]);
+    }
+
+    #[test]
+    fn a_skipped_definition_is_reported() {
+        // `--no-agents` removes `spawn_agent`, and silence would read as a broken feature.
+        let loaded = resolved_with(rho_config::ConfigLayer {
+            no_agents: Some(true),
+            ..Default::default()
+        });
+        let notices = wiring_notices(&loaded);
+        assert!(
+            notices.iter().any(|line| line.contains("--no-agents")),
+            "the notice names the switch: {notices:?}"
+        );
+    }
+
+    #[test]
+    fn no_switch_means_no_wiring_notice() {
+        // A notice a user did not ask for is noise, so the quiet path stays quiet.
+        assert!(wiring_notices(&resolved_with(rho_config::ConfigLayer::default())).is_empty());
     }
 
     #[test]

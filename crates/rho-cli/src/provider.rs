@@ -133,9 +133,24 @@ pub fn resolve_provider_name(
 
 /// Build a provider by name. This reads the environment for credentials. It
 /// fails with a clear message when a credential is missing.
-pub fn build_provider(name: &str) -> Result<Arc<dyn Provider>, ProviderError> {
+pub fn build_provider(
+    name: &str,
+    base_url: Option<&str>,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    // A base url belongs to the OpenAI-compatible client. Bedrock and Azure name their
+    // endpoint their own way, so a base url with either is a mistake rho reports rather
+    // than ignores. Silence here would be a fresh dead switch.
+    if let Some(url) = base_url
+        && name != "openrouter"
+    {
+        return Err(ProviderError::MissingConfig {
+            message: format!(
+                "base-url is set to {url}, and the {name} provider names its endpoint its own way. Remove base-url, or use --provider openrouter."
+            ),
+        });
+    }
     match name {
-        "openrouter" => build_openrouter(),
+        "openrouter" => build_openrouter(base_url),
         "bedrock" => build_bedrock(),
         "azure" => build_azure(),
         other if KNOWN_PROVIDERS.contains(&other) => Err(ProviderError::NotCompiled {
@@ -148,15 +163,18 @@ pub fn build_provider(name: &str) -> Result<Arc<dyn Provider>, ProviderError> {
 }
 
 #[cfg(feature = "openrouter")]
-fn build_openrouter() -> Result<Arc<dyn Provider>, ProviderError> {
+fn build_openrouter(base_url: Option<&str>) -> Result<Arc<dyn Provider>, ProviderError> {
     let key = std::env::var(OPENROUTER_KEY_ENV).unwrap_or_default();
-    openrouter_from_key(&key)
+    openrouter_from_key(&key, base_url)
 }
 
 /// Build the OpenRouter provider from a key value. A separate function, so a test
 /// can check the missing-key path without changing the process environment.
 #[cfg(feature = "openrouter")]
-fn openrouter_from_key(key: &str) -> Result<Arc<dyn Provider>, ProviderError> {
+fn openrouter_from_key(
+    key: &str,
+    base_url: Option<&str>,
+) -> Result<Arc<dyn Provider>, ProviderError> {
     use rho_core::Secret;
     use rho_provider_openrouter::{OpenRouterConfig, OpenRouterProvider};
 
@@ -164,12 +182,17 @@ fn openrouter_from_key(key: &str) -> Result<Arc<dyn Provider>, ProviderError> {
     if secret.is_empty() {
         return Err(missing(OPENROUTER_KEY_ENV, "your OpenRouter API key"));
     }
-    let config = OpenRouterConfig::new(secret);
+    let mut config = OpenRouterConfig::new(secret);
+    // The client already carried a settable endpoint, and nothing reached it. That is the
+    // whole defect. See `D-a-provider-base-url-is-a-config-key`.
+    if let Some(url) = base_url {
+        config = config.with_openai_host(url);
+    }
     Ok(Arc::new(OpenRouterProvider::new(config)))
 }
 
 #[cfg(not(feature = "openrouter"))]
-fn build_openrouter() -> Result<Arc<dyn Provider>, ProviderError> {
+fn build_openrouter(_base_url: Option<&str>) -> Result<Arc<dyn Provider>, ProviderError> {
     Err(ProviderError::NotCompiled {
         name: "openrouter".to_string(),
     })
@@ -245,7 +268,7 @@ mod tests {
 
     #[test]
     fn unknown_provider_names_the_choices() {
-        let message = expect_err(build_provider("nope")).to_string();
+        let message = expect_err(build_provider("nope", None)).to_string();
         assert!(message.contains("openrouter"), "message was: {message}");
         assert!(message.contains("--provider"), "message was: {message}");
     }
@@ -310,7 +333,7 @@ mod tests {
     #[cfg(feature = "openrouter")]
     #[test]
     fn missing_openrouter_key_names_the_variable() {
-        let message = expect_err(openrouter_from_key("")).to_string();
+        let message = expect_err(openrouter_from_key("", None)).to_string();
         assert!(
             message.contains(OPENROUTER_KEY_ENV),
             "message must name the variable: {message}"
@@ -320,6 +343,6 @@ mod tests {
     #[cfg(feature = "openrouter")]
     #[test]
     fn a_present_openrouter_key_builds_a_provider() {
-        assert!(openrouter_from_key("sk-test-key").is_ok());
+        assert!(openrouter_from_key("sk-test-key", None).is_ok());
     }
 }

@@ -82,10 +82,25 @@ impl McpSchemaCache {
     /// A config change alters the fingerprint, so a stale entry is never
     /// returned. That is the first correctness guard.
     pub fn tools_for(&self, config: &McpServerConfig) -> &[McpToolDef] {
-        match self.entries.get(&config.fingerprint()) {
+        match self.entries.get(&Self::persisted_key(config)) {
             Some(entry) => &entry.tools,
             None => &[],
         }
+    }
+
+    /// The persisted key for a config.
+    ///
+    /// A fingerprint embeds every `env` entry, including a server token, so it is an
+    /// in-memory key and never a file one. This hashes it, so the file names no secret and
+    /// no variable. FNV-1a keeps the digest stable across builds, which a cache needs, and
+    /// it carries no security claim beyond hiding the input.
+    fn persisted_key(config: &McpServerConfig) -> String {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in config.fingerprint().as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{hash:016x}")
     }
 
     /// Replace the entry for a config with a live tool list.
@@ -94,11 +109,33 @@ impl McpSchemaCache {
     /// correctness guard.
     pub fn update(&mut self, config: &McpServerConfig, tools: Vec<McpToolDef>) {
         self.entries.insert(
-            config.fingerprint(),
+            Self::persisted_key(config),
             CacheEntry {
                 server: config.name.clone(),
                 tools,
             },
         );
     }
+}
+
+/// Record one server's tools in the cache file, keeping every other entry.
+///
+/// It reads the file, updates one entry, writes a temporary file, and renames it over the
+/// old one. Two sessions, or two servers in one process, therefore never lose each other's
+/// entry, and no reader ever sees a half-written file. A whole-file write from an in-memory
+/// snapshot would drop whatever the other writer had added.
+pub fn record_tools(
+    path: &Path,
+    config: &McpServerConfig,
+    tools: Vec<McpToolDef>,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut cache = McpSchemaCache::load(path).unwrap_or_else(|_| McpSchemaCache::new());
+    cache.update(config, tools);
+
+    let temporary = path.with_extension(format!("tmp{}", std::process::id()));
+    cache.save(&temporary)?;
+    std::fs::rename(&temporary, path)
 }

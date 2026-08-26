@@ -93,6 +93,10 @@ pub struct McpPool {
     factory: Arc<dyn TransportFactory>,
     servers: Mutex<HashMap<String, ServerEntry>>,
     private_counter: AtomicU64,
+    /// Where a successful handshake records its tool list. `None` records nothing, which is
+    /// what a test wants. Without it the cache was never written and no MCP tool ever
+    /// reached the model. See `SPEC-wire-the-dead-switches`.
+    cache_path: Mutex<Option<std::path::PathBuf>>,
 }
 
 impl McpPool {
@@ -112,7 +116,19 @@ impl McpPool {
             factory,
             servers: Mutex::new(HashMap::new()),
             private_counter: AtomicU64::new(0),
+            cache_path: Mutex::new(None),
         })
+    }
+
+    /// Record a successful handshake's tool list at this path.
+    ///
+    /// The pool is behind an `Arc` by the time a caller has it, so this takes `&self` and
+    /// stores the path behind its own lock rather than taking `self` by value.
+    pub fn set_cache_path(&self, path: std::path::PathBuf) {
+        *self
+            .cache_path
+            .lock()
+            .expect("the cache path mutex is never poisoned") = Some(path);
     }
 
     /// Take a reference to a server, connecting in the background if needed.
@@ -178,6 +194,11 @@ impl McpPool {
     fn spawn_connect(&self, slot: Arc<ServerSlot>, config: McpServerConfig) {
         let factory = Arc::clone(&self.factory);
         let limits = self.limits;
+        let cache_path = self
+            .cache_path
+            .lock()
+            .expect("the cache path mutex is never poisoned")
+            .clone();
         tokio::spawn(async move {
             let result = async {
                 let pair = factory.open(&config, &limits).await?;
@@ -185,7 +206,16 @@ impl McpPool {
             }
             .await;
             match result {
-                Ok((connection, _tools)) => {
+                Ok((connection, tools)) => {
+                    // The only place that knows the handshake succeeded and still holds the
+                    // whole list. `extensions::load` returns long before this runs, so a
+                    // write there would cache nothing. A failed handshake takes the `Err`
+                    // arm and writes nothing at all.
+                    if let Some(path) = cache_path
+                        && let Err(error) = crate::record_tools(&path, &config, tools)
+                    {
+                        tracing::debug!(%error, "the MCP schema cache was not written");
+                    }
                     // `send_replace` updates the stored value even when no
                     // receiver exists yet, so a call that subscribes later still
                     // sees the ready connection. `send` would drop the update.

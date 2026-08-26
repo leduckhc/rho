@@ -233,6 +233,9 @@ pub async fn load(
         .map(|home| home.join(".rho").join("mcp-schema-cache.json"))
         .unwrap_or_else(|| PathBuf::from("mcp-schema-cache.json"));
     let cache = McpSchemaCache::load(&cache_path).unwrap_or_else(|_| McpSchemaCache::new());
+    // The write was the missing call. Nothing recorded a handshake, so the cache stayed
+    // empty, so no MCP tool ever reached the model. See `docs/verification/mcp-live-probe.md`.
+    pool.set_cache_path(cache_path.clone());
     // `tools_for` returns at once. It advertises from the cache and connects on a
     // background task, so the first provider request already carries these tools and a
     // late handshake never rewrites the stable prefix. See SPEC-mcp section 4.
@@ -240,8 +243,8 @@ pub async fn load(
         Ok(mcp_tools) => {
             if mcp_tools.is_empty() {
                 notices.push(format!(
-                    "{} MCP server(s) are configured, and no tool schema is cached yet. \
-                     Their tools appear in the next session.",
+                    "{} MCP server(s) are configured, and no tool schema is cached yet. rho \
+                     is connecting now, and their tools are available in the next session.",
                     servers.len()
                 ));
             }

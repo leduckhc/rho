@@ -11,7 +11,7 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use common::{env_map, sources_with_project_file, temp_dir, write_file};
+use common::{empty_sources, env_map, sources_with_project_file, temp_dir, write_file};
 use rho_config::{ApprovalMode, Config, CredentialSource, Sources};
 use rho_core::{SandboxMode, Secret, SubagentLimits};
 
@@ -154,4 +154,28 @@ fn load_resolves_the_default_security_keys() {
         "a bare load must never resolve to allow-all, got {:?}",
         config.approval
     );
+}
+
+#[test]
+fn no_skills_leaves_agent_discovery_on() {
+    // One switch used to govern both loaders, so `--no-skills` removed every subagent in
+    // silence. See `D-skills-and-agents-are-two-switches`.
+    let config = Config::load(&empty_sources().with_flags(rho_config::ConfigLayer {
+        no_skills: Some(true),
+        ..Default::default()
+    }))
+    .expect("flags resolve");
+    assert!(!config.discover_skills, "the skill search is off");
+    assert!(config.discover_agents, "and delegation is untouched");
+}
+
+#[test]
+fn no_agents_leaves_skill_discovery_on() {
+    let config = Config::load(&empty_sources().with_flags(rho_config::ConfigLayer {
+        no_agents: Some(true),
+        ..Default::default()
+    }))
+    .expect("flags resolve");
+    assert!(!config.discover_agents, "the agent search is off");
+    assert!(config.discover_skills, "and skills still load");
 }

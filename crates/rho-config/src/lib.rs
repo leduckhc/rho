@@ -426,6 +426,46 @@ impl ConfigLayer {
     }
 }
 
+/// A base url must be `https`, or plain `http` to a loopback literal.
+///
+/// A base url redirects the credential. `https` anywhere is allowed, because the transport
+/// is encrypted. Plain `http` puts the key on the wire in clear text, so it is allowed only
+/// where the traffic never leaves the machine.
+///
+/// The host is read from a parser, never from the string. `http://127.0.0.1@evil.example`
+/// has host `evil.example`, and a substring check would send the key there. An encoded
+/// address such as `http://2130706433` is refused rather than decoded, because rho does not
+/// out-guess a resolver, and a DNS lookup here would be a TOCTOU of its own.
+fn check_base_url(value: &str) -> Result<(), ConfigError> {
+    let refuse = |message: &str| {
+        Err(ConfigError::Value {
+            key: "base-url",
+            value: value.to_string(),
+            message: message.to_string(),
+        })
+    };
+    let Ok(url) = url::Url::parse(value) else {
+        return refuse("it is not a url with a scheme, for example https://host/v1");
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        return refuse(
+            "a url with a user or a password is refused, because the host is not what it looks like",
+        );
+    }
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" => match url.host() {
+            Some(url::Host::Ipv4(address)) if address.is_loopback() => Ok(()),
+            Some(url::Host::Ipv6(address)) if address.is_loopback() => Ok(()),
+            Some(url::Host::Domain("localhost")) => Ok(()),
+            _ => refuse(
+                "plain http is allowed only to localhost, 127.0.0.0/8, or [::1], because the credential would travel in clear text",
+            ),
+        },
+        other => refuse(&format!("the scheme {other} is not https or http")),
+    }
+}
+
 /// Parse a boolean from an environment value. It accepts `1`, `true`, and `yes` as
 /// true, and `0`, `false`, and `no` as false. The match trims space and ignores case.
 /// Any other value fails closed, so an unknown string never reads as false.
@@ -812,6 +852,9 @@ impl Config {
         // The environment layer fails closed on an unaccepted boolean, before use.
         validate_env_booleans(&sources.env)?;
 
+        if let Some(url) = &merged.base_url {
+            check_base_url(url)?;
+        }
         let sandbox = parse_sandbox(&merged)?;
         let approval = parse_approval(&merged)?;
         let reasoning = parse_reasoning(&merged)?;

@@ -20,6 +20,12 @@ pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai";
 
 /// The chat-completions path on the base URL.
 const CHAT_PATH: &str = "/api/v1/chat/completions";
+/// The path every other OpenAI-compatible host serves.
+///
+/// OpenRouter puts its chat endpoint under `/api`. Ollama, vLLM, LiteLLM, and LM Studio do
+/// not. Appending OpenRouter's path to a local host gives a 404, and a live probe caught
+/// exactly that. See `D-a-provider-base-url-is-a-config-key`.
+const OPENAI_CHAT_PATH: &str = "/v1/chat/completions";
 
 // `Secret` and `RetryPolicy` live in `rho-core`. See decision D-secret-in-core.
 //
@@ -43,6 +49,9 @@ pub struct OpenRouterConfig {
     pub api_key: Secret,
     /// The retry policy for the initial request.
     pub retry: RetryPolicy,
+    /// The chat path appended to `base_url`. OpenRouter's own path by default, and the
+    /// standard OpenAI one when a caller set a base url.
+    chat_path: String,
 }
 
 impl OpenRouterConfig {
@@ -50,12 +59,36 @@ impl OpenRouterConfig {
     pub fn new(api_key: Secret) -> Self {
         Self {
             base_url: OPENROUTER_BASE_URL.to_string(),
+            chat_path: CHAT_PATH.to_string(),
             api_key,
             retry: RetryPolicy::default(),
         }
     }
 
     /// Override the base URL. Tests use this to target a mock server.
+    /// The full chat endpoint this config sends to.
+    pub fn chat_url(&self) -> String {
+        format!("{}{}", self.base_url, self.chat_path)
+    }
+
+    /// Point at an OpenAI-compatible host, such as Ollama, vLLM, or LM Studio.
+    ///
+    /// It sets the standard OpenAI chat path, because OpenRouter serves its endpoint under
+    /// `/api` and no other host does. A live probe against a stub that answered any path
+    /// hid this, so a stub must be strict. See `D-a-provider-base-url-is-a-config-key`.
+    ///
+    /// A local host's own documentation usually shows the `/v1` suffix, so both forms work
+    /// and neither doubles the segment.
+    pub fn with_openai_host(mut self, base_url: impl Into<String>) -> Self {
+        let given = base_url.into();
+        let trimmed = given.trim_end_matches('/');
+        let root = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
+        self.base_url = root.to_string();
+        self.chat_path = OPENAI_CHAT_PATH.to_string();
+        self
+    }
+
+    /// Point at another URL that serves OpenRouter's own path. A test uses it for a mock.
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
         self
@@ -106,7 +139,7 @@ impl Provider for OpenRouterProvider {
                 "the OpenRouter API key is empty. Set OPENROUTER_API_KEY.".to_string(),
             ));
         }
-        let url = format!("{}{CHAT_PATH}", self.config.base_url);
+        let url = self.config.chat_url();
         let body = build_request_body(&request);
 
         // Retry only before the first event. Once the response head arrives, a

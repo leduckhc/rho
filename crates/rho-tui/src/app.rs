@@ -112,6 +112,17 @@ impl App {
         self
     }
 
+    /// Set whether the working word animates.
+    ///
+    /// This is the call that was missing. `state.animate` was read by the renderer and
+    /// assigned nowhere, so the sweep never drew. A flag, a config key, and
+    /// `RHO_REDUCE_MOTION` all arrive here through the merge. See
+    /// `D-motion-answers-to-one-switch`.
+    pub fn with_motion(mut self, animates: bool) -> Self {
+        self.state.animate = animates;
+        self
+    }
+
     /// Set how the TUI draws reasoning. Default is `Summary`.
     ///
     /// The mode reaches the renderer through `TuiState`, so a config file, a variable, and a

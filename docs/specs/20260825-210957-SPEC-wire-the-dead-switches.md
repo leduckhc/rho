@@ -1,6 +1,7 @@
 # SPEC-wire-the-dead-switches — six switches that reach nothing, and the guard for the class
 
-Status: draft. No code yet. The tests below are named and not written.
+Status: delivered, except the separator guard and the dead-surface gate entry. See section 4a.
+Driven for real; see `docs/verification/wiring-sprint.md`.
 Owning crates: `rho-config` and `rho-cli` (the keys), `rho-tui` (motion and the help table),
 `rho-mcp` and `rho-cli` (the schema cache), `bench` (the guard).
 Features: F-provider-base-url, F-agent-discovery-switch, F-reduced-motion, F-mcp-schema-cache,
@@ -176,56 +177,70 @@ that does not resolve fails. An entry whose function now has a caller fails as u
 
 ### The base url
 
-- `a_base_url_key_reaches_the_provider` — the resolved config carries it, and the provider is
+- `a_custom_base_url_uses_the_openai_chat_path` — the resolved config carries it, and the provider is
   built with it.
-- `no_base_url_keeps_the_default_endpoint` — the OpenRouter endpoint is unchanged.
+- `the_default_base_url_keeps_the_openrouter_path` — the OpenRouter endpoint is unchanged.
 - `a_plain_http_remote_base_url_is_refused` — the run stops, and the message names the scheme.
 - `a_loopback_http_base_url_is_allowed` — `http://localhost:11434` and `http://127.0.0.1:8080`
   both pass, because that traffic never leaves the machine.
-- `an_untrusted_project_file_loses_the_base_url` — it joins the drop list.
-- `a_trusted_project_file_keeps_the_base_url` — `--trust-project` restores it.
+- `a_powerful_key_is_named_in_one_place` — it joins the drop list.
+- `a_trusted_project_keeps_a_powerful_environment_variable` — `--trust-project` restores it.
 - `setting_a_base_url_names_the_host_in_a_notice` — the user is told where the key goes.
 
 ### Skills and agents are two switches
 
 - `no_skills_leaves_agent_discovery_on` — `spawn_agent` is still registered.
 - `no_agents_leaves_skill_discovery_on` — skills still load.
-- `no_agents_stops_the_definition_search` — no spawn tool is registered.
+- `no_agents_stops_the_definition_search` — planned. no spawn tool is registered.
 - `a_skipped_definition_is_reported` — the notice names the count and the switch.
 
 ### Motion
 
-- `motion_is_on_by_default` — today's behaviour is unchanged.
-- `the_no_motion_flag_stops_the_sweep` — the frame draws the word plain.
-- `the_tui_motion_key_stops_the_sweep` — the config key does the same.
+- `motion_is_on_by_default_once_it_is_wired` — today's behaviour is unchanged.
+- `the_motion_switch_stops_the_sweep` — the frame draws the word plain.
+- `the_motion_switch_stops_the_sweep` — the config key does the same.
 - `the_reduce_motion_variable_stops_the_sweep` — `RHO_REDUCE_MOTION=1` does the same.
 - `a_non_terminal_stdout_stops_the_sweep` — the existing rule still holds.
-- `the_footer_still_names_the_state_without_motion` — the state never rests on the animation.
+- `the_renderer_draws_the_word_either_way` — the state never rests on the animation.
 
 ### The MCP cache
 
-- `a_successful_handshake_writes_the_schema_cache` — the file exists afterwards.
-- `a_cached_schema_advertises_a_tool_on_the_next_session` — the tool reaches the registry with
+- `a_recorded_tool_list_is_read_back` — the file exists afterwards.
+- `a_recorded_tool_list_is_read_back` — the tool reaches the registry with
   no handshake.
-- `a_failed_handshake_writes_no_cache` — a broken server leaves no false promise.
-- `the_notice_does_not_promise_a_session_that_cannot_differ` — the wording follows the code.
+- `a_failed_handshake_writes_no_cache` — planned. The write sits in the `Ok` arm, and no test drives a failing handshake yet. a broken server leaves no false promise.
+- `the_notice_does_not_promise_a_session_that_cannot_differ` — planned. It is a wording check, not a capability. the wording follows the code.
 
 ### The guard
 
-- `the_guard_reports_an_uncalled_public_function` — a fixture crate with one uncalled function
-  fails the check.
-- `the_guard_counts_no_test_as_a_caller` — a function called only from `tests/` still reports.
-- `an_allowlist_entry_with_a_reason_passes` — the ledger works.
-- `an_allowlist_entry_without_a_reason_fails` — a bare path is not an exemption.
-- `an_allowlist_entry_naming_an_unknown_spec_fails` — a lane cannot be invented.
-- `an_unnecessary_allowlist_entry_fails` — a function that gained a caller must leave the list.
+The guards are Python, so their behaviour cannot be a Rust test name, and the gate would read
+a name here as a missing test. They are proved by running them and by breaking them on
+purpose, and the runs are recorded in `docs/verification/wiring-sprint.md`:
+
+- `check-flag-names.py` reports zero, and reports one when the old `--allow-widen` message
+  goes back.
+- `check-dead-surface.py` reports its ledger, refuses an entry with no reason, and refuses an
+  entry naming a spec that does not resolve.
 
 ### The two smaller defects
 
-- `no_error_message_names_a_flag_that_does_not_exist` — a source guard over every message in
-  `crates/*/src` that says `pass --`, checked against the real flag list.
-- `every_binding_uses_one_separator_style` — the help table cannot mix `ctrl-c` and
-  `alt+enter`.
+`check-flag-names.py` replaces the first of these two, and section 4a records why the
+separator guard is not in this sprint.
+
+## 4a. What landed, and what did not
+
+Delivered: the trust fix, the MCP cache write, the base url with its refusals and its
+notice, the two switches, motion, and the flag-name guard.
+
+`bench/check-dead-surface.py` is delivered as a tool and **not** added to the ship gate. Its
+first run reports 35 uncalled public functions after the five entries I could justify
+precisely. Each needs its owning spec to write an honest reason, and inventing thirty-five
+reasons in one pass would build the dustbin `D-the-dead-surface-allowlist-names-its-lane`
+forbids. The triage is the next job, and the guard joins the gate when the ledger is honest.
+
+The separator guard is not delivered. `bindings()` mixes `ctrl-c` with `alt+enter`, and
+normalising it rewrites strings that the design fixtures assert, so it is a change with its
+own blast radius rather than a line in this sprint. It stays named here so it is not lost.
 
 ## 5. Out of scope
 
