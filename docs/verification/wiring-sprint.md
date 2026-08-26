@@ -77,8 +77,11 @@ The write now sits in the `Ok` arm of the pool's connect task, which is the only
 knows the handshake succeeded and still holds the tool list. `extensions::load` returns long
 before that, so a write there would have cached nothing.
 
-It reads the file, updates one entry, and renames a temporary file over the old one, so two
-sessions never lose each other's entry. The persisted key is a hash of the config
+It reads the file, updates one entry, and renames a temporary file over the old one, under a
+lock file that spans all three steps. An earlier version of this paragraph claimed two sessions
+could never lose each other's entry with the rename alone, and a review disproved it: eight
+writers left one entry. The lock is why the claim holds now. The persisted key is a hash of the
+config
 fingerprint, because a fingerprint embeds server `env` values and would otherwise write a
 token to disk in clear text. A test asserts the file holds no secret.
 
