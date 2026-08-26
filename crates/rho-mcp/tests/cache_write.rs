@@ -4,6 +4,8 @@
 //! `tools_for` always advertised nothing, so no MCP tool ever reached the model. Every run
 //! said the tools would arrive next session. See `docs/verification/mcp-live-probe.md`.
 
+mod common;
+
 use rho_mcp::{McpSchemaCache, McpServerConfig, McpToolDef, McpTransport, record_tools};
 
 fn server(name: &str, token: &str) -> McpServerConfig {
@@ -95,4 +97,47 @@ fn a_changed_config_does_not_serve_a_stale_list() {
         cache.tools_for(&after).is_empty(),
         "a changed config gets no stale entry"
     );
+}
+
+// ---- The production path, not the helper. ---------------------------------
+
+#[tokio::test]
+async fn a_handshake_through_the_pool_writes_the_cache() {
+    // Every test above calls `record_tools` directly, so deleting the call in
+    // `spawn_connect`'s `Ok` arm, or the `set_cache_path` call in the CLI, would restore the
+    // defect this sprint exists to fix and leave the suite green. A test review and an
+    // external review both said so. This drives the pool.
+    use rho_mcp::{McpLimits, McpPool, tools_for};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("cache.json");
+    let pool = McpPool::with_factory(McpLimits::default(), Arc::new(common::FakeFactory));
+    pool.set_cache_path(path.clone());
+
+    let server = common::stub_config("probe", "ok");
+    let cache = McpSchemaCache::new();
+    tools_for(&pool, std::slice::from_ref(&server), &cache)
+        .await
+        .expect("tools_for returns at once");
+
+    // The handshake runs on a background task, so wait for the file rather than assume it.
+    for _ in 0..50 {
+        if path.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        path.exists(),
+        "a successful handshake through the pool must write the cache"
+    );
+    let written = McpSchemaCache::load(&path).expect("the file loads");
+    assert_eq!(
+        written.tools_for(&server).len(),
+        0,
+        "the fake server lists no tool, and the entry exists for its config"
+    );
+    let text = std::fs::read_to_string(&path).expect("read");
+    assert!(text.contains("probe"), "the entry names the server: {text}");
 }

@@ -1539,6 +1539,13 @@ mod tests {
             "/tmp/mcp.json",
             "--skill",
             "/tmp/skill-one",
+            // The three flags this sprint added. Without them here, dropping a mapping in
+            // `flag_layer` would leave the flag silently doing nothing, which is the whole
+            // defect class the sprint exists to kill. A test review found the omission.
+            "--no-motion",
+            "--no-agents",
+            "--base-url",
+            "http://localhost:11434/v1",
         ])
         .unwrap();
         let layer = flag_layer(&cli);
@@ -1553,6 +1560,21 @@ mod tests {
         );
         assert_eq!(layer.tui_mouse, Some(true));
         assert_eq!(layer.no_skills, Some(true));
+        assert_eq!(
+            layer.tui_motion,
+            Some(false),
+            "--no-motion maps onto tui-motion"
+        );
+        assert_eq!(
+            layer.no_agents,
+            Some(true),
+            "--no-agents maps onto no-agents"
+        );
+        assert_eq!(
+            layer.base_url.as_deref(),
+            Some("http://localhost:11434/v1"),
+            "--base-url maps onto base-url"
+        );
         assert_eq!(layer.session_root, Some(PathBuf::from("/tmp/root")));
         assert_eq!(layer.mcp_config, Some(PathBuf::from("/tmp/mcp.json")));
         assert_eq!(
