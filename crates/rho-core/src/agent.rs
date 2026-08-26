@@ -423,7 +423,20 @@ impl Session {
     /// `D-no-caller-writes-a-session-file`.
     ///
     /// It **appends**, because the context is append-only and a stable prefix keeps the provider
-    /// cache warm. So a caller replays into a fresh session, never over a live one.
+    /// cache warm.
+    ///
+    /// # The precondition, and why nothing enforces it
+    ///
+    /// **Call this before the first `prompt`, and never after one.** Replaying twice before a
+    /// prompt is harmless, because both replays only append history in order. Replaying after a
+    /// prompt would put old history behind a live turn, and the prefix a provider cached would then
+    /// change.
+    ///
+    /// Nothing enforces it, and a reviewer named that gap. The precondition is "before the first
+    /// prompt", not "the context is empty", so a check would need new state that records whether a
+    /// prompt has been sent. This project deletes a branch that no test reaches, and there is one
+    /// caller: `run_headless` replays and then prompts, in that order. So the rule is written here
+    /// and listed in `SPEC-session-store-wiring` section 16, rather than half enforced.
     pub async fn replay(&self, messages: Vec<Message>) {
         let mut context = self.inner.context.lock().await;
         for message in messages {

@@ -114,6 +114,15 @@ pub struct Recording {
     /// The messages a resume replays. Empty for a new session.
     pub messages: Vec<Message>,
     /// Lines to show the user once.
+    ///
+    /// A notice is **data**, and not a print. So a frontend draws it where the user is looking, and
+    /// a headless run puts it on stderr. `D-a-notice-reaches-the-transcript` settled that after rho
+    /// printed a security notice onto the primary screen and then opened the alternate screen over
+    /// it.
+    ///
+    /// A reviewer read the English here as a single-responsibility smell, and it is one: this module
+    /// decides user-facing copy. The trade is already chosen, for the reason above, so the copy
+    /// stays here and travels as data.
     pub notices: Vec<String>,
     /// The session this run writes, or `None` when the run is ephemeral.
     pub id: Option<SessionId>,

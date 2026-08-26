@@ -1530,7 +1530,16 @@ one rule has one spelling.
    `a_second_process_cannot_open_a_live_session`, which locks in a child process. The test's own
    comment says so now, rather than leaving its name to overstate.
 
-**Three findings were accepted and not fixed.** Each is stated where a reader will meet it:
+**Five findings were accepted and not fixed.** Each is stated where a reader will meet it:
+
+- `Session::replay` does not enforce its precondition. The rule is "before the first prompt", and
+  not "the context is empty", so a check would need new state that records whether a prompt has been
+  sent. There is one caller, and it replays and then prompts. The doc comment states the rule, and
+  section 16 lists it.
+- `Recording::notices` holds user-facing English in a module that is otherwise about the store. A
+  reviewer read that as a single-responsibility smell, and it is one.
+  `D-a-notice-reaches-the-transcript` already chose this trade: a notice is data and not a print, so
+  a frontend can draw it where the user is looking. The doc comment on the field says so.
 
 - `is_locked_elsewhere` probes a lock and releases it, so `newest_resumable` can name a session
   another process takes first. The caller then gets `Busy`. The invariant holds, because the real
@@ -1553,6 +1562,8 @@ report.
 - **The terminal.** `rho-tui` records nothing and `/sessions` opens no picker.
 - **A `flock` failure from a real filesystem.** `classify_lock_failure` is pure and every code is
   tested, and no test makes a real network filesystem refuse a lock.
+- **The precondition of `Session::replay`.** Nothing stops a caller replaying after a prompt. The
+  one caller does not, and the doc comment states the rule.
 - **`SessionStore::create_file`, `SessionSelector::resumes`, `SessionsAction`, and
   `sessions_command::run`** are each reached only through a caller. Each has a test that fails when
   it breaks, and none has a test that names it.
