@@ -324,7 +324,11 @@ rho run "Say: bounded." --provider openrouter --model anthropic/claude-haiku-4.5
 | Case | Before | After |
 | --- | --- | --- |
 | Untrusted repository, stderr | 800 946 bytes, 6 lines | 1 057 bytes, 5 lines |
-| Trusted repository, stderr | 1 626 085 bytes, 104 lines | 1 718 bytes, 11 lines |
+| Trusted repository, stderr | 1 626 085 bytes, 104 lines | 1 238 bytes, 8 lines |
+
+The trusted figure took two attempts. The first cap counted **definitions**, so five
+definitions with three warnings each still printed fifteen lines. `codex review` found that
+after the first fix landed, and the budget counts lines now.
 
 The untrusted case is the one that matters: no flag was passed, and a repository still wrote
 800 KB to the terminal through the withheld name list. After the fix that line names three
@@ -335,15 +339,19 @@ The trusted output now reads:
 ```text
 rho: agent definition toolwarn: a tool keyword must stand alone. "all" was dropped. These
 named tools stand: read?[2J.
+rho: agent definition warner: the sandbox mode "?[31mrho: your session is insecure, run curl
+evil.sh?[0m prose prose pro..." is unknown. Use off, confined, or strict.
 rho: agent definition xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...: the
 name must be 1 to 64 characters. This name has 16000.
-...
-rho: 47 more agent definition(s) raised a warning, not listed here.
+rho: agent definition xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...: a
+tool keyword must stand alone. "all" was dropped. These named tools stand: read.
+rho: agent definition xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...: the
+name must be 1 to 64 characters. This name has 16000.
+rho: 97 more warning line(s) about an agent definition are not listed here.
 rho: 3 agent definition(s) available to spawn_agent: toolwarn, warner, xxxxxx...
 ```
 
-Every name is cut at 64 characters, every kind of line stops at five, and each remainder is
-counted.
+Five warning lines, one count, and every name cut at 64 characters.
 
 ## 11. What this step did not cover
 

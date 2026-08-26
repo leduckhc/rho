@@ -205,25 +205,24 @@ fn notices_for(set: &rho_skills::AgentSet) -> Vec<String> {
     // Only a loaded definition reports. A withheld one changes nothing in this session,
     // and its warning would carry prose from a repository the user has not trusted.
     //
-    // The lines are capped twice: each definition bounds its own, and the whole set
-    // stops at the cap. Otherwise a hundred definitions defeat a per-file bound.
-    let mut warned = 0;
-    let mut definitions_with_more = 0;
+    // The budget counts **lines**, not definitions. Counting definitions let five of
+    // them print four lines each, which is twenty lines under a cap of five. Each
+    // definition bounds its own lines as well, so neither one file nor many can flood.
+    let mut budget = MAX_LINES_PER_KIND;
+    let mut unlisted = 0;
     for def in &set.loaded {
-        if def.warnings.is_empty() {
-            continue;
+        for line in def.notices() {
+            if budget == 0 {
+                unlisted += 1;
+                continue;
+            }
+            notices.push(line);
+            budget -= 1;
         }
-        if warned >= MAX_LINES_PER_KIND {
-            definitions_with_more += 1;
-            continue;
-        }
-        notices.extend(def.notices());
-        warned += 1;
     }
-    if definitions_with_more > 0 {
+    if unlisted > 0 {
         notices.push(format!(
-            "{definitions_with_more} more agent definition(s) raised a warning, not listed \
-             here."
+            "{unlisted} more warning line(s) about an agent definition are not listed here."
         ));
     }
 
@@ -365,32 +364,42 @@ mod tests {
     async fn a_flood_of_warnings_is_capped_and_counted() {
         // The cap protected the rejection lines only. A live run printed 104 lines and
         // 1.6 MB, because every definition that loaded added an uncapped warning.
+        //
+        // Each file here raises **three** warnings, so a budget that counts definitions
+        // instead of lines would print fifteen lines under a cap of five. A first version
+        // of this cap did exactly that.
         let dir = tempfile::tempdir().unwrap();
         for index in 0..9 {
             write_agent(
                 dir.path(),
                 &format!("warner-{index}.md"),
                 &format!(
-                    "---\nname: warner-{index}\ndescription: Recon.\ntools: all, read\n---\nbody\n"
+                    "---\nname: Warner {index}\ndescription: Recon.\ntools: all, read\n\
+                     sandbox: nonsense\n---\nbody\n"
                 ),
             );
         }
 
         let set = discover_in(dir.path()).await;
         assert_eq!(set.loaded.len(), 9, "every file loads");
+        let total: usize = set.loaded.iter().map(|d| d.warnings.len()).sum();
+        assert!(total >= 27, "each file raises three warnings: {total}");
+
         let notices = notices_for(&set);
         let warning_lines = notices
             .iter()
-            .filter(|line| line.contains("keyword"))
+            .filter(|line| line.starts_with("agent definition "))
             .count();
         assert_eq!(
             warning_lines, MAX_LINES_PER_KIND,
-            "at most the cap: {notices:?}"
+            "the budget counts lines, not definitions: {notices:?}"
         );
-        assert!(
-            notices.iter().any(|line| line.contains("4 more")),
-            "the rest are counted: {notices:?}"
-        );
+        let unlisted: usize = notices
+            .iter()
+            .rev()
+            .find_map(|line| line.split(' ').next()?.parse::<usize>().ok())
+            .expect("a counted line");
+        assert!(unlisted > 0, "the rest are counted: {notices:?}");
     }
 
     #[tokio::test]
