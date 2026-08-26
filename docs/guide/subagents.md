@@ -256,7 +256,7 @@ Rename the file to avoid a silent override.
 > A definition that sets it has no effect.
 
 > **Partly built.** `--no-skills` also turns subagents off, and it says so nowhere. rho then
-> registers no `spawn_agent` and ignores every definition you wrote. Drop the flag to get
+> registers no `spawn_agent` and skips agent discovery entirely. Drop the flag to get
 > subagents back. A live run proved both halves.
 
 ## See also

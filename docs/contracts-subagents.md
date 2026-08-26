@@ -97,6 +97,26 @@ D-an-agent-symlink-cannot-smuggle-trust.
 sanitised and bounded like a rejection detail. A withheld definition prints none, because it
 changes nothing until the user trusts the project.
 
+**Every start-up line is bounded, in length and in count.**
+
+```rust
+/// The most lines of one kind a start-up report may print. The rest are counted.
+pub const MAX_LINES_PER_KIND: usize = 5;
+
+impl AgentDefinition {
+    /// The name, made safe to draw and short enough to read.
+    pub fn safe_name(&self) -> String;
+
+    /// The lines this definition owes the user, and no more than a bounded number.
+    pub fn notices(&self) -> Vec<String>;
+}
+```
+
+A repository chooses how many files it holds and how long each name is. So a name is cut at
+64 characters, one definition prints at most five lines, and each kind of line stops at the
+cap and counts the rest. A live run printed 800 KB from one untrusted repository before these
+bounds existed. See `SPEC-definition-rejection` section 11.
+
 ## 2. Confinement: a child is never more permissive than its parent
 
 Four rules, and each one is enforced by construction rather than by a check.
