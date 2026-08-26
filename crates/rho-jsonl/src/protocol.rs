@@ -465,7 +465,7 @@ pub enum DialogAnswer {
 /// a type a caller should hold. `DialogAnswer` is the type a caller holds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WireAnswer {
+struct WireAnswer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     value: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

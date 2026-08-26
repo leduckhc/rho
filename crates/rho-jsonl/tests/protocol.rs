@@ -434,3 +434,106 @@ fn a_line_holding_a_newline_in_a_string_is_escaped() {
     let back: Command = serde_json::from_str(&text).expect("round trip");
     assert_eq!(back, command);
 }
+
+#[test]
+fn every_public_reply_type_is_constructed_and_pinned() {
+    // AGENTS.md step 8 asks for the list of public items no test touches, because that
+    // list is where the bugs are. These five were reachable only through a helper, so
+    // this test names each one and pins its wire shape.
+    use rho_jsonl::{AnswerError, False, ReplyErr, ReplyOk, True};
+
+    // `ReplyOk` with a data payload, built through `ok_with`.
+    let with_data = Reply::ok_with(
+        "get_state",
+        Some("s1".to_string()),
+        serde_json::json!({ "running": false }),
+    );
+    assert_eq!(
+        line(&with_data),
+        r#"{"req_id":"s1","command":"get_state","success":true,"data":{"running":false}}"#
+    );
+
+    // The struct built by hand. It cannot hold an error, because it has no such field.
+    let ok = ReplyOk {
+        req_id: None,
+        command: "abort".to_string(),
+        success: True,
+        data: None,
+    };
+    assert_eq!(line(&ok), r#"{"command":"abort","success":true}"#);
+
+    // `False` refuses the wrong literal, which is what keeps the two untagged arms apart.
+    let bad = ReplyErr {
+        req_id: None,
+        command: "prompt".to_string(),
+        success: False,
+        error: ReplyError::Internal,
+        message: "x".to_string(),
+    };
+    assert_eq!(
+        line(&bad),
+        r#"{"command":"prompt","success":false,"error":"internal","message":"x"}"#
+    );
+    assert!(
+        serde_json::from_str::<False>("true").is_err(),
+        "False must refuse true, or an ok reply could read as an error"
+    );
+    assert!(
+        serde_json::from_str::<True>("false").is_err(),
+        "True must refuse false, or an error reply could read as ok"
+    );
+
+    // `AnswerError` says how many keys it found, so a client can see its own mistake.
+    let error: AnswerError =
+        serde_json::from_str::<DialogAnswer>(r#"{"value":"a","confirmed":true}"#)
+            .map(|_| unreachable!("two keys must be refused"))
+            .unwrap_or_else(|error| {
+                assert!(error.to_string().contains('2'), "{error}");
+                AnswerError { found: 2 }
+            });
+    assert_eq!(error.found, 2);
+}
+
+#[test]
+fn every_reply_error_case_has_a_distinct_wire_value() {
+    // A client matches on this field, so two cases that share a value would be one case.
+    let cases = [
+        (ReplyError::UnknownCommand, "unknown_command"),
+        (ReplyError::ParseError, "parse_error"),
+        (ReplyError::LineTooLong, "line_too_long"),
+        (ReplyError::AlreadyStreaming, "already_streaming"),
+        (ReplyError::QueueFull, "queue_full"),
+        (ReplyError::InvalidArgument, "invalid_argument"),
+        (ReplyError::UnknownProvider, "unknown_provider"),
+        (ReplyError::MissingCredential, "missing_credential"),
+        (ReplyError::Internal, "internal"),
+    ];
+    let mut seen: Vec<&str> = Vec::new();
+    for (case, wire) in cases {
+        let text = line(&Reply::err("x", None, case, "m"));
+        assert!(text.contains(&format!(r#""error":"{wire}""#)), "{text}");
+        assert!(!seen.contains(&wire), "{wire} is used twice");
+        seen.push(wire);
+    }
+}
+
+#[test]
+fn every_fault_kind_has_a_distinct_wire_value() {
+    use rho_jsonl::FaultKind;
+    let cases = [
+        (FaultKind::Provider, "provider"),
+        (FaultKind::Tool, "tool"),
+        (FaultKind::Canceled, "canceled"),
+        (FaultKind::Incomplete, "incomplete"),
+    ];
+    for (kind, wire) in cases {
+        let text = line(&Event::Fault {
+            kind,
+            message: "m".to_string(),
+        });
+        assert_eq!(
+            text,
+            format!(r#"{{"type":"fault","kind":"{wire}","message":"m"}}"#)
+        );
+    }
+}

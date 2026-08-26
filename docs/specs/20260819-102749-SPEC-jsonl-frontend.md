@@ -704,6 +704,9 @@ The live transcripts are in `docs/verification/jsonl-frontend.md`.
 | `a_dialog_answer_with_no_key_is_invalid_argument` | An empty answer is refused. |
 | `a_dialog_request_round_trips_under_two_tags` | A dialog survives nesting under both `type` and `method`. |
 | `a_line_holding_a_newline_in_a_string_is_escaped` | A prompt holding a newline stays one record. |
+| `every_public_reply_type_is_constructed_and_pinned` | Each public reply type is built by hand and its wire shape pinned. `True` and `False` each refuse the wrong literal. |
+| `every_reply_error_case_has_a_distinct_wire_value` | All nine error cases have distinct wire values, so no two collapse into one. |
+| `every_fault_kind_has_a_distinct_wire_value` | All four fault kinds have distinct wire values. |
 
 ### The event pump, in `tests/pump.rs`
 
