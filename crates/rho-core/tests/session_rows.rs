@@ -1304,3 +1304,117 @@ fn delete_of_an_absent_session_names_the_path() {
         "the error must name the file, not just a reason, got {message}"
     );
 }
+
+#[test]
+fn delete_refuses_a_live_session() {
+    // A delete unlinks the lock file, and `flock` binds to an inode. So a delete while a session
+    // is live would let the next writer lock a new inode, and two writers would then both believe
+    // they hold the session. A review found that race.
+    let (_guard, store, _root) = temp_store();
+    let session = id(0x0024);
+    let path = session_with_prompt(&store, &session, "a live session");
+    let _held = store.lock(&session).expect("the lock");
+
+    let error = store
+        .delete(&session)
+        .expect_err("a delete of a live session must be refused");
+
+    assert!(
+        matches!(error, SessionError::Busy { .. }),
+        "expected Busy, got {error:?}"
+    );
+    assert!(path.exists(), "the file survives a refused delete");
+}
+
+#[test]
+fn a_fork_mints_a_free_id_through_the_store() {
+    // A caller that minted its own id would rebuild the retry of `create_minted`, and two
+    // spellings of one rule drift. `rho-cli` had exactly that second loop.
+    let (_guard, store, _root) = temp_store();
+    let path = session_with_prompt(&store, &id(0x0025), "the original");
+    let head = rho_core::SessionReader::read(&path)
+        .expect("the file reads back")
+        .entries
+        .last()
+        .expect("a record")
+        .id
+        .clone();
+    let taken = 0x4242u16;
+    // Take the first suffix, so the retry has to run.
+    let (first, writer) = store
+        .fork_minted_from(&path, &head, 1_756_000_000_000, [taken].into_iter())
+        .expect("a first fork");
+    drop(writer);
+
+    let (second, _writer) = store
+        .fork_minted_from(
+            &path,
+            &head,
+            1_756_000_000_000,
+            [taken, taken, 0x9999].into_iter(),
+        )
+        .expect("a taken id must cost one more mint, never the fork");
+
+    assert_ne!(first, second, "the retry must mint another id");
+}
+
+#[test]
+fn a_fork_gives_up_after_mint_attempts() {
+    let (_guard, store, _root) = temp_store();
+    let path = session_with_prompt(&store, &id(0x0026), "the original");
+    let head = rho_core::SessionReader::read(&path)
+        .expect("the file reads back")
+        .entries
+        .last()
+        .expect("a record")
+        .id
+        .clone();
+    let taken = 0x5151u16;
+    let (_id, writer) = store
+        .fork_minted_from(&path, &head, 1_756_000_000_000, [taken].into_iter())
+        .expect("a first fork");
+    drop(writer);
+
+    let error = store
+        .fork_minted_from(
+            &path,
+            &head,
+            1_756_000_000_000,
+            std::iter::repeat_n(taken, rho_core::MINT_ATTEMPTS * 4),
+        )
+        .map(|(id, _)| id)
+        .expect_err("a fork that cannot find a free id must give up");
+
+    assert!(
+        matches!(
+            error,
+            SessionError::MintExhausted {
+                attempts: rho_core::MINT_ATTEMPTS
+            }
+        ),
+        "expected MintExhausted, got {error:?}"
+    );
+}
+
+#[test]
+fn a_fork_at_a_record_the_file_does_not_hold_is_refused() {
+    // A user types `--at r99`. The message names the record, so they can see what went wrong.
+    let (_guard, store, _root) = temp_store();
+    let path = session_with_prompt(&store, &id(0x0027), "a session");
+
+    let error = store
+        .fork(&path, &rho_core::RecordId("r99".to_string()), &id(0x0028))
+        .map(|writer| writer.path().to_path_buf())
+        .expect_err("a fork at a record the file does not hold must be refused");
+
+    match error {
+        SessionError::NoSuchRecord { id } => {
+            assert_eq!(id, rho_core::RecordId("r99".to_string()));
+            assert_eq!(
+                SessionError::NoSuchRecord { id }.to_string(),
+                "the session holds no record r99"
+            );
+        }
+        other => panic!("expected NoSuchRecord, got {other:?}"),
+    }
+}

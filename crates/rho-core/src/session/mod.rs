@@ -1536,6 +1536,13 @@ impl SessionStore {
     /// bytes, so a recovery tool may still find them. It does not remove a session forked
     /// from this one, because a fork is its own file.
     pub fn delete(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        // **A delete takes the lock.** It unlinks the lock file, and `flock` binds to an inode, so
+        // a delete while a session is live would let the next writer lock a **new** inode and two
+        // writers would then both believe they hold the session. A review found that race.
+        //
+        // A busy session refuses the delete, which is right on its own: a user does not mean to
+        // delete the session another rho is writing.
+        let _lock = self.lock(session_id)?;
         let path = self.session_path(session_id.as_str());
         std::fs::remove_file(&path).map_err(|e| io_error(path.as_path(), e))?;
         // Remove any sidecar files that belong to this session too.
@@ -1559,6 +1566,52 @@ impl SessionStore {
             }
         }
         Ok(())
+    }
+
+    /// Fork a session, and mint a free id for the new file.
+    ///
+    /// A caller that minted its own id would rebuild the retry of `create_minted`, and two
+    /// spellings of one rule drift. A review found exactly that second loop in `rho-cli`, with an
+    /// untested give-up branch of its own.
+    pub fn fork_minted(
+        &self,
+        from_path: &Path,
+        from: &RecordId,
+        now_millis: u64,
+    ) -> Result<(SessionId, SessionWriter), SessionError> {
+        self.fork_minted_from(from_path, from, now_millis, random_suffixes())
+    }
+
+    /// Fork a session, taking each id suffix from `suffixes`.
+    ///
+    /// The seam `fork_minted` calls, for the same reason `create_minted_from` exists: a test
+    /// cannot force a collision when the suffix comes from the clock.
+    pub fn fork_minted_from<I: Iterator<Item = u16>>(
+        &self,
+        from_path: &Path,
+        from: &RecordId,
+        now_millis: u64,
+        suffixes: I,
+    ) -> Result<(SessionId, SessionWriter), SessionError> {
+        let mut last = None;
+        for suffix in suffixes.take(MINT_ATTEMPTS) {
+            let id = SessionId::mint(now_millis, suffix);
+            match self.fork(from_path, from, &id) {
+                Ok(writer) => return Ok((id, writer)),
+                Err(SessionError::Io(message)) if is_already_exists(&message) => {
+                    last = Some(message);
+                }
+                Err(other) => return Err(other),
+            }
+        }
+        tracing::warn!(
+            attempts = MINT_ATTEMPTS,
+            last = ?last,
+            "every minted fork id was taken"
+        );
+        Err(SessionError::MintExhausted {
+            attempts: MINT_ATTEMPTS,
+        })
     }
 
     /// Fork a session at `from`. Copy the branch that ends at `from` into a new

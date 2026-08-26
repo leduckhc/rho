@@ -9,7 +9,7 @@
 //! solved it with a per-session advisory lock. rho copies that shape.
 
 use std::fs::{File, OpenOptions};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::session::SessionError;
 
@@ -19,17 +19,10 @@ use crate::session::SessionError;
 /// leaves a session locked for ever, which a plain lock file with a pid inside would.
 pub struct SessionLock {
     /// The open descriptor that holds the lock. Dropping it releases the lock.
-    file: File,
-    path: PathBuf,
-}
-
-impl SessionLock {
-    /// The lock file this lock holds.
     ///
-    /// A refusal names it, so a user can see which file could not be locked.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
+    /// The path is **not** kept. Nothing read it, and a field no reader wants is dead surface.
+    /// See `D-dead-surface-is-a-defect-class`. A refusal names the path from the error instead.
+    file: File,
 }
 
 impl Drop for SessionLock {
@@ -81,10 +74,7 @@ pub(crate) fn take_lock(path: &Path, session_id: &str) -> Result<SessionLock, Se
             let code = std::io::Error::last_os_error().raw_os_error();
             return Err(classify_lock_failure(code, path, session_id));
         }
-        Ok(SessionLock {
-            file,
-            path: path.to_path_buf(),
-        })
+        Ok(SessionLock { file })
     }
     // A target with no `flock` cannot promise the invariant, so it refuses rather than
     // pretending. See section 7d.
@@ -125,8 +115,19 @@ pub fn classify_lock_failure(code: Option<i32>, path: &Path, session_id: &str) -
 
 /// Is this session locked by another process right now?
 ///
-/// It takes the lock and drops it at once. A success means nobody held it. `newest_open` uses
-/// this to skip a live session, so `--continue` never picks one.
+/// It takes the lock and drops it at once. A success means nobody held it at that moment.
+///
+/// **This is a probe, and not a reservation.** A review named the race, and it is real: a session
+/// that was free here can be taken before the caller takes the lock for its own write. The caller
+/// then gets `SessionError::Busy` and stops, which names the session and tells the user what to do.
+///
+/// The invariant that matters still holds. The real lock is taken **before** any write, in
+/// `SessionStore::lock`, so two processes never write one file. The probe only chooses which
+/// candidate to try first, and losing that race costs one error message and never a corrupt file.
+///
+/// A reservation would need `newest_resumable` to return a held lock. That changes the return type
+/// of a read-only query into a resource, so a caller that only wanted to know the id would take a
+/// lock it must remember to drop. The cost is worse than the race.
 pub(crate) fn is_locked_elsewhere(path: &Path, session_id: &str) -> bool {
     matches!(take_lock(path, session_id), Err(SessionError::Busy { .. }))
 }

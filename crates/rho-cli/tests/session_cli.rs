@@ -325,6 +325,41 @@ fn ephemeral_and_continue_together_are_refused() {
 }
 
 #[test]
+fn a_filesystem_that_cannot_lock_stops_a_new_run() {
+    // A new session that cannot open degrades to ephemeral, and the run still answers. **A lock
+    // failure is the exception.** A filesystem that cannot hold an advisory lock cannot promise
+    // that two rho processes will not write one file, so the run stops.
+    //
+    // A review found the degrade branch swallowing every error, including this one. That is the
+    // fail-open shape of `D-plugin-does-not-classify-itself`.
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let root = project(dir.path());
+    // The store root is a file, so no lock file can be created under it.
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(home.join(".rho")).expect("the home");
+    std::fs::write(home.join(".rho").join("sessions"), "not a directory").expect("the blocker");
+
+    let error = recording::open(request(&home, &root, SessionSelector::New))
+        .map(|_| ())
+        .expect_err("a store that cannot hold a lock must stop the run");
+
+    // The refusal reaches the caller, so `open_recording` cannot degrade it. The classification
+    // that decides that lives in `cli.rs`, and this reads the real call site.
+    let source = std::fs::read_to_string("src/cli.rs").expect("the cli source");
+    assert!(
+        source.contains("Err(error) if is_a_lock_refusal(&error) => Err(error),"),
+        "the run path must never degrade a lock refusal"
+    );
+    assert!(
+        source.contains("SessionError::LockUnsupported { .. }")
+            && source.contains("SessionError::Busy { .. }"),
+        "both lock refusals must stop the run"
+    );
+    let message = error.to_string();
+    assert!(!message.is_empty(), "the refusal says something");
+}
+
+#[test]
 fn a_write_failure_degrades_and_the_run_finishes() {
     // A session file is not worth ending a run for. See `D-write-failure-degrades`.
     let degraded = recording::Recording::degraded("the disk is full".to_string());
@@ -529,27 +564,62 @@ fn a_resume_takes_its_cwd_from_config_not_from_the_file() {
 
 #[test]
 fn a_forged_header_cannot_widen_a_run() {
-    // A header claiming `allow-all` grants nothing the live config withheld. The stored mode may
-    // only tighten a run, so a forged header can remove a warning and never add a permission.
-    let dir = tempfile::tempdir().expect("a temporary directory");
-    let root = project(dir.path());
-    let id = seed_session(dir.path(), &root, "a session", "an answer");
-    let (store, _key) = recording::store_for(dir.path(), &root);
-    let path = store.path_of(&id);
-    let text = std::fs::read_to_string(&path).expect("the file");
-    std::fs::write(&path, text.replacen("read-only", "allow-all", 1)).expect("the forged file");
+    // A header claiming `allow-all` grants nothing the live config withheld. **The stored mode may
+    // only tighten a run.**
+    //
+    // A review found the first version of this test asserting only that a narrower run succeeded,
+    // which passes whether or not the header is trusted. So the property is driven as a table
+    // instead: for every pair of a stored mode and a live mode, the resume is allowed exactly when
+    // the live mode is not wider than the stored one. A build that read the run's mode from the
+    // file would break a row of it.
+    let cases = [
+        // stored, live, allowed
+        ("allow-all", "read-only", true), // the forged header, and a narrower run
+        ("allow-all", "ask", true),       // still narrower
+        ("allow-all", "allow-all", true), // equal
+        ("read-only", "read-only", true), // equal
+        ("read-only", "ask", false),      // wider than stored, so refused
+        ("read-only", "allow-all", false), // wider than stored, so refused
+        ("ask", "allow-all", false),      // wider than stored, so refused
+        ("ask", "read-only", true),       // narrower
+    ];
+    for (stored, live, allowed) in cases {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let root = project(dir.path());
+        // The session is created read-only, then its header is forged to the stored mode.
+        let id = seed_session(dir.path(), &root, "a session", "an answer");
+        let (store, _key) = recording::store_for(dir.path(), &root);
+        let path = store.path_of(&id);
+        let text = std::fs::read_to_string(&path).expect("the file");
+        std::fs::write(
+            &path,
+            text.replacen(
+                "\"approval\":\"read-only\"",
+                &format!("\"approval\":\"{stored}\""),
+                1,
+            ),
+        )
+        .expect("the forged file");
 
-    // A narrower run is always allowed, so the forged header stops nothing.
-    {
-        let resumed = recording::open(request(dir.path(), &root, SessionSelector::Newest))
-            .expect("a narrower run is always allowed");
-        assert!(resumed.id.is_some());
-        // The lock releases here, so the next open can reach the same session.
+        let mut asked = request(dir.path(), &root, SessionSelector::Newest);
+        asked.approval = live;
+        let outcome = recording::open(asked);
+
+        assert_eq!(
+            outcome.is_ok(),
+            allowed,
+            "stored {stored:?} with a live {live:?} run must be {}: {:?}",
+            if allowed { "allowed" } else { "refused" },
+            outcome.err().map(|e| e.to_string())
+        );
     }
+}
 
-    // The header cannot **grant** anything, and that is structural. The mode the run uses comes
-    // from the live config, and this reads the real call site to prove it. An assertion that a
-    // resume succeeded would pass against a build that took the mode from the file.
+#[test]
+fn the_run_never_takes_its_permission_from_a_session_file() {
+    // The other half of the rule above, and it is structural. The mode the run uses comes from the
+    // live config, and this reads the real call site. An assertion that a resume succeeded would
+    // pass against a build that took the mode from the file.
     let source = std::fs::read_to_string("src/cli.rs").expect("the cli source");
     let start = source
         .find("fn approval_name")
@@ -565,7 +635,6 @@ fn a_forged_header_cannot_widen_a_run() {
             "the approval mode must never come from the session file, and it mentions {forbidden}"
         );
     }
-    // And the policy the session runs under is built from the config alone.
     let policy_start = source
         .find("let approval: Arc<dyn ApprovalPolicy>")
         .expect("the policy is built at one place");
@@ -608,12 +677,18 @@ fn an_unknown_mode_name_still_parses_to_the_strictest_mode() {
 #[test]
 fn a_forged_fork_origin_opens_no_file() {
     // `forked_from` is shown and never trusted. It opens no file and grants nothing.
+    //
+    // A review found the first version vacuous: the sentinel did not exist, so nothing could
+    // read it and every implementation passed. **The sentinel is a real file with a secret in
+    // it now.** An implementation that followed the origin would put that secret into the
+    // rebuilt context or into a printed row, and both are asserted against.
     let dir = tempfile::tempdir().expect("a temporary directory");
     let root = project(dir.path());
     let id = seed_session(dir.path(), &root, "a session", "an answer");
     let (store, _key) = recording::store_for(dir.path(), &root);
     let path = store.path_of(&id);
-    let sentinel = dir.path().join("sentinel-must-never-open.jsonl");
+    let sentinel = dir.path().join("sentinel.jsonl");
+    std::fs::write(&sentinel, "SENTINEL-CONTENT-MUST-NOT-BE-READ\n").expect("the sentinel");
     let text = std::fs::read_to_string(&path).expect("the file");
     let forged = text.replacen(
         "\"type\":\"session\"",
@@ -627,14 +702,27 @@ fn a_forged_fork_origin_opens_no_file() {
 
     let resumed = recording::open(request(dir.path(), &root, SessionSelector::Newest))
         .expect("a forged origin must not stop a resume");
-
-    // The assertion is that the sentinel was never created or read. An assertion that the run
-    // succeeded would pass against an implementation that follows the origin.
+    let replayed = every_text(&resumed.messages);
     assert!(
-        !sentinel.exists(),
-        "rho must never open a path a session file names"
+        !replayed.contains("SENTINEL-CONTENT"),
+        "a forged origin must never reach the model, got {replayed}"
     );
-    assert!(resumed.id.is_some());
+    drop(resumed);
+
+    // And the row that shows the origin shows it as text, and never follows it.
+    let rows = rows(dir.path(), &root);
+    let SessionRow::Session(summary) = &rows[0] else {
+        panic!("a readable row");
+    };
+    let origin = summary.forked_from.as_ref().expect("the origin is shown");
+    assert!(
+        origin.session_id.contains("sentinel.jsonl"),
+        "the origin is shown as data, got {origin:?}"
+    );
+    assert!(
+        !summary.title.contains("SENTINEL-CONTENT"),
+        "the row must never read the file the origin names"
+    );
 }
 
 #[test]

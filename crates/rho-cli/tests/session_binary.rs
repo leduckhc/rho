@@ -241,3 +241,59 @@ fn two_worktrees_continuing_at_once_never_share_a_file() {
         );
     }
 }
+
+#[test]
+fn the_name_and_delete_commands_run_through_the_binary() {
+    // A review found that `sessions list`, `show` and `fork` were driven end to end and `name` and
+    // `delete` were not. A module test cannot see a missing dispatch arm.
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let home = dir.path().join("home");
+    let root = project(dir.path(), "project");
+    std::fs::create_dir_all(&home).expect("the home");
+    let key = project_key(&home, &root);
+    let path = seed_session(&home, &key, "20260825-094512-a3f9", &[]);
+
+    // Name it, and read the name back from the list.
+    let (out, err, code) = rho(
+        &home,
+        &root,
+        &["sessions", "name", "20260825-09", "the sign bug"],
+    );
+    assert_eq!(code, 0, "name must succeed, stderr: {err}");
+    assert!(out.contains("the sign bug"), "got {out}");
+    let (listing, _err, code) = rho(&home, &root, &["sessions", "list"]);
+    assert_eq!(code, 0);
+    assert!(
+        listing.contains("the sign bug"),
+        "the list must show the new title, got {listing}"
+    );
+
+    // An empty title is refused, and the message has its own words.
+    let (_out, err, code) = rho(&home, &root, &["sessions", "name", "20260825-09", ""]);
+    assert_ne!(code, 0, "an empty title must be refused");
+    assert!(
+        err.contains("a session title cannot be empty"),
+        "the refusal must say what happened, got {err}"
+    );
+
+    // A named session still reads back. This is the leaf-parent defect a live drive found.
+    let (_out, err, code) = rho(&home, &root, &["sessions", "show", "20260825-09"]);
+    assert_eq!(
+        code, 0,
+        "a named session must still read back, stderr: {err}"
+    );
+
+    // Delete it, and it is gone.
+    let (out, err, code) = rho(&home, &root, &["sessions", "delete", "20260825-09"]);
+    assert_eq!(code, 0, "delete must succeed, stderr: {err}");
+    assert!(out.contains("deleted session"), "got {out}");
+    assert!(!path.exists(), "the file is gone");
+
+    // The same delete twice. "Twice" has caught two defects in this project.
+    let (_out, err, code) = rho(&home, &root, &["sessions", "delete", "20260825-09"]);
+    assert_ne!(code, 0, "deleting a session that is gone must be refused");
+    assert!(
+        err.contains("20260825-09"),
+        "the refusal must name what the user asked for, got {err}"
+    );
+}

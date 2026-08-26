@@ -13,7 +13,7 @@ use std::path::Path;
 
 use rho_core::{
     PrefixMatch, RecordId, SessionError, SessionId, SessionLog, SessionReader, SessionRecorder,
-    SessionRow, SessionStore,
+    SessionStore,
 };
 
 use crate::cli::SessionsAction;
@@ -59,9 +59,10 @@ pub fn run(
             let record = RecordId(at.trim().to_string());
             // A fork writes a new file, so it takes the lock on what it writes. The source is
             // only read, and it is left byte-identical.
-            let new_id = mint_free_id(&store, now_millis)?;
+            // The store mints the id, with the same bounded retry `create_minted` uses. A second
+            // mint loop here would be one more spelling of the same rule.
+            let (new_id, writer) = store.fork_minted(&store.path_of(&id), &record, now_millis)?;
             let _lock = store.lock(&new_id)?;
-            let writer = store.fork(&store.path_of(&id), &record, &new_id)?;
             Ok(format!(
                 "forked session {} at record {record} into {}.\n{}\n",
                 id.as_str(),
@@ -103,31 +104,4 @@ fn resolve(store: &SessionStore, prefix: &str) -> anyhow::Result<SessionId> {
         }
         .into()),
     }
-}
-
-/// Mint an id no session in this store already holds.
-///
-/// A fork names its own new file, so it needs a free id before it writes. The store's own
-/// `create_minted` cannot be used, because a fork writes the copied branch instead of a header
-/// and a model record.
-fn mint_free_id(store: &SessionStore, now_millis: u64) -> anyhow::Result<SessionId> {
-    let taken: Vec<SessionId> = store
-        .rows()?
-        .into_iter()
-        .filter_map(|row| match row {
-            SessionRow::Session(summary) => Some(summary.id),
-            SessionRow::Unreadable { .. } => None,
-        })
-        .collect();
-    for attempt in 0..rho_core::MINT_ATTEMPTS {
-        let suffix = ((now_millis >> 3).wrapping_add(attempt as u64 * 7919) % 65_536) as u16;
-        let id = SessionId::mint(now_millis, suffix);
-        if !taken.contains(&id) {
-            return Ok(id);
-        }
-    }
-    Err(SessionError::MintExhausted {
-        attempts: rho_core::MINT_ATTEMPTS,
-    }
-    .into())
 }

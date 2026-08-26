@@ -690,13 +690,31 @@ fn open_recording(
     match opened {
         Ok(recording) => Ok(recording),
         Err(error) if request.selector.resumes() => Err(error),
+        // **A lock failure is never degraded.** A filesystem that cannot hold an advisory lock
+        // cannot promise that two rho processes will not write one file, and a warning that
+        // continued would fail open. That is the shape of `D-plugin-does-not-classify-itself`.
+        // A review found this branch degrading every error, including that one. See section 7d.
+        Err(error) if is_a_lock_refusal(&error) => Err(error),
         Err(error) => {
-            // A new session that cannot open degrades. The run still answers.
+            // Any other new session that cannot open degrades. The run still answers, because a
+            // session file is not worth ending a run for. See `D-write-failure-degrades`.
             Ok(Recording::degraded(format!(
                 "cannot open a session file: {error}. This run is ephemeral."
             )))
         }
     }
+}
+
+/// Is this a refusal that must stop the run, rather than degrade it?
+///
+/// A busy session and a filesystem that cannot lock are both about the lock, and the lock is what
+/// stops two processes writing one file. Neither may become a warning.
+fn is_a_lock_refusal(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<rho_core::SessionError>(),
+        Some(rho_core::SessionError::LockUnsupported { .. })
+            | Some(rho_core::SessionError::Busy { .. })
+    )
 }
 
 /// The approval mode name this run resolved to.

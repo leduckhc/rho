@@ -403,3 +403,84 @@ because a user can read it again on the first prompt line. Test:
 - **One provider.** Bedrock only. The change touches no wire format, so a provider cannot see
   it, and `SessionRecorder` folds the same normalised events for every provider. That is a
   reason, not a measurement.
+
+## 9. The mutation proofs of the review fixes
+
+A reviewer that did not write the code read the whole diff, with the same defect history. Section
+15c of the spec lists its six findings. Each fix has a proof.
+
+| Break | Tests that failed |
+| --- | --- |
+| a lock refusal degrades to ephemeral again | `a_filesystem_that_cannot_lock_stops_a_new_run` |
+| only `Busy` stops the run, and `LockUnsupported` does not | the same |
+| the resume mode check compares the wrong way | `a_forged_header_cannot_widen_a_run`, `a_resume_that_would_widen_is_refused_on_the_command_line`, `an_unknown_mode_name_still_parses_to_the_strictest_mode` |
+| a delete takes no lock | `delete_refuses_a_live_session` |
+| a fork mints once and gives up | `a_fork_mints_a_free_id_through_the_store` |
+| an unknown record in a walk is not named | `a_fork_at_a_record_the_file_does_not_hold_is_refused` |
+
+The reviewer named `a_forged_header_cannot_widen_a_run` as theatre, and the row above is the
+answer: the rewritten test drives a table of eight stored-and-live mode pairs, so reversing the
+comparison breaks it. The first version asserted only that a narrower resume succeeded, and that
+passes whether or not the header is trusted.
+
+An attempt to break `StoredApproval::parse` into a fail-open default did not compile, because the
+match has no wildcard. That is the shape `D-plugin-does-not-classify-itself` asks for: a new mode
+name breaks the build instead of becoming the most permissive one.
+
+## 10. The public items no test names
+
+`AGENTS.md` step 8 asks for this list, and step 9 asks a reviewer for it too.
+
+**Removed rather than tested.** `SessionLock::path` and the `path` field behind it. Nothing read
+either. A field no reader wants is dead surface, and this project has a defect class for it.
+`sessions_command::mint_free_id` went the same way, replaced by `SessionStore::fork_minted`.
+
+**Covered only through a caller, and named by no test:**
+
+| Item | Where | What reaches it |
+| --- | --- | --- |
+| `SessionStore::create_file` | `session/mod.rs` | `the_session_file_key_overrides_the_store` drives it through `recording::open`. |
+| `SessionSelector::resumes` | `rho-cli/src/recording.rs` | `ephemeral_and_continue_together_are_refused` and every resume test. |
+| `SessionsAction` and its five variants | `rho-cli/src/cli.rs` | `session_binary.rs` drives `list`, `show`, `fork`, `name`, and `delete` through the real binary. |
+| `sessions_command::run` | `rho-cli/src/sessions_command.rs` | the same four tests in `session_binary.rs`. |
+
+Each of those has a test that fails when it breaks. None has a test that names it, and that is
+stated here rather than left for a reader to discover.
+
+## 11. The review fixes, driven for real again
+
+The whole sweep ran once more on the release binary, after the review fixes.
+
+```
+### 1 a run
+rho: session 20260826-213448-0fbc at /tmp/rho-final/home/.rho/sessions/root-c3f84ecf/20260826-213448-0fbc.jsonl
+The bug is: the parser reads a number but forgets to preserve the sign (positive or negative).
+### 2 a resume
+rho: continuing session 20260826-213448-0fbc in /tmp/rho-final/root (4 messages)
+Sign.
+### 3 twice
+rho: continuing session 20260826-213448-0fbc in /tmp/rho-final/root (6 messages)
+Sign.
+### 4 the crash continue
+last record: closed
+rho: continuing session 20260826-213503-a557 in /tmp/rho-final/root (4 messages)
+RECOVERED.
+### 5 name a session, then resume it
+named session 20260826-213503-a557 "the essay session".
+STILL-READABLE.
+ID                   LAST ACTIVE TITLE              MODEL           TOKENS  COST
+20260826-213503-a557 just now    the essay session  us.anthropic.c…   3.1k     -
+20260826-213448-0fbc just now    Read sample.txt a… us.anthropic.c…   2.1k     -
+### 6 a delete while the session is live is refused
+rho: session 20260826-213503-a557 is open in another process. Use another session, or close that one.
+### 7 and once it is free, the delete works
+deleted session 20260826-213503-a557. A session forked from it is its own file, so it stays. ...
+```
+
+A note on the lock, learned the hard way in this run. An earlier attempt reported `Busy` for a
+minute, and the cause was **not** rho: a background run from an earlier shell was still streaming
+and still held the lock. `flock` is per open file, and a probe confirmed the lock was free the
+moment that process ended. So the refusal was correct every time, and the surprise was the shell.
+
+The `WARN a record read from a file carried oversize content` line comes from the read-side cap
+bounding the 900 word essay the crashed run recorded. That is `cap_entry_state` doing its job.

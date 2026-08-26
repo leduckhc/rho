@@ -929,8 +929,13 @@ fn create_minted_gives_up_after_mint_attempts() {
         .expect_err("a store that cannot mint a free id must give up");
 
     assert!(
-        error.to_string().contains("mint") || matches!(error, SessionError::Io(_)),
-        "the refusal must say what happened, got {error:?}"
+        matches!(
+            error,
+            SessionError::MintExhausted {
+                attempts: rho_core::MINT_ATTEMPTS
+            }
+        ),
+        "expected MintExhausted with the bound, got {error:?}"
     );
 }
 

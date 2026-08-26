@@ -1390,6 +1390,40 @@ Everything else arrives without an edit to shared code. A new frontend calls the
 A new record arrives as a leaf, and the referential check of section 6a catches a chain
 record that a build cannot read.
 
+### 15c. What the final review changed
+
+A reviewer that did not write the code read the whole diff, with the same defect history. It found
+six things, and each one is fixed.
+
+1. **A fail-open on the new-session path.** `open_recording` degraded **every** failure to
+   ephemeral, including `LockUnsupported`. So a filesystem that cannot lock would have warned and
+   continued, which section 7d forbids. A lock refusal now stops the run. Test:
+   `a_filesystem_that_cannot_lock_stops_a_new_run`.
+2. **`a_forged_header_cannot_widen_a_run` was theatre.** Its only runtime assertion was that a
+   narrower run succeeded, which passes whether or not the header is trusted. It drives a table of
+   eight stored-and-live mode pairs now, so a build that read the run's mode from the file breaks a
+   row. The code-shape half moved to `the_run_never_takes_its_permission_from_a_session_file`.
+3. **`a_forged_fork_origin_opens_no_file` was vacuous.** The sentinel did not exist, so nothing
+   could read it. The sentinel is a real file with a marker inside now, and the test asserts the
+   marker reaches neither the model nor a printed row.
+4. **A second mint loop.** `rho-cli` minted a fork id with its own bounded retry, and its give-up
+   branch had no test. `SessionStore::fork_minted` and `fork_minted_from` replace it, so one rule
+   has one spelling. Tests: `a_fork_mints_a_free_id_through_the_store`,
+   `a_fork_gives_up_after_mint_attempts`.
+5. **A delete could break the lock.** `delete` unlinks `<id>.lock`, and `flock` binds to an inode.
+   So a delete during a live session would let the next writer lock a **new** inode, and two
+   writers would both believe they held the session. A delete takes the lock first now, and a live
+   session refuses it. Test: `delete_refuses_a_live_session`.
+6. **`SessionError::NoSuchRecord` had no test**, and a user reaches it by typing `--at r99`. Test:
+   `a_fork_at_a_record_the_file_does_not_hold_is_refused`.
+
+**One finding is accepted and not fixed.** `is_locked_elsewhere` probes a lock and releases it, so
+`newest_resumable` can name a session that another process takes first. The caller then gets
+`SessionError::Busy` and stops. The invariant holds, because the real lock is taken before any
+write, so two processes never write one file. A reservation would make a read-only query return a
+resource a caller must remember to drop, and that cost is worse than one error message. The doc
+comment on `is_locked_elsewhere` states it.
+
 ### 15b. Three more items needed a name
 
 Section 11 names `a_hand_built_leaf_parent_is_refused`, and section 7e listed no error for
