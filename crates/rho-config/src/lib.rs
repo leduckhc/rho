@@ -393,46 +393,79 @@ impl ConfigLayer {
     fn strip_powerful_keys_to_depth(&mut self, depth: usize) -> Stripped {
         /// Deeper than any real config, and shallow enough that no stack is at risk.
         const MAX_PROFILE_DEPTH: usize = 16;
-        // Every powerful key, in one place. `a_powerful_key_is_named_in_one_place` fails
-        // when a new field is neither listed here nor listed as harmless.
-        // `session_root` is the confinement boundary of every file tool and of the OS
-        // sandbox. A project file that moves it escapes the boundary rather than adding a
-        // capability, and a probe proved it: with `session-root = "/tmp/escape"` an
-        // untrusted file let `read` reach a file the same run refused without it. A
-        // boundary is the most powerful key of all.
+
+        // **An exhaustive destructure, with no `..`.** The compiler fails when `ConfigLayer`
+        // gains a field, so a new field cannot be trusted by default: somebody must classify
+        // it here to make the crate build again.
+        //
+        // That is the whole point. The first version of this function was a remembered list,
+        // and `session_root` was missing from it, so an untrusted project file could move the
+        // boundary every file tool confines to. A probe proved it. A test then claimed to
+        // catch that class and asserted four hard-coded names instead, which two reviews
+        // called decorative. A rule the compiler holds is not a rule anybody can forget.
+        //
+        // See `D-trust-is-provenance-not-a-field-list` and
+        // `docs/verification/profile-trust-bypass.md`.
+        let Self {
+            // Powerful. An untrusted source may not contribute any of these.
+            session_root,
+            session_file,
+            skill_paths,
+            mcp_config,
+            base_url,
+            credentials,
+            profiles,
+            // Harmless. Each chooses a model, a display, or a limit, and grants nothing.
+            provider: _,
+            model: _,
+            ephemeral: _,
+            sandbox: _,
+            approval: _,
+            no_skills: _,
+            no_agents: _,
+            tui_mouse: _,
+            tui_motion: _,
+            tui_reasoning: _,
+            reasoning_effort: _,
+            subagents: _,
+        } = self;
+
         let mut cleared: Vec<&'static str> = Vec::new();
         for (name, was_set) in [
-            ("session-root", self.session_root.is_some()),
-            ("session-file", self.session_file.is_some()),
-            ("skill-paths", self.skill_paths.is_some()),
-            ("mcp-config", self.mcp_config.is_some()),
-            ("base-url", self.base_url.is_some()),
+            ("session-root", session_root.is_some()),
+            ("session-file", session_file.is_some()),
+            ("skill-paths", skill_paths.is_some()),
+            ("mcp-config", mcp_config.is_some()),
+            ("base-url", base_url.is_some()),
         ] {
             if was_set {
                 cleared.push(name);
             }
         }
-        self.session_root = None;
-        self.session_file = None;
-        self.skill_paths = None;
-        self.mcp_config = None;
-        self.base_url = None;
+        *session_root = None;
+        *session_file = None;
+        *skill_paths = None;
+        *mcp_config = None;
+        *base_url = None;
 
+        // A credential is kept as a refusal rather than dropped, so the user meets a message
+        // naming `--trust-project` instead of "no such name".
         let mut refused: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (name, raw) in self.credentials.iter().flatten() {
+        for (name, raw) in credentials.iter().flatten() {
             if raw.starts_with('!') {
                 refused.entry(name.clone()).or_default().insert(raw.clone());
             }
         }
 
         // Recurse, so a nesting level a later format adds inherits the rule instead of
-        // defeating it. Every refused value for a name is kept, because two profiles may
-        // use one name and the merge keeps only the winner. Recording one value let the
-        // other slip past the equality check at the call site.
-        for profile in self.profiles.values_mut() {
+        // defeating it. Every refused value for a name is kept, because two profiles may use
+        // one name while the merge keeps only the winner, and recording one value let the
+        // other slip past the check at the call site.
+        for profile in profiles.values_mut() {
             if depth >= MAX_PROFILE_DEPTH {
                 // Past the bound the profiles are cleared wholesale, so nothing deeper can
-                // carry a powerful value past the gate.
+                // carry a powerful value past the gate. The bound lives here rather than in
+                // the parser, because a guard that leans on a dependency is not a guard.
                 profile.profiles.clear();
                 continue;
             }

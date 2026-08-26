@@ -367,8 +367,14 @@ fn every_field_is_classified_as_powerful_or_harmless() {
     // unclassified fields had walked past the gate, and one of them, `session_root`, moved
     // the confinement boundary of every file tool.
     //
-    // This enumerates the fields from the Debug text of a fully populated layer, so a new
-    // field on `ConfigLayer` fails here until somebody classifies it.
+    // The compiler is the real guard now: `strip_powerful_keys` destructures `ConfigLayer`
+    // exhaustively, so a new field fails the build until somebody classifies it. An
+    // architecture review insisted on that, and it was right: a rule the compiler holds is
+    // not a rule anybody can forget.
+    //
+    // This test stays as a second net. It reads the field names from the Debug text, so it
+    // also catches a field that the destructure classifies as harmless while this list calls
+    // it powerful, or the reverse.
     const POWERFUL: &[&str] = &[
         "session_root",
         "session_file",

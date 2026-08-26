@@ -36,6 +36,13 @@ inherits the rule instead of defeating it.
 capability says so beside its own definition. A reviewer reading `ConfigLayer` sees which keys
 are gated, and a new field that forgets to say is caught by the test below.
 
+**The compiler holds the rule.** `strip_powerful_keys` destructures `ConfigLayer`
+exhaustively, with no `..`, so a new field fails the build until somebody classifies it. That
+came from an architecture review, which insisted on it before merge and was right. My first
+version was a remembered list that missed `session_root`, and my second was a test that
+claimed to enumerate every field and asserted four hard-coded names. Two reviews called it
+decorative. A rule the compiler holds is the only one nobody can forget.
+
 **A test asserts the set is complete.** Every field of `ConfigLayer` is either in the powerful
 set or in the harmless set, and a field in neither fails the test. That is the same shape as
 `every_scalar_key_merges_and_reaches_the_config`, which caught the merge list drifting, and it

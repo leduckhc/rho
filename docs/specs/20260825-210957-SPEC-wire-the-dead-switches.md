@@ -199,7 +199,7 @@ that does not resolve fails. An entry whose function now has a caller fails as u
 - `motion_is_on_by_default_once_it_is_wired` — today's behaviour is unchanged.
 - `the_motion_switch_stops_the_sweep` — the frame draws the word plain.
 - `the_motion_switch_stops_the_sweep` — the config key does the same.
-- `reduce_motion_wins_over_the_motion_key` — `RHO_REDUCE_MOTION=1` does the same, and it wins over `tui-motion` whichever order the two arrive in. It is asserted in `rho-config`, where the variable is really read: the `MotionInputs` field of the same name was dead, and a review found it.
+- `reduce_motion_wins_over_the_motion_key` — `RHO_REDUCE_MOTION=1` does the same, and it wins over `tui-motion` whichever order the two arrive in. It is asserted in `rho-config`, where the variable is really read. The `MotionInputs` field of the same name was dead, and a review found it.
 - `a_non_terminal_stdout_stops_the_sweep` — the existing rule still holds.
 - `the_renderer_draws_the_word_either_way` — the state never rests on the animation.
 
