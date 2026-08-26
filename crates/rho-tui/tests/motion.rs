@@ -100,26 +100,6 @@ fn motion_off_when_stdout_not_a_terminal() {
 }
 
 #[test]
-fn motion_off_when_reduce_motion_setting() {
-    // `tui.reduce_motion = true` renders the word plain, at every tick.
-    let inputs = MotionInputs {
-        reduce_motion_env: true,
-        ..MotionInputs::animating()
-    };
-    assert_still_and_plain(&inputs);
-}
-
-#[test]
-fn motion_off_when_reduce_motion_env() {
-    // `RHO_REDUCE_MOTION=1` renders the word plain, at every tick.
-    let inputs = MotionInputs {
-        reduce_motion_env: true,
-        ..MotionInputs::animating()
-    };
-    assert_still_and_plain(&inputs);
-}
-
-#[test]
 fn render_never_reads_a_clock() {
     // The frame is a pure function of state. With every input fixed, the frame
     // never varies, so no ambient clock feeds it. The only time source is the tick.

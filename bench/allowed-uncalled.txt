@@ -8,9 +8,9 @@
 
 # Landed ahead of its wiring lane. Each names the spec that consumes it.
 crates/rho-core/src/session/key.rs::default_store_root  SPEC-session-store-wiring consumes it. The wiring lane is a draft.
-crates/rho-core/src/session/key.rs::resolve_from  SPEC-session-store-wiring consumes it. The wiring lane is a draft.
 crates/rho-config/src/lib.rs::resolve_credential  No provider asks for a credential yet. The [credentials] table is documented as partly built, and item I15 wires it.
 crates/rho-session-import-pi/src/lib.rs::import_pi_session  A library for an importer nobody has built a command for. It is documented as a library only.
 
-# Library surface a caller outside this workspace uses.
-crates/rho-provider-openrouter/src/lib.rs::with_base_url  A third party points the client at its own mock of OpenRouter's path. The CLI uses with_openai_host.
+# Test-only surface, said plainly. A review called the earlier wording an excuse, and it was:
+# the only consumer in this workspace is the crate's own harness, not a third party.
+crates/rho-provider-openrouter/src/lib.rs::with_base_url  Only this crate's test harness calls it, to point at a mock of OpenRouter's own path. The CLI uses with_openai_host. Delete it when the harness can use with_openai_host instead.

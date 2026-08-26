@@ -29,6 +29,7 @@ See [configuration](configuration.md) for the full order.
 
 | Flag | Environment variable | What it does |
 |---|---|---|
+| `--base-url <URL>` | The provider endpoint. Use it for a local model host such as Ollama or vLLM. A remote plain-`http` url is refused, and a notice names the host your key goes to. |
 | `--provider <NAME>` | `RHO_PROVIDER` | The provider to use, for example `openrouter` or `azure`. |
 | `--model <ID>` | `RHO_MODEL` | The model id to send. For Azure, this is your deployment name. |
 | `--profile <NAME>` | — | Load a named block from the config file. |
@@ -64,6 +65,7 @@ Pass `--read-only` instead.
 |---|---|---|
 | `--no-mouse` | — | Return mouse control to the terminal. Drag selects text without a modifier. |
 | `--mouse` | — | Capture the mouse. The scroll wheel moves the transcript. On by default. |
+| `--no-motion` | Stop the animation that sweeps the working word. The footer still names the state. |
 | `--reasoning <off\|summary\|full\|live>` | `summary` | How rho draws reasoning in the terminal interface. `summary` shows one row. `full` adds the text, dimmed. `live` streams the text then collapses it. `off` hides it. |
 | `--reasoning-effort <off\|low\|medium\|high\|xhigh>` | provider default | How hard the model thinks. Unset means rho sends no field to the provider. |
 
@@ -80,7 +82,8 @@ A build without it prints: `this build has no terminal UI. Use "rho run <prompt>
 |---|---|
 | `--trust-project` | Load skills from the repository you are editing. Off by default. A skill can instruct the model and carry scripts. |
 | `--skill <PATH>` | Load a skill from this path. Repeatable. Works even with `--no-skills`. |
-| `--no-skills` | Stop the skill directory search. An explicit `--skill` still loads. It also stops subagent discovery, in silence. See below. |
+| `--no-skills` | Stop the skill directory search. An explicit `--skill` still loads. It no longer touches subagents. |
+| `--no-agents` | Stop the agent-definition search, so rho offers no subagent. |
 | `--mcp-config <PATH>` | Read MCP servers from this file instead of `~/.rho/mcp.json`. |
 
 ## Subagents

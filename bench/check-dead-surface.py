@@ -60,7 +60,14 @@ DEFINITION = re.compile(r"^\s*pub (?:async )?fn ([a-z_][a-z0-9_]*)", re.M)
 def use_pattern(name: str) -> re.Pattern[str]:
     escaped = re.escape(name)
     # `name(`, `.name(`, `::name`, and `name` as a bare value in a call or a list.
-    return re.compile(rf"(?<![a-zA-Z0-9_]){escaped}\s*(?:\(|,|\)|;|\]|\bas\b)|::{escaped}\b")
+    #
+    # A brace is in the alternation because a re-export ends `…, name}`. Without it the
+    # position of a name inside `pub use x::{a, b, c}` decided the verdict: a mid-list name
+    # matched the comma and read as called, and only the last name was ever reported. A
+    # review found the same construct giving opposite answers.
+    return re.compile(
+        rf"(?<![a-zA-Z0-9_]){escaped}\s*(?:\(|,|\)|;|\]|\}}|\bas\b)|::{escaped}\b"
+    )
 
 # A name too generic to attribute, or one the language calls for us.
 IGNORED = {
@@ -95,6 +102,27 @@ def without_test_modules(text: str) -> str:
             depth += line.count("{") - line.count("}")
             if depth <= 0 and "}" in line:
                 skipping = False
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def strip_use_statements(text: str) -> str:
+    """Drop every `use` and `pub use` statement, including one that wraps over lines.
+
+    A re-export moves a name; it never calls it. An earlier version filtered one line at a
+    time, so a wrapped `pub use crate::{a,\n    b}` kept its later lines and every name on
+    them read as called. A review found the same construct giving opposite verdicts.
+    """
+    out: list[str] = []
+    in_use = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not in_use and (stripped.startswith("use ") or stripped.startswith("pub use ")):
+            in_use = not stripped.endswith(";")
+            continue
+        if in_use:
+            in_use = not stripped.endswith(";")
             continue
         out.append(line)
     return "\n".join(out)
@@ -144,10 +172,17 @@ def main() -> int:
             pattern = use_pattern(name)
             callers = 0
             for other, other_text in bodies.items():
-                hits = len(pattern.findall(other_text))
+                # A `pub use` line moves a name, it does not call it. Counting it as a use
+                # hid every dead item that was not last in a braced list.
+                countable = strip_use_statements(other_text)
+                hits = len(pattern.findall(countable))
                 if other == path:
-                    # Its own definition line is not a call.
-                    hits -= len(re.findall(rf"pub (?:async )?fn {re.escape(name)}\b", other_text))
+                    # Its own definition line is not a call. Only the definition is
+                    # subtracted, never a real call from the same file: a function whose one
+                    # caller sits beside it used to score zero, which a review found.
+                    hits -= len(
+                        re.findall(rf"pub (?:async )?fn {re.escape(name)}\s*[(<]", countable)
+                    )
                 callers += max(hits, 0)
             if callers > 0:
                 key = f"{relative}::{name}"

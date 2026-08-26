@@ -238,6 +238,21 @@ precisely. Each needs its owning spec to write an honest reason, and inventing t
 reasons in one pass would build the dustbin `D-the-dead-surface-allowlist-names-its-lane`
 forbids. The triage is the next job, and the guard joins the gate when the ledger is honest.
 
+**A live hole this sprint did not close, named here because a review found the ledger silent
+about it.** `sandbox` and `approval` are not in the powerful set, and a project value beats a
+global one. So an untrusted cloned repository can set `sandbox = "off"` or
+`approval = "allow-all"` and win over the user's own config, with no `--trust-project`. A typed
+flag still beats both. That is worse than several defects this sprint did fix.
+
+It is not folded in here because widening a security mode is a comparison, not a filter, and it
+needs its own probe. `D-your-settings-are-a-floor` holds the rule, the ranking, and the probe to
+run. `rho-core`'s `confines_writes` is the predicate a floor would use, and it has no caller
+today. Until the floor lands, pass `--sandbox` and `--read-only` as flags in a checkout you do
+not trust.
+
+The MCP cache holds no inter-process lock, so two rho processes can still lose one entry. The
+cost is one extra handshake in a later session, and `record_tools` says so.
+
 The separator guard is not delivered. `bindings()` mixes `ctrl-c` with `alt+enter`, and
 normalising it rewrites strings that the design fixtures assert, so it is a change with its
 own blast radius rather than a line in this sprint. It stays named here so it is not lost.

@@ -75,8 +75,6 @@ pub struct MotionInputs {
     pub tui_motion: bool,
     /// Whether stdout is a terminal. A non-terminal stdout stops the sweep.
     pub stdout_is_terminal: bool,
-    /// The `RHO_REDUCE_MOTION=1` variable. True stops the sweep.
-    pub reduce_motion_env: bool,
 }
 
 impl MotionInputs {
@@ -86,14 +84,13 @@ impl MotionInputs {
         Self {
             tui_motion: true,
             stdout_is_terminal: true,
-            reduce_motion_env: false,
         }
     }
 }
 
 /// True when the sweep animates. False under any one stop condition.
 pub fn motion_enabled(inputs: MotionInputs) -> bool {
-    inputs.tui_motion && inputs.stdout_is_terminal && !inputs.reduce_motion_env
+    inputs.tui_motion && inputs.stdout_is_terminal
 }
 
 /// The rendered cells of the working word at one tick.

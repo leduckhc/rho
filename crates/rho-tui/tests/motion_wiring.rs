@@ -16,7 +16,6 @@ fn motion_is_on_by_default_once_it_is_wired() {
     assert!(motion_enabled(MotionInputs {
         tui_motion: true,
         stdout_is_terminal: true,
-        reduce_motion_env: false,
     }));
 }
 
@@ -25,16 +24,6 @@ fn the_motion_switch_stops_the_sweep() {
     assert!(!motion_enabled(MotionInputs {
         tui_motion: false,
         stdout_is_terminal: true,
-        reduce_motion_env: false,
-    }));
-}
-
-#[test]
-fn the_reduce_motion_variable_stops_the_sweep() {
-    assert!(!motion_enabled(MotionInputs {
-        tui_motion: true,
-        stdout_is_terminal: true,
-        reduce_motion_env: true,
     }));
 }
 
@@ -44,7 +33,6 @@ fn a_non_terminal_stdout_stops_the_sweep() {
     assert!(!motion_enabled(MotionInputs {
         tui_motion: true,
         stdout_is_terminal: false,
-        reduce_motion_env: false,
     }));
 }
 

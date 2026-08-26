@@ -901,12 +901,13 @@ async fn run_interactive(cli: &Cli) -> i32 {
     // `SPEC-config-call-site`.
     let mouse = loaded.tui_mouse;
     let reasoning = loaded.reasoning;
-    // A non-terminal stdout, and `RHO_REDUCE_MOTION`, are conditions the interface reads
-    // for itself. The config key and the flag arrive through the merge.
+    // A non-terminal stdout is the one condition the interface reads for itself. The flag,
+    // the config key, and `RHO_REDUCE_MOTION` all arrive through the merge as `tui_motion`,
+    // so there is one path and not two. A review found the second path was dead: production
+    // hard-coded its input to false and only a test ever set it.
     let motion = rho_tui::motion_enabled(rho_tui::MotionInputs {
         tui_motion: loaded.tui_motion,
         stdout_is_terminal: std::io::IsTerminal::is_terminal(&std::io::stdout()),
-        reduce_motion_env: false,
     });
     // Hold `_tasks` and `_extras` for the whole run. Dropping the task registry kills
     // every background task, and dropping the MCP pool stops every server, so an early
