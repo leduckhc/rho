@@ -104,6 +104,21 @@ detail to a file and name the file."
 
 The second run reported the same text.
 
+The count charges 64 bytes for the block as well as its payload, so the binary was rebuilt and
+this path ran twice again, with a cap of 100 bytes:
+
+```text
+"the message is 129 bytes and the limit is 100 bytes. Send a shorter message, or write the
+detail to a file and name the file."
+```
+
+A steer with no flag still works, so the default cap refuses nothing a model normally writes:
+
+```text
+"queued for sleeper (id 1), at position 1. The child reads it after its current tool calls
+finish."
+```
+
 An earlier pair of runs let the model retry. It read the refusal, wrote the detail to a file,
 and steered with the file name. So the advice in the message is advice a model can act on.
 
@@ -176,8 +191,9 @@ keeps its whole budget.
 
 ## 9. The deliberate breaks
 
-Fifteen mutations ran, each with the file copied to `/tmp` first and copied back after. Never
-`git checkout`. Every one was caught by the named tests, and the restored file passed again.
+Seventeen mutations ran, each with the file copied to `/tmp` first and copied back after.
+Never `git checkout`. Every one was caught by the named tests, and the restored file passed
+again.
 
 | The break | The tests that failed |
 | --- | --- |
@@ -196,8 +212,15 @@ Fifteen mutations ran, each with the file copied to `/tmp` first and copied back
 | `--max-agent-steer-bytes` is parsed and ignored | `the_agent_steer_byte_flag_reaches_the_limits` |
 | a timed-out waiter is a cancel for the parent | `a_waiter_that_ran_out_of_patience_is_a_failure_that_names_the_wait` |
 | a failed label keeps its full stop | `a_failed_label_is_a_phrase_and_not_a_sentence` |
+| a block is free to hold, so only payload counts | `a_block_is_never_free_to_hold` |
+| the count walks a value of any depth | `a_value_too_deep_to_count_is_refused` |
 
 The harness is `/tmp/rho-mutations/prove.py`. It reports `ESCAPED MUTATIONS 0`.
+
+The last two rows come from a second review, which asked what the count misses. A message of
+ten thousand empty blocks counted nothing and held ten thousand allocations. And a value
+nested deeper than the walk would have ended the process on the stack. Both are closed, and
+both have a test.
 
 Two of those breaks were found by this step, not by the first draft of the tests. The timer
 that read `child_timeout` escaped, because the test asserted the reason and not the moment.

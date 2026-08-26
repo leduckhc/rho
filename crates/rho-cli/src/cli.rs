@@ -140,9 +140,9 @@ pub struct Cli {
     /// How long a child may wait for a slot before rho refuses it.
     ///
     /// It defaults to the child timeout, so a waiter gets one whole sibling run of
-    /// patience. `0` refuses any child that has to wait. There is no value that lets a
-    /// child wait for ever, because one blocking spawn used to hold a turn for about
-    /// forty minutes.
+    /// patience. `0` refuses any child that has to wait. There is no off switch, because
+    /// one blocking spawn used to hold a turn for about forty minutes. A very large value
+    /// comes close to one, and that choice belongs to the host.
     #[arg(long, global = true, value_name = "SECONDS")]
     pub queue_wait_secs: Option<u64>,
 

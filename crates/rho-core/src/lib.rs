@@ -41,7 +41,8 @@ pub use event::StreamEvent;
 pub use hook::{Hook, HookChain, HookOutcome, ToolCallView};
 pub use provider::{CompletionRequest, Provider, ProviderStream, ToolSpec};
 pub use queue::{
-    MAX_STEER_MESSAGE_BYTES, MessageQueue, QueueError, STEER_QUEUE_CAPACITY, message_bytes,
+    BLOCK_OVERHEAD_BYTES, MAX_COUNTED_JSON_DEPTH, MAX_STEER_MESSAGE_BYTES, MessageQueue,
+    QueueError, STEER_QUEUE_CAPACITY, message_bytes,
 };
 pub use reasoning::{MIN_THINKING_BUDGET, ReasoningDisplay, ReasoningEffort};
 pub use results::{

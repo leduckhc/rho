@@ -1253,23 +1253,28 @@ async fn a_cancel_beats_the_deadline() {
 async fn a_child_queue_carries_the_byte_cap_from_the_limits() {
     // The flag must reach the queue a child really reads. A cap that only the default
     // constructor applies would leave `--max-agent-steer-bytes` a dead switch.
+    // The cap counts the block as well as its payload, so the limit is stated that way.
+    let cap = rho_core::BLOCK_OVERHEAD_BYTES + 8;
     let limits = SubagentLimits {
-        max_steer_message_bytes: 8,
+        max_steer_message_bytes: cap,
         ..one_slot()
     };
     let registry = registry(limits);
     let (root, _live, queued) = hold_the_slot_and_queue_one(&registry, CancelToken::new());
 
     let refusal = registry
-        .steer_descendant(&root, queued.id(), text_of(9))
+        .steer_descendant(&root, queued.id(), text_of(cap + 1))
         .expect("the queued child is addressable")
         .expect_err("a message over the cap is refused");
     assert_eq!(
         refusal,
-        rho_core::QueueError::TooLarge { limit: 8, size: 9 }
+        rho_core::QueueError::TooLarge {
+            limit: cap,
+            size: cap + 1
+        }
     );
     registry
-        .steer_descendant(&root, queued.id(), text_of(8))
+        .steer_descendant(&root, queued.id(), text_of(cap))
         .expect("the queued child is addressable")
         .expect("the cap itself passes");
 }
@@ -1277,8 +1282,9 @@ async fn a_child_queue_carries_the_byte_cap_from_the_limits() {
 #[tokio::test]
 async fn a_started_child_queue_carries_the_byte_cap_from_the_limits() {
     // The arm that starts at once builds its own queue, so it needs the same cap.
+    let cap = rho_core::BLOCK_OVERHEAD_BYTES + 8;
     let limits = SubagentLimits {
-        max_steer_message_bytes: 8,
+        max_steer_message_bytes: cap,
         ..SubagentLimits::new()
     };
     let registry = registry(limits);
@@ -1293,23 +1299,32 @@ async fn a_started_child_queue_carries_the_byte_cap_from_the_limits() {
     let id = spawn.node.id();
 
     let refusal = registry
-        .steer_descendant(&root, id, text_of(9))
+        .steer_descendant(&root, id, text_of(cap + 1))
         .expect("a live child is addressable")
         .expect_err("a message over the cap is refused");
     assert_eq!(
         refusal,
-        rho_core::QueueError::TooLarge { limit: 8, size: 9 }
+        rho_core::QueueError::TooLarge {
+            limit: cap,
+            size: cap + 1
+        }
     );
     assert_eq!(
         spawn.queue().max_message_bytes(),
-        8,
+        cap,
         "the queue the child reads holds the cap too"
     );
 }
 
-/// A message of exactly `bytes` counted bytes.
+/// A message that counts exactly `bytes`, the block overhead included.
 fn text_of(bytes: usize) -> Vec<rho_core::ContentBlock> {
-    vec![rho_core::ContentBlock::Text {
-        text: "x".repeat(bytes),
-    }]
+    let message = vec![rho_core::ContentBlock::Text {
+        text: "x".repeat(bytes - rho_core::BLOCK_OVERHEAD_BYTES),
+    }];
+    assert_eq!(
+        rho_core::message_bytes(&message),
+        bytes,
+        "the helper must count what it claims"
+    );
+    message
 }

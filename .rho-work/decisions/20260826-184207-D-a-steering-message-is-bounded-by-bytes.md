@@ -40,6 +40,11 @@ The product is now a real number. A child queue holds at most 32 by 16 KiB, whic
 process holds at most 80 MiB of queued messages. One session queue holds at most 2 MiB.
 Before this change each of those numbers was unbounded.
 
+A second review found two more holes, and both are closed. Every block costs 64 bytes
+whatever its payload, because a message of ten thousand empty blocks was free to hold. And a
+JSON value nested deeper than 64 counts as over any cap, because the walk is recursive and a
+hostile value would end the process on the stack. Every addition saturates.
+
 ## Rules out
 
 **One default for both kinds of queue.** 64 KiB per child queue would put the process

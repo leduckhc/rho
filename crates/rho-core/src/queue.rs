@@ -218,65 +218,107 @@ impl MessageQueue {
     }
 }
 
+/// What one block costs, whatever its payload.
+///
+/// A count of payload bytes alone is not a bound on memory, because ten thousand empty
+/// blocks hold ten thousand allocations and no payload. So every block is charged this
+/// much before its payload is counted. A reviewer found the hole.
+pub const BLOCK_OVERHEAD_BYTES: usize = 64;
+
+/// How deep the count walks a JSON value.
+///
+/// A value deeper than this is refused rather than walked, because the walk is recursive
+/// and a hostile value would end the process on the stack. A body rho cannot measure is a
+/// body it cannot bound, so the refusal is the safe answer.
+pub const MAX_COUNTED_JSON_DEPTH: usize = 64;
+
 /// The bytes one message holds.
 ///
 /// It counts the text of every block, the base64 payload of an image, the strings inside
 /// tool-call arguments, and every `ProviderState` value. A block whose payload the count
-/// skips is a place a large body hides, so the count skips none. A review found both
-/// `state` fields missing from the first draft of this function.
+/// skips is a place a large body hides, so the count skips none. It also charges
+/// [`BLOCK_OVERHEAD_BYTES`] for each block, so a message of many empty blocks is not free.
 ///
 /// The count walks a JSON value rather than serialising it, so a push allocates nothing
 /// but a number. It counts the punctuation a writer would need, so it is never smaller
-/// than the strings the value holds.
+/// than the strings the value holds. A value nested deeper than
+/// [`MAX_COUNTED_JSON_DEPTH`] counts as larger than any cap, so `push` refuses it.
 pub fn message_bytes(message: &[ContentBlock]) -> usize {
-    message.iter().map(block_bytes).sum()
+    message
+        .iter()
+        .map(|block| BLOCK_OVERHEAD_BYTES.saturating_add(block_bytes(block)))
+        .fold(0, usize::saturating_add)
 }
 
 /// The bytes one block holds. Every variant is named, so a new one cannot be forgotten.
+///
+/// A review found both `state` fields missing from the first draft of this function.
 fn block_bytes(block: &ContentBlock) -> usize {
     match block {
         ContentBlock::Text { text } | ContentBlock::ReasoningTrace { text } => text.len(),
-        ContentBlock::ReasoningReplay { text, state } => {
-            text.len() + state.as_ref().map_or(0, state_bytes)
-        }
+        ContentBlock::ReasoningReplay { text, state } => text
+            .len()
+            .saturating_add(state.as_ref().map_or(0, state_bytes)),
         ContentBlock::ToolCall {
             id,
             name,
             arguments,
             state,
-        } => id.len() + name.len() + json_bytes(arguments) + state.as_ref().map_or(0, state_bytes),
+        } => id
+            .len()
+            .saturating_add(name.len())
+            .saturating_add(json_bytes(arguments, 0))
+            .saturating_add(state.as_ref().map_or(0, state_bytes)),
         ContentBlock::ToolResult {
             tool_call_id,
             content,
             is_error: _,
-        } => tool_call_id.len() + content.iter().map(block_bytes).sum::<usize>(),
-        ContentBlock::Image { source } => source.data.len() + source.mime_type.len(),
+        } => tool_call_id.len().saturating_add(
+            content
+                .iter()
+                .map(|held| BLOCK_OVERHEAD_BYTES.saturating_add(block_bytes(held)))
+                .fold(0, usize::saturating_add),
+        ),
+        ContentBlock::Image { source } => source.data.len().saturating_add(source.mime_type.len()),
     }
 }
 
 /// The bytes a provider's replay payload holds. It is opaque, and it can be large.
 fn state_bytes(state: &crate::ProviderState) -> usize {
-    state.owner.provider.len() + state.owner.model.len() + json_bytes(&state.value)
+    state
+        .owner
+        .provider
+        .len()
+        .saturating_add(state.owner.model.len())
+        .saturating_add(json_bytes(&state.value, 0))
 }
 
 /// The bytes a JSON value would take, walked rather than serialised.
-fn json_bytes(value: &serde_json::Value) -> usize {
+///
+/// A value deeper than [`MAX_COUNTED_JSON_DEPTH`] returns `usize::MAX`, so every caller
+/// refuses it. The walk stops there, so a hostile value cannot end the process.
+fn json_bytes(value: &serde_json::Value, depth: usize) -> usize {
+    if depth > MAX_COUNTED_JSON_DEPTH {
+        return usize::MAX;
+    }
     match value {
         serde_json::Value::Null => 4,
         serde_json::Value::Bool(_) => 5,
         serde_json::Value::Number(number) => number.to_string().len(),
         // Two quotes, so a string is never counted short.
-        serde_json::Value::String(text) => text.len() + 2,
-        serde_json::Value::Array(items) => {
-            2 + items.len() + items.iter().map(json_bytes).sum::<usize>()
-        }
-        serde_json::Value::Object(fields) => {
-            2 + fields.len()
-                + fields
-                    .iter()
-                    .map(|(key, held)| key.len() + 3 + json_bytes(held))
-                    .sum::<usize>()
-        }
+        serde_json::Value::String(text) => text.len().saturating_add(2),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|held| json_bytes(held, depth + 1).saturating_add(1))
+            .fold(2, usize::saturating_add),
+        serde_json::Value::Object(fields) => fields
+            .iter()
+            .map(|(key, held)| {
+                json_bytes(held, depth + 1)
+                    .saturating_add(key.len())
+                    .saturating_add(4)
+            })
+            .fold(2, usize::saturating_add),
     }
 }
 
@@ -383,11 +425,19 @@ mod tests {
 
     // ---- the byte cap (SPEC-steering section 4) ----
 
-    /// A message of exactly `bytes` counted bytes.
+    /// A message that counts exactly `bytes`, block overhead included.
+    ///
+    /// The cap counts the block as well as its payload, so a test that wants a stated
+    /// counted size has to say so once, here, rather than in every assertion.
     fn body(bytes: usize) -> Vec<ContentBlock> {
-        vec![ContentBlock::Text {
-            text: "x".repeat(bytes),
-        }]
+        let payload = bytes
+            .checked_sub(BLOCK_OVERHEAD_BYTES)
+            .expect("a message cannot count less than one block");
+        let message = vec![ContentBlock::Text {
+            text: "x".repeat(payload),
+        }];
+        assert_eq!(message_bytes(&message), bytes, "the helper must be exact");
+        message
     }
 
     #[test]
@@ -403,6 +453,7 @@ mod tests {
                 size: 101
             }
         );
+        queue.push(body(100)).expect("the cap itself passes");
         let text = error.to_string();
         assert!(
             text.contains("101") && text.contains("100"),
@@ -414,8 +465,8 @@ mod tests {
     fn the_byte_cap_holds_for_any_message_size() {
         // The invariant, not one example: a push is accepted exactly when the counted
         // size is inside the cap. See AGENTS.md step 12.
-        let limit = 64;
-        for size in 0..=(limit * 2) {
+        let limit = BLOCK_OVERHEAD_BYTES * 2;
+        for size in BLOCK_OVERHEAD_BYTES..=(limit * 2) {
             let queue = MessageQueue::with_limits(32, limit);
             let message = body(size);
             let counted = message_bytes(&message);
@@ -439,9 +490,9 @@ mod tests {
     fn a_refused_message_leaves_the_queue_as_it_was() {
         // The count cap already promises this. The byte cap must promise it too, or a
         // large message would cost the user an earlier one.
-        let queue = MessageQueue::with_limits(32, 10);
+        let queue = MessageQueue::with_limits(32, BLOCK_OVERHEAD_BYTES + 10);
         queue.push(text("keep me")).unwrap();
-        queue.push(body(11)).unwrap_err();
+        queue.push(body(BLOCK_OVERHEAD_BYTES + 11)).unwrap_err();
         assert_eq!(queue.len(), 1, "an oversized push adds nothing");
         let drained = queue.drain();
         assert_eq!(drained.len(), 1);
@@ -529,12 +580,64 @@ mod tests {
 
     #[test]
     fn with_limits_sets_the_stated_byte_cap() {
-        let queue = MessageQueue::with_limits(4, 8);
-        assert_eq!(queue.max_message_bytes(), 8);
-        queue.push(body(8)).expect("the cap itself passes");
+        let cap = BLOCK_OVERHEAD_BYTES + 8;
+        let queue = MessageQueue::with_limits(4, cap);
+        assert_eq!(queue.max_message_bytes(), cap);
+        queue.push(body(cap)).expect("the cap itself passes");
         assert!(
-            queue.push(body(9)).is_err(),
+            queue.push(body(cap + 1)).is_err(),
             "the stated cap binds, not the default cap"
+        );
+    }
+
+    #[test]
+    fn a_block_is_never_free_to_hold() {
+        // A count of payload bytes alone is not a bound on memory. Ten thousand empty
+        // blocks hold a real allocation each and counted nothing, so a message could be
+        // large and cheap at the same time. The count now charges for the block itself.
+        let empty = ContentBlock::Text {
+            text: String::new(),
+        };
+        assert!(
+            message_bytes(std::slice::from_ref(&empty)) >= BLOCK_OVERHEAD_BYTES,
+            "one empty block is not free"
+        );
+        for count in [1usize, 10, 1000] {
+            let message: Vec<ContentBlock> = std::iter::repeat_n(empty.clone(), count).collect();
+            assert!(
+                message_bytes(&message) >= count * BLOCK_OVERHEAD_BYTES,
+                "{count} blocks must cost at least {count} block overheads"
+            );
+        }
+        // And the cap refuses them, rather than holding a queue of cheap blocks.
+        let queue = MessageQueue::with_limits(32, 1024);
+        let many: Vec<ContentBlock> = std::iter::repeat_n(empty, 1024).collect();
+        assert!(
+            queue.push(many).is_err(),
+            "a thousand empty blocks must not pass a 1 KiB cap"
+        );
+    }
+
+    #[test]
+    fn a_value_too_deep_to_count_is_refused() {
+        // `push` is public, so a caller may hand it a tool-call block. A value nested
+        // deeper than the count walks is refused, rather than walked into a stack
+        // overflow. Fail closed, because a body rho cannot measure is a body it cannot
+        // bound.
+        let mut value = serde_json::json!("leaf");
+        for _ in 0..(MAX_COUNTED_JSON_DEPTH + 20) {
+            value = serde_json::Value::Array(vec![value]);
+        }
+        let message = vec![ContentBlock::ToolCall {
+            id: "call-1".to_string(),
+            name: "bash".to_string(),
+            arguments: value,
+            state: None,
+        }];
+        let queue = MessageQueue::with_limits(32, MAX_STEER_MESSAGE_BYTES);
+        assert!(
+            queue.push(message).is_err(),
+            "a value too deep to measure must be refused"
         );
     }
 
