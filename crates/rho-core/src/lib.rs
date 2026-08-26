@@ -56,7 +56,8 @@ pub use session::{
     ROW_TAIL_BYTES, ReadResult, Record, RecordId, RowMeta, SessionError, SessionHeader, SessionId,
     SessionLock, SessionLog, SessionReader, SessionRecorder, SessionRow, SessionStore,
     SessionSummary, SessionWriter, StoredApproval, StoredSandbox, branch_messages,
-    check_resume_permission, classify_lock_failure, decode, default_store_root, encode, row_from,
+    check_resume_permission, classify_lock_failure, decode, default_store_root, encode,
+    expire_stale_result_handles, row_from,
 };
 pub use subagent::{
     Admission, AgentId, AgentNode, AgentOutcome, AgentProgress, AgentRef, AgentRegistry,

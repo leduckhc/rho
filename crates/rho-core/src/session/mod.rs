@@ -1194,6 +1194,15 @@ impl SessionStore {
         self.root.join(format!("{session_id}.jsonl"))
     }
 
+    /// The file one session id lives in.
+    ///
+    /// A caller that holds an id from `rows` or `resolve_prefix` needs the path to read or to
+    /// reopen it. Without this a caller would rebuild the naming rule, and two spellings of one
+    /// rule drift.
+    pub fn path_of(&self, id: &SessionId) -> PathBuf {
+        self.session_path(id.as_str())
+    }
+
     /// Create a session file. Write the header, then one `ModelChange` record.
     ///
     /// The model record is written here, not by a caller. So every file states its model on
@@ -1207,15 +1216,26 @@ impl SessionStore {
     /// The file is created `0o600`, and every directory rho creates under the store root
     /// `0o700`. See `D-a-session-file-is-private`.
     pub fn create(&self, new: NewSession<'_>) -> Result<SessionWriter, SessionError> {
-        create_private_dir(&self.root)?;
         let path = self.session_path(new.id.as_str());
+        Self::create_file(&path, new)
+    }
+
+    /// Create a session at one exact path, with the same rules `create` applies.
+    ///
+    /// `create` calls this, so the store path and this path are the same code. It exists for
+    /// the `session-file` config key, which names one exact file and overrides the store. See
+    /// `D-session-store-layout`.
+    pub fn create_file(path: &Path, new: NewSession<'_>) -> Result<SessionWriter, SessionError> {
+        if let Some(parent) = path.parent() {
+            create_private_dir(parent)?;
+        }
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&path)
-            .map_err(|e| io_error(path.as_path(), e))?;
-        set_owner_only(&path)?;
-        let mut writer = SessionWriter::with_sink(path, Box::new(file));
+            .open(path)
+            .map_err(|e| io_error(path, e))?;
+        set_owner_only(path)?;
+        let mut writer = SessionWriter::with_sink(path.to_path_buf(), Box::new(file));
         let header = Record::Session {
             version: SESSION_FORMAT_VERSION,
             cwd: new.cwd.to_path_buf(),
@@ -1688,6 +1708,75 @@ pub fn branch_messages(
     Ok(messages)
 }
 
+/// Rewrite every stale result-handle preview in a rebuilt context.
+///
+/// A resumed context holds text like `<tool_result_preview handle="r-0001">`. The store behind
+/// that handle died with the earlier run, and the per-session nonce enforces that on purpose.
+/// So the model would call `read_tool_result`, get an error, and spend a turn learning that the
+/// evidence is gone.
+///
+/// The rewrite says the evidence expired and keeps the byte count. The model then re-runs the
+/// command instead. **The file on disk does not change**, because the file is append-only. Only
+/// the rebuilt context does. See `D-a-stale-result-handle-expires-on-resume`.
+pub fn expire_stale_result_handles(messages: &mut [Message]) {
+    for message in messages {
+        for block in &mut message.content {
+            expire_in_block(block);
+        }
+    }
+}
+
+/// The marker a stored result preview opens with.
+const PREVIEW_OPEN: &str = "<tool_result_preview";
+
+/// Rewrite one block, and every block nested inside a tool result.
+fn expire_in_block(block: &mut ContentBlock) {
+    match block {
+        ContentBlock::Text { text } if text.contains(PREVIEW_OPEN) => {
+            *text = expired_preview(text);
+        }
+        ContentBlock::ToolResult { content, .. } => {
+            for nested in content {
+                expire_in_block(nested);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The replacement text for one stale preview.
+///
+/// It keeps the preview head the record already holds, because that is real evidence the model
+/// read once. It removes only the promise that the handle still works.
+fn expired_preview(text: &str) -> String {
+    let stored_bytes = attribute(text, "stored_bytes").unwrap_or_else(|| "an unknown".to_string());
+    let head = between_tags(text);
+    format!(
+        "{head}\n[rho stored {stored_bytes} bytes of this result in an earlier run. The evidence \
+         expired when that run ended, so no handle can read it. Run the command again if you \
+         need the rest.]"
+    )
+}
+
+/// One attribute value from the preview tag.
+fn attribute(text: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=\"");
+    let start = text.find(&needle)? + needle.len();
+    let rest = &text[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// The text between the preview tags, which is the head the model already read.
+fn between_tags(text: &str) -> String {
+    let Some(open_end) = text.find('>') else {
+        return String::new();
+    };
+    let rest = &text[open_end + 1..];
+    let end = rest.find("</tool_result_preview>").unwrap_or(rest.len());
+    rest[..end].trim().to_string()
+}
+
 /// A tool message that carries one synthetic error result for a call id.
 fn synthetic_error_result(tool_call_id: &str, reason: &str) -> Message {
     Message {
@@ -2140,6 +2229,20 @@ impl SessionRecorder {
     /// True when the log is ephemeral, or degraded to ephemeral.
     pub fn is_ephemeral(&self) -> bool {
         self.log.is_ephemeral()
+    }
+
+    /// Write the `Closed` record, so the file states its own close.
+    ///
+    /// A run that ended on its own calls this. A cancel does not, because a cancel keeps the
+    /// session open and usable. See `D-cancel-keeps-the-session-open`. A closed file is never
+    /// offered by `newest_open`, so a crash offers only a session that really has no close.
+    ///
+    /// It is idempotent, and an ephemeral log does nothing.
+    pub fn close(&mut self) -> Result<(), SessionError> {
+        match &mut self.log {
+            SessionLog::Off => Ok(()),
+            SessionLog::File(writer) => writer.close(),
+        }
     }
 }
 

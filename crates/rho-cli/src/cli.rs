@@ -23,6 +23,8 @@ use rho_core::{
 
 use crate::extensions;
 use crate::provider::{self, MODEL_ENV};
+use crate::recording::{self, Recording, RecordingRequest, SessionSelector};
+use crate::sessions_command;
 use crate::subagents;
 
 /// The exit code for a run that failed.
@@ -209,6 +211,84 @@ pub enum Command {
     Run {
         /// The prompt text.
         prompt: String,
+
+        /// Continue a session. Bare it takes the newest one, and `--continue=<id>` takes that
+        /// one.
+        ///
+        /// `--resume` is an alias, so the two spellings are one argument and can never
+        /// disagree. `--continue --resume=<id>` is then refused by clap itself, with no custom
+        /// conflict rule.
+        ///
+        /// **The value needs an equals sign.** The prompt is a positional argument, so without
+        /// `require_equals` clap takes the prompt as this flag's value and the prompt goes
+        /// missing. That was measured, not guessed. See `SPEC-session-store-wiring` section 8c.
+        #[arg(
+            long = "continue",
+            short = 'c',
+            alias = "resume",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "",
+            value_name = "ID"
+        )]
+        continue_session: Option<String>,
+
+        /// Write no session file at all.
+        #[arg(long)]
+        ephemeral: bool,
+
+        /// Allow a resume that widens the approval mode or the sandbox mode.
+        ///
+        /// A stored mode may only tighten a run. This flag is the only way to widen one, and it
+        /// is an error on its own. See `D-resume-never-widens`.
+        #[arg(long, requires = "continue_session")]
+        allow_widen: bool,
+    },
+    /// Read, name, fork, and delete the sessions of this project.
+    Sessions {
+        #[command(subcommand)]
+        action: SessionsAction,
+    },
+}
+
+/// What `rho sessions` does.
+#[derive(Debug, Subcommand)]
+pub enum SessionsAction {
+    /// Print one row per session, newest first.
+    List {
+        /// Also print the working directory and the fork origin.
+        #[arg(long)]
+        long: bool,
+    },
+    /// Print one line per record, so a user can read a session and copy a record id.
+    ///
+    /// It sends nothing to a model, and it starts no session. So looking costs nothing.
+    Show {
+        /// The session id, or a prefix of one.
+        id: String,
+        /// Print the whole text of each record instead of one line.
+        #[arg(long)]
+        full: bool,
+    },
+    /// Delete one session file, and every sidecar beside it.
+    Delete {
+        /// The session id, or a prefix of one.
+        id: String,
+    },
+    /// Copy a session into a new one, from a chosen record.
+    Fork {
+        /// The session id, or a prefix of one.
+        id: String,
+        /// The record to fork from. `rho sessions show` prints it in the first column.
+        #[arg(long, value_name = "RECORD-ID")]
+        at: String,
+    },
+    /// Write an explicit title for one session.
+    Name {
+        /// The session id, or a prefix of one.
+        id: String,
+        /// The title. An empty title is refused.
+        title: String,
     },
 }
 
@@ -527,14 +607,141 @@ fn assemble_prompt(system: &str, instructions: &str, skills: &str) -> String {
 /// Run the CLI. Return the process exit code.
 pub async fn run(cli: Cli) -> i32 {
     match &cli.command {
-        Some(Command::Run { prompt }) => run_headless(&cli, prompt.clone()).await,
+        Some(Command::Run {
+            prompt,
+            continue_session,
+            ephemeral,
+            allow_widen,
+        }) => {
+            let selector = SessionSelector::from_flag(continue_session.as_deref());
+            // A space instead of an equals sign continued the wrong session and sent the id to
+            // the model. It was measured. See `SPEC-session-store-wiring` section 8c.
+            if let Err(error) = recording::refuse_an_id_shaped_prompt(prompt, &selector) {
+                return fail(error);
+            }
+            let request = RunRequest {
+                prompt: prompt.clone(),
+                selector,
+                ephemeral: *ephemeral,
+                allow_widen: *allow_widen,
+            };
+            run_headless(&cli, request).await
+        }
+        Some(Command::Sessions { action }) => run_sessions(&cli, action),
         None => run_interactive(&cli).await,
+    }
+}
+
+/// What one headless run needs beyond the flags every mode shares.
+struct RunRequest {
+    prompt: String,
+    selector: SessionSelector,
+    ephemeral: bool,
+    allow_widen: bool,
+}
+
+/// The wall clock, as epoch milliseconds.
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The home directory the session store sits under.
+///
+/// It reads `HOME`, and falls back to the working directory, so a run without `HOME` still
+/// records rather than losing the session in silence.
+fn home_dir() -> PathBuf {
+    match std::env::var("HOME") {
+        Ok(home) if !home.trim().is_empty() => PathBuf::from(home),
+        _ => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    }
+}
+
+/// Open the session this run records into.
+///
+/// A failure to open a **new** session degrades to ephemeral with a warning, because a session
+/// file is not worth ending a run for. See `D-write-failure-degrades`. A failure to open a
+/// session the user **named** is fatal, because rho would otherwise answer from a blank
+/// conversation while the user believes it continued theirs.
+fn open_recording(
+    loaded: &rho_config::Config,
+    config: &SessionConfig,
+    provider_name: &str,
+    request: &RunRequest,
+) -> Result<Recording, anyhow::Error> {
+    let home = home_dir();
+    let approval = approval_name(loaded);
+    let sandbox = config.sandbox.as_str().to_string();
+    let opened = recording::open(RecordingRequest {
+        project_root: &config.session_root,
+        home: &home,
+        session_file: loaded.session_file.as_deref(),
+        ephemeral: request.ephemeral || loaded.ephemeral,
+        selector: request.selector.clone(),
+        allow_widen: request.allow_widen,
+        approval: &approval,
+        sandbox: &sandbox,
+        provider: provider_name,
+        model: &config.model,
+        now_millis: now_millis(),
+    });
+    match opened {
+        Ok(recording) => Ok(recording),
+        Err(error) if request.selector.resumes() => Err(error),
+        Err(error) => {
+            // A new session that cannot open degrades. The run still answers.
+            Ok(Recording::degraded(format!(
+                "cannot open a session file: {error}. This run is ephemeral."
+            )))
+        }
+    }
+}
+
+/// The approval mode name this run resolved to.
+///
+/// It goes into a new header, and a resume compares it against the stored one. The name must
+/// match `StoredApproval::parse`, so it comes from the config enum and never from a literal at
+/// the call site.
+fn approval_name(loaded: &rho_config::Config) -> String {
+    match loaded.approval {
+        Some(rho_config::ApprovalMode::ReadOnly) => "read-only",
+        Some(rho_config::ApprovalMode::Ask) => "ask",
+        Some(rho_config::ApprovalMode::AllowAll) | None => "allow-all",
+    }
+    .to_string()
+}
+
+/// Run one `rho sessions` action. It sends nothing to a model.
+fn run_sessions(cli: &Cli, action: &SessionsAction) -> i32 {
+    let loaded = match load_config(cli) {
+        Ok(loaded) => loaded,
+        Err(error) => return fail(error),
+    };
+    let root = match loaded.session_root.clone() {
+        Some(path) => path,
+        None => match std::env::current_dir() {
+            Ok(path) => path,
+            Err(error) => {
+                return fail(anyhow::anyhow!(
+                    "cannot read the current directory: {error}"
+                ));
+            }
+        },
+    };
+    match sessions_command::run(&home_dir(), &root, action, now_millis()) {
+        Ok(text) => {
+            print!("{text}");
+            0
+        }
+        Err(error) => fail(error),
     }
 }
 
 /// Run one prompt headless. Print the answer to stdout. Print diagnostics to
 /// stderr. Return a non-zero code on failure.
-async fn run_headless(cli: &Cli, prompt: String) -> i32 {
+async fn run_headless(cli: &Cli, request: RunRequest) -> i32 {
     // The configuration loads once, here, before a session exists.
     let loaded = match load_config(cli) {
         Ok(loaded) => loaded,
@@ -544,6 +751,24 @@ async fn run_headless(cli: &Cli, prompt: String) -> i32 {
         Ok(config) => config,
         Err(error) => return fail(error),
     };
+    let provider_name = match provider::resolve_provider_name(loaded.provider.as_deref(), None) {
+        Ok(name) => name,
+        Err(error) => return fail(anyhow::anyhow!(error)),
+    };
+    // The session file opens **before** the provider runs, so a resume that would widen a
+    // permission stops before a single token is spent.
+    let mut recording = match open_recording(&loaded, &config, &provider_name, &request) {
+        Ok(recording) => recording,
+        Err(error) => return fail(error),
+    };
+    for notice in &recording.notices {
+        eprintln!("rho: {notice}");
+    }
+    // Name the session and its file. A user needs the id for `--resume=<id>` and the path for
+    // anything else, and a run that printed neither left the feature invisible.
+    if let (Some(id), Some(path)) = (&recording.id, &recording.path) {
+        eprintln!("rho: session {} at {}", id.as_str(), path.display());
+    }
     // Hold `_tasks` and `_extras` for the whole run. Dropping the task registry kills
     // every background task, and dropping the MCP pool stops every server, so an early
     // drop would end work the model is still waiting on.
@@ -555,18 +780,33 @@ async fn run_headless(cli: &Cli, prompt: String) -> i32 {
         eprintln!("rho: {notice}");
     }
     let _extras = extras;
+    // A resume replays the rebuilt conversation into the context before the prompt goes out.
+    if !recording.messages.is_empty() {
+        session
+            .replay(std::mem::take(&mut recording.messages))
+            .await;
+    }
 
+    let input = vec![ContentBlock::Text {
+        text: request.prompt,
+    }];
+    recording.start(&input);
     let cancel = CancelToken::new();
-    let mut events = session.prompt(vec![ContentBlock::Text { text: prompt }], cancel);
+    let mut events = session.prompt(input, cancel);
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
-    print_run(
+    let code = print_run(
         &mut events,
         &mut stdout,
         &mut stderr,
         reasoning_is_shown(loaded.reasoning),
+        Some(&mut recording),
     )
-    .await
+    .await;
+    // A headless run ends the session, so the file states its own close. A cancel keeps the
+    // session open instead, per `D-cancel-keeps-the-session-open`.
+    recording.close();
+    code
 }
 
 /// Print one run onto two streams, and return the exit code.
@@ -581,6 +821,7 @@ async fn print_run<S, O: Write, E: Write>(
     stdout: &mut O,
     stderr: &mut E,
     show_reasoning: bool,
+    mut recording: Option<&mut Recording>,
 ) -> i32
 where
     S: futures::Stream<Item = Result<AgentEvent, rho_core::Error>> + Unpin,
@@ -597,6 +838,11 @@ where
     let mut splitter = rho_core::ThinkingSplitter::new();
 
     while let Some(item) = events.next().await {
+        // The recorder folds every event into records. It sees each one before the printer, so a
+        // print that panicked could not lose a record it already had.
+        if let (Some(recording), Ok(event)) = (recording.as_deref_mut(), item.as_ref()) {
+            recording.observe(event);
+        }
         match item {
             Ok(AgentEvent::Stream(StreamEvent::TextStart { .. })) => {
                 splitter = rho_core::ThinkingSplitter::new();
@@ -1371,7 +1617,7 @@ mod tests {
     fn run_subcommand_parses() {
         let cli = Cli::try_parse_from(["rho", "run", "hello"]).unwrap();
         match cli.command {
-            Some(Command::Run { prompt }) => assert_eq!(prompt, "hello"),
+            Some(Command::Run { prompt, .. }) => assert_eq!(prompt, "hello"),
             other => panic!("expected a run command, got {other:?}"),
         }
     }
@@ -2090,7 +2336,13 @@ mod headless_loop_tests {
             .enable_all()
             .build()
             .expect("a runtime")
-            .block_on(print_run(&mut stream, &mut out, &mut err, show_reasoning));
+            .block_on(print_run(
+                &mut stream,
+                &mut out,
+                &mut err,
+                show_reasoning,
+                None,
+            ));
         (
             String::from_utf8(out).expect("utf8 on stdout"),
             String::from_utf8(err).expect("utf8 on stderr"),

@@ -8,6 +8,9 @@
 mod cli;
 mod extensions;
 mod provider;
+mod recording;
+mod sessions;
+mod sessions_command;
 mod subagents;
 
 use clap::Parser;

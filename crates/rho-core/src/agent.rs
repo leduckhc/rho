@@ -415,6 +415,21 @@ impl Session {
     pub async fn messages(&self) -> Vec<Message> {
         self.inner.context.lock().await.messages().to_vec()
     }
+
+    /// Replay a rebuilt conversation into the context, before the first prompt.
+    ///
+    /// A resume needs this. `SessionStore` can rebuild the message list of a branch, and
+    /// without a way to put it back the whole resume feature has no caller. See
+    /// `D-no-caller-writes-a-session-file`.
+    ///
+    /// It **appends**, because the context is append-only and a stable prefix keeps the provider
+    /// cache warm. So a caller replays into a fresh session, never over a live one.
+    pub async fn replay(&self, messages: Vec<Message>) {
+        let mut context = self.inner.context.lock().await;
+        for message in messages {
+            context.append(message);
+        }
+    }
 }
 
 /// The event channel buffer size. It applies backpressure to the driver task.

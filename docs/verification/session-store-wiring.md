@@ -136,3 +136,49 @@ before and after every break.
 | an empty title is accepted | `an_empty_name_is_refused_by_the_recorder` |
 
 Every break was caught on the first attempt in this slice. Twelve of twelve.
+
+## 5. The mutation proofs of the command-line slice
+
+`crates/rho-cli/src/recording.rs` and `cli.rs` were copied to `/tmp` first, and copied back
+before and after every break.
+
+| Break | Tests that failed |
+| --- | --- |
+| a bare flag starts a new session instead of the newest | `a_bare_flag_takes_the_newest_session`, `the_flag_does_not_swallow_the_prompt`, `a_session_id_as_the_prompt_is_refused_with_a_hint` |
+| an id-shaped prompt is not refused | `a_session_id_as_the_prompt_is_refused_with_a_hint` |
+| a resume skips the widen check | `a_resume_that_would_widen_is_refused_on_the_command_line`, `an_unknown_mode_name_still_parses_to_the_strictest_mode` |
+| `--allow-widen` is ignored | `allow_widen_permits_the_wider_resume_on_the_command_line` |
+| a resume replays nothing | `a_resume_replays_the_earlier_conversation` |
+| a stale result handle survives a resume | `a_resume_expires_a_stale_result_handle_from_the_file` |
+| `--ephemeral` still writes a file | `the_ephemeral_flag_writes_no_file`, `the_ephemeral_config_key_writes_no_file` |
+| `--ephemeral` with `--continue` is allowed | `ephemeral_and_continue_together_are_refused` |
+| the `session-file` key is ignored | `the_session_file_key_overrides_the_store` |
+| an empty store is not an error, so a resume starts blank | `continue_with_no_session_is_an_error_that_says_what_to_do`, `a_closed_session_is_never_continued`, `a_second_process_cannot_continue_a_live_session` |
+| the approval name comes from a literal, not the config | `a_forged_header_cannot_widen_a_run` |
+| `close` writes nothing | `a_run_that_ends_closes_its_session`, `a_closed_session_is_never_continued`, `the_run_path_records_the_prompt_the_turns_and_the_close` |
+| `start` records no prompt | `the_run_path_records_the_prompt_the_turns_and_the_close` |
+| `observe` folds nothing | the two tests above |
+| the run path records no prompt | `the_headless_run_path_drives_every_lifecycle_call` |
+| the run path never closes the session | the same |
+| the printer folds no event | the same |
+| the run path opens no recording | the same |
+
+**Four breaks passed at first, and all four were in the run path itself.** That is the exact
+defect this lane exists to fix: the store had a full test suite and no caller. My first tests
+drove `recording::open` directly, so deleting the calls in `run_headless` changed nothing a test
+could see.
+
+Two changes fixed it:
+
+1. The lifecycle moved into `Recording::start`, `Recording::observe`, and `Recording::close`.
+   A caller now makes three named calls instead of reaching into the recorder, and each one has
+   a test on a real file.
+2. `the_headless_run_path_drives_every_lifecycle_call` reads `cli.rs` and asserts that
+   `run_headless` calls all three, and that the printer folds every event. A grep is weak, and
+   it is the only thing that can see a deleted call on a path with no injectable provider.
+   `crates/rho-cli/src/provider.rs` belongs to another lane, so this lane cannot add a stub
+   provider to drive the path in process. **Section 6 drives it for real instead.**
+
+The stale-handle test had the same shape of hole: it called `expire_stale_result_handles`
+directly, so it would have passed while the resume forgot to call it. It now seeds a session
+file with a stored preview and resumes it.
