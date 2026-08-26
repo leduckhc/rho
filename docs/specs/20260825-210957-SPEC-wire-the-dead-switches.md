@@ -183,7 +183,7 @@ that does not resolve fails. An entry whose function now has a caller fails as u
 - `a_plain_http_remote_base_url_is_refused` — the run stops, and the message names the scheme.
 - `a_loopback_http_base_url_is_allowed` — `http://localhost:11434` and `http://127.0.0.1:8080`
   both pass, because that traffic never leaves the machine.
-- `a_powerful_key_is_named_in_one_place` — it joins the drop list.
+- `every_field_is_classified_as_powerful_or_harmless` — it joins the drop list.
 - `a_trusted_project_keeps_a_powerful_environment_variable` — `--trust-project` restores it.
 - `setting_a_base_url_names_the_host_in_a_notice` — the user is told where the key goes.
 
