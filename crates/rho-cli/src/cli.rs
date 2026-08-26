@@ -1904,6 +1904,33 @@ mod tests {
             rho_core::ReasoningDisplay::Live,
             "the other file must never be read"
         );
+        // The root itself is not moved, because an untrusted project file may not move the
+        // confinement boundary. That assertion used to read `Some(elsewhere)`, which
+        // enshrined the escape a probe later proved: a cloned repository moved the boundary
+        // and read a file outside itself. A security review named this test as the place the
+        // vulnerability was written down as correct. See
+        // `D-trust-is-provenance-not-a-field-list` and
+        // `docs/verification/profile-trust-bypass.md`.
+        assert_eq!(
+            config.session_root, None,
+            "an untrusted project file must not move the root"
+        );
+    }
+
+    #[test]
+    fn a_trusted_session_root_key_still_moves_the_root() {
+        // The other half, so a break that drops the key unconditionally fails.
+        let root = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        write_project(
+            root.path(),
+            &format!(
+                "session-root = \"{}\"\n",
+                elsewhere.path().to_str().unwrap()
+            ),
+        );
+        let cli = Cli::try_parse_from(["rho", "--model", "m", "--trust-project"]).unwrap();
+        let config = try_load_in(&cli, &[], &[], root.path()).unwrap();
         assert_eq!(config.session_root.as_deref(), Some(elsewhere.path()));
     }
 

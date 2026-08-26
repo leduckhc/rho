@@ -7,7 +7,7 @@
 //! The crate fails closed. A malformed file, an unknown key, or an unreadable file
 //! returns a typed error. It never falls back to a default that grants more access.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -362,25 +362,35 @@ impl ConfigLayer {
     /// It returns the `!command` credentials it found, by name, so the caller can refuse
     /// them rather than drop them. A dropped credential would read as "no such name",
     /// which teaches the user nothing.
-    fn strip_powerful_keys(&mut self) -> BTreeMap<String, String> {
+    fn strip_powerful_keys(&mut self) -> BTreeMap<String, BTreeSet<String>> {
         // Every powerful key, in one place. `a_powerful_key_is_named_in_one_place` fails
         // when a new field is neither listed here nor listed as harmless.
+        // `session_root` is the confinement boundary of every file tool and of the OS
+        // sandbox. A project file that moves it escapes the boundary rather than adding a
+        // capability, and a probe proved it: with `session-root = "/tmp/escape"` an
+        // untrusted file let `read` reach a file the same run refused without it. A
+        // boundary is the most powerful key of all.
+        self.session_root = None;
+        self.session_file = None;
         self.skill_paths = None;
         self.mcp_config = None;
         self.base_url = None;
 
-        let mut refused: BTreeMap<String, String> = self
-            .credentials
-            .iter()
-            .flatten()
-            .filter(|(_, raw)| raw.starts_with('!'))
-            .map(|(name, raw)| (name.clone(), raw.clone()))
-            .collect();
+        let mut refused: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (name, raw) in self.credentials.iter().flatten() {
+            if raw.starts_with('!') {
+                refused.entry(name.clone()).or_default().insert(raw.clone());
+            }
+        }
 
         // Recurse, so a nesting level a later format adds inherits the rule instead of
-        // defeating it.
+        // defeating it. Every refused value for a name is kept, because two profiles may
+        // use one name and the merge keeps only the winner. Recording one value let the
+        // other slip past the equality check at the call site.
         for profile in self.profiles.values_mut() {
-            refused.extend(profile.strip_powerful_keys());
+            for (name, values) in profile.strip_powerful_keys() {
+                refused.entry(name).or_default().extend(values);
+            }
         }
         refused
     }
@@ -809,7 +819,7 @@ impl Config {
             }
         } // The project file arrives with a clone, so three keys need `--trust-project`.
         // See SPEC-config-call-site section 5, and the probe that proved the command path.
-        let mut refused_commands: Option<(PathBuf, BTreeMap<String, String>)> = None;
+        let mut refused_commands: Option<(PathBuf, BTreeMap<String, BTreeSet<String>>)> = None;
         if let Some(path) = &sources.project_file
             && let Some(mut layer) = Config::read_file(path)?
         {
@@ -868,7 +878,9 @@ impl Config {
                 // A later layer, such as a profile, may have replaced it, and that value
                 // is not the one the gate refused.
                 if let Some((path, commands)) = &refused_commands
-                    && commands.get(&name) == Some(&raw)
+                    && commands
+                        .get(&name)
+                        .is_some_and(|values| values.contains(&raw))
                 {
                     return (
                         name,

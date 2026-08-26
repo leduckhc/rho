@@ -360,23 +360,76 @@ fn an_untrusted_project_keeps_a_harmless_environment_variable() {
 }
 
 #[test]
-fn a_powerful_key_is_named_in_one_place() {
-    // Every field of `ConfigLayer` is powerful or harmless, and a new field must join a
-    // list. A field in neither would slip through the gate unnoticed, which is how the
-    // profile bypass survived. The Debug text carries every field name, so this needs no
-    // second hand-kept list of its own.
+fn every_field_is_classified_as_powerful_or_harmless() {
+    // The real completeness guard. An earlier version wrote a fixture with the four keys it
+    // already knew and asserted those were cleared, which proves nothing about a field
+    // nobody thought of. A security review called it decorative and was right: three
+    // unclassified fields had walked past the gate, and one of them, `session_root`, moved
+    // the confinement boundary of every file tool.
+    //
+    // This enumerates the fields from the Debug text of a fully populated layer, so a new
+    // field on `ConfigLayer` fails here until somebody classifies it.
+    const POWERFUL: &[&str] = &[
+        "session_root",
+        "session_file",
+        "skill_paths",
+        "mcp_config",
+        "base_url",
+        "credentials",
+    ];
+    const HARMLESS: &[&str] = &[
+        "provider",
+        "model",
+        "ephemeral",
+        "sandbox",
+        "approval",
+        "no_skills",
+        "no_agents",
+        "tui_mouse",
+        "tui_motion",
+        "tui_reasoning",
+        "reasoning_effort",
+        "subagents",
+        "profiles",
+        // The nested subagent limits. The sweep reaches them because they are part of the
+        // layer's Debug text, which is the point: a nested field is classified too.
+        //
+        // They are harmless **today** only because the `[subagents]` table reaches no code,
+        // which the user guide states. An external review noted that an untrusted repo
+        // could otherwise amplify cost with `max-live-total = 100000`. So when that table is
+        // wired, these move to a clamped set rather than a harmless one.
+        "max_depth",
+        "max_children_per_parent",
+        "max_live_total",
+        "child_timeout_secs",
+    ];
+
     let dir = temp_dir();
     let path = write_file(&dir, "p.toml", EVERY_POWERFUL_KEY);
     let layer = Config::read_file(&path)
         .expect("valid TOML")
         .expect("a present file");
     let debug = format!("{layer:?}");
-    for field in ["skill_paths", "mcp_config", "base_url", "credentials"] {
+
+    // Every field name the type carries, taken from its own Debug output.
+    let fields: Vec<&str> = debug
+        .split(", ")
+        .filter_map(|part| part.split(':').next())
+        .map(|name| name.trim().trim_start_matches("ConfigLayer {").trim())
+        .filter(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+        .collect();
+    assert!(fields.len() >= 15, "the sweep found the fields: {fields:?}");
+
+    for field in &fields {
         assert!(
-            debug.contains(&format!("{field}: Some")),
-            "the fixture must set every powerful key, and it misses {field}"
+            POWERFUL.contains(field) || HARMLESS.contains(field),
+            "the field {field} is classified neither powerful nor harmless. A field nobody \
+             classifies is the next bypass: say which it is, in this test and in \
+             strip_powerful_keys."
         );
     }
+
+    // And the powerful ones really are cleared from an untrusted source.
     let sources = Sources::from_paths(ConfigPaths {
         global: None,
         project: Some(path),
@@ -386,12 +439,86 @@ fn a_powerful_key_is_named_in_one_place() {
     assert!(config.skill_paths.is_empty());
     assert_eq!(config.mcp_config, None);
     assert_eq!(config.base_url, None);
+    assert_eq!(config.session_file, None);
 }
 
 /// Every powerful key, at the top level, for the completeness guard above.
-const EVERY_POWERFUL_KEY: &str = "skill-paths = [\"/tmp/a\"]\n\
+const EVERY_POWERFUL_KEY: &str = "provider = \"openrouter\"\n\
+     model = \"m\"\n\
+     session-root = \"/tmp/root\"\n\
+     session-file = \"/tmp/root/s.jsonl\"\n\
+     ephemeral = true\n\
+     sandbox = \"confined\"\n\
+     approval = \"read-only\"\n\
+     skill-paths = [\"/tmp/a\"]\n\
+     no-skills = true\n\
+     no-agents = true\n\
+     tui-mouse = true\n\
+     tui-motion = false\n\
+     tui-reasoning = \"summary\"\n\
+     reasoning-effort = \"high\"\n\
      mcp-config = \"/tmp/b.json\"\n\
      base-url = \"https://c.example/v1\"\n\
      \n\
+     [subagents]\n\
+     max-depth = 2\n\
+     \n\
      [credentials]\n\
      openrouter = \"!echo leaked\"\n";
+
+#[test]
+fn two_profiles_reusing_one_credential_name_are_both_refused() {
+    // The record kept one value per name, so a second profile using the same name replaced
+    // it, and the equality check at the call site then missed the value the merge kept. An
+    // external review found it. Every refused value for a name is now recorded.
+    let dir = temp_dir();
+    let path = write_file(
+        &dir,
+        "p.toml",
+        "[profiles.a.credentials]\n\
+         openrouter = \"!touch /tmp/rho-must-not-run\"\n\
+         \n\
+         [profiles.b.credentials]\n\
+         openrouter = \"!true\"\n",
+    );
+    let sources = Sources::from_paths(ConfigPaths {
+        global: None,
+        project: Some(path),
+    })
+    .with_project_trust(ProjectTrust::Untrusted)
+    .with_profile(Some("a".to_string()));
+    let config = Config::load(&sources).expect("valid TOML");
+
+    let error = config
+        .resolve_credential("openrouter", &common::env_map(&[]))
+        .expect_err("an untrusted command must not run, whichever profile wrote it");
+    assert!(
+        error.to_string().contains("--trust-project"),
+        "the refusal names the flag: {error}"
+    );
+}
+
+#[test]
+fn an_untrusted_project_cannot_move_the_session_root() {
+    // The confinement boundary of every file tool, and of the OS sandbox. A probe proved
+    // the escape: with `session-root = "/tmp/escape"` in an untrusted file, `read` reached a
+    // file that the same command refused without the file. A boundary is more powerful than
+    // a capability, and it was not in the gate at all.
+    let (config, _path, _dir) =
+        load_project("session-root = \"/tmp/escape\"\n", ProjectTrust::Untrusted);
+    assert_eq!(
+        config.session_root, None,
+        "an untrusted file must not move the confinement boundary"
+    );
+}
+
+#[test]
+fn a_trusted_project_may_move_the_session_root() {
+    let (config, _path, _dir) =
+        load_project("session-root = \"/tmp/escape\"\n", ProjectTrust::Trusted);
+    assert_eq!(
+        config.session_root,
+        Some(PathBuf::from("/tmp/escape")),
+        "with trust the user's own choice stands"
+    );
+}

@@ -47,3 +47,36 @@ fn the_default_base_url_keeps_the_openrouter_path() {
         "https://openrouter.ai/api/v1/chat/completions"
     );
 }
+
+// ---- No proxy may stand between rho and a loopback host. -----------------
+
+#[test]
+fn a_loopback_host_bypasses_every_proxy() {
+    // A live probe set `HTTP_PROXY` and captured `Bearer sk-...` at the proxy, in clear
+    // text, from a request to `http://127.0.0.1`. The rule that allows plain http to a
+    // loopback host rests on the traffic never leaving the machine, so rho makes that true.
+    for base in [
+        "http://127.0.0.1:11434/v1",
+        "http://localhost:8080/v1",
+        "http://[::1]:8080/v1",
+        "http://127.0.0.2:1234/v1",
+    ] {
+        assert!(
+            rho_provider_openrouter::bypasses_proxy(base),
+            "{base} must never go through a proxy"
+        );
+    }
+}
+
+#[test]
+fn a_remote_host_still_honours_a_proxy() {
+    // A corporate proxy is a legitimate setup for a real endpoint, and https hides the
+    // token from it. Only the loopback case changes.
+    for base in [
+        "https://openrouter.ai",
+        "https://models.example.com/v1",
+        "http://models.example.com/v1",
+    ] {
+        assert!(!rho_provider_openrouter::bypasses_proxy(base), "{base}");
+    }
+}

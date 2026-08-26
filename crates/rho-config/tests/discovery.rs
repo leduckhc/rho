@@ -159,6 +159,11 @@ fn the_builder_carries_env_profile_and_flags() {
         project: Some(project),
     })
     .with_env(env_vars(&[("RHO_SESSION_FILE", "/tmp/from-env.jsonl")]))
+    // It states trust, because `session-file` is a path an untrusted source may not set.
+    // `session-root` and `session-file` move the confinement boundary of every file tool,
+    // which a probe proved, so both are powerful. See
+    // `D-trust-is-provenance-not-a-field-list`.
+    .with_project_trust(rho_config::ProjectTrust::Trusted)
     .with_profile(Some("work".to_string()))
     .with_flags(ConfigLayer {
         provider: Some("from-flag".to_string()),

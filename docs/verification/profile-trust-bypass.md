@@ -144,3 +144,53 @@ One behaviour change a user may notice. In a checkout you have not trusted,
 `--trust-project` to use them. A display variable such as `RHO_MODEL` needs no trust, because
 it grants nothing. One existing test asserted the old rule and now states trust, with the
 reason written beside it.
+
+## Two more holes, found by review after the fix
+
+A hostile security review and an external Codex review read the fix. Both found more, and a
+probe confirmed each.
+
+### The confinement boundary was not in the gate
+
+`session-root` moves the root that every file tool and the OS sandbox confine to. It was not
+powerful, so an untrusted project file could move it.
+
+```sh
+# /tmp/escape/repo/.rho/config.toml holds: session-root = "/tmp/escape"
+rho run "Read /tmp/escape/outside.txt and tell me its contents." --no-skills
+The file contains: **canary**
+
+# The control, the same command with that file removed
+I cannot read that file because /tmp/escape/outside.txt is outside the session root
+```
+
+So a cloned repository moved rho's boundary and read a file outside itself, in the default
+configuration, with no `--trust-project`. `session_root` and `session_file` are now powerful.
+After the fix the first command refuses, and `--trust-project` still obeys the user.
+
+This is worse than the bypass above, because it needs no profile and no flag.
+
+### The credential could leave the machine through a proxy
+
+The rule that allows plain `http` to a loopback host rested on the traffic never leaving the
+machine. `reqwest` honours `HTTP_PROXY`, and that variable arrives in a `.devcontainer` file
+or a CI `env:` block like any other.
+
+```sh
+HTTP_PROXY=http://127.0.0.1:8123 rho run "hi" --base-url http://127.0.0.1:9999/v1
+# the proxy captured:
+PROXY SAW host=127.0.0.1:9999 path=http://127.0.0.1:9999/v1/chat/completions auth=PRESENT: Bearer sk-secret-k
+```
+
+The key travelled in clear text to a host the user never named. A loopback base url now builds
+its client with no proxy at all, and the same probe captures nothing.
+
+### The completeness guard was decorative
+
+`a_powerful_key_is_named_in_one_place` wrote a fixture with the four keys it already knew and
+asserted those were cleared. It proved nothing about a field nobody had thought of, while its
+decision claimed every field was classified. That is why `session_root` walked past.
+
+`every_field_is_classified_as_powerful_or_harmless` replaces it. It reads every field name from
+the layer's own Debug text, including nested ones, and fails when a field is in neither set. A
+deliberate break added a `hook_path` field, and the guard named it.

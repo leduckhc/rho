@@ -20,6 +20,37 @@ pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai";
 
 /// The chat-completions path on the base URL.
 const CHAT_PATH: &str = "/api/v1/chat/completions";
+/// True when a base url names a loopback host, so no proxy may stand between rho and it.
+///
+/// A proxy variable such as `HTTP_PROXY` can arrive in a `.devcontainer` file or a CI `env:`
+/// block, which travel with a clone. `reqwest` honours those variables, so a request to
+/// `http://127.0.0.1` was routed to the proxy **with the bearer token in clear text**. A live
+/// probe captured `auth=PRESENT: Bearer sk-...` at an attacker's proxy. The rule that allows
+/// plain http to a loopback host rests on the traffic never leaving the machine, so rho must
+/// make that true rather than assume it.
+pub fn bypasses_proxy(base_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(base_url) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        Some(url::Host::Domain(name)) => name == "localhost",
+        None => false,
+    }
+}
+
+/// The HTTP client for a base url. A loopback host gets a client with no proxy at all.
+fn build_client(base_url: &str) -> reqwest::Client {
+    if bypasses_proxy(base_url) {
+        return reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+    }
+    reqwest::Client::new()
+}
+
 /// The path every other OpenAI-compatible host serves.
 ///
 /// OpenRouter puts its chat endpoint under `/api`. Ollama, vLLM, LiteLLM, and LM Studio do
@@ -111,10 +142,8 @@ pub struct OpenRouterProvider {
 impl OpenRouterProvider {
     /// Build the provider from a configuration.
     pub fn new(config: OpenRouterConfig) -> Self {
-        Self {
-            config,
-            client: reqwest::Client::new(),
-        }
+        let client = build_client(&config.base_url);
+        Self { config, client }
     }
 
     /// The configured base URL.

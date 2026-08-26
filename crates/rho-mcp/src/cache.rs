@@ -135,7 +135,19 @@ pub fn record_tools(
     let mut cache = McpSchemaCache::load(path).unwrap_or_else(|_| McpSchemaCache::new());
     cache.update(config, tools);
 
-    let temporary = path.with_extension(format!("tmp{}", std::process::id()));
-    cache.save(&temporary)?;
-    std::fs::rename(&temporary, path)
+    // A name keyed by the process id alone collides when two servers in one process finish
+    // together, and one rename then overwrites the other's half-written file. The counter
+    // makes every write its own path, and a failed write cleans up after itself.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let ticket = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = path.with_extension(format!("tmp{}.{ticket}", std::process::id()));
+    if let Err(error) = cache.save(&temporary) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
 }
