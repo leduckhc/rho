@@ -52,10 +52,11 @@ pub use sandbox::SandboxMode;
 pub use secret::Secret;
 pub use session::{
     Entry, ForkOrigin, GIT_ENTRY_MAX_BYTES, MAX_DROPPED_RECORDS, MAX_LINE_BYTES, MAX_RECORD_BYTES,
-    MINT_ATTEMPTS, NewSession, NewSessionWithoutId, ProjectKey, ReadResult, Record, RecordId,
-    SessionError, SessionHeader, SessionId, SessionLog, SessionReader, SessionRecorder,
-    SessionStore, SessionSummary, SessionWriter, StoredApproval, StoredSandbox, branch_messages,
-    check_resume_permission, decode, default_store_root, encode,
+    MINT_ATTEMPTS, NewSession, NewSessionWithoutId, PrefixMatch, ProjectKey, ROW_HEAD_LINES,
+    ROW_TAIL_BYTES, ReadResult, Record, RecordId, RowMeta, SessionError, SessionHeader, SessionId,
+    SessionLock, SessionLog, SessionReader, SessionRecorder, SessionRow, SessionStore,
+    SessionSummary, SessionWriter, StoredApproval, StoredSandbox, branch_messages,
+    check_resume_permission, classify_lock_failure, decode, default_store_root, encode, row_from,
 };
 pub use subagent::{
     Admission, AgentId, AgentNode, AgentOutcome, AgentProgress, AgentRef, AgentRegistry,

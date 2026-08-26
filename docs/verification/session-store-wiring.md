@@ -50,3 +50,67 @@ cargo test --workspace --all-features
 ```
 1536 passed, 0 failed
 ```
+
+## 2. The mutation proofs of the row slice
+
+Same method. `crates/rho-core/src/session/row.rs`, `lock.rs`, and `mod.rs` were copied to
+`/tmp` first, and copied back before and after every break.
+
+| Break | Tests that failed |
+| --- | --- |
+| the head read has no line bound, so a row decodes the whole file | `a_row_never_decodes_the_whole_file`, `a_first_prompt_beyond_the_head_lines_leaves_the_title_empty`, `a_list_of_five_hundred_sessions_reads_only_the_head_and_the_tail` |
+| the tail read starts at byte zero, so the window is the whole file | `a_row_never_decodes_the_whole_file`, `a_list_of_five_hundred_sessions_reads_only_the_head_and_the_tail` |
+| an explicit `Name` record never wins over the first prompt | `a_tail_read_drops_a_partial_first_line` |
+| the first usage record wins, not the last | `a_row_reports_the_cumulative_usage` |
+| a decoded record no longer decides the close flag | `a_row_marks_a_closed_session`, `a_closed_session_is_never_offered` |
+| the title is not cut at one line | `a_row_falls_back_to_the_first_prompt` |
+| the title is not capped at 60 bytes | `a_row_falls_back_to_the_first_prompt` |
+| `rows` sorts oldest first | `rows_come_back_newest_first` |
+| an unreadable file fails the whole list | `one_unreadable_file_is_one_row` |
+| a prefix picks the newest of several matches | `an_ambiguous_prefix_lists_every_match` |
+| `newest_open` offers a closed session | `a_closed_session_is_never_offered` |
+| `newest_open` does not skip a locked session | `newest_open_skips_a_locked_session` |
+| the lock is taken and never held | `a_second_process_cannot_open_a_live_session`, `a_lock_is_released_when_the_process_ends`, `newest_open_skips_a_locked_session` |
+| a `flock` failure warns and continues | the same three |
+| every `flock` failure counts as busy, so a filesystem that cannot lock looks live | `only_a_would_block_error_means_busy` |
+| a lock file that cannot open is not a refusal | `a_lock_file_that_cannot_open_is_refused` |
+
+**Five breaks passed at first.** Each one was a test that could not fail, and each is fixed:
+
+1. **The title one-line rule.** The test used a 90 character first line, so the 60 byte cap
+   cut the newline away and hid the missing rule. It now uses two prompts: a short first line
+   proves the one-line rule, and a long one proves the cap.
+2. **An unreadable file.** Both bad files in the test still **opened**; only their content was
+   bad. So the open-failure branch had no test. The test now also writes a file with mode
+   `0o000`.
+3. **The `flock` refusal.** The only test of it passed a store root that is a file, so
+   `create_private_dir` refused first and `take_lock` was never reached. A new test makes the
+   lock path a directory, so the open fails inside `take_lock`.
+4. **The classification of a `flock` error code.** A filesystem that refuses to lock cannot be
+   arranged on a developer machine, so the branch was unreachable from a test. The
+   classification is now a pure function, `classify_lock_failure`, and
+   `only_a_would_block_error_means_busy` drives it with `EWOULDBLOCK`, `EAGAIN`, `ENOLCK`,
+   `EOPNOTSUPP`, `EBADF`, and an unknown code.
+5. **The partial first line of a tail read.** Deleting the explicit skip changed nothing a test
+   could see, because a partial line cannot decode into an `Entry` and the loop drops it
+   already. Two guards where each masks the other is the trap this project met in `record_fits`
+   and in `ProviderState::for_owner`. **So the redundant guard is gone**, and the comment says
+   why. `a_tail_read_drops_a_partial_first_line` pins the outcome.
+
+## 3. The list budget, measured
+
+```sh
+cargo test -p rho-core --test session_rows -- --nocapture a_list_of_five
+```
+
+```
+500 rows in 20.683875ms
+```
+
+The budget in the spec is 100 milliseconds for 500 sessions. The number asserts nothing, per
+`D-a-budget-is-measured-not-asserted`. The assertion that proves the bound is the sentinel row:
+one of the 500 files carries a `Name` record past the head window and more than
+`ROW_TAIL_BYTES` before the end, so a full decode reports an explicit title and a bounded read
+does not.
+
+The cache in `D-no-list-cache-until-a-budget-fails` therefore does not ship.

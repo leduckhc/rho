@@ -476,47 +476,6 @@ fn a_usage_record_round_trips() {
 }
 
 #[test]
-fn list_reads_only_the_first_line() {
-    // list on many files reads one line each. The summary comes from the header record.
-    let (_dir, store) = temp_store();
-    for i in 0..5 {
-        let mut writer = store
-            .create(new_session(
-                &sid(i as u16),
-                Path::new("/work"),
-                "read-only",
-                "off",
-            ))
-            .expect("create");
-        writer.append(message_record("body"), None).expect("append");
-    }
-    let summaries = store.list().expect("list");
-    assert_eq!(summaries.len(), 5, "list finds every session file");
-    let ids: std::collections::HashSet<String> =
-        summaries.iter().map(|s| s.session_id.clone()).collect();
-    for i in 0..5 {
-        let expected = sid(i as u16);
-        assert!(
-            ids.contains(expected.as_str()),
-            "the summary carries the session id {}",
-            expected.as_str()
-        );
-    }
-    for summary in &summaries {
-        assert_eq!(
-            summary.cwd,
-            Path::new("/work"),
-            "the summary comes from the header"
-        );
-        assert!(summary.size_bytes > 0, "the summary carries file metadata");
-        assert!(
-            summary.path.exists(),
-            "the summary path points at a real session file, not an empty default"
-        );
-    }
-}
-
-#[test]
 fn delete_removes_the_file_and_its_branches() {
     let (_dir, store) = temp_store();
     let path = {

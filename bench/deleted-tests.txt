@@ -18,3 +18,4 @@ the_mouse_is_off_by_default a33c958 renamed to the_mouse_is_on_by_default_throug
 a_bad_env_value_leaves_the_mouse_off a33c958 renamed to a_bad_env_value_leaves_the_mouse_at_its_default, for the same reason
 resolve_mouse a33c958 the helper is gone; the merged config decides, and mouse_tests asserts the same rules through it
 the_config_key_defaults_to_false a33c958 renamed to the_config_key_defaults_to_true; the alternate-screen renderer reversed the default
+list_reads_only_the_first_line PENDING ported to rows_read_only_the_head_and_the_tail in session_rows.rs; SessionStore::list is replaced by rows, whose return type is an enum and whose id is a SessionId, so the assertions are rewritten rather than preserved. See SPEC-session-store-wiring section 5.

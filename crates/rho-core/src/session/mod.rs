@@ -17,7 +17,11 @@ use serde::{Deserialize, Serialize};
 use crate::{AgentEvent, AgentStopReason, ContentBlock, Message, Role, StreamEvent, Usage};
 
 mod key;
-pub use key::{GIT_ENTRY_MAX_BYTES, ProjectKey, SessionId, default_store_root};
+mod lock;
+mod row;
+pub use key::{GIT_ENTRY_MAX_BYTES, PrefixMatch, ProjectKey, SessionId, default_store_root};
+pub use lock::{SessionLock, classify_lock_failure};
+pub use row::{ROW_HEAD_LINES, ROW_TAIL_BYTES, RowMeta, SessionRow, SessionSummary, row_from};
 
 // ---------------------------------------------------------------------------
 // Section 2. The record set.
@@ -876,15 +880,6 @@ pub struct ReadResult {
     pub dropped_records: usize,
 }
 
-/// A cheap summary for a list. It reads only the first line of a file.
-#[derive(Clone, Debug)]
-pub struct SessionSummary {
-    pub session_id: String,
-    pub path: PathBuf,
-    pub cwd: PathBuf,
-    pub size_bytes: u64,
-}
-
 /// Reads a session file into records.
 pub struct SessionReader;
 
@@ -1330,42 +1325,143 @@ impl SessionStore {
         Ok(writer)
     }
 
-    /// List sessions with a cheap summary. Read only the first line of each file.
-    /// The first line obeys the same `MAX_LINE_BYTES` cap as `read`.
-    pub fn list(&self) -> Result<Vec<SessionSummary>, SessionError> {
-        let mut out = Vec::new();
-        let dir = match std::fs::read_dir(&self.root) {
-            Ok(dir) => dir,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-            Err(e) => return Err(SessionError::Io(e.to_string())),
-        };
-        for entry in dir {
-            let path = entry.map_err(|e| io_error(self.root.as_path(), e))?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let file = File::open(&path).map_err(|e| io_error(path.as_path(), e))?;
-            let mut reader = BufReader::new(file);
-            let mut buf = Vec::new();
-            if !read_capped_line(&mut reader, &mut buf)? {
-                continue;
-            }
-            let line = String::from_utf8_lossy(&buf);
-            let (_header_id, header) = parse_header(line.trim_end_matches(['\n', '\r']))?;
-            let session_id = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-                .to_string();
-            let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            out.push(SessionSummary {
-                session_id,
-                path,
-                cwd: header.cwd,
-                size_bytes,
-            });
+    /// Every session in the store, newest first. A file rho cannot read is one row.
+    ///
+    /// It reads `ROW_HEAD_LINES` lines and `ROW_TAIL_BYTES` bytes per file, through `row_from`.
+    /// So the store path and the tested path are the same code, and no file is fully decoded.
+    ///
+    /// It replaces `list`, which returned four fields no picker wants and failed the whole list
+    /// on one unreadable file. Two methods for one job would leave dead surface.
+    pub fn rows(&self) -> Result<Vec<SessionRow>, SessionError> {
+        let mut paths = self.session_files()?;
+        // The id sorts by time, so a name sort gives newest first and opens no file. See
+        // `D-a-session-id-sorts-by-time`.
+        paths.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+        let mut out = Vec::with_capacity(paths.len());
+        for path in paths {
+            out.push(self.row_for(&path));
         }
         Ok(out)
+    }
+
+    /// One row for one file. Every failure becomes a row, never an error.
+    fn row_for(&self, path: &Path) -> SessionRow {
+        let meta = match std::fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(error) => return row::unreadable_row(path.to_path_buf(), &io_error(path, error)),
+        };
+        let last_active_millis = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|since| since.as_millis() as u64)
+            .unwrap_or(0);
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) => return row::unreadable_row(path.to_path_buf(), &io_error(path, error)),
+        };
+        row_from(
+            BufReader::new(file),
+            RowMeta {
+                display_path: path.to_path_buf(),
+                size_bytes: meta.len(),
+                last_active_millis,
+            },
+        )
+    }
+
+    /// Every `.jsonl` file directly under the store root.
+    ///
+    /// A missing root is an empty store, not an error. A user with no sessions yet runs
+    /// `rho sessions list` and reads "no sessions", never a stack of io text.
+    fn session_files(&self) -> Result<Vec<PathBuf>, SessionError> {
+        let dir = match std::fs::read_dir(&self.root) {
+            Ok(dir) => dir,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(io_error(self.root.as_path(), e)),
+        };
+        let mut out = Vec::new();
+        for entry in dir {
+            let path = entry.map_err(|e| io_error(self.root.as_path(), e))?.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                out.push(path);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Resolve a prefix to one id, to none, or to every match.
+    ///
+    /// A prefix never picks one of several. An ambiguous prefix returns every match, so the
+    /// caller can list them all. See `D-a-session-id-sorts-by-time`.
+    ///
+    /// It reads no file. Every id is in a file name.
+    pub fn resolve_prefix(&self, prefix: &str) -> Result<PrefixMatch, SessionError> {
+        let mut matches: Vec<SessionId> = self
+            .session_files()?
+            .iter()
+            .filter_map(|path| path.file_stem().and_then(|stem| stem.to_str()))
+            .filter(|stem| stem.starts_with(prefix))
+            .filter_map(|stem| SessionId::parse(stem).ok())
+            .collect();
+        matches.sort();
+        match matches.len() {
+            0 => Ok(PrefixMatch::None),
+            1 => Ok(PrefixMatch::One(matches.remove(0))),
+            _ => Ok(PrefixMatch::Many(matches)),
+        }
+    }
+
+    /// The newest session in this store that holds no `Closed` record.
+    ///
+    /// This is what a crash offers, and it is what `--continue` takes.
+    ///
+    /// It skips a session another process holds, so `--continue` never picks a live session and
+    /// two worktrees never write one file. See section 7d.
+    pub fn newest_open(&self) -> Result<Option<SessionId>, SessionError> {
+        for row in self.rows()? {
+            let SessionRow::Session(summary) = row else {
+                // An unreadable file cannot be resumed. It can be deleted, so a user can clean
+                // the store. See `D-a-bad-session-file-is-one-row`.
+                continue;
+            };
+            if summary.closed {
+                continue;
+            }
+            if lock::is_locked_elsewhere(&self.lock_path(&summary.id), summary.id.as_str()) {
+                tracing::debug!(
+                    id = summary.id.as_str(),
+                    "a session is open in another process; --continue moved past it"
+                );
+                continue;
+            }
+            return Ok(Some(summary.id));
+        }
+        Ok(None)
+    }
+
+    /// The lock file for one session.
+    fn lock_path(&self, id: &SessionId) -> PathBuf {
+        self.root.join(format!("{}.lock", id.as_str()))
+    }
+
+    /// Take the advisory lock for one session.
+    ///
+    /// `SessionError::Busy` names the session when another process holds it.
+    /// `SessionError::LockUnsupported` names the path when the filesystem cannot lock, and then
+    /// the run stops. A warning that continued would fail open.
+    ///
+    /// Every write path takes this: a create, a resume, and a fork of the target it writes. A
+    /// read-only path takes no lock, so `list` and `show` always work.
+    pub fn lock(&self, id: &SessionId) -> Result<SessionLock, SessionError> {
+        let path = self.lock_path(id);
+        if let Some(parent) = path.parent() {
+            // A store that cannot even hold its directory cannot hold a lock, so the refusal
+            // names the lock path rather than leaking a create error.
+            create_private_dir(parent)
+                .map_err(|_| SessionError::LockUnsupported { path: path.clone() })?;
+        }
+        lock::take_lock(&path, id.as_str())
     }
 
     /// Delete one session file. Every branch in the file goes with it.
