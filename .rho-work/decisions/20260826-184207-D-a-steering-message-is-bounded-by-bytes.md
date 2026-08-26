@@ -21,7 +21,9 @@ Two owners hold a default, because the two kinds of queue face different writers
 `with_capacity` keep the default byte cap, so no constructor makes an uncapped queue.
 
 `message_bytes` counts one message. It counts every byte the queue holds: the text of each
-block, the base64 image payload, and the strings inside tool-call arguments.
+block, the base64 image payload, the strings inside tool-call arguments, and every
+`ProviderState` value. A review found the two `state` fields missing from the first draft of
+that list, and a skipped block is a place a large body hides.
 
 ## Why
 

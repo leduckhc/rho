@@ -7,6 +7,12 @@ The status line must not carry that word, because the guard reads this line firs
 whole spec that mentions it. That is how this spec sat unchecked for one run.
 Owning crates: `rho-core` for the spawner, the registry, and the run loop. `rho-tools` for
 the five model-facing tools. `rho-cli` for the flags.
+
+**`rho-cli` is a side of this contract, not a reader of it.** `SubagentLimits` is a struct
+literal in `subagent_limits`, at `crates/rho-cli/src/cli.rs`, so a new field is a compile
+error there until the flag is wired. That is deliberate: a limit rho refuses on, and that no
+flag can raise, teaches the user a lie. A flag that parses and changes nothing is the same
+defect from the other side. Three tests hold that wiring, in section 5.
 Features: three new rows, F-agent-slot-queue, F-agent-handles, and F-agent-grace-turns. See
 `docs/features.md`.
 
@@ -214,8 +220,9 @@ section 2.9 comes from the primitive, not from a second structure that could dis
 - `QueuedChild::started` calls `acquire_owned` on the per-parent semaphore, then
   `try_acquire_owned` on the process-wide one. It selects on the child's `CancelToken` and on
   a `queue_wait` timer, so a cancel and a deadline each resolve the wait at once.
-- **The cancel branch is checked before the deadline branch.** A waiter that is cancelled and
-  past its deadline reports `Cancelled`, because a cancel is what the parent asked for.
+- **The cancel branch is checked before the deadline branch, and the select is `biased`.** A
+  waiter that is cancelled and past its deadline reports `Cancelled`, because a cancel is what
+  the parent asked for. A fair select would report either one, so the order is stated in code.
 - **When the process-wide try fails, the child releases its per-parent permit and refuses.** It
   resolves `Err(Dequeued::ProcessWideFull)`. It must release first, because a waiter that keeps a
   per-parent permit while it gives up blocks a sibling for ever. It must not retry, because a
@@ -626,6 +633,13 @@ and a queue while it waits. A background waiter that runs out of patience record
 a parent that polls learns why the child never ran. A caller that cannot afford any wait uses
 `background: true`, which returns at once with an id.
 
+**Two rules for a test, because the default hides a mistake.** The default `queue_wait` and
+the default `child_timeout` are both 600 seconds, so a test at the defaults cannot tell which
+number ended the wait. Every deadline test therefore sets a `queue_wait` that differs from its
+`child_timeout`. And `started` now holds a timer, so a test with a paused tokio clock advances
+to that timer once nothing else is ready. A test that wants a waiter to stay in the line either
+never polls `started`, or it keeps the real clock.
+
 ### 2.9 Fairness and order
 
 **Start order is first-in-first-out per parent, and the semaphore provides it.**
@@ -1022,11 +1036,12 @@ name below is a test that exists:
   waiter in the process passed every other test.
 - `one_tree_cannot_steer_another_queued_child` — the scope guard covers the steer path too.
 - `a_waiter_refuses_when_its_deadline_passes_and_names_the_flag` — `Dequeued::WaitedTooLong`,
-  and the text names `--queue-wait-secs` and `background: true`.
+  and the text names `--queue-wait-secs` and `background: true`. The deadline differs from the
+  child timeout, so the assertion can only be about the deadline.
 - `the_deadline_fires_before_the_worst_case_wait` — across three limit sets, the wait ends at
   `queue_wait` and always inside
-  `ceil(max_queued_per_parent / max_children_per_parent) x child_timeout`. The invariant, not
-  one example.
+  `ceil(max_queued_per_parent / max_children_per_parent) x child_timeout`. Every set states a
+  `queue_wait` that is not the `child_timeout`. The invariant, not one example.
 - `a_slot_that_frees_before_the_deadline_still_starts_the_child` — the deadline breaks no
   happy path.
 - `a_zero_deadline_refuses_a_waiter_at_once` — zero means no waiting, so no value turns the
@@ -1040,6 +1055,14 @@ name below is a test that exists:
   message over `max_steer_message_bytes`, so the flag is not a dead switch.
 - `a_started_child_queue_carries_the_byte_cap_from_the_limits` — the same for the arm that
   starts at once.
+
+The flags, in `crates/rho-cli/src/cli.rs`. A limit with no flag teaches a lie, and a flag that
+changes nothing is dead surface:
+- `the_queue_wait_flag_reaches_the_limits` — `--queue-wait-secs 30` sets `queue_wait`.
+- `an_unset_queue_wait_follows_the_child_timeout` — with only `--child-timeout-secs 900`, the
+  deadline is 900 seconds. A host that lengthens a child run lengthens the patience with it.
+- `the_agent_steer_byte_flag_reaches_the_limits` — `--max-agent-steer-bytes` sets the child
+  queue cap, and the default is the stated 16 KiB.
 
 A queued child is addressable, and only by its owner, in `crates/rho-core/tests/subagent_slots.rs`
 and `crates/rho-tools/tests/subagent_tool.rs`:
