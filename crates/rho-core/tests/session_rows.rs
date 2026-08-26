@@ -199,6 +199,61 @@ fn a_row_never_decodes_the_whole_file() {
 }
 
 #[test]
+fn a_row_stays_inside_the_tail_window_when_the_file_grew() {
+    // `size_bytes` comes from a `metadata` call, and the seek and the read happen after it. Another
+    // rho appending to the same session makes the real file longer than that number, and the tail
+    // loop would then read to the **new** end of file and past `ROW_TAIL_BYTES`.
+    //
+    // A reviewer found it. The test states the growth by handing the builder a `size_bytes` that
+    // is smaller than the source really is, which is exactly what a stale metadata read gives.
+    let mut file = String::new();
+    file.push_str(&header_line(id(0x0030).as_str(), 1_756_000_000_000));
+    file.push('\n');
+    file.push_str(&model_line("r1", "r0"));
+    file.push('\n');
+    file.push_str(&message_line("r2", "r1", "the first prompt"));
+    file.push('\n');
+    let head_len = file.len() as u64;
+    // Four tail windows of content after the head.
+    let mut n = 0;
+    while (file.len() as u64) < head_len + ROW_TAIL_BYTES * 4 {
+        file.push_str(&message_line(
+            &format!("r{}", n + 3),
+            &format!("r{}", n + 2),
+            &format!("filler {n} {}", "z".repeat(300)),
+        ));
+        file.push('\n');
+        n += 1;
+    }
+    let real_length = file.len() as u64;
+    // The stale number a `metadata` call gave before the file grew.
+    let stale = head_len + ROW_TAIL_BYTES;
+    assert!(stale < real_length);
+    let (source, counted) = CountingSource::new(file.into_bytes(), 4096);
+
+    let row = row_from(
+        source,
+        RowMeta {
+            display_path: PathBuf::from("/nonexistent/never-opened.jsonl"),
+            size_bytes: stale,
+            last_active_millis: 1_756_000_009_000,
+        },
+    );
+
+    assert!(
+        matches!(row, SessionRow::Session(_)),
+        "the row still builds"
+    );
+    let bytes = counted.load(Ordering::Relaxed) as u64;
+    let allowed = ROW_TAIL_BYTES + (ROW_HEAD_LINES as u64 * 4096) + 2 * 4096;
+    assert!(
+        bytes <= allowed,
+        "a row must read at most {allowed} bytes even when the file grew to {real_length}; it \
+         read {bytes}"
+    );
+}
+
+#[test]
 fn rows_read_only_the_head_and_the_tail() {
     // The ported list test. It keeps the assertions on the path, the working directory, and
     // the size, and it reads the id as a `SessionId`.
@@ -875,6 +930,45 @@ fn newest_resumable_skips_a_locked_session() {
 }
 
 #[test]
+fn newest_resumable_skips_a_session_it_cannot_read() {
+    // A row is built from two bounded reads, and it never walks a parent link. So a file whose
+    // chain is broken or cyclic still builds a **readable-looking row**, and `--continue` chose it
+    // and then failed on the full read. One crafted file in the store made `--continue` fail for
+    // ever, and a user had to find and delete it with no hint.
+    //
+    // A live drive found it, after the cycle guard landed. The fix costs one read of one candidate,
+    // which the resume does anyway.
+    let (_guard, store, root) = temp_store();
+    let good = id_at(0, 0x0001);
+    session_with_prompt(&store, &good, "a good session");
+    // A newer file that reads as a row and refuses a full read.
+    std::fs::write(
+        root.join("20991231-235959-cafe.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            header_line("20991231-235959-cafe", 1_756_000_000_000),
+            message_line("a", "b", "one"),
+            message_line("b", "a", "two")
+        ),
+    )
+    .expect("the cyclic file");
+    // It really does build a row, or this test would prove nothing.
+    let rows = store.rows().expect("the rows build");
+    assert!(
+        matches!(&rows[0], SessionRow::Session(summary) if summary.id.as_str() == "20991231-235959-cafe"),
+        "the cyclic file must look readable as a row, or this test is vacuous"
+    );
+
+    let resumable = store.newest_resumable().expect("no error");
+
+    assert_eq!(
+        resumable,
+        Some(good),
+        "--continue must move past a session it cannot read, and take the next one"
+    );
+}
+
+#[test]
 fn newest_resumable_skips_an_unreadable_file() {
     let (_guard, store, root) = temp_store();
     let good = id_at(0, 0x0001);
@@ -1012,6 +1106,18 @@ fn a_filesystem_that_cannot_lock_is_refused() {
         matches!(error, SessionError::LockUnsupported { .. }),
         "expected LockUnsupported, got {error:?}"
     );
+    // **The message is what a user reads, and this refusal stops their run.** A variant match alone
+    // shipped a message nobody had checked, which is how `EmptyTitle` came to read like file
+    // corruption. A test reviewer named it.
+    let message = error.to_string();
+    assert!(
+        message.contains(&blocked.display().to_string()),
+        "the refusal must name the path it could not lock, got {message}"
+    );
+    assert!(
+        message.contains("local disk"),
+        "the refusal must say what to do next, got {message}"
+    );
 }
 
 #[test]
@@ -1032,6 +1138,11 @@ fn a_lock_file_that_cannot_open_is_refused() {
     assert!(
         matches!(error, SessionError::LockUnsupported { .. }),
         "expected LockUnsupported, got {error:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains(session.as_str()) && message.contains("local disk"),
+        "the refusal must name the lock file and say what to do, got {message}"
     );
 }
 

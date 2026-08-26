@@ -231,6 +231,13 @@ pub enum SessionError {
     /// Two records in one file share an id.
     #[error("record id {id} appears twice in the file")]
     DuplicateId { id: RecordId },
+    /// The parent links form a cycle, so a walk would never end.
+    ///
+    /// Referential integrity alone does not catch this: a cycle resolves every parent, and no
+    /// record on it is a leaf. A reviewer found the hole, and this project already guards the same
+    /// class for subagents in `check_no_cycle`.
+    #[error("the parent links of record {at} form a cycle, so this file cannot be read")]
+    CyclicChain { at: RecordId },
     /// A walk asked for a record the file does not hold.
     ///
     /// A user typing `--at r99` reaches this, so the message names the id.
@@ -515,10 +522,18 @@ impl SessionWriter {
     /// Write the spilled payloads for one record to a sidecar file.
     fn spill_to_sidecar(&self, id: &RecordId, spills: &[String]) -> Result<(), SessionError> {
         let path = self.sidecar_path(id);
-        let mut file = File::create(&path).map_err(|e| io_error(path.as_path(), e))?;
-        // A spill holds whatever a tool read, so it gets the mode the session file gets. A
-        // default umask would make it `0o644`. See `D-a-session-file-is-private`.
-        set_owner_only(&path)?;
+        // The mode goes on the open call, for the same reason `create_file` does it. A spill holds
+        // whatever a tool read. See `D-a-session-file-is-private`.
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&path)
+            .map_err(|e| io_error(path.as_path(), e))?;
         for spill in spills {
             file.write_all(spill.as_bytes())
                 .map_err(|e| io_error(path.as_path(), e))?;
@@ -998,6 +1013,9 @@ fn check_integrity(header_id: &RecordId, entries: &[Entry]) -> Result<(), Sessio
             });
         }
     }
+    // A cycle resolves every parent, so the referential check below cannot see one. Without this
+    // pass a crafted file made every walk loop for ever, and each iteration cloned an entry.
+    check_no_cycle(header_id, entries)?;
     for entry in entries {
         let Some(parent) = &entry.parent_id else {
             continue;
@@ -1246,12 +1264,21 @@ impl SessionStore {
         if let Some(parent) = path.parent() {
             create_private_dir(parent)?;
         }
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .map_err(|e| io_error(path, e))?;
-        set_owner_only(path)?;
+        // **The mode goes on the open call.** A `create_new` followed by a `set_permissions` leaves
+        // the file at the umask mode for a moment, and a `session-file` key can name a file in a
+        // directory the store's `0o700` does not cover. A security review found that window.
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        // **One mechanism, not two.** A `set_permissions` after this would be redundant: the final
+        // mode is the same, so deleting either changed nothing a test could see. This project met
+        // that trap in `record_fits` and in the tail read of `row_from`, and the answer is the
+        // same. The mode on `open` is the one that also closes the window, so it is the one kept.
+        let file = options.open(path).map_err(|e| io_error(path, e))?;
         let mut writer = SessionWriter::with_sink(path.to_path_buf(), Box::new(file));
         let header = Record::Session {
             version: SESSION_FORMAT_VERSION,
@@ -1501,6 +1528,21 @@ impl SessionStore {
                 );
                 continue;
             }
+            // **A row is not a promise that the file reads.** A row comes from two bounded reads and
+            // it never walks a parent link, so a file with a broken or cyclic chain still builds a
+            // readable-looking row. Without this check `--continue` chose such a file and then
+            // failed on the full read, for ever, and a user had to find it by hand.
+            //
+            // It costs one read of one candidate, which the resume then does anyway. A live drive
+            // found the trap.
+            if let Err(error) = SessionReader::read(&summary.path) {
+                tracing::debug!(
+                    id = summary.id.as_str(),
+                    %error,
+                    "a session cannot be read whole; the search moved past it"
+                );
+                continue;
+            }
             return Ok(Some(summary.id));
         }
         Ok(None)
@@ -1508,7 +1550,7 @@ impl SessionStore {
 
     /// The lock file for one session.
     fn lock_path(&self, id: &SessionId) -> PathBuf {
-        self.root.join(format!("{}.lock", id.as_str()))
+        lock_path_for(&self.path_of(id))
     }
 
     /// Take the advisory lock for one session.
@@ -1520,14 +1562,7 @@ impl SessionStore {
     /// Every write path takes this: a create, a resume, and a fork of the target it writes. A
     /// read-only path takes no lock, so `list` and `show` always work.
     pub fn lock(&self, id: &SessionId) -> Result<SessionLock, SessionError> {
-        let path = self.lock_path(id);
-        if let Some(parent) = path.parent() {
-            // A store that cannot even hold its directory cannot hold a lock, so the refusal
-            // names the lock path rather than leaking a create error.
-            create_private_dir(parent)
-                .map_err(|_| SessionError::LockUnsupported { path: path.clone() })?;
-        }
-        lock::take_lock(&path, id.as_str())
+        Self::lock_file(&self.path_of(id))
     }
 
     /// Delete one session file. Every branch in the file goes with it.
@@ -1676,11 +1711,94 @@ impl SessionStore {
             } else {
                 entry
             };
+            // A leaf never becomes the head, here as well as in `append`. A branch can end at a
+            // `Name` record, and a returned writer whose head is a leaf makes the next append name
+            // a leaf as its parent. `SessionWriter::append` already knew that, and this second
+            // spelling of the rule did not.
+            let is_leaf = is_leaf_record(&entry.record);
             writer.write_entry(&entry)?;
-            writer.head = Some(entry.id.clone());
+            if !is_leaf {
+                writer.head = Some(entry.id.clone());
+            }
         }
         Ok(writer)
     }
+
+    /// Take the advisory lock beside one exact file.
+    ///
+    /// `lock` calls this, so a session in the store and a file the `session-file` key names are
+    /// locked by the same code. A named file had no lock at all, so two runs with that key set
+    /// would have interleaved their records into one file.
+    pub fn lock_file(path: &Path) -> Result<SessionLock, SessionError> {
+        let lock_path = lock_path_for(path);
+        if let Some(parent) = lock_path.parent() {
+            // A store that cannot even hold its directory cannot hold a lock, so the refusal names
+            // the lock path rather than leaking a create error.
+            create_private_dir(parent).map_err(|_| SessionError::LockUnsupported {
+                path: lock_path.clone(),
+            })?;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("the session");
+        lock::take_lock(&lock_path, name)
+    }
+}
+
+/// The lock file that sits beside one session file.
+fn lock_path_for(path: &Path) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "session".to_string());
+    path.with_file_name(format!("{stem}.lock"))
+}
+
+/// Refuse a set of entries whose parent links form a cycle.
+///
+/// It walks from every record and stops at a record it has already settled, so the whole pass is
+/// linear in the number of records however deep the chains are.
+///
+/// A missing parent is **not** an error here. The referential check reports that, with both ids,
+/// and reporting it twice with two messages would confuse a reader.
+fn check_no_cycle(header_id: &RecordId, entries: &[Entry]) -> Result<(), SessionError> {
+    let parents: HashMap<&str, Option<&str>> = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.id.0.as_str(),
+                entry.parent_id.as_ref().map(|id| id.0.as_str()),
+            )
+        })
+        .collect();
+    // Every record already known to reach a root without a cycle.
+    let mut settled: HashSet<&str> = HashSet::with_capacity(entries.len() + 1);
+    settled.insert(header_id.0.as_str());
+    for entry in entries {
+        let mut path: Vec<&str> = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut cursor = entry.id.0.as_str();
+        loop {
+            if settled.contains(cursor) {
+                break;
+            }
+            if !seen.insert(cursor) {
+                return Err(SessionError::CyclicChain {
+                    at: RecordId(cursor.to_string()),
+                });
+            }
+            path.push(cursor);
+            match parents.get(cursor) {
+                // A missing parent, or a root. Either way this chain ends here, and the
+                // referential check names a hole with both of its ids.
+                Some(Some(parent)) => cursor = parent,
+                Some(None) | None => break,
+            }
+        }
+        settled.extend(path);
+    }
+    Ok(())
 }
 
 /// Walk parent links from `head` to the root, and return the chain in file order.
@@ -1695,6 +1813,9 @@ fn walk_chain(
 ) -> Result<Vec<Entry>, SessionError> {
     let map: HashMap<&RecordId, &Entry> = entries.iter().map(|e| (&e.id, e)).collect();
     let mut chain = Vec::new();
+    // Defence in depth. `read_from` refuses a cyclic file, and a caller that builds entries by
+    // hand reaches this walker directly. One guard on one path is how `confine` stayed unproven.
+    let mut seen: HashSet<RecordId> = HashSet::new();
     let mut cursor = head.clone();
     loop {
         // The header is not in `entries`, because `read_from` consumes the first line before
@@ -1715,6 +1836,11 @@ fn walk_chain(
                 },
             });
         };
+        if !seen.insert(entry.id.clone()) {
+            return Err(SessionError::CyclicChain {
+                at: entry.id.clone(),
+            });
+        }
         chain.push(*entry);
         match &entry.parent_id {
             // The header is not in `entries`, so the walk ends at a record with no parent.
@@ -1832,11 +1958,25 @@ pub fn expire_stale_result_handles(messages: &mut [Message]) {
 /// The marker a stored result preview opens with.
 const PREVIEW_OPEN: &str = "<tool_result_preview";
 
+/// The marker it closes with.
+const PREVIEW_CLOSE: &str = "</tool_result_preview>";
+
+/// The promise a stored preview makes, which must not survive the expiry.
+const PROMISE: &str = "read_tool_result";
+
 /// Rewrite one block, and every block nested inside a tool result.
+///
+/// **Every block that carries readable text is rewritten**, and not only a `Text` block. A preview
+/// hidden in a reasoning block kept a live handle through a resume, and a security review found it.
+/// The match has no wildcard for a text-carrying block, so a new one cannot slip past in silence.
 fn expire_in_block(block: &mut ContentBlock) {
     match block {
-        ContentBlock::Text { text } if text.contains(PREVIEW_OPEN) => {
-            *text = expired_preview(text);
+        ContentBlock::Text { text }
+        | ContentBlock::ReasoningTrace { text }
+        | ContentBlock::ReasoningReplay { text, .. }
+            if text.contains(PREVIEW_OPEN) =>
+        {
+            *text = expired_previews(text);
         }
         ContentBlock::ToolResult { content, .. } => {
             for nested in content {
@@ -1847,18 +1987,76 @@ fn expire_in_block(block: &mut ContentBlock) {
     }
 }
 
+/// The replacement text for **every** preview in one string.
+///
+/// A first version rewrote one, so a second preview in the same block survived. It also kept the
+/// head of the tag it rewrote, and a nested preview left a live-looking handle inside that head.
+/// So the rewrite runs over every occurrence, and the head it keeps is scrubbed the same way.
+fn expired_previews(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(PREVIEW_OPEN) {
+        out.push_str(&rest[..start]);
+        let block = &rest[start..];
+        let end = match block.find(PREVIEW_CLOSE) {
+            Some(at) => at + PREVIEW_CLOSE.len(),
+            // An unterminated tag. Everything after it is part of the same claim, so all of it
+            // goes. Keeping the tail would keep the promise the tag makes.
+            None => block.len(),
+        };
+        out.push_str(&expired_preview(&block[..end]));
+        rest = &block[end..];
+        // The promise that follows a preview is part of the same claim, so it goes with it.
+        if let Some(after) = rest.strip_prefix('\n') {
+            rest = after;
+        }
+        if let Some(line_end) = rest.find('\n') {
+            if rest[..line_end].contains(PROMISE) {
+                rest = &rest[line_end + 1..];
+            }
+        } else if rest.contains(PROMISE) {
+            rest = "";
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The replacement text for one stale preview.
 ///
-/// It keeps the preview head the record already holds, because that is real evidence the model
-/// read once. It removes only the promise that the handle still works.
+/// It keeps the preview head the record already holds, because that is real evidence the model read
+/// once. It removes only the promise that the handle still works, and it scrubs any nested tag out
+/// of the head it keeps.
 fn expired_preview(text: &str) -> String {
     let stored_bytes = attribute(text, "stored_bytes").unwrap_or_else(|| "an unknown".to_string());
     let head = between_tags(text);
+    // A nested tag inside the head would leave a live-looking handle behind, so the whole nested
+    // tag goes, and not only its opening marker. A security review found that a scrub of the marker
+    // alone left `handle="r-live"` in place.
+    let head = strip_tags(&head);
     format!(
         "{head}\n[rho stored {stored_bytes} bytes of this result in an earlier run. The evidence \
          expired when that run ended, so no handle can read it. Run the command again if you \
          need the rest.]"
     )
+}
+
+/// Remove every angle-bracket tag from a kept head.
+///
+/// The head is evidence a model already read, and it is text. A tag inside it is not evidence: it is
+/// a claim about a handle, and the handle is dead. So every tag goes, with its attributes.
+fn strip_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut inside = false;
+    for ch in text.chars() {
+        match ch {
+            '<' => inside = true,
+            '>' if inside => inside = false,
+            _ if inside => {}
+            _ => out.push(ch),
+        }
+    }
+    out.trim().to_string()
 }
 
 /// One attribute value from the preview tag.
@@ -1876,7 +2074,7 @@ fn between_tags(text: &str) -> String {
         return String::new();
     };
     let rest = &text[open_end + 1..];
-    let end = rest.find("</tool_result_preview>").unwrap_or(rest.len());
+    let end = rest.find(PREVIEW_CLOSE).unwrap_or(rest.len());
     rest[..end].trim().to_string()
 }
 
@@ -2200,6 +2398,17 @@ impl SessionRecorder {
                 None
             }
             AgentEvent::ToolEnd { id, output } => {
+                // **A result is never written without its call.** A provider that emits no
+                // tool-call stream event still reaches `ToolStart` and `ToolEnd`, and the first
+                // version dropped the pending call here and wrote only the result. The file then
+                // held a `ToolResult` matching no `ToolCall`, which every provider refuses on a
+                // resume. `branch_messages` can invent a missing result, and it cannot invent a
+                // missing call, because the arguments are gone.
+                if let Some(position) = self.unwritten_calls.iter().position(|(open, _)| open == id)
+                {
+                    let (call_id, name) = self.unwritten_calls.remove(position);
+                    self.write_bare_calls(vec![(call_id, name)]);
+                }
                 self.awaiting_result.retain(|(open, _)| open != id);
                 self.unwritten_calls.retain(|(open, _)| open != id);
                 // **The result is wrapped in a `ToolResult` block, and it names its call.**
@@ -2259,6 +2468,38 @@ impl SessionRecorder {
         )
     }
 
+    /// Write an assistant message for calls whose arguments are not known.
+    ///
+    /// Only a provider that emitted no tool-call stream event reaches this, or a caller that drives
+    /// `ToolStart` directly. An empty object stands in, because nothing better is known, and the id
+    /// and the name keep the pairing valid. A guessed argument set would be replayed as if the
+    /// model had sent it.
+    ///
+    /// Two paths share this: a `ToolEnd` for a call with no block on disk, and a cancel. A second
+    /// spelling of the rule is a rule that drifts.
+    fn write_bare_calls(&mut self, calls: Vec<(String, String)>) -> Option<RecordId> {
+        let content = calls
+            .iter()
+            .map(|(id, name)| ContentBlock::ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                arguments: serde_json::json!({}),
+                state: None,
+            })
+            .collect();
+        let written = self.log.record(
+            Record::Message {
+                message: Message {
+                    role: Role::Assistant,
+                    content,
+                },
+            },
+            None,
+        );
+        self.awaiting_result.extend(calls);
+        written
+    }
+
     /// Write an explicit title as a `Name` leaf record.
     ///
     /// An empty or blank title is refused, so a row never shows a blank name. A title costs no
@@ -2289,26 +2530,7 @@ impl SessionRecorder {
         // because nothing better is known, and the id and the name keep the pairing valid.
         let unwritten = std::mem::take(&mut self.unwritten_calls);
         if !unwritten.is_empty() {
-            let calls = unwritten
-                .iter()
-                .map(|(id, name)| ContentBlock::ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
-                    arguments: serde_json::json!({}),
-                    // A guessed payload would be replayed as if the provider had sent it.
-                    state: None,
-                })
-                .collect();
-            last = self.log.record(
-                Record::Message {
-                    message: Message {
-                        role: Role::Assistant,
-                        content: calls,
-                    },
-                },
-                None,
-            );
-            self.awaiting_result.extend(unwritten);
+            last = self.write_bare_calls(unwritten);
         }
         for (id, _) in std::mem::take(&mut self.awaiting_result) {
             last = self.log.record(

@@ -7,7 +7,7 @@
 //! result never reaches the terminal. A long text is cut at the width and never wrapped, so
 //! one record is always one line.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rho_core::{ContentBlock, Entry, ReadResult, Record, Role, SessionId, SessionRow, Usage};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -138,12 +138,18 @@ fn show_header(read: &ReadResult, id: &SessionId) -> String {
     } else {
         "open"
     };
-    // **The title gives way, and never the model or the state.** A live drive showed a long title
-    // pushing both off the end of the line, so the header said nothing a user needed. The title is
-    // the one field a user can already read on the next line, in the first prompt.
-    let fixed = format!("session  {}  \"\"  {model}  {closed}", id.as_str());
-    let room = LINE_WIDTH.saturating_sub(display_width(&fixed));
-    let title = fit(&title, room);
+    // **The state never gives way.** It is one word, and it is the only field a user cannot read
+    // again from a record line, so it is the last thing cut.
+    //
+    // The title gives way first, because the first prompt line repeats it. Then the model gives
+    // way, because a real Bedrock id is 41 characters and it pushed the state off the end. A live
+    // drive found the first case, and a test reviewer found the second.
+    let frame = format!("session  {}  \"\"    {closed}", id.as_str());
+    let room = LINE_WIDTH.saturating_sub(display_width(&frame));
+    // The model keeps at most half of what is left, so a long model can never starve the title and
+    // a long title can never starve the model.
+    let model = fit(&model, room / 2);
+    let title = fit(&title, room.saturating_sub(display_width(&model)));
     let line = format!("session  {}  \"{title}\"  {model}  {closed}", id.as_str());
     fit(&line, LINE_WIDTH)
 }
@@ -204,7 +210,30 @@ fn describe_message(
     content: &[ContentBlock],
     names: &HashMap<String, String>,
 ) -> (String, String) {
-    // A tool result is the safety case. Name the tool and the byte count, never the body.
+    // **A tool result is the safety case, and the rule is the role.** Name the tool and the byte
+    // count, never the body. A secret inside a result must never reach the terminal by accident,
+    // and `docs/guide/sessions.md` promises that.
+    //
+    // A first version keyed on the block shape, so a tool message holding a bare `Text` block fell
+    // through to the text arm and printed the body. A crafted or imported file holds exactly that,
+    // and a security review found it.
+    if matches!(role, Role::Tool) {
+        let name = content
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::ToolResult { tool_call_id, .. } => names
+                    .get(tool_call_id)
+                    .cloned()
+                    .or_else(|| Some(tool_call_id.clone())),
+                _ => None,
+            })
+            .unwrap_or_else(|| "a tool".to_string());
+        let bytes = result_bytes(content);
+        return (
+            "tool_result".to_string(),
+            format!("{name}  {}", fmt_bytes(bytes)),
+        );
+    }
     for block in content {
         if let ContentBlock::ToolResult {
             tool_call_id,
@@ -351,20 +380,44 @@ fn depths(entries: &[Entry]) -> HashMap<String, usize> {
     for entry in entries {
         by_id.insert(entry.id.to_string(), entry);
     }
-    let mut depths = HashMap::new();
+    // **Memoised, so the walk is linear.** A first version walked to the root for every record, so a
+    // long session cost O(N squared), and a security review named that a denial of service. A
+    // record's depth is its parent's depth, plus one when the parent has more than one child.
+    //
+    // The chain cannot be cyclic here, because `SessionReader::read` refuses a cyclic file. The
+    // `seen` set stays anyway, so a caller with hand-built entries cannot spin.
+    let mut depths: HashMap<String, usize> = HashMap::new();
     for entry in entries {
-        let mut depth = 0;
-        let mut cursor = entry.parent_id.as_ref().map(|p| p.to_string());
-        while let Some(pid) = cursor {
-            if children.get(&pid).copied().unwrap_or(0) > 1 {
-                depth += 1;
+        // Walk up to the first record whose depth is known, then fill the path back down.
+        let mut path: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut cursor = entry.id.to_string();
+        let mut base = 0usize;
+        loop {
+            if let Some(known) = depths.get(&cursor) {
+                base = *known;
+                break;
             }
-            match by_id.get(&pid) {
-                Some(parent) => cursor = parent.parent_id.as_ref().map(|p| p.to_string()),
+            if !seen.insert(cursor.clone()) {
+                break;
+            }
+            path.push(cursor.clone());
+            match by_id.get(&cursor).and_then(|e| e.parent_id.as_ref()) {
+                Some(parent) => cursor = parent.to_string(),
+                // A root, or a parent this listing does not hold.
                 None => break,
             }
         }
-        depths.insert(entry.id.to_string(), depth);
+        // `path` runs child first, so fill it in reverse.
+        for id in path.iter().rev() {
+            let parent_branches = by_id
+                .get(id)
+                .and_then(|e| e.parent_id.as_ref())
+                .map(|parent| children.get(&parent.to_string()).copied().unwrap_or(0) > 1)
+                .unwrap_or(false);
+            base += usize::from(parent_branches);
+            depths.insert(id.clone(), base);
+        }
     }
     depths
 }

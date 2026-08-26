@@ -181,10 +181,17 @@ fn the_fork_flow_works_from_the_two_printed_commands() {
 
 #[test]
 fn two_worktrees_continuing_at_once_never_share_a_file() {
-    // Two worktrees of one repository share a project key, so both reach one store. Without a
-    // lock both would seed their record ids from the same read and the lines would interleave.
+    // Two worktrees of one repository share a project key, so both reach one store.
     //
-    // The two runs here are two processes, and each one takes its own session.
+    // **What this test proves, exactly.** Both worktrees resolve to one key, both see both sessions
+    // through the real binary, and each file keeps its own unique record ids. A test reviewer
+    // pointed out that the name promises more: it opens no concurrent run, because a real `rho run`
+    // needs a provider this crate cannot stub.
+    //
+    // The concurrency itself is proved by two partners: `a_second_process_cannot_continue_a_live_session`
+    // in `session_cli.rs`, which really opens two recordings and asserts the second is refused, and
+    // `a_second_process_cannot_open_a_live_session` in `rho-core`, which takes the second lock in a
+    // child process.
     let dir = tempfile::tempdir().expect("a temporary directory");
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).expect("the home");

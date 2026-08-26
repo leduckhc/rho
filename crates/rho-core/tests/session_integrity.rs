@@ -296,6 +296,87 @@ fn the_chain_record_set_is_frozen_and_the_version_gates_it() {
     );
 }
 
+#[test]
+fn a_cyclic_parent_chain_is_refused_rather_than_looping() {
+    // `check_integrity` checked referential integrity only: every parent resolves, and no parent
+    // is a leaf. A cycle satisfies both. So a crafted file whose `r5` names `r6` and whose `r6`
+    // names `r5` made every walk loop forever, pushing a clone per iteration.
+    //
+    // A reviewer found it. This project already guards the same class for subagents, in
+    // `check_no_cycle`, "to stop an infinite loop inside a lock". The session reader forgot it.
+    //
+    // The test has a timeout, because the defect is non-termination and a plain assertion would
+    // hang the suite instead of failing it.
+    let lines = [
+        old_header_line(),
+        message_line("r5", Some("r6"), "the first half of a cycle"),
+        message_line("r6", Some("r5"), "the second half of a cycle"),
+    ];
+    let text = lines.join("\n");
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = SessionReader::read_from(std::io::Cursor::new(text));
+        let _ = sender.send(match outcome {
+            Ok(_) => "accepted".to_string(),
+            Err(error) => format!("{error:?}"),
+        });
+    });
+    let settled = receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("a cyclic file must be refused, and never loop for ever");
+
+    assert!(
+        settled.starts_with("CyclicChain"),
+        "expected a cyclic-chain refusal, got {settled}"
+    );
+    assert!(
+        SessionError::CyclicChain {
+            at: RecordId("r5".to_string())
+        }
+        .to_string()
+        .contains("r5"),
+        "the message must name a record on the cycle"
+    );
+}
+
+#[test]
+fn a_hand_built_cyclic_walk_is_refused_rather_than_looping() {
+    // Defence in depth. The reader refuses a cyclic file, and a caller that builds entries by hand
+    // must be stopped too. One guard on one path is how `confine` stayed unproven.
+    let entries = vec![
+        Entry {
+            id: RecordId("r5".to_string()),
+            parent_id: Some(RecordId("r6".to_string())),
+            timestamp: "1756000000005".to_string(),
+            record: message_record("the first half of a cycle"),
+        },
+        Entry {
+            id: RecordId("r6".to_string()),
+            parent_id: Some(RecordId("r5".to_string())),
+            timestamp: "1756000000006".to_string(),
+            record: message_record("the second half of a cycle"),
+        },
+    ];
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = branch_messages(&entries, &RecordId("r5".to_string()), None);
+        let _ = sender.send(match outcome {
+            Ok(messages) => format!("accepted {} messages", messages.len()),
+            Err(error) => format!("{error:?}"),
+        });
+    });
+    let settled = receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("a cyclic walk must be refused, and never loop for ever");
+
+    assert!(
+        settled.starts_with("CyclicChain"),
+        "expected a cyclic-chain refusal, got {settled}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Section 6b. A walk with a hole is an error, never a short list.
 // ---------------------------------------------------------------------------
@@ -841,6 +922,48 @@ fn a_named_session_reopens_and_stays_readable() {
     SessionReader::read(&path).expect("a named session must still read back");
 }
 
+#[test]
+fn a_fork_at_a_leaf_record_leaves_a_usable_head() {
+    // A fork copies a branch, and the branch may end at a `Name` leaf. The copy loop made every
+    // copied record the head, including the leaf, so the next append through the returned writer
+    // named a leaf as its parent and the file was refused.
+    //
+    // `SessionWriter::append` already skips a leaf. The fork's own copy loop did not, and Codex
+    // found the second spelling of the rule.
+    let (_guard, store, _root) = temp_store();
+    let session = id(0x0ccc);
+    let (path, head) = {
+        let mut writer = store
+            .create(new_session(&session, Path::new("/tmp")))
+            .expect("a created session");
+        let base = writer.head();
+        let message = writer
+            .append(message_record("a prompt"), base)
+            .expect("appended");
+        // The branch ends at a leaf, exactly as `rho sessions name` leaves it.
+        let name = writer
+            .append(
+                Record::Name {
+                    title: "a title".to_string(),
+                },
+                Some(message),
+            )
+            .expect("a name is written");
+        (writer.path().to_path_buf(), name)
+    };
+
+    let mut writer = store
+        .fork(&path, &head, &id(0x0ddd))
+        .expect("a fork at a leaf record");
+    let fork_path = writer.path().to_path_buf();
+    let next = writer.head();
+    writer
+        .append(message_record("after the fork"), next)
+        .expect("appended");
+
+    SessionReader::read(&fork_path).expect("a fork at a leaf must stay readable");
+}
+
 // ---------------------------------------------------------------------------
 // Section 7c. An exclusive create, because a collision truncates.
 // ---------------------------------------------------------------------------
@@ -942,6 +1065,36 @@ fn create_minted_gives_up_after_mint_attempts() {
 // ---------------------------------------------------------------------------
 // Section 9. The store is private, by construction.
 // ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn a_session_file_is_never_briefly_world_readable() {
+    // `create_new` then `set_permissions` leaves the file at the umask mode for a moment. Inside a
+    // `0o700` store that window is closed by the directory, and the `session-file` config key can
+    // name a file in a loose directory where it is not. A security review found it.
+    //
+    // The mode goes on the `open` call now, so no window exists. The test sets a permissive umask
+    // and a world-writable parent, then asserts the mode the file was **created** with.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let loose = dir.path().join("loose");
+    std::fs::create_dir_all(&loose).expect("the directory");
+    std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o777)).expect("the mode");
+    let path = loose.join("named-session.jsonl");
+
+    let writer = SessionStore::create_file(&path, new_session(&id(0x0e01), Path::new("/tmp")))
+        .expect("a created session");
+
+    let mode = std::fs::metadata(writer.path())
+        .expect("the file")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "a session file must be owner only, got {mode:o}"
+    );
+}
 
 #[cfg(unix)]
 #[test]

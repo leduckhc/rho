@@ -197,11 +197,112 @@ pub fn open(request: RecordingRequest<'_>) -> anyhow::Result<Recording> {
             "this session is ephemeral, so rho writes no session file.".to_string(),
         ]));
     }
+    // **An existing named file is a session like any other.** So it locks, it checks the stored
+    // modes, and it replays. A first version appended to it with no lock and no check, so two runs
+    // with the key set would interleave their records, and a file written under `read-only` came
+    // back as `allow-all` in silence. See `D-a-named-session-file-is-a-session-like-any-other`.
+    if let Some(path) = request.session_file
+        && path.exists()
+    {
+        return reopen_named(path, request);
+    }
     let (store, key) = store_for(request.home, request.project_root);
     if request.selector.resumes() {
         return resume(&store, &key, request);
     }
     create(&store, request)
+}
+
+/// Reopen the file the `session-file` key names, with the rules a resume follows.
+///
+/// It is `resume` without the store, because a named file has no id to resolve. Everything after
+/// the resolution is the same, and `rebuild` holds that shared half so the two paths cannot drift.
+fn reopen_named(path: &Path, request: RecordingRequest<'_>) -> anyhow::Result<Recording> {
+    let lock = SessionStore::lock_file(path)?;
+    let read = SessionReader::read(path)?;
+    check_resume_permission(
+        &read.header,
+        StoredApproval::parse(request.approval),
+        StoredSandbox::parse(request.sandbox),
+        request.allow_widen,
+    )?;
+    let rebuilt = rebuild(&read)?;
+    let mut notices = rebuilt.notices;
+    notices.insert(
+        0,
+        format!(
+            "continuing the session file {} ({} messages)",
+            path.display(),
+            rebuilt.messages.len()
+        ),
+    );
+    let mut writer = store_append(path)?;
+    if rebuilt.stored_model.as_deref() != Some(request.model) {
+        writer.append(
+            Record::ModelChange {
+                provider: request.provider.to_string(),
+                model: request.model.to_string(),
+            },
+            None,
+        )?;
+    }
+    // A named file carries no store id, so the id is the file stem when that is one.
+    let id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| SessionId::parse(stem).ok());
+    Ok(Recording {
+        recorder: SessionRecorder::new(SessionLog::File(writer)),
+        messages: rebuilt.messages,
+        notices,
+        id,
+        path: Some(path.to_path_buf()),
+        _lock: Some(lock),
+    })
+}
+
+/// What a read gives a resume: the conversation, the model, and what to tell the user.
+struct Rebuilt {
+    messages: Vec<Message>,
+    stored_model: Option<String>,
+    notices: Vec<String>,
+}
+
+/// Rebuild the conversation of one read file.
+///
+/// Both resume paths call this, so the expiry of a stale result handle and the two warnings cannot
+/// be present on one path and missing on the other.
+fn rebuild(read: &rho_core::ReadResult) -> Result<Rebuilt, SessionError> {
+    let head = read
+        .entries
+        .last()
+        .map(|entry| entry.id.clone())
+        .unwrap_or_else(|| read.header_id.clone());
+    // The `?` matters. A hole in the chain is an error, never a short list, and a swallowed error
+    // here would replay the front of a conversation and drop its end.
+    let mut messages = branch_messages(&read.entries, &head, Some(&read.header_id))?;
+    // The store behind an old result handle died with the earlier run, so the promise expires.
+    expire_stale_result_handles(&mut messages);
+
+    let mut notices = Vec::new();
+    if read.truncated_tail {
+        notices.push(
+            "the session file had a truncated last line, so rho dropped it. A crash can leave \
+             one."
+                .to_string(),
+        );
+    }
+    if read.dropped_records > 0 {
+        notices.push(format!(
+            "{} records in the session file did not decode, so rho skipped them.",
+            read.dropped_records
+        ));
+    }
+    Ok(Rebuilt {
+        messages,
+        stored_model: stored_model(read),
+        notices,
+    })
 }
 
 /// Create a fresh session, and mint a free id.
@@ -227,32 +328,26 @@ fn create(store: &SessionStore, request: RecordingRequest<'_>) -> anyhow::Result
                 model: new.model,
                 forked_from: None,
             };
-            // An existing named file is reopened, because the key names one file for every run.
-            if path.exists() {
-                let writer = store_append(path)?;
-                (id, writer)
-            } else {
-                let writer = SessionStore::create_file(path, named)?;
-                (id, writer)
-            }
+            // An existing named file never reaches here. `open` routes it to `reopen_named`, so
+            // it locks and checks its stored modes like any other session.
+            let writer = SessionStore::create_file(path, named)?;
+            (id, writer)
         }
         None => store.create_minted(request.now_millis, new)?,
     };
     let path = writer.path().to_path_buf();
-    // The lock goes on the file the run writes. A create is exclusive, so the window between
-    // the create and the lock cannot lose a session; the lock stops a **later** process.
-    let lock = match request.session_file {
-        // A named file lives outside the store's naming, so the store cannot name its lock.
-        Some(_) => None,
-        None => Some(store.lock(&id)?),
-    };
+    // The lock goes on the file the run writes, whatever named it. A create is exclusive, so the
+    // window between the create and the lock cannot lose a session; the lock stops a **later**
+    // process. A first version left a `session-file` unlocked, and two runs with that key set
+    // would then have interleaved their records.
+    let lock = SessionStore::lock_file(&path)?;
     Ok(Recording {
         recorder: SessionRecorder::new(SessionLog::File(writer)),
         messages: Vec::new(),
         notices: Vec::new(),
         id: Some(id),
         path: Some(path),
-        _lock: lock,
+        _lock: Some(lock),
     })
 }
 
@@ -289,40 +384,21 @@ fn resume(
         request.allow_widen,
     )?;
 
-    let head = read
-        .entries
-        .last()
-        .map(|entry| entry.id.clone())
-        .unwrap_or_else(|| read.header_id.clone());
-    let mut messages = branch_messages(&read.entries, &head, Some(&read.header_id))?;
-    // The store behind an old result handle died with the earlier run, so the promise expires.
-    expire_stale_result_handles(&mut messages);
-
+    // The same rebuild the named path uses, so the expiry of a stale handle and the two warnings
+    // cannot be present on one resume path and missing on the other.
+    let rebuilt = rebuild(&read)?;
     let mut notices = vec![format!(
         "continuing session {} in {} ({} messages)",
         id.as_str(),
         read.header.cwd.display(),
-        messages.len()
+        rebuilt.messages.len()
     )];
-    if read.truncated_tail {
-        notices.push(
-            "the session file had a truncated last line, so rho dropped it. A crash can leave \
-             one."
-                .to_string(),
-        );
-    }
-    if read.dropped_records > 0 {
-        notices.push(format!(
-            "{} records in the session file did not decode, so rho skipped them.",
-            read.dropped_records
-        ));
-    }
+    notices.extend(rebuilt.notices);
 
     let mut writer = store.append_to(&path)?;
     // A resume under another model states the change on disk, so a reader of the file can see
     // which model answered which turn.
-    let stored_model = stored_model(&read);
-    if stored_model.as_deref() != Some(request.model) {
+    if rebuilt.stored_model.as_deref() != Some(request.model) {
         writer.append(
             Record::ModelChange {
                 provider: request.provider.to_string(),
@@ -333,7 +409,7 @@ fn resume(
     }
     Ok(Recording {
         recorder: SessionRecorder::new(SessionLog::File(writer)),
-        messages,
+        messages: rebuilt.messages,
         notices,
         id: Some(id),
         path: Some(path),

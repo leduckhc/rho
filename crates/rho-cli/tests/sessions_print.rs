@@ -494,9 +494,12 @@ fn show_keeps_the_model_and_the_state_when_the_title_is_long() {
     let text = render_show(&read, &id(), false);
     let header = text.lines().next().expect("a header");
 
+    // The model is recognisable, and not necessarily whole. Eighty columns cannot hold a 300
+    // character title, a 28 character model, and the state, so both fields give way and the state
+    // never does. `show_keeps_the_state_when_the_model_is_long` pins the other half.
     assert!(
-        header.contains("a-very-long-model-identifier"),
-        "the model must survive a long title, got {header}"
+        header.contains("a-very-long-model"),
+        "the model must stay recognisable under a long title, got {header}"
     );
     assert!(
         header.ends_with("closed"),
@@ -506,5 +509,136 @@ fn show_keeps_the_model_and_the_state_when_the_title_is_long() {
         header.chars().count() <= 80,
         "got {} columns",
         header.chars().count()
+    );
+}
+
+#[test]
+fn show_keeps_the_state_when_the_model_is_long() {
+    // A real Bedrock or Claude model id is long. The header cut from the end, so the close state
+    // became `c…` and the header then lied about whether the session was open.
+    //
+    // A test reviewer reproduced it with `anthropic.claude-3-5-sonnet-20241022-v2:0`. The earlier
+    // test only stressed a long **title**, which gives way by design, so nothing saw this.
+    let read = read_result(vec![
+        entry(
+            "r1",
+            Some("r0"),
+            NOW,
+            model_change("anthropic.claude-3-5-sonnet-20241022-v2:0"),
+        ),
+        entry("r2", Some("r1"), NOW, user("fix the parser")),
+        entry("r3", Some("r2"), NOW, Record::Closed),
+    ]);
+
+    let text = render_show(&read, &id(), false);
+    let header = text.lines().next().expect("a header");
+
+    assert!(
+        header.ends_with("closed"),
+        "the close state must survive a long model, got {header}"
+    );
+    assert!(
+        header.contains("anthropic.claude"),
+        "the model must still be recognisable, got {header}"
+    );
+    assert!(
+        header.chars().count() <= 80,
+        "got {} columns: {header}",
+        header.chars().count()
+    );
+}
+
+#[test]
+fn show_of_a_long_session_is_not_quadratic() {
+    // `depths` walked to the root for every record, so a long session cost O(N squared). A security
+    // review named it. The walk memoises now, so the cost is linear.
+    //
+    // The assertion is a wall clock with a generous bound, because the defect is a growth rate and
+    // a tight number would be flaky. Four thousand records at O(N squared) is eight million steps
+    // of map lookups and clones, which takes seconds; linear takes milliseconds.
+    let mut entries = Vec::new();
+    for n in 0..4000u32 {
+        entries.push(entry(
+            &format!("r{}", n + 1),
+            Some(&if n == 0 {
+                "r0".to_string()
+            } else {
+                format!("r{n}")
+            }),
+            NOW,
+            user("a prompt"),
+        ));
+    }
+    let read = read_result(entries);
+
+    let started = std::time::Instant::now();
+    let text = render_show(&read, &id(), false);
+    let elapsed = started.elapsed();
+
+    assert_eq!(text.lines().count(), 4001, "every record is one line");
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "a linear walk must render 4000 records well inside two seconds, it took {elapsed:?}"
+    );
+    println!("4000 records in {elapsed:?}");
+}
+
+#[test]
+fn show_never_prints_a_tool_message_body() {
+    // A tool message whose content is a bare `Text` block, with no `ToolResult` wrapper, fell to
+    // the text arm and **printed the body**. A crafted or imported file can hold exactly that, and
+    // `docs/guide/sessions.md` promises that a secret inside a result does not reach the terminal.
+    //
+    // A security review found it. The rule is the role, and not the block shape: a message from a
+    // tool is evidence, and `show` reports its size.
+    let read = read_result(vec![entry(
+        "r1",
+        Some("r0"),
+        NOW,
+        Record::Message {
+            message: Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::Text {
+                    text: "AWS_SECRET_ACCESS_KEY=must-not-be-printed".to_string(),
+                }],
+            },
+        },
+    )]);
+
+    let text = render_show(&read, &id(), false);
+
+    assert!(
+        !text.contains("must-not-be-printed"),
+        "a tool message body must never reach the terminal, got {text}"
+    );
+    assert!(
+        text.contains("tool_result"),
+        "the row still says what kind of record it is, got {text}"
+    );
+}
+
+#[test]
+fn show_full_never_prints_a_tool_message_body_either() {
+    // `--full` prints the whole text of each record. That must not turn the safety case off, or the
+    // flag becomes a way to read every secret a session recorded.
+    let read = read_result(vec![entry(
+        "r1",
+        Some("r0"),
+        NOW,
+        Record::Message {
+            message: Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::Text {
+                    text: "AWS_SECRET_ACCESS_KEY=must-not-be-printed".to_string(),
+                }],
+            },
+        },
+    )]);
+
+    let text = render_show(&read, &id(), true);
+
+    assert!(
+        !text.contains("must-not-be-printed"),
+        "--full must not print a tool message body, got {text}"
     );
 }

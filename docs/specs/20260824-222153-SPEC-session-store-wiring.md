@@ -385,6 +385,22 @@ and never declared by a writer. A future rho needs no cooperation from this buil
 
 The same read also refuses two records that share an id. See section 7a.
 
+**And it refuses a cycle.** Referential integrity alone cannot see one: a cycle resolves every
+parent, and no record on it is a leaf. So a three-line file whose `a` names `b` and whose `b` names
+`a` passed every check, and then every walk ran for ever and cloned an entry per turn of the loop.
+That is a denial of service reachable from a resume and from `sessions fork`.
+
+A reviewer found it, and this project already guards the same class for subagents in
+`check_no_cycle`, "to stop an infinite loop inside a lock". The session reader had forgotten it.
+
+- `SessionError::CyclicChain` names a record on the cycle.
+- The check runs at read time, with the other two, and it is linear because it memoises the
+  records it has already settled.
+- `walk_chain` keeps a visited set as well, so a caller with hand-built entries cannot spin.
+  Defence in depth, because one guard on one path is how `confine` stayed unproven.
+- `rho sessions show` walks parents too, in `depths`. It memoises, so a long session costs O(N)
+  and not O(N squared).
+
 ### 6b. A silent early stop must become an error
 
 `branch_messages` and `fork` both walk parent links with `None => break`. See lines 1084
@@ -809,8 +825,16 @@ Rules for the format:
 - The record id is the first column, so a user copies it into `--at`.
 - One record is one line. A long text is cut at the terminal width, and never wrapped.
 - The whole listing fits 80 columns. A test asserts that.
-- A tool call names the tool and its short arguments. A tool result names the tool and a
-  byte count, never the content.
+- **The close state is the last thing cut.** It is one word. It is also the only header field a
+  user cannot read again from a record line. The title gives way first, and then the model, which
+  keeps at most half of the room that is left. A live drive found a long title pushing both the model and
+  the state off the line, and a reviewer found a real 41 character Bedrock model id doing the same
+  to the state alone.
+- A tool call names the tool and its short arguments. **A tool message names the tool and a byte
+  count, never the content.** The rule is the **role**, and not the block shape: a first version
+  keyed on a `ToolResult` block, so a tool message holding a bare `Text` block fell through and
+  printed the body. A crafted or an imported file holds exactly that. `--full` does not turn the
+  rule off, or the flag would be a way to read every secret a session recorded.
 - `--full` prints the whole text of each record instead of one line.
 - A branch is shown by indentation, and a sibling branch is marked. So a user can see that
   two answers came from one question.
@@ -1437,3 +1461,82 @@ A fork at a record the file does not hold needed a name too. A user typing
 10. **`branch_messages` could not tell the root from a hole.** The header record is not in
     `entries`, so the first entry of every real file names a parent the walk cannot see.
     Section 6b adds the `root` parameter, and `ReadResult` gains `header_id`.
+
+### 15d. What the review fleet and codex found
+
+The lane ran a second review phase after the suite was green: four subagents with one lens each,
+and `codex review` from outside this harness with no sight of their findings. Ten findings were
+real. Each is fixed, and each has a mutation proof in
+`docs/verification/session-store-wiring.md` section 12.
+
+**One critical.**
+
+1. **A cyclic parent chain looped for ever.** Section 6a states the rule now. Found independently by
+   the correctness lens and the security lens, which is the strongest signal in this review.
+
+**Two that bypassed a rule through a config key.** Codex found both.
+
+2. **A `session-file` took no lock.** Two runs with the key set appended to one file, and both
+   seeded their record ids from one read.
+3. **A `session-file` skipped the permission check.** A file written under `read-only` came back
+   under `allow-all` in silence, which is `D-resume-never-widens` reached by a different door.
+
+Both are settled by `D-a-named-session-file-is-a-session-like-any-other`: **an existing named file
+is a resume.** It locks, it checks the stored modes, and it replays. `SessionStore::lock_file`
+locks any path and `lock` calls it, and `rebuild` holds the shared half of both resume paths, so
+one rule has one spelling.
+
+**Four more.**
+
+4. **A fork at a leaf record left a leaf as the head**, so the next append through the returned
+   writer named a leaf as its parent. `SessionWriter::append` already knew the rule, and the fork's
+   own copy loop was a second spelling of it. Codex found it.
+5. **A tool message with a bare text block printed its body.** Section 8a states the role rule now.
+   The security lens found it, and it was a real gap against a promise `docs/guide/sessions.md`
+   makes.
+6. **A long model id pushed the close state off the `show` header.** Section 8a states the budget
+   now. The test lens reproduced it with a real Bedrock id.
+7. **`expire_stale_result_handles` was string surgery with three holes:** it rewrote a `Text` block
+   only, it rewrote one preview per block, and it kept a nested tag inside the head it kept. The
+   security lens found all three. The impact is a wasted turn and not a leak, because the store
+   behind the handle is dead, and a promise rho makes must still hold.
+
+**Two about a test rather than the code.**
+
+8. **The grep of `cli.rs` passes against `if false`.** The test lens proved it by running the break.
+   `record_and_print` now holds the whole recording lifecycle in one function, and two tests drive
+   it on a real file: `the_whole_lifecycle_runs_in_order` and
+   `the_prompt_is_recorded_before_the_answer_even_when_the_run_fails`. The grep is a backstop for
+   one call now, and not the guard for the lifecycle. **The residual limit is stated in section 16.**
+9. **`two_worktrees_continuing_at_once_never_share_a_file` opens no concurrent run.** It proves the
+   shared project key through the real binary. The concurrency is proved by
+   `a_second_process_cannot_continue_a_live_session`, which really opens two recordings, and by
+   `a_second_process_cannot_open_a_live_session`, which locks in a child process. The test's own
+   comment says so now, rather than leaving its name to overstate.
+
+**Three findings were accepted and not fixed.** Each is stated where a reader will meet it:
+
+- `is_locked_elsewhere` probes a lock and releases it, so `newest_resumable` can name a session
+  another process takes first. The caller then gets `Busy`. The invariant holds, because the real
+  lock is taken before any write.
+- A project key has no length cap, so a four kilobyte `gitdir:` line yields a long directory
+  component and `ENAMETOOLONG`. That is a degrade and not a traversal.
+- The prior-art table in section 7d is a reading of pi, jcode and fx. It is editorial context about
+  other projects, and no rho test can back it.
+
+## 16. What no test covers
+
+`AGENTS.md` step 8 asks for this list, and a reader deserves it in the contract and not only in a
+report.
+
+- **`run_headless` calling `record_and_print`.** The lifecycle is behaviour, and this last hop is a
+  grep. `crates/rho-cli/src/provider.rs` belongs to another lane, so this crate cannot inject a stub
+  provider and drive `run_headless` in process. A break that wraps the call in `if false` still
+  passes the suite. `docs/verification/session-store-wiring.md` drives it against live Bedrock
+  instead, and that is the only guard.
+- **The terminal.** `rho-tui` records nothing and `/sessions` opens no picker.
+- **A `flock` failure from a real filesystem.** `classify_lock_failure` is pure and every code is
+  tested, and no test makes a real network filesystem refuse a lock.
+- **`SessionStore::create_file`, `SessionSelector::resumes`, `SessionsAction`, and
+  `sessions_command::run`** are each reached only through a caller. Each has a test that fails when
+  it breaks, and none has a test that names it.

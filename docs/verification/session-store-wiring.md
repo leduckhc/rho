@@ -484,3 +484,212 @@ moment that process ended. So the refusal was correct every time, and the surpri
 
 The `WARN a record read from a file carried oversize content` line comes from the read-side cap
 bounding the 900 word essay the crashed run recorded. That is `cap_entry_state` doing its job.
+
+## 12. The review phase, and its mutation proofs
+
+The suite was green, the step 7 proofs were recorded, and the work was committed. Then a review
+phase ran, in this shape:
+
+1. A code-graph brief, built with the `cbm` tools on **this** worktree. `cbm_index`, then
+   `cbm_changes` for the blast radius, `cbm_architecture` for the boundaries, `cbm_trace` on
+   `row_from`, and a Cypher query for exported items with no inbound call. The brief is what every
+   reviewer read. **One caveat is written into it:** the graph's `CALLS` resolution for Rust is
+   weak, and it lists `parse_header`, `walk_chain` and `check_integrity` as having no caller, which
+   is false. So "no inbound calls" from the graph is not evidence.
+2. Four subagents in parallel, one lens each: correctness and architecture, security, test quality,
+   and documentation claims. Each got the same brief, the defect history, and the instruction to
+   assume another defect of the same family exists.
+3. `codex review`, from outside this harness, with **no sight of the subagent findings**, so its
+   lens stayed independent.
+
+### The proofs
+
+| Break | Tests that failed |
+| --- | --- |
+| the reader does not check for a cycle | `a_cyclic_parent_chain_is_refused_rather_than_looping` |
+| the walker does not check for a cycle | `a_hand_built_cyclic_walk_is_refused_rather_than_looping` |
+| `depths` walks to the root for every record | `show_of_a_long_session_is_not_quadratic` |
+| the session file mode is not on the open call | `a_session_file_is_0o600_on_unix`, `a_session_file_is_never_briefly_world_readable` |
+| the sidecar mode is not on the open call | `a_sidecar_spill_file_is_0o600_on_unix` |
+| a fork leaves a leaf as the head | `a_fork_at_a_leaf_record_leaves_a_usable_head` |
+| a tool result is written without its call | `a_tool_result_is_never_written_without_its_call` |
+| the tail window is unbounded | `a_row_stays_inside_the_tail_window_when_the_file_grew` |
+| the `show` header cuts from the end | `show_keeps_the_state_when_the_model_is_long`, `show_keeps_the_model_and_the_state_when_the_title_is_long` |
+| the model does not give way | `show_keeps_the_state_when_the_model_is_long` |
+| the tool-result rule keys on the block shape | `show_never_prints_a_tool_message_body`, `show_full_never_prints_a_tool_message_body_either` |
+| only a `Text` block is expired | `a_handle_hidden_in_a_reasoning_block_expires_too` |
+| one preview per block is expired | the same |
+| the promise line is kept | the same |
+| a nested tag survives inside the kept head | the same |
+| the lifecycle records no prompt | `the_whole_lifecycle_runs_in_order`, `the_prompt_is_recorded_before_the_answer_even_when_the_run_fails` |
+| the lifecycle never closes | the same two |
+| the printer gets no recording | `the_whole_lifecycle_runs_in_order` |
+| a named session file takes no lock | `a_named_session_file_holds_a_lock` |
+| a named session file skips the permission check | `a_named_session_file_cannot_widen_a_run` |
+| a named session file does not replay | `a_named_session_file_replays_what_it_holds` |
+
+`4000 records in 16.25ms`, from
+`cargo test -p rho-cli --test sessions_print -- --nocapture show_of_a_long`. The same case at
+O(N squared) is eight million map lookups and clones.
+
+### Three breaks passed at first, and each one changed something
+
+1. **The mode on the `open` call.** A `set_permissions` after it made the final mode the same, so
+   deleting either changed nothing a test could see. That is the redundant-guard trap of
+   `record_fits`, met for the fourth time on this branch. **The chmod is gone from the create paths**
+   and the mode on `open` is the single mechanism, so the existing `0o600` tests now observe it. The
+   lock file keeps its chmod, because a lock file can already exist and `OpenOptions::mode` applies
+   at creation only.
+2. **The tail bound.** `a_row_never_decodes_the_whole_file` passes a `size_bytes` equal to the real
+   length, so the window end and the file end coincide and the bound is invisible. A new test hands
+   the builder a **stale** `size_bytes`, which is exactly what a file that grew after the metadata
+   read gives.
+3. **The nested-tag scrub.** The first version replaced the opening marker only, so
+   `handle="r-live"` survived inside the kept head. The test did not cover nesting, and a probe in a
+   scratch crate outside the repository showed the leftover. Now every tag goes, and the test drives
+   a nested preview.
+
+### One break still passes, and it is stated rather than hidden
+
+Wrapping the `record_and_print` call in `run_headless` inside `if false` passes the whole suite. The
+lifecycle itself is now behaviour, and that last hop is a grep. This crate cannot inject a stub
+provider, because `crates/rho-cli/src/provider.rs` belongs to another lane. Section 6 of this
+document is the only guard on that hop, and section 16 of the spec says so.
+
+## 13. The review fixes, driven for real
+
+The release binary was rebuilt and driven again. Two of these cases came **out of** the drive, and
+they are the reason step 11 runs after a review and not only before one.
+
+### A widen refusal was becoming a warning
+
+```sh
+RHO_SESSION_FILE=/tmp/rho-dbg/n/ro.jsonl ./target/release/rho run "Say only A." --read-only ...
+head -1 /tmp/rho-dbg/n/ro.jsonl   # approval: read-only  sandbox: off
+RHO_SESSION_FILE=/tmp/rho-dbg/n/ro.jsonl ./target/release/rho run "Say only B." ...
+```
+
+Before the fix:
+
+```
+rho: cannot open a session file: a resume would widen approval from read-only to allow-all; pass --allow-widen to allow it. This run is ephemeral.
+B.
+```
+
+The refusal became a warning and the run answered. `open_recording` degraded **every** failure on a
+new session, and a named session file is opened with a new selector.
+
+After the fix:
+
+```
+rho: a resume would widen approval from read-only to allow-all; pass --allow-widen to allow it
+exit 1
+```
+
+**The rule is inverted now: only a write failure degrades.** A list of errors that stop the run is a
+fail-open shape, because the next variant joins the degrade by default. The rule names what
+degrades instead. Tests: `a_write_failure_on_a_new_session_degrades_the_run`,
+`a_widen_refusal_on_a_new_session_stops_the_run`, `a_busy_session_stops_the_run`, all driving the
+real `open_recording`.
+
+### One crafted file blocked `--continue` for ever
+
+A row comes from two bounded reads, and it never walks a parent link. So a file with a cyclic chain
+still builds a **readable-looking row**. `--continue` chose it, and then failed on the full
+read:
+
+```
+rho: the parent links of record a form a cycle, so this file cannot be read
+```
+
+Every later `--continue` failed the same way, and a user had to find and delete the file with no
+hint. `newest_matching` now reads the candidate it is about to name, which costs one read that the
+resume does anyway. After the fix, in the same poisoned store:
+
+```
+rho: continuing session 20260826-224828-8bef in /tmp/rho-rev/root (4 messages)
+MOVED-PAST.
+```
+
+Test: `newest_resumable_skips_a_session_it_cannot_read`. It asserts first that the cyclic file
+really does build a row, or the test would be vacuous.
+
+### The rest of the sweep, after the fixes
+
+```
+### a run, a resume, and the same again
+rho: session 20260826-224822-e79e at /tmp/rho-rev/home/.rho/sessions/root-63873f5c/20260826-224822-e79e.jsonl
+The parser reads a number but forgets to handle the sign (positive or negative).
+rho: continuing session 20260826-224822-e79e in /tmp/rho-rev/root (4 messages)
+Sign.
+rho: continuing session 20260826-224822-e79e in /tmp/rho-rev/root (6 messages)
+Sign.
+
+### the session-file key
+rho: session 20260826-224829-b8e4 at /tmp/rho-rev/notes/mine.jsonl
+FIRST.
+rho: continuing the session file /tmp/rho-rev/notes/mine.jsonl (2 messages)   # it replays now
+FIRST.
+--- with --allow-widen ---
+WIDENED.
+
+### a cyclic file, with a 20 second deadline on each
+rho: the parent links of record a form a cycle, so this file cannot be read     # sessions show
+rho: the parent links of record a form a cycle, so this file cannot be read     # a named resume
+20991231-235959-cafe just now    one                                     -     -   # the list still works
+```
+
+`sessions show` and a named resume both refuse a cyclic file in well under the deadline. Before the
+guard they never returned.
+
+### The lock on a named file, probed rather than timed
+
+A first attempt looked like a failure and was a timing artefact: the background run had already
+finished. So the lock was probed directly.
+
+```
+first run alive? yes
+-rw-------  mine.jsonl
+-rw-------  mine.lock
+--- is the lock really held, probed with flock from python ---
+flock: held by rho (EWOULDBLOCK)
+--- a second run on the same named file ---
+rho: session mine is open in another process. Use another session, or close that one.
+exit 1
+```
+
+**A timing test is not a proof.** The probe is, and it is why this section shows the flock result
+beside the refusal.
+
+## 14. A test the controller destroyed, and the guard that caught it
+
+`bench/check-claimed-tests.py` failed the first attempt to commit this review phase:
+
+```
+a commit message names `a_handle_hidden_in_a_reasoning_block_expires_too`, and no test of that name exists
+VIOLATIONS 1 (range origin/main..HEAD)
+```
+
+The test was real, it had failed against the defect, and then a scripted edit deleted it. The edit
+replaced a region of `crates/rho-cli/tests/session_cli.rs` using a slice from one index to another,
+and the new test sat between the two anchors. The suite stayed green, because the deletion removed
+the only thing that could fail.
+
+**This is the second time in this lane that a slice-based edit destroyed committed work.** The first
+took the tail of `crates/rho-cli/src/sessions.rs`, and a compile error caught that one within a
+minute. A test has no compile error to catch it.
+
+Two lessons, both written down rather than remembered:
+
+- An edit that spans from one anchor to another deletes everything between them. Prefer a single
+  anchored replacement, and read the diff.
+- `check-claimed-tests.py` is the only guard that can see a lost test, and it earned its place here.
+  The commit named the test, the tree did not hold it, and the gate refused. See the note on that
+  checker in `AGENTS.md`.
+
+The test was restored, and both of its mutation proofs were re-run:
+
+| Break | Test that failed |
+| --- | --- |
+| only a `Text` block is expired | `a_handle_hidden_in_a_reasoning_block_expires_too` |
+| a nested tag survives in the kept head | the same |

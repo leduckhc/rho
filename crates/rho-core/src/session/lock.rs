@@ -53,16 +53,22 @@ impl Drop for SessionLock {
 /// warning that continued would fail open, and that is the shape of
 /// `D-plugin-does-not-classify-itself`.
 pub(crate) fn take_lock(path: &Path, session_id: &str) -> Result<SessionLock, SessionError> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
+    // The mode goes on the open call, so the lock file is never briefly world readable. It holds no
+    // content, and it sits beside a private conversation, so it gets the same care.
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
         .open(path)
         .map_err(|_| SessionError::LockUnsupported {
             path: path.to_path_buf(),
         })?;
-    // A lock file sits in the store beside a private conversation, so it gets the store's mode.
+    // A lock file can already exist, from a run that crashed, and `OpenOptions::mode` applies at
+    // creation only. So this one keeps the explicit call, and it is not redundant here.
     crate::session::set_owner_only(path)?;
 
     #[cfg(unix)]

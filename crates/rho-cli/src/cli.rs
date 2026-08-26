@@ -10,7 +10,7 @@
 //! model, the session root, and the approval policy in the calling code.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::ValueEnum;
@@ -670,13 +670,13 @@ fn open_recording(
     config: &SessionConfig,
     provider_name: &str,
     request: &RunRequest,
+    home: &Path,
 ) -> Result<Recording, anyhow::Error> {
-    let home = home_dir();
     let approval = approval_name(loaded);
     let sandbox = config.sandbox.as_str().to_string();
     let opened = recording::open(RecordingRequest {
         project_root: &config.session_root,
-        home: &home,
+        home,
         session_file: loaded.session_file.as_deref(),
         ephemeral: request.ephemeral || loaded.ephemeral,
         selector: request.selector.clone(),
@@ -689,32 +689,27 @@ fn open_recording(
     });
     match opened {
         Ok(recording) => Ok(recording),
+        // **Only a write failure degrades.** A session file is not worth ending a run for, and that
+        // is what `D-write-failure-degrades` says: a *write failure*. Everything else on this path
+        // is a refusal, and a refusal exists to protect the user.
+        //
+        // The rule names what degrades, and not what stops. A list of errors that stop the run is a
+        // fail-open shape, because the next variant joins the degrade by default. A first version
+        // was that list, and a live drive then showed a widen refusal becoming a warning:
+        //
+        //     rho: cannot open a session file: a resume would widen approval from read-only to
+        //     allow-all; pass --allow-widen to allow it. This run is ephemeral.
+        //
+        // A resume never degrades at all, because a user who asked for their conversation must not
+        // get a blank one instead.
         Err(error) if request.selector.resumes() => Err(error),
-        // **A lock failure is never degraded.** A filesystem that cannot hold an advisory lock
-        // cannot promise that two rho processes will not write one file, and a warning that
-        // continued would fail open. That is the shape of `D-plugin-does-not-classify-itself`.
-        // A review found this branch degrading every error, including that one. See section 7d.
-        Err(error) if is_a_lock_refusal(&error) => Err(error),
-        Err(error) => {
-            // Any other new session that cannot open degrades. The run still answers, because a
-            // session file is not worth ending a run for. See `D-write-failure-degrades`.
-            Ok(Recording::degraded(format!(
+        Err(error) => match error.downcast_ref::<rho_core::SessionError>() {
+            Some(rho_core::SessionError::Io(_)) => Ok(Recording::degraded(format!(
                 "cannot open a session file: {error}. This run is ephemeral."
-            )))
-        }
+            ))),
+            _ => Err(error),
+        },
     }
-}
-
-/// Is this a refusal that must stop the run, rather than degrade it?
-///
-/// A busy session and a filesystem that cannot lock are both about the lock, and the lock is what
-/// stops two processes writing one file. Neither may become a warning.
-fn is_a_lock_refusal(error: &anyhow::Error) -> bool {
-    matches!(
-        error.downcast_ref::<rho_core::SessionError>(),
-        Some(rho_core::SessionError::LockUnsupported { .. })
-            | Some(rho_core::SessionError::Busy { .. })
-    )
 }
 
 /// The approval mode name this run resolved to.
@@ -775,10 +770,11 @@ async fn run_headless(cli: &Cli, request: RunRequest) -> i32 {
     };
     // The session file opens **before** the provider runs, so a resume that would widen a
     // permission stops before a single token is spent.
-    let mut recording = match open_recording(&loaded, &config, &provider_name, &request) {
-        Ok(recording) => recording,
-        Err(error) => return fail(error),
-    };
+    let mut recording =
+        match open_recording(&loaded, &config, &provider_name, &request, &home_dir()) {
+            Ok(recording) => recording,
+            Err(error) => return fail(error),
+        };
     for notice in &recording.notices {
         eprintln!("rho: {notice}");
     }
@@ -808,21 +804,46 @@ async fn run_headless(cli: &Cli, request: RunRequest) -> i32 {
     let input = vec![ContentBlock::Text {
         text: request.prompt,
     }];
-    recording.start(&input);
     let cancel = CancelToken::new();
-    let mut events = session.prompt(input, cancel);
+    let mut events = session.prompt(input.clone(), cancel);
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
-    let code = print_run(
+    record_and_print(
         &mut events,
+        &mut recording,
+        &input,
         &mut stdout,
         &mut stderr,
         reasoning_is_shown(loaded.reasoning),
-        Some(&mut recording),
     )
-    .await;
-    // A headless run ends the session, so the file states its own close. A cancel keeps the
-    // session open instead, per `D-cancel-keeps-the-session-open`.
+    .await
+}
+
+/// Record the prompt, print the run, and close the session.
+///
+/// **This is the seam.** `run_headless` builds the stream and calls this once, so the whole
+/// recording lifecycle is one function a test can drive. A reviewer showed that the guard which
+/// greps this file passes against a call moved into `if false`, and a grep cannot see reachability,
+/// order, or an argument. This function is the behavioural answer, and
+/// `the_whole_lifecycle_runs_in_order` drives it.
+///
+/// The order is the contract: the prompt is recorded before the answer arrives, every event is
+/// folded, and the close is last. A run that ended on its own closes its session, so a crash offer
+/// can tell a clean exit from a crash. A cancel does not reach here, per
+/// `D-cancel-keeps-the-session-open`.
+async fn record_and_print<S, O: Write, E: Write>(
+    events: &mut S,
+    recording: &mut Recording,
+    input: &[ContentBlock],
+    stdout: &mut O,
+    stderr: &mut E,
+    show_reasoning: bool,
+) -> i32
+where
+    S: futures::Stream<Item = Result<AgentEvent, rho_core::Error>> + Unpin,
+{
+    recording.start(input);
+    let code = print_run(events, stdout, stderr, show_reasoning, Some(recording)).await;
     recording.close();
     code
 }
@@ -2445,6 +2466,365 @@ mod headless_loop_tests {
             "the error names itself: {err}"
         );
         assert!(out.trim().is_empty(), "no answer on stdout: {out}");
+    }
+}
+
+#[cfg(test)]
+mod headless_recording_tests {
+    //! The printer folds every event into the records, driven for real.
+    //!
+    //! `crates/rho-cli/tests/session_cli.rs` proves `Recording::start`, `observe` and `close` on a
+    //! real file, and it greps this file to prove `run_headless` calls them. A grep cannot see a
+    //! call moved into an unreachable branch, and a reviewer said so. **This test drives the real
+    //! `print_run` with a real `Recording` over a real store**, so the fold is behaviour and not a
+    //! string.
+    //!
+    //! The one thing still not driven in process is `run_headless` itself, because it builds a
+    //! provider and `crates/rho-cli/src/provider.rs` belongs to another lane, so this crate cannot
+    //! inject a stub. `docs/verification/session-store-wiring.md` drives it against live Bedrock.
+
+    use super::*;
+    use crate::recording::{RecordingRequest, SessionSelector};
+    use rho_core::{AgentEvent, Record, Role, StopReason, StreamEvent};
+
+    /// A session over a temporary home, and the file it writes.
+    fn open_one(dir: &std::path::Path) -> (crate::recording::Recording, std::path::PathBuf) {
+        let root = dir.join("project");
+        std::fs::create_dir_all(root.join(".git")).expect("the project root");
+        let recording = crate::recording::open(RecordingRequest {
+            project_root: &root,
+            home: dir,
+            session_file: None,
+            ephemeral: false,
+            selector: SessionSelector::New,
+            allow_widen: false,
+            approval: "read-only",
+            sandbox: "off",
+            provider: "testkit",
+            model: "test-model",
+            now_millis: 1_756_000_000_000,
+        })
+        .expect("a session opens");
+        let path = recording.path.clone().expect("a session file");
+        (recording, path)
+    }
+
+    /// One scripted turn, in the order the agent loop really emits.
+    fn one_turn() -> Vec<AgentEvent> {
+        vec![
+            AgentEvent::TurnStart,
+            AgentEvent::Stream(StreamEvent::TextStart { index: 0 }),
+            AgentEvent::Stream(StreamEvent::TextDelta {
+                index: 0,
+                delta: "the bug is on line 42".to_string(),
+            }),
+            AgentEvent::Stream(StreamEvent::TextEnd { index: 0 }),
+            AgentEvent::TurnEnd {
+                stop_reason: StopReason::EndTurn,
+            },
+            AgentEvent::AgentEnd {
+                stop_reason: rho_core::AgentStopReason::EndTurn,
+            },
+        ]
+    }
+
+    /// The loaded config and the session config a run would build, with a chosen approval mode.
+    fn built(
+        root: &std::path::Path,
+        approval: Option<rho_config::ApprovalMode>,
+    ) -> (rho_config::Config, SessionConfig) {
+        let mut loaded = rho_config::Config::load(&rho_config::Sources::default())
+            .expect("the built-in defaults load");
+        loaded.approval = approval;
+        loaded.session_root = Some(root.to_path_buf());
+        let config = SessionConfig::new(
+            "test-model".to_string(),
+            root.to_path_buf(),
+            std::sync::Arc::new(rho_core::ReadOnlyPolicy),
+        );
+        (loaded, config)
+    }
+
+    fn a_new_run() -> RunRequest {
+        RunRequest {
+            prompt: "fix the parser".to_string(),
+            selector: SessionSelector::New,
+            ephemeral: false,
+            allow_widen: false,
+        }
+    }
+
+    #[test]
+    fn a_write_failure_on_a_new_session_degrades_the_run() {
+        // A session file is not worth ending a run for. The store root here is a file, so the
+        // directory rho needs cannot be created, and that is an io error.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join(".git")).expect("the project root");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join(".rho")).expect("the home");
+        std::fs::write(home.join(".rho").join("sessions"), "not a directory").expect("the blocker");
+        let (loaded, config) = built(&root, None);
+
+        let opened = open_recording(&loaded, &config, "testkit", &a_new_run(), &home)
+            .expect("a write failure must not end the run");
+
+        assert!(opened.recorder.is_ephemeral(), "the run degrades");
+        assert!(
+            opened.notices.iter().any(|n| n.contains("ephemeral")),
+            "the user is told, got {:?}",
+            opened.notices
+        );
+    }
+
+    #[test]
+    fn a_widen_refusal_on_a_new_session_stops_the_run() {
+        // A named session file is opened with a **new** selector, so this is the case a live drive
+        // found degrading: the refusal became a warning and the run continued.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join(".git")).expect("the project root");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("the home");
+        let named = dir.path().join("notes").join("ro.jsonl");
+        let mut loaded = built(&root, Some(rho_config::ApprovalMode::ReadOnly)).0;
+        loaded.session_file = Some(named.clone());
+        let config = built(&root, None).1;
+
+        // A first run writes the file under read-only.
+        let first = open_recording(&loaded, &config, "testkit", &a_new_run(), &home)
+            .expect("the first run opens");
+        drop(first);
+
+        // The same file, now under allow-all, which is wider.
+        loaded.approval = Some(rho_config::ApprovalMode::AllowAll);
+        let error = open_recording(&loaded, &config, "testkit", &a_new_run(), &home)
+            .map(|_| ())
+            .expect_err("a widen refusal must stop the run, and never degrade it");
+
+        assert!(
+            error.to_string().contains("--allow-widen"),
+            "the refusal must reach the user, got {error}"
+        );
+    }
+
+    #[test]
+    fn a_busy_session_stops_the_run() {
+        // The other refusal that must never become a warning. Two runs on one named file.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join(".git")).expect("the project root");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("the home");
+        let named = dir.path().join("notes").join("live.jsonl");
+        let (mut loaded, config) = built(&root, None);
+        loaded.session_file = Some(named);
+
+        let held = open_recording(&loaded, &config, "testkit", &a_new_run(), &home)
+            .expect("the first run opens");
+        let error = open_recording(&loaded, &config, "testkit", &a_new_run(), &home)
+            .map(|_| ())
+            .expect_err("a busy session must stop the run, and never degrade it");
+
+        assert!(
+            error.to_string().contains("open in another process"),
+            "the refusal must reach the user, got {error}"
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn the_whole_lifecycle_runs_in_order() {
+        // `run_headless` calls `record_and_print` once, so this drives the whole recording
+        // lifecycle the real run uses: the prompt, then every folded event, then the close.
+        //
+        // A reviewer proved that the grep guard passes against `if false { recording.start(..) }`.
+        // This test does not: it reads the file back and asserts the order on disk.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (mut recording, path) = open_one(dir.path());
+        let input = vec![ContentBlock::Text {
+            text: "fix the parser".to_string(),
+        }];
+        let mut stream = futures::stream::iter(one_turn().into_iter().map(Ok));
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+
+        let code = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(record_and_print(
+                &mut stream,
+                &mut recording,
+                &input,
+                &mut out,
+                &mut err,
+                false,
+            ));
+
+        assert_eq!(code, 0);
+        assert!(String::from_utf8_lossy(&out).contains("the bug is on line 42"));
+        let read = rho_core::SessionReader::read(&path).expect("the file reads back");
+        let kinds: Vec<&str> = read
+            .entries
+            .iter()
+            .map(|entry| match &entry.record {
+                Record::ModelChange { .. } => "model",
+                Record::Message { message } => match message.role {
+                    Role::User => "prompt",
+                    Role::Assistant => "answer",
+                    _ => "other",
+                },
+                Record::Usage { .. } => "usage",
+                Record::Stop { .. } => "stop",
+                Record::Closed => "closed",
+                Record::Reopened => "reopened",
+                Record::Name { .. } => "name",
+                Record::Session { .. } => "header",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["model", "prompt", "answer", "stop", "closed"],
+            "the lifecycle order on disk is the prompt, the answer, and the close"
+        );
+    }
+
+    #[test]
+    fn the_prompt_is_recorded_before_the_answer_even_when_the_run_fails() {
+        // A run that errors mid-stream still leaves the prompt on disk, so a resume knows what the
+        // user asked. A lifecycle that recorded the prompt after the stream would lose it.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (mut recording, path) = open_one(dir.path());
+        let input = vec![ContentBlock::Text {
+            text: "fix the parser".to_string(),
+        }];
+        let items: Vec<Result<AgentEvent, rho_core::Error>> = vec![Err(rho_core::Error::Provider(
+            rho_core::ProviderError::Transport("the provider went away".to_string()),
+        ))];
+        let mut stream = futures::stream::iter(items);
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+
+        let code = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(record_and_print(
+                &mut stream,
+                &mut recording,
+                &input,
+                &mut out,
+                &mut err,
+                false,
+            ));
+
+        assert_eq!(code, EXIT_FAILURE, "a failed run exits non-zero");
+        let read = rho_core::SessionReader::read(&path).expect("the file reads back");
+        let prompts = read
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(&entry.record, Record::Message { message } if message.role == Role::User)
+            })
+            .count();
+        assert_eq!(
+            prompts, 1,
+            "the prompt is on disk even though the run failed"
+        );
+        assert!(
+            matches!(read.entries.last().map(|e| &e.record), Some(Record::Closed)),
+            "a failed run still closes its session, so a crash offer means a real crash"
+        );
+    }
+
+    #[test]
+    fn the_printer_folds_every_event_into_the_records() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join(".git")).expect("the project root");
+        let mut recording = crate::recording::open(RecordingRequest {
+            project_root: &root,
+            home: dir.path(),
+            session_file: None,
+            ephemeral: false,
+            selector: SessionSelector::New,
+            allow_widen: false,
+            approval: "read-only",
+            sandbox: "off",
+            provider: "testkit",
+            model: "test-model",
+            now_millis: 1_756_000_000_000,
+        })
+        .expect("a session opens");
+        let path = recording.path.clone().expect("a session file");
+
+        let input = vec![ContentBlock::Text {
+            text: "fix the parser".to_string(),
+        }];
+        recording.start(&input);
+        let events = vec![
+            AgentEvent::TurnStart,
+            AgentEvent::Stream(StreamEvent::TextStart { index: 0 }),
+            AgentEvent::Stream(StreamEvent::TextDelta {
+                index: 0,
+                delta: "the bug is on line 42".to_string(),
+            }),
+            AgentEvent::Stream(StreamEvent::TextEnd { index: 0 }),
+            AgentEvent::TurnEnd {
+                stop_reason: StopReason::EndTurn,
+            },
+            AgentEvent::AgentEnd {
+                stop_reason: rho_core::AgentStopReason::EndTurn,
+            },
+        ];
+        let mut stream = futures::stream::iter(events.into_iter().map(Ok));
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let code = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+            .block_on(print_run(
+                &mut stream,
+                &mut out,
+                &mut err,
+                false,
+                Some(&mut recording),
+            ));
+        recording.close();
+
+        assert_eq!(code, 0);
+        assert!(
+            String::from_utf8_lossy(&out).contains("the bug is on line 42"),
+            "the answer still reaches stdout"
+        );
+
+        // And the same run is on disk, in order.
+        let read = rho_core::SessionReader::read(&path).expect("the file reads back");
+        let roles: Vec<Role> = read
+            .entries
+            .iter()
+            .filter_map(|entry| match &entry.record {
+                Record::Message { message } => Some(message.role),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            roles,
+            vec![Role::User, Role::Assistant],
+            "the printer must fold the turn into a record, not only print it"
+        );
+        assert!(
+            read.entries
+                .iter()
+                .any(|entry| matches!(entry.record, Record::Stop { .. })),
+            "the agent end must reach the file"
+        );
+        assert!(
+            matches!(read.entries.last().map(|e| &e.record), Some(Record::Closed)),
+            "the run states its own close"
+        );
     }
 }
 

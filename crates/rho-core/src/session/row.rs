@@ -179,9 +179,16 @@ pub fn row_from<R: BufRead + Seek>(mut source: R, meta: RowMeta) -> SessionRow {
     // met the same redundant-guard trap in `record_fits` and in `ProviderState::for_owner`,
     // and the answer is the same: keep one mechanism. `a_tail_read_drops_a_partial_first_line`
     // pins the outcome.
+    // The tail read is bounded by the window, and not by the end of the file. `size_bytes` comes
+    // from a separate `metadata` call, so a file that grew between the two syscalls would otherwise
+    // let this loop read to the new end of file and past `ROW_TAIL_BYTES`. A reviewer found that.
+    let mut tail_read: u64 = 0;
     loop {
+        if tail_read >= ROW_TAIL_BYTES {
+            break;
+        }
         match read_capped_line(&mut source, &mut buf) {
-            Ok(true) => {}
+            Ok(true) => tail_read += buf.len() as u64,
             Ok(false) => break,
             Err(_) => break,
         }

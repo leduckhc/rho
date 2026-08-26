@@ -313,6 +313,120 @@ fn the_session_file_key_overrides_the_store() {
 }
 
 #[test]
+fn a_named_session_file_holds_a_lock() {
+    // A configured `session-file` names one file for every run, so two runs with the same key
+    // reach the same file. Without a lock both would seed their record ids from one read and the
+    // lines would interleave. The store path locks; this path did not.
+    //
+    // Codex found it. See `D-a-named-session-file-is-a-session-like-any-other`.
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let root = project(dir.path());
+    let named = dir.path().join("notes").join("my-session.jsonl");
+    let mut asked = request(dir.path(), &root, SessionSelector::New);
+    asked.session_file = Some(&named);
+
+    let held = recording::open(asked.clone()).expect("the first run opens the named file");
+    assert_eq!(held.path.as_deref(), Some(named.as_path()));
+
+    let error = recording::open(asked)
+        .map(|_| ())
+        .expect_err("a second run on the same named file must be refused");
+
+    assert!(
+        matches!(
+            error.downcast_ref::<SessionError>(),
+            Some(SessionError::Busy { .. })
+        ),
+        "expected Busy, got {error}"
+    );
+    drop(held);
+}
+
+#[test]
+fn a_named_session_file_cannot_widen_a_run() {
+    // An existing configured file is a session like any other, so the stored mode may only
+    // tighten the run. This path reopened it with no check at all, so a file written under
+    // `read-only` came back as `allow-all` in silence. That is `D-resume-never-widens` bypassed
+    // by a config key.
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let root = project(dir.path());
+    let named = dir.path().join("notes").join("my-session.jsonl");
+
+    // A first run under read-only writes the file.
+    {
+        let mut asked = request(dir.path(), &root, SessionSelector::New);
+        asked.session_file = Some(&named);
+        asked.approval = "read-only";
+        let mut first = recording::open(asked).expect("the first run");
+        first.start(&[ContentBlock::Text {
+            text: "a read-only session".to_string(),
+        }]);
+    }
+
+    // A second run asks for allow-all, which is wider. It must be refused.
+    let mut wider = request(dir.path(), &root, SessionSelector::New);
+    wider.session_file = Some(&named);
+    wider.approval = "allow-all";
+    let error = recording::open(wider.clone())
+        .map(|_| ())
+        .expect_err("a wider run on an existing named file must be refused");
+    assert!(
+        error.to_string().contains("--allow-widen"),
+        "the message must name the flag that allows it, got {error}"
+    );
+
+    // With the flag it starts, because the user asked on purpose.
+    let mut allowed = wider;
+    allowed.allow_widen = true;
+    recording::open(allowed).expect("with --allow-widen the run starts");
+}
+
+#[test]
+fn a_named_session_file_replays_what_it_holds() {
+    // An existing named file is a session, so a run that continues it must replay it. A run that
+    // appended with no replay would write a file whose conversation jumps, and the file would
+    // then say something the model never saw. That is the recorder defect wearing a config key.
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let root = project(dir.path());
+    let named = dir.path().join("notes").join("my-session.jsonl");
+    {
+        let mut asked = request(dir.path(), &root, SessionSelector::New);
+        asked.session_file = Some(&named);
+        let mut first = recording::open(asked).expect("the first run");
+        first.start(&[ContentBlock::Text {
+            text: "fix the parser".to_string(),
+        }]);
+        first.observe(&rho_core::AgentEvent::TurnStart);
+        first.observe(&rho_core::AgentEvent::Stream(
+            rho_core::StreamEvent::TextStart { index: 0 },
+        ));
+        first.observe(&rho_core::AgentEvent::Stream(
+            rho_core::StreamEvent::TextDelta {
+                index: 0,
+                delta: "the bug is on line 42".to_string(),
+            },
+        ));
+        first.observe(&rho_core::AgentEvent::TurnEnd {
+            stop_reason: rho_core::StopReason::EndTurn,
+        });
+    }
+
+    let mut asked = request(dir.path(), &root, SessionSelector::New);
+    asked.session_file = Some(&named);
+    let second = recording::open(asked).expect("the second run reopens the named file");
+
+    let text = every_text(&second.messages);
+    assert!(
+        text.contains("fix the parser"),
+        "the prompt must come back, got {text:?}"
+    );
+    assert!(
+        text.contains("the bug is on line 42"),
+        "the answer must come back, got {text:?}"
+    );
+}
+
+#[test]
 fn ephemeral_and_continue_together_are_refused() {
     // --ephemeral writes no file, so there is nothing to continue. Choosing one silently would
     // either lose the session or lose the ephemeral promise.
@@ -346,17 +460,87 @@ fn a_filesystem_that_cannot_lock_stops_a_new_run() {
     // The refusal reaches the caller, so `open_recording` cannot degrade it. The classification
     // that decides that lives in `cli.rs`, and this reads the real call site.
     let source = std::fs::read_to_string("src/cli.rs").expect("the cli source");
+    // The behaviour is proved in `cli.rs`, where `open_recording` is reachable:
+    // `a_busy_session_stops_the_run`, `a_widen_refusal_on_a_new_session_stops_the_run`, and
+    // `a_write_failure_on_a_new_session_degrades_the_run`. This is a shape backstop.
     assert!(
-        source.contains("Err(error) if is_a_lock_refusal(&error) => Err(error),"),
-        "the run path must never degrade a lock refusal"
-    );
-    assert!(
-        source.contains("SessionError::LockUnsupported { .. }")
-            && source.contains("SessionError::Busy { .. }"),
-        "both lock refusals must stop the run"
+        source.contains("Some(rho_core::SessionError::Io(_)) => Ok(Recording::degraded("),
+        "the run path must degrade a write failure and nothing else"
     );
     let message = error.to_string();
     assert!(!message.is_empty(), "the refusal says something");
+}
+
+#[test]
+fn only_a_write_failure_degrades_and_every_refusal_stops_the_run() {
+    // `open_recording` degraded **every** failure on a new session to ephemeral, and a named
+    // session file is opened with a new selector. So a widen refusal on that path became a warning
+    // and the run continued, which is the very thing `D-resume-never-widens` forbids.
+    //
+    // A live drive found it, after the lock refusals were already excepted:
+    //
+    //     rho: cannot open a session file: a resume would widen approval from read-only to
+    //     allow-all; pass --allow-widen to allow it. This run is ephemeral.
+    //     B.
+    //
+    // So the rule is inverted. **Only a write failure degrades.** Every refusal stops the run,
+    // because a refusal exists to protect the user and a warning is not a refusal.
+    let source = std::fs::read_to_string("src/cli.rs").expect("the cli source");
+    let start = source
+        .find("fn open_recording")
+        .expect("the run path opens a recording");
+    let end = source[start..]
+        .find("\n/// The approval mode name")
+        .map(|offset| start + offset)
+        .expect("the end of open_recording");
+    let body = &source[start..end];
+
+    assert!(
+        body.contains("Some(rho_core::SessionError::Io(_)) => Ok(Recording::degraded("),
+        "the degrade must name the one error it accepts, got {body}"
+    );
+    // A list of errors that **stop** the run is a fail-open shape, because the next variant joins
+    // the degrade by default. The rule must name what degrades instead.
+    assert!(
+        !body.contains("is_a_lock_refusal"),
+        "the rule must name what degrades, and not what stops"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_resume_of_an_unreadable_file_is_an_error_and_not_a_blank_session() {
+    // A user who asked to continue their conversation must not silently get a blank one, and then
+    // send a blank one to a model. `recording::open` propagates, and the degrade rule that could
+    // swallow it lives in `cli.rs`, where `a_write_failure_on_a_new_session_degrades_the_run` and
+    // its two siblings prove which errors stop a run.
+    //
+    // The file here cannot be opened at all, so the failure is an io error.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let root = project(dir.path());
+    let id = seed_session(dir.path(), &root, "a session", "an answer");
+    let (store, _key) = recording::store_for(dir.path(), &root);
+    let path = store.path_of(&id);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("the mode");
+
+    let error = recording::open(request(
+        dir.path(),
+        &root,
+        SessionSelector::Named(id.as_str().to_string()),
+    ))
+    .map(|_| ())
+    .expect_err("a resume that cannot read its file must stop the run");
+
+    assert!(
+        matches!(
+            error.downcast_ref::<SessionError>(),
+            Some(SessionError::Io(_))
+        ),
+        "expected an io error to reach the caller, got {error}"
+    );
+    // And the same failure on a new session degrades instead, so the two rules really differ.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("the mode");
 }
 
 #[test]
@@ -525,11 +709,22 @@ fn allow_widen_permits_the_wider_resume_on_the_command_line() {
     let root = project(dir.path());
     seed_session(dir.path(), &root, "a read-only session", "an answer");
 
-    let mut asked = request(dir.path(), &root, SessionSelector::Newest);
-    asked.approval = "allow-all";
-    asked.allow_widen = true;
+    // Both halves in one test, because "the call succeeded" alone would pass against a build that
+    // ignored the flag and always permitted. A test reviewer named that shape.
+    let mut refused = request(dir.path(), &root, SessionSelector::Newest);
+    refused.approval = "allow-all";
+    let error = recording::open(refused.clone())
+        .map(|_| ())
+        .expect_err("without the flag the wider resume is refused");
+    assert!(error.to_string().contains("--allow-widen"), "got {error}");
 
-    recording::open(asked).expect("with the flag the run starts");
+    let mut allowed = refused;
+    allowed.allow_widen = true;
+    let opened = recording::open(allowed).expect("with the flag the run starts");
+    assert!(
+        opened.id.is_some(),
+        "the flag opens the session the user named"
+    );
 }
 
 #[test]
@@ -844,38 +1039,124 @@ fn the_run_path_records_the_prompt_the_turns_and_the_close() {
 
 #[test]
 fn the_headless_run_path_drives_every_lifecycle_call() {
-    // The three calls above prove the behaviour. This proves `run_headless` really makes them.
-    // Without it every test here would pass while the run path recorded nothing, and that is
-    // exactly the defect this lane exists to fix: the store had no caller at all.
+    // `record_and_print` in `cli.rs` holds the whole lifecycle, and its own tests drive it on a real
+    // file: `the_whole_lifecycle_runs_in_order` and
+    // `the_prompt_is_recorded_before_the_answer_even_when_the_run_fails`. So the behaviour is
+    // proved, in order, on disk.
+    //
+    // **This test proves only that `run_headless` still calls it.** That last hop cannot be driven
+    // in process, because `run_headless` builds a provider and
+    // `crates/rho-cli/src/provider.rs` belongs to another lane, so this crate cannot inject a stub.
+    // A reviewer showed that a grep passes against a call moved into `if false`, and that is true
+    // of this test. It is a backstop for one call, and not the guard for the lifecycle.
+    // `docs/verification/session-store-wiring.md` drives the last hop against live Bedrock.
     let source = std::fs::read_to_string("src/cli.rs").expect("the cli source");
     let start = source
         .find("async fn run_headless")
         .expect("the headless run path");
     let end = source[start..]
-        .find("\n/// Print one run onto two streams")
+        .find("\n/// Record the prompt, print the run, and close the session")
         .map(|offset| start + offset)
         .expect("the end of the headless run path");
     let body = &source[start..end];
 
-    for needle in [
-        "open_recording(",
-        "recording.start(&input)",
-        "Some(&mut recording)",
-        "recording.close()",
-    ] {
+    for needle in ["open_recording(", "record_and_print("] {
         assert!(
             body.contains(needle),
             "the headless run path must call {needle}, or the session records nothing"
         );
     }
-    // And the printer must fold every event into the records.
-    let print_start = source
-        .find("/// Print one run onto two streams")
-        .expect("the printer");
-    let printer = &source[print_start..];
+    // And the lifecycle itself must still do the three things, in the one place that owns them.
+    let seam_start = source
+        .find("async fn record_and_print")
+        .expect("the lifecycle seam");
+    let seam = &source[seam_start..seam_start + 900];
+    for needle in [
+        "recording.start(input)",
+        "Some(recording)",
+        "recording.close()",
+    ] {
+        assert!(
+            seam.contains(needle),
+            "the lifecycle seam must call {needle}, got {seam}"
+        );
+    }
+}
+
+#[test]
+fn a_handle_hidden_in_a_reasoning_block_expires_too() {
+    // The rewrite looked at `Text` blocks only, so a preview embedded in a reasoning block kept a
+    // live handle through a resume. It also rewrote one preview per block, so a second one in the
+    // same text survived, and a nested tag stayed inside the head it kept.
+    //
+    // A security review found all three. The impact is a wasted turn and not a leak, because the
+    // store behind the handle died with the earlier run. A promise rho makes must still hold.
+    let preview = |handle: &str| {
+        format!(
+            "<tool_result_preview handle=\"{handle}\" stored_bytes=\"4242\" \
+             preview_bytes=\"9\">\nthe head\n</tool_result_preview>\nUse read_tool_result with \
+             this exact handle."
+        )
+    };
+    let mut messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ReasoningTrace {
+                    text: preview("r-in-a-trace"),
+                },
+                ContentBlock::ReasoningReplay {
+                    text: preview("r-in-a-replay"),
+                    state: None,
+                },
+            ],
+        },
+        Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: "call-1".to_string(),
+                content: vec![ContentBlock::Text {
+                    // Two previews in one block. The first version rewrote only one.
+                    text: format!("{}\n{}", preview("r-first"), preview("r-second")),
+                }],
+                is_error: false,
+            }],
+        },
+    ];
+    // A **nested** preview. The rewrite keeps the head of the tag it replaces, and a tag inside
+    // that head would leave a live-looking handle behind.
+    messages.push(Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::Text {
+            text: "<tool_result_preview handle=\"r-outer\" stored_bytes=\"4242\">\
+                   <tool_result_preview handle=\"r-nested-live\">x</tool_result_preview>"
+                .to_string(),
+        }],
+    });
+
+    rho_core::expire_stale_result_handles(&mut messages);
+
+    let text = every_text(&messages);
+    for handle in [
+        "r-in-a-trace",
+        "r-in-a-replay",
+        "r-first",
+        "r-second",
+        "r-outer",
+        "r-nested-live",
+    ] {
+        assert!(
+            !text.contains(handle),
+            "the handle {handle} must not survive a resume, got {text}"
+        );
+    }
     assert!(
-        printer.contains("recording.observe(event)"),
-        "the printer must fold every event into the records"
+        !text.contains("read_tool_result"),
+        "no promise may survive, got {text}"
+    );
+    assert!(
+        text.matches("4242").count() >= 4,
+        "every byte count survives, got {text}"
     );
 }
 
@@ -999,8 +1280,9 @@ fn a_second_process_cannot_continue_a_live_session() {
 #[test]
 fn two_runs_at_once_never_share_a_file() {
     // Two runs in one project reach one store. Each must end with its own file, and every record
-    // id in each file must be unique. `session_binary.rs` drives the two-worktree half through
-    // the real binary, in `two_worktrees_continuing_at_once_never_share_a_file`.
+    // id in each file must be unique. **This is the test that really opens two recordings**, so it
+    // is the one that would break if two runs shared a file. Its partner in `session_binary.rs`
+    // checks the shared project key through the real binary, and opens no concurrent run.
     let dir = tempfile::tempdir().expect("a temporary directory");
     let root = project(dir.path());
 

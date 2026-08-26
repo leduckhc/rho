@@ -538,3 +538,71 @@ fn tool_call_arguments(records: &[Entry], id: &str) -> Option<serde_json::Value>
         })
     })
 }
+
+#[test]
+fn a_tool_result_is_never_written_without_its_call() {
+    // A provider that emits no tool-call stream event still reaches `ToolStart` and `ToolEnd`,
+    // because the agent loop fires both from the parsed message. The recorder put the call in
+    // `unwritten_calls` on `ToolStart` and then **removed** it on `ToolEnd` while writing only the
+    // result. The file then held a `ToolResult` matching no `ToolCall`, and every provider refuses
+    // that on a resume.
+    //
+    // A reviewer found it. `branch_messages` repairs the other direction only: it can invent a
+    // missing result, and it cannot invent a missing call.
+    let (_guard, store) = temp_store();
+    let (mut recorder, path) = recorder(&store, 0x000b);
+
+    recorder.observe(&AgentEvent::TurnStart);
+    // No `ToolCallStart` and no `ToolCallEnd`. Only the two agent events.
+    recorder.observe(&AgentEvent::ToolStart {
+        id: "call-1".to_string(),
+        name: "read".to_string(),
+        kind: ToolKind::Read,
+    });
+    recorder.observe(&AgentEvent::ToolEnd {
+        id: "call-1".to_string(),
+        output: ToolOutput {
+            content: vec![ContentBlock::Text {
+                text: "some output".to_string(),
+            }],
+            is_error: false,
+        },
+    });
+
+    let records = entries(&path);
+    let calls: Vec<String> = records.iter().flat_map(tool_call_ids).collect();
+    let results: Vec<String> = records.iter().flat_map(tool_result_ids).collect();
+
+    assert_eq!(results, vec!["call-1".to_string()], "the result is on disk");
+    assert_eq!(
+        calls, results,
+        "a result on disk must always have its call on disk, got calls {calls:?} against results \
+         {results:?}"
+    );
+    let call_line = records
+        .iter()
+        .position(|entry| holds_tool_call(entry, "call-1"))
+        .expect("the call");
+    let result_line = records
+        .iter()
+        .position(|entry| holds_tool_result(entry, "call-1"))
+        .expect("the result");
+    assert!(call_line < result_line, "the call comes first");
+
+    // And the rebuilt conversation is a valid provider request.
+    let read = SessionReader::read(&path).expect("the file reads back");
+    let head = read.entries.last().expect("a record").id.clone();
+    let rebuilt =
+        branch_messages(&read.entries, &head, Some(&read.header_id)).expect("the chain rebuilds");
+    let mut pairs = (0usize, 0usize);
+    for message in &rebuilt {
+        for block in &message.content {
+            match block {
+                ContentBlock::ToolCall { .. } => pairs.0 += 1,
+                ContentBlock::ToolResult { .. } => pairs.1 += 1,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(pairs.0, pairs.1, "every call is matched exactly once");
+}
