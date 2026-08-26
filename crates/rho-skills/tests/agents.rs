@@ -781,3 +781,86 @@ async fn a_symlink_from_a_user_dir_into_the_session_root_is_treated_as_a_project
     };
     assert_eq!(discover_agents(&trusted).await.loaded.len(), 1);
 }
+
+#[tokio::test]
+async fn a_hostile_name_is_sanitised_when_the_definition_loads() {
+    // Two layers, and each needs its own test. The loader sanitises the name, because
+    // the name reaches the model, the tool schema, and the terminal. The renderer
+    // bounds it, because a name only warns above 64 characters and never shrinks.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "hostile.md",
+        "---\nname: \"read\\e[2J\"\ndescription: Recon.\n---\nbody\n",
+    );
+    let def = accept(&path).await;
+    assert!(
+        !def.name.chars().any(char::is_control),
+        "the loaded name holds no control character: {:?}",
+        def.name
+    );
+
+    let long = write_agent(
+        dir.path(),
+        "long.md",
+        &format!(
+            "---\nname: {}\ndescription: Recon.\n---\nbody\n",
+            "x".repeat(16_000)
+        ),
+    );
+    let def = accept(&long).await;
+    assert!(
+        def.safe_name().chars().count() <= 64,
+        "a drawn name is bounded, and this one has {}",
+        def.safe_name().chars().count()
+    );
+    assert!(def.safe_name().ends_with("..."), "the cut is marked");
+}
+
+#[tokio::test]
+async fn a_definition_bounds_the_number_of_lines_it_owes() {
+    // One definition must not own the screen either.
+    //
+    // The frontmatter rules cannot yield more than about four warnings, so a file
+    // fixture cannot reach the cap. The first version of this test used one, passed
+    // against a removed cap, and proved nothing. So the definition is built here with
+    // more warnings than the cap allows. That is the bound this test exists for.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "many.md",
+        "---\nname: many\ndescription: Recon.\n---\nbody\n",
+    );
+    let mut def = accept(&path).await;
+    def.warnings = (0..9).map(|index| format!("warning {index}")).collect();
+
+    let lines = def.notices();
+    assert_eq!(
+        lines.len(),
+        rho_skills::MAX_LINES_PER_KIND + 1,
+        "the cap, plus one line that counts the rest: {lines:?}"
+    );
+    let hidden = def.warnings.len() - rho_skills::MAX_LINES_PER_KIND;
+    assert!(
+        lines
+            .last()
+            .is_some_and(|line| line.contains(&format!("{hidden} more"))),
+        "the remainder is counted exactly: {lines:?}"
+    );
+    for line in &lines {
+        assert!(
+            line.starts_with("agent definition many"),
+            "every line names the definition: {line}"
+        );
+    }
+
+    // A real file still reports every warning it raises, because it raises few.
+    let path = write_agent(
+        dir.path(),
+        "bad.md",
+        "---\nname: Bad Name\ndescription: Recon.\ntools: all, read\nsandbox: nonsense\n---\nb\n",
+    );
+    let def = accept(&path).await;
+    assert!(def.warnings.len() >= 3, "{:?}", def.warnings);
+    assert_eq!(def.notices().len(), def.warnings.len());
+}

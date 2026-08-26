@@ -231,8 +231,11 @@ You wrote an agent definition, and the model says it has no way to spawn a subag
 whether you passed `--no-skills`.
 
 > **Partly built.** `--no-skills` also turns subagent discovery off, and it warns about
-> neither. rho then registers no `spawn_agent` and ignores every definition. Drop the flag to
-> get subagents back. No flag keeps subagents while dropping skills.
+> neither. rho then registers no `spawn_agent` and skips agent discovery entirely. Drop the
+> flag to get subagents back. No flag keeps subagents while dropping skills.
+
+A definition file that does not load is a different case, and rho names it at start-up. See
+[subagents](subagents.md).
 
 When discovery works, rho says so at startup:
 

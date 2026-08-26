@@ -16,8 +16,9 @@ reason died at the call site. `discover_agents` then dropped the file, and `Agen
 place to record it.
 
 The visible result was worse than a lost file. rho registers `spawn_agent` only when at least
-one definition loaded. So one bad line in one file removed five tools from the session, and
-the model told the user it had no such tool. Two live runs were spent finding it. See
+one definition loaded. So one bad line in one file removed five tools from the session
+(`spawn_agent`, `spawn_agents`, `steer_agent`, `agent_status`, and `cancel_agent`), and the
+model told the user it had no such tool. Two live runs were spent finding it. See
 `docs/verification/subagent-slot-queue.md` section 6.
 
 The file that started it wrote `tools: [read, list]`. That is valid YAML and a reasonable
@@ -132,6 +133,24 @@ pub async fn load_definition(
 `AgentSet::rejected`. For a project file that the user has not trusted, it pushes
 `without_detail` instead.
 
+A definition that loads may also owe the user a line, so it renders its own:
+
+```rust
+/// The most lines of one kind a start-up report may print. The rest are counted.
+pub const MAX_LINES_PER_KIND: usize = 5;
+
+impl AgentDefinition {
+    /// The name, made safe to draw and short enough to read.
+    pub fn safe_name(&self) -> String;
+
+    /// The lines this definition owes the user, and no more than a bounded number.
+    pub fn notices(&self) -> Vec<String>;
+}
+```
+
+A name comes from a file, so a repository chooses it. The loader sanitises it, `safe_name`
+bounds it, and `notices` bounds the count. Section 11 says what that cost before it existed.
+
 **A path is drawn safely too.** `notice` renders the path through the same sanitiser, and it
 cuts a path longer than 200 characters **on the left**, so the file name at the end stays. A
 file name is repository text: one holding a line break forged a second `rho:` line in a live
@@ -155,10 +174,12 @@ the message from `SandboxMode::from_str` quotes the whole value and the repair s
 
 ### What an old reader does with the new field
 
-`AgentSet` is built by `discover_agents` and by `Default`, never by a literal outside this
-crate, so the new field breaks no construction inside the workspace. A reader that ignores
-`rejected` loses the report. The changed `load_definition` is what stops that being quiet,
-because a `Result` cannot be dropped without a compiler warning.
+`AgentSet` carries `#[non_exhaustive]`. So only this crate writes the literal, and a later
+field breaks no caller. `discover_agents` and `Default` build every set.
+
+A reader that ignores `rejected` loses the report. Two things stop that. `Result` is
+`#[must_use]`, so an accidental drop warns. And `discover_agents` files every outcome through
+`admit`, which pushes each one onto the set. No call site discards a result.
 
 ## 4. The `tools` field, in both spellings
 
@@ -199,8 +220,9 @@ Three rules:
 
 - A rejection prints even when no definition loaded. That case removed the tool, so it is the
   case that most needs the report.
-- At most five lines print. The rest become one counted line, so a directory of broken files
-  cannot push the real output away.
+- At most `MAX_LINES_PER_KIND` lines of **each kind** print. The rest become one counted
+  line. A rejection, a warning, and a name list are all bounded, in count and in length,
+  because a repository chooses how many files it holds and how long each name is.
 - A **warning** on a definition that did load prints too, with the definition name. A
   warning is not a fault, so the file still loads. Nothing printed one before, and section 9
   says what that cost.
@@ -282,6 +304,14 @@ What a line may carry, in `crates/rho-skills/tests/agents.rs`:
 - `a_bidi_override_cannot_reorder_a_line`, in `crates/rho-skills/src/rejection.rs` — a
   right-to-left override, a bidi isolate, and a line separator never reach the terminal.
 
+What a line may hold, and how many, in `crates/rho-skills/tests/agents.rs`:
+
+- `a_hostile_name_is_sanitised_when_the_definition_loads` — two layers, each with its own
+  assertion. The loader strips a control character from the name, and `safe_name` bounds a
+  16 000-character name to 64.
+- `a_definition_bounds_the_number_of_lines_it_owes` — nine warnings yield five lines and one
+  count.
+
 The notice, in `crates/rho-cli/src/subagents.rs`:
 
 - `a_rejected_definition_reaches_the_user_as_a_notice` — the notice list holds the path, the
@@ -294,6 +324,14 @@ The notice, in `crates/rho-cli/src/subagents.rs`:
   reports it, with the definition name.
 - `an_untrusted_project_definition_prints_no_warning` — a withheld definition's warning stays
   unprinted, and the same warning prints once the project is trusted.
+- `a_flood_of_warnings_is_capped_and_counted` — nine definitions that each warn produce five
+  lines and one count.
+- `a_hostile_name_cannot_flood_a_notice_line` — eight withheld definitions, each named with
+  16 000 characters, and no line runs away.
+- `load_reports_a_rejection_when_no_definition_loaded` — the **production** path. `load`
+  returns no tool and still returns the reason. A test on the notice builder alone would pass
+  even if this return dropped its notices.
+- `load_lists_what_the_model_may_spawn` — the available line, which shipped untested.
 
 ## 7. Out of scope
 
@@ -373,3 +411,43 @@ for security. Three findings were blocking, and each one is now a test and a liv
 
 `sanitize` also grew: it replaces a bidirectional override, a bidi isolate, a line separator,
 and a byte order mark. A control character was never the only way to disguise a line.
+
+## 11. What the review fleet found
+
+Four reviewer lenses and `codex review` ran over the committed change. Three findings were
+real, and each one is now a test and a live probe. See
+`docs/verification/agent-definition-rejection.md` section 10.
+
+1. **The cap protected one kind of line out of four.** The rejection lines stopped at five,
+   and the withheld name list, the warning lines, and the available list did not. A name is
+   never truncated either: it warns above 64 characters and then prints whole. A live probe
+   with fifty files, each named with 16 000 characters, printed **800 KB** on one line from an
+   untrusted repository, and 1.6 MB over 104 lines when trusted. `MAX_LINES_PER_KIND`,
+   `safe_name`, and `summarise_names` now bound every kind, in count and in length.
+2. **The production path had no test.** `a_rejection_is_reported_even_when_no_definition_loaded`
+   called the notice builder, not `load`, and `load` owns the early return that this whole spec
+   exists to protect. The return could have dropped its notices and the test would have passed.
+   `load` builds one `Subagents` value now, `LoadRequest` carries the `AgentConfig` so a test
+   can isolate discovery from the machine's own home directory, and two tests drive `load`
+   itself.
+3. **A test of mine passed against the bug it was written for.** The first
+   `a_definition_bounds_the_number_of_lines_it_owes` used a file fixture that raises three
+   warnings, and the cap is five, so removing the cap changed nothing. The mutation proof
+   caught it. The test now builds a definition with nine warnings.
+
+Recorded and not fixed here, each with its reason:
+
+- **`is_inside` returns false when a path or root will not resolve**, which reads as "not
+  inside" and therefore trusted. The direction is wrong for a trust boundary. It needs write
+  access to the user's own `~/.rho/agents` to matter, and failing closed would withhold every
+  user definition on an unrelated filesystem error. In production the session root is the
+  working directory or `--root`, and both resolve.
+- **A trusted project definition still overwrites a user definition of the same name**, with
+  no warning, while the skill loader keeps the first and warns. That is a name-resolution
+  change, not a failure-path change.
+- **`markdown_files` reads every `.md` in a directory with no count cap.** Throughput only:
+  each read is bounded to 16 KiB and a fifo or a device file is skipped.
+- **An unknown `sandbox` value inherits the parent's mode**, where the resume path fails
+  closed to `strict`. A child can never widen past its parent, so this cannot escalate.
+- **`Eq` on the three new types is never exercised**, and `Display for Detail` is asserted
+  only through `notice`.

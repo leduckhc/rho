@@ -20,6 +20,12 @@ const MAX_DETAIL_LENGTH: usize = 200;
 /// The most characters a path may hold when it is drawn.
 const MAX_PATH_LENGTH: usize = 200;
 
+/// The most lines of one kind a start-up report may print. The rest are counted.
+///
+/// A live run printed 104 lines and 1.6 MB from one repository, because only the
+/// rejection lines were capped. Every kind is capped now.
+pub const MAX_LINES_PER_KIND: usize = 5;
+
 /// What replaces the tail of a detail that is too long.
 const ELLIPSIS: &str = "...";
 
@@ -51,21 +57,29 @@ fn safe_path(path: &Path) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Detail(String);
 
+/// Sanitise one piece of untrusted text, and cut it to `max` characters.
+///
+/// The cut is marked, so a reader knows the text is not whole. Every value a notice
+/// draws goes through this, because a repository chooses the length of its own text.
+pub(crate) fn bounded(text: &str, max: usize) -> String {
+    let clean = sanitize(text);
+    let clean = clean.trim();
+    if clean.chars().count() <= max {
+        return clean.to_string();
+    }
+    let keep = max.saturating_sub(ELLIPSIS.chars().count());
+    let mut cut: String = clean.chars().take(keep).collect();
+    cut.push_str(ELLIPSIS);
+    cut
+}
+
 impl Detail {
     /// Sanitise and bound one piece of untrusted text.
     ///
     /// This is the only constructor, and it is private to the crate. A caller that
     /// could write the field directly would carry raw file text to the terminal.
     pub(crate) fn new(text: impl AsRef<str>) -> Self {
-        let clean = sanitize(text.as_ref());
-        let clean = clean.trim();
-        if clean.chars().count() <= MAX_DETAIL_LENGTH {
-            return Self(clean.to_string());
-        }
-        let keep = MAX_DETAIL_LENGTH - ELLIPSIS.chars().count();
-        let mut cut: String = clean.chars().take(keep).collect();
-        cut.push_str(ELLIPSIS);
-        Self(cut)
+        Self(bounded(text.as_ref(), MAX_DETAIL_LENGTH))
     }
 
     /// An empty detail, for a rejection that may quote nothing.

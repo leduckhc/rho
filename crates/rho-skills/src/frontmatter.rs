@@ -190,7 +190,7 @@ fn is_unsafe(c: char) -> bool {
     }
     matches!(c,
         // The bidirectional embedding, override, and isolate controls.
-        '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
         // The line and paragraph separators.
         | '\u{2028}' | '\u{2029}'
         // A byte order mark inside a line is invisible and never wanted.

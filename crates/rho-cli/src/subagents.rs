@@ -7,14 +7,14 @@
 //! it was found the same way: by looking for the tool in the running binary.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::extensions::summarise_names;
 use rho_core::{
     AgentNode, AgentRegistry, HookChain, Provider, SessionConfig, SubagentLimits, Tool,
     ToolRegistry,
 };
-use rho_skills::{AgentConfig, AgentDefinition};
+use rho_skills::{AgentConfig, AgentDefinition, MAX_LINES_PER_KIND};
 use rho_tools::{ChildToolFactory, SpawnAgentTool, SpawnAgentsTool, SpawnEnv};
 
 /// Build a child's tool registry from the parent's set.
@@ -65,9 +65,12 @@ pub struct Subagents {
 /// repository skill is instructions. A repository agent definition is instructions plus a
 /// tool list plus a model, and it runs unattended.
 pub struct LoadRequest {
-    pub session_root: PathBuf,
-    pub trust_project: bool,
-    pub discover: bool,
+    /// Where to look for a definition, and what to trust.
+    ///
+    /// The caller builds this, so `load` reads no environment variable. A test can then
+    /// point discovery at a temporary directory, and the real `~/.rho/agents` of the
+    /// machine running the test cannot change the result.
+    pub agents: AgentConfig,
     pub parent_config: SessionConfig,
     pub provider: Arc<dyn Provider>,
     pub hooks: Arc<HookChain>,
@@ -79,35 +82,31 @@ pub struct LoadRequest {
 
 pub async fn load(request: LoadRequest) -> (Vec<Arc<dyn Tool>>, Subagents) {
     let LoadRequest {
-        session_root,
-        trust_project,
-        discover,
+        agents,
         parent_config,
         provider,
         hooks,
         parent_tools,
         limits,
     } = request;
-    let session_root = &session_root;
     let parent_config = &parent_config;
-    let mut config = AgentConfig::with_default_user_dirs(session_root);
-    config.project_trusted = trust_project;
-    config.discover = discover;
 
-    let set = rho_skills::discover_agents(&config).await;
+    let set = rho_skills::discover_agents(&agents).await;
     let mut notices = notices_for(&set);
 
     let registry = AgentRegistry::new(limits);
     let loaded = set.loaded.len();
     if loaded == 0 {
-        // No definitions, so no tool. See the note on the return type. The notices still
-        // go back, because this is the case that removes the tool from the session.
+        // No definitions, so no tool. See the note on the return type. **The notices go
+        // back on this path too**, because this is the case that removes the tool from
+        // the session. One `Subagents` is built, at the end, so this return cannot drop
+        // them by accident.
         return (
             Vec::new(),
             Subagents {
                 registry,
                 notices,
-                loaded: 0,
+                loaded,
             },
         );
     }
@@ -166,11 +165,6 @@ fn root_node(registry: &AgentRegistry) -> AgentNode {
     registry.new_tree()
 }
 
-/// The most rejection lines to print. The rest are counted.
-///
-/// A directory of broken files must not push the real output off the screen.
-const MAX_REJECTION_LINES: usize = 5;
-
 /// Every line a discovery pass owes the user, in one place.
 ///
 /// One place, because a second builder is how a report gets lost. The set holds three
@@ -180,10 +174,10 @@ fn notices_for(set: &rho_skills::AgentSet) -> Vec<String> {
 
     // A rejected file first, because it is the one the user must repair. It used to be
     // dropped in silence, and a whole directory of rejects removed `spawn_agent`.
-    for rejected in set.rejected.iter().take(MAX_REJECTION_LINES) {
+    for rejected in set.rejected.iter().take(MAX_LINES_PER_KIND) {
         notices.push(rejected.notice());
     }
-    let hidden = set.rejected.len().saturating_sub(MAX_REJECTION_LINES);
+    let hidden = set.rejected.len().saturating_sub(MAX_LINES_PER_KIND);
     if hidden > 0 {
         notices.push(format!(
             "{hidden} more agent definition file(s) are not listed here. Repair the files \
@@ -192,13 +186,15 @@ fn notices_for(set: &rho_skills::AgentSet) -> Vec<String> {
     }
 
     if !set.withheld.is_empty() {
-        let names: Vec<&str> = set.withheld.iter().map(|d| d.name.as_str()).collect();
+        // Every name is bounded and summarised. A repository chooses its own names, and
+        // fifty files with a 16 KiB name each printed 800 KB on one line.
+        let names: Vec<String> = set.withheld.iter().map(|d| d.safe_name()).collect();
         notices.push(format!(
             "{} project agent definition(s) were found and not loaded: {}. \
              A definition carries a tool list and a model, and it runs unattended, so one \
              from this repository stays off until you trust it. Pass --trust-project.",
             set.withheld.len(),
-            names.join(", ")
+            summarise_names(&names)
         ));
     }
 
@@ -208,10 +204,27 @@ fn notices_for(set: &rho_skills::AgentSet) -> Vec<String> {
     //
     // Only a loaded definition reports. A withheld one changes nothing in this session,
     // and its warning would carry prose from a repository the user has not trusted.
+    //
+    // The lines are capped twice: each definition bounds its own, and the whole set
+    // stops at the cap. Otherwise a hundred definitions defeat a per-file bound.
+    let mut warned = 0;
+    let mut definitions_with_more = 0;
     for def in &set.loaded {
-        for warning in &def.warnings {
-            notices.push(format!("agent definition {}: {warning}", def.name));
+        if def.warnings.is_empty() {
+            continue;
         }
+        if warned >= MAX_LINES_PER_KIND {
+            definitions_with_more += 1;
+            continue;
+        }
+        notices.extend(def.notices());
+        warned += 1;
+    }
+    if definitions_with_more > 0 {
+        notices.push(format!(
+            "{definitions_with_more} more agent definition(s) raised a warning, not listed \
+             here."
+        ));
     }
 
     notices
@@ -219,12 +232,15 @@ fn notices_for(set: &rho_skills::AgentSet) -> Vec<String> {
 
 /// The line that lists what the model may spawn.
 fn available_notice(definitions: &HashMap<String, AgentDefinition>) -> String {
-    let mut names: Vec<&str> = definitions.keys().map(String::as_str).collect();
+    let mut names: Vec<String> = definitions
+        .values()
+        .map(AgentDefinition::safe_name)
+        .collect();
     names.sort();
     format!(
         "{} agent definition(s) available to spawn_agent: {}.",
         definitions.len(),
-        names.join(", ")
+        summarise_names(&names)
     )
 }
 
@@ -233,6 +249,25 @@ mod tests {
     use super::*;
     use rho_skills::AgentConfig;
     use std::path::Path;
+
+    /// A provider that refuses every request. `load` never calls it, because these
+    /// tests spawn no child. It exists so the production `load` can be tested at all.
+    struct NeverProvider;
+
+    #[async_trait::async_trait]
+    impl rho_core::Provider for NeverProvider {
+        fn id(&self) -> &str {
+            "never"
+        }
+
+        async fn stream(
+            &self,
+            _request: rho_core::CompletionRequest,
+            _cancel: rho_core::CancelToken,
+        ) -> Result<rho_core::ProviderStream, rho_core::ProviderError> {
+            unreachable!("no test here spawns a child")
+        }
+    }
 
     /// Write one agent definition file, and return its path.
     fn write_agent(dir: &Path, file: &str, body: &str) -> std::path::PathBuf {
@@ -310,10 +345,159 @@ mod tests {
             .iter()
             .filter(|line| line.contains("did not load"))
             .count();
-        assert_eq!(lines, MAX_REJECTION_LINES, "at most five files are named");
+        // The invariant, not the example: however many files break, the report names at
+        // most the cap and counts the remainder exactly.
+        assert_eq!(
+            lines,
+            set.rejected.len().min(MAX_LINES_PER_KIND),
+            "the report names at most the cap: {notices:?}"
+        );
+        let hidden = set.rejected.len() - lines;
         assert!(
-            notices.iter().any(|line| line.contains("1 more")),
+            notices
+                .iter()
+                .any(|line| line.contains(&format!("{hidden} more"))),
+            "the remainder is counted exactly: {notices:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_flood_of_warnings_is_capped_and_counted() {
+        // The cap protected the rejection lines only. A live run printed 104 lines and
+        // 1.6 MB, because every definition that loaded added an uncapped warning.
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..9 {
+            write_agent(
+                dir.path(),
+                &format!("warner-{index}.md"),
+                &format!(
+                    "---\nname: warner-{index}\ndescription: Recon.\ntools: all, read\n---\nbody\n"
+                ),
+            );
+        }
+
+        let set = discover_in(dir.path()).await;
+        assert_eq!(set.loaded.len(), 9, "every file loads");
+        let notices = notices_for(&set);
+        let warning_lines = notices
+            .iter()
+            .filter(|line| line.contains("keyword"))
+            .count();
+        assert_eq!(
+            warning_lines, MAX_LINES_PER_KIND,
+            "at most the cap: {notices:?}"
+        );
+        assert!(
+            notices.iter().any(|line| line.contains("4 more")),
             "the rest are counted: {notices:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hostile_name_cannot_flood_a_notice_line() {
+        // A repository chooses its own names, and a name only warns above 64 characters.
+        // Fifty files with a 16 KiB name each printed 800 KB on one withheld line.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let long = "x".repeat(16_000);
+        for index in 0..8 {
+            write_agent(
+                &root.join(".rho").join("agents"),
+                &format!("a{index}.md"),
+                &format!("---\nname: {long}\ndescription: Recon.\n---\nbody\n"),
+            );
+        }
+        let set = rho_skills::discover_agents(&rho_skills::AgentConfig {
+            user_dirs: Vec::new(),
+            session_root: Some(root.to_path_buf()),
+            project_trusted: false,
+            discover: true,
+        })
+        .await;
+        assert_eq!(set.withheld.len(), 8);
+
+        for line in notices_for(&set) {
+            assert!(
+                line.chars().count() < 600,
+                "no start-up line may run away: {} characters",
+                line.chars().count()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn load_reports_a_rejection_when_no_definition_loaded() {
+        // The production path, not a helper. `load` owns the early return for zero
+        // definitions, and that return is the one that removes the tool from the
+        // session. A test on `notices_for` alone would still pass if the return
+        // dropped its notices.
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("agents");
+        write_agent(&user, "broken.md", BROKEN);
+
+        let (tools, subagents) = load(LoadRequest {
+            agents: rho_skills::AgentConfig {
+                user_dirs: vec![user],
+                session_root: None,
+                project_trusted: false,
+                discover: true,
+            },
+            parent_config: SessionConfig::new(
+                "test-model",
+                dir.path().to_path_buf(),
+                Arc::new(rho_core::AllowAllPolicy),
+            ),
+            provider: Arc::new(NeverProvider),
+            hooks: Arc::new(HookChain::new()),
+            parent_tools: Vec::new(),
+            limits: SubagentLimits::new(),
+        })
+        .await;
+
+        assert!(tools.is_empty(), "no definition loaded, so no tool");
+        assert_eq!(subagents.loaded, 0);
+        let joined = subagents.notices.join("\n");
+        assert!(
+            joined.contains("did not load"),
+            "the session lost five tools, so it must say why: {joined}"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_lists_what_the_model_may_spawn() {
+        // The available line ships on every session and had no test.
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("agents");
+        write_agent(&user, "scout.md", GOOD);
+
+        let (tools, subagents) = load(LoadRequest {
+            agents: rho_skills::AgentConfig {
+                user_dirs: vec![user],
+                session_root: None,
+                project_trusted: false,
+                discover: true,
+            },
+            parent_config: SessionConfig::new(
+                "test-model",
+                dir.path().to_path_buf(),
+                Arc::new(rho_core::AllowAllPolicy),
+            ),
+            provider: Arc::new(NeverProvider),
+            hooks: Arc::new(HookChain::new()),
+            parent_tools: rho_tools::builtin_tools(),
+            limits: SubagentLimits::new(),
+        })
+        .await;
+
+        assert!(
+            !tools.is_empty(),
+            "one definition loaded, so the tools exist"
+        );
+        assert_eq!(subagents.loaded, 1);
+        let joined = subagents.notices.join("\n");
+        assert!(
+            joined.contains("available to spawn_agent: scout"),
+            "the user learns what the model may spawn: {joined}"
         );
     }
 

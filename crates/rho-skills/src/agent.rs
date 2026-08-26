@@ -18,7 +18,7 @@ use serde::{Deserialize, Deserializer};
 
 use crate::discover::is_inside;
 use crate::frontmatter::{extract_frontmatter, read_bounded, sanitize};
-use crate::rejection::{Detail, RejectedDefinition, RejectionReason};
+use crate::rejection::{Detail, MAX_LINES_PER_KIND, RejectedDefinition, RejectionReason, bounded};
 use crate::types::SkillOrigin;
 
 /// The most characters allowed in a name. The same rule as a skill.
@@ -61,6 +61,37 @@ impl AgentDefinition {
     pub fn resolve_tools(&self, parent_tools: &[String]) -> ToolIntersection {
         intersect_tools(parent_tools, self.tools.as_deref())
     }
+
+    /// The name, made safe to draw and short enough to read.
+    ///
+    /// A name comes from a file, so a repository chooses it. The loader sanitises it,
+    /// and this bounds it as well. A live run printed 800 KB of one repository's names
+    /// on a start-up line, because a name only warns above 64 characters.
+    pub fn safe_name(&self) -> String {
+        bounded(&self.name, MAX_NAME_LENGTH)
+    }
+
+    /// The lines this definition owes the user, and no more than a bounded number.
+    ///
+    /// A warning is rho's own sentence with the file's text inside it. `Detail` bounds
+    /// that text, this bounds the name, and the cap bounds the count. So one definition
+    /// cannot fill a terminal.
+    pub fn notices(&self) -> Vec<String> {
+        let name = self.safe_name();
+        let mut lines: Vec<String> = self
+            .warnings
+            .iter()
+            .take(MAX_LINES_PER_KIND)
+            .map(|warning| format!("agent definition {name}: {warning}"))
+            .collect();
+        let hidden = self.warnings.len().saturating_sub(MAX_LINES_PER_KIND);
+        if hidden > 0 {
+            lines.push(format!(
+                "agent definition {name} raised {hidden} more warning(s), not listed here."
+            ));
+        }
+        lines
+    }
 }
 
 /// Read one agent definition's body, the text after the frontmatter.
@@ -95,7 +126,12 @@ fn strip_frontmatter(text: &str) -> String {
 }
 
 /// The set an agent discovery pass found.
+///
+/// `#[non_exhaustive]`, so no crate outside this one writes the literal. This field set
+/// has grown once already, and a struct literal in another crate would have broken on
+/// that change. `discover_agents` and `Default` are the two ways to build one.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct AgentSet {
     /// Definitions that may be used now.
     pub loaded: Vec<AgentDefinition>,
@@ -160,7 +196,7 @@ pub async fn discover_agents(config: &AgentConfig) -> AgentSet {
                 SkillOrigin::User
             };
             let outcome = load_definition(&path, origin).await;
-            admit(&mut set, outcome, origin, config.project_trusted);
+            admit(&mut set, outcome, config.project_trusted);
         }
     }
 
@@ -172,12 +208,7 @@ pub async fn discover_agents(config: &AgentConfig) -> AgentSet {
         for dir in project_dirs {
             for path in markdown_files(&dir) {
                 let outcome = load_definition(&path, SkillOrigin::Project).await;
-                admit(
-                    &mut set,
-                    outcome,
-                    SkillOrigin::Project,
-                    config.project_trusted,
-                );
+                admit(&mut set, outcome, config.project_trusted);
             }
         }
     }
@@ -188,14 +219,20 @@ pub async fn discover_agents(config: &AgentConfig) -> AgentSet {
 /// File one load outcome into the set, under the trust rule.
 ///
 /// One place decides trust, so the user pass and the project pass cannot drift apart.
+/// The origin comes from the outcome itself, so no caller can pass one that disagrees
+/// with the definition it files.
+///
 /// An untrusted rejection loses its detail, because a repository rho has not been told
 /// to trust must not put its own prose on a start-up line.
 fn admit(
     set: &mut AgentSet,
     outcome: Result<AgentDefinition, RejectedDefinition>,
-    origin: SkillOrigin,
     project_trusted: bool,
 ) {
+    let origin = match &outcome {
+        Ok(def) => def.origin,
+        Err(rejected) => rejected.origin,
+    };
     let trusted = matches!(origin, SkillOrigin::User) || project_trusted;
     match outcome {
         Ok(def) => {

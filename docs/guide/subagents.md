@@ -73,8 +73,12 @@ A broken `tools` field stops the whole file on purpose. Ignoring the field would
 "inherit every tool the parent holds", so a typo would widen the child instead of
 narrowing it.
 
-rho prints at most five of these lines, then counts the rest. A file inside a project you
-have not trusted is still reported, and rho quotes nothing from it.
+rho prints at most five of these lines, then counts the rest. The same cap covers the
+warning lines, and one definition prints at most five of its own. A long name is cut. So a
+repository full of broken files cannot fill your terminal.
+
+A file inside a project you have not trusted is still reported, and rho quotes nothing from
+it.
 
 A warning is different from a fault. A definition with a warning still loads, and rho
 prints the warning with the definition name:

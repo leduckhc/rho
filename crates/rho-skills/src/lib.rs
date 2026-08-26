@@ -21,7 +21,7 @@ pub use agent::{
 pub use discover::discover;
 pub use error::SkillError;
 pub use prompt::prompt_block;
-pub use rejection::{Detail, RejectedDefinition, RejectionReason};
+pub use rejection::{Detail, MAX_LINES_PER_KIND, RejectedDefinition, RejectionReason};
 pub use types::{Skill, SkillConfig, SkillOrigin, SkillSet};
 
 /// Read one skill's full body, on demand.

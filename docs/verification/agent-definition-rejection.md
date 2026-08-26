@@ -301,7 +301,51 @@ trust it. Pass --trust-project.
 The skill loader has resolved a path before classifying it since sprint 2. The agent loader
 did not, and the two now call one function. See D-an-agent-symlink-cannot-smuggle-trust.
 
-## 10. What this step did not cover
+## 10. The flood the review fleet found, probed live
+
+Four reviewer lenses and `codex review` read the committed change. The blocking finding was
+that the five-line cap covered the rejection lines only.
+
+Fifty files in `<repo>/.rho/agents`, each carrying a 16 000-character `name:` and a
+`tools: all, read` line that warns:
+
+```sh
+python3 -c "
+import pathlib
+d = pathlib.Path('/tmp/rho-live/flood2/.rho/agents'); d.mkdir(parents=True, exist_ok=True)
+long = 'x' * 16000
+for i in range(50):
+    (d / f'a{i}.md').write_text(f'---\nname: {long}\ndescription: Recon.\ntools: all, read\n---\nbody\n')
+"
+rho run "Say: bounded." --provider openrouter --model anthropic/claude-haiku-4.5 \
+  --root /tmp/rho-live/flood2 2>err; wc -c < err
+```
+
+| Case | Before | After |
+| --- | --- | --- |
+| Untrusted repository, stderr | 800 946 bytes, 6 lines | 1 057 bytes, 5 lines |
+| Trusted repository, stderr | 1 626 085 bytes, 104 lines | 1 718 bytes, 11 lines |
+
+The untrusted case is the one that matters: no flag was passed, and a repository still wrote
+800 KB to the terminal through the withheld name list. After the fix that line names three
+definitions and counts the rest.
+
+The trusted output now reads:
+
+```text
+rho: agent definition toolwarn: a tool keyword must stand alone. "all" was dropped. These
+named tools stand: read?[2J.
+rho: agent definition xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...: the
+name must be 1 to 64 characters. This name has 16000.
+...
+rho: 47 more agent definition(s) raised a warning, not listed here.
+rho: 3 agent definition(s) available to spawn_agent: toolwarn, warner, xxxxxx...
+```
+
+Every name is cut at 64 characters, every kind of line stops at five, and each remainder is
+counted.
+
+## 11. What this step did not cover
 
 - **A definition on Windows.** No Windows host was available.
 - **A `~/.agents/agents` directory.** Every run used a temporary `HOME`, so the user
