@@ -99,9 +99,13 @@ impl QueuedChild {
     ///
     /// It resolves `Err(Dequeued::Cancelled)` when the child was cancelled while it
     /// waited, alone or with its parent. It resolves
-    /// `Err(Dequeued::ProcessWideFull)` when a slot freed under this parent and the
-    /// process-wide cap was full at that moment. It never waits on the
-    /// process-wide cap, because that is a wait on another tree.
+    /// `Err(Dequeued::WaitedTooLong)` when `SubagentLimits::queue_wait` passed and no
+    /// slot freed. It resolves `Err(Dequeued::ProcessWideFull)` when a slot freed
+    /// under this parent and the process-wide cap was full at that moment. It never
+    /// waits on the process-wide cap, because that is a wait on another tree.
+    ///
+    /// The deadline clock starts at the first poll of this future, which is when the
+    /// child begins to wait.
     pub async fn started(self) -> Result<ChildSpawn, Dequeued>;
 }
 
@@ -131,10 +135,19 @@ impl Drop for QueuedChild {
 
 /// Why a queued child never started.
 ///
-/// Both variants are results the parent can act on, and neither ends the run.
+/// Every variant is a result the parent can act on, and none ends the run.
 pub enum Dequeued {
     /// The child was cancelled while it waited, alone or with its parent.
+    ///
+    /// A cancel wins over the deadline below. A cancel is what the parent asked for, so
+    /// a waiter that is cancelled and past its deadline still reports this.
     Cancelled,
+    /// The child waited for `SubagentLimits::queue_wait` and no slot freed.
+    ///
+    /// It bounds one tool call. Without it, one blocking spawn could hold a parent's
+    /// turn for the wait line depth times `child_timeout`. See section 2.8 and decision
+    /// D-a-waiter-has-a-deadline.
+    WaitedTooLong { limit: Duration },
     /// A slot freed under this parent, and the process-wide cap was full by then.
     ///
     /// A queued child holds no process-wide permit while it waits, so the cap can
@@ -154,6 +167,14 @@ The `ProcessWideFull` text, verbatim, so nobody has to invent it:
 a slot freed for this child, and the process-wide limit of {limit} live agents was reached
 first. The work was not started. Run it again when a child finishes, or ask the user to raise
 --max-live-agents.
+```
+
+The `WaitedTooLong` text, verbatim:
+
+```text
+the child waited {seconds} seconds for a slot and none freed, so the work was not started.
+Run it again later, spawn it with background: true, or ask the user to raise
+--queue-wait-secs.
 ```
 
 ### 2.2a A permit, not a counter
@@ -191,8 +212,10 @@ section 2.9 comes from the primitive, not from a second structure that could dis
 - `spawn_child` calls `try_acquire_owned` on both semaphores. A failure is the same refusal it
   returns today, so the immediate form is unchanged for every caller.
 - `QueuedChild::started` calls `acquire_owned` on the per-parent semaphore, then
-  `try_acquire_owned` on the process-wide one. It selects on the child's `CancelToken`, so a
-  cancel resolves the wait at once.
+  `try_acquire_owned` on the process-wide one. It selects on the child's `CancelToken` and on
+  a `queue_wait` timer, so a cancel and a deadline each resolve the wait at once.
+- **The cancel branch is checked before the deadline branch.** A waiter that is cancelled and
+  past its deadline reports `Cancelled`, because a cancel is what the parent asked for.
 - **When the process-wide try fails, the child releases its per-parent permit and refuses.** It
   resolves `Err(Dequeued::ProcessWideFull)`. It must release first, because a waiter that keeps a
   per-parent permit while it gives up blocks a sibling for ever. It must not retry, because a
@@ -472,13 +495,30 @@ pub struct SubagentLimits {
     /// host may run many sessions in one process. Without this field the waiting
     /// total is the per-parent cap times an unbounded number of roots.
     pub max_queued_total: usize,
+    /// How long one child may wait for a slot. Then rho refuses it.
+    ///
+    /// It bounds one blocking spawn, which the wait line depth used to multiply. The
+    /// default is 600 seconds, which is one `child_timeout`. Zero refuses any child
+    /// that has to wait, and no value turns the deadline off. See section 2.8 and
+    /// decision D-a-waiter-has-a-deadline.
+    pub queue_wait: Duration,
+    /// The largest steering message a child's queue accepts, in bytes.
+    ///
+    /// A child queue is written to by a model, and there may be 160 of them. So this
+    /// is 16 KiB, where a session queue allows 64 KiB. See `SPEC-steering` section 4
+    /// and decision D-a-steering-message-is-bounded-by-bytes.
+    pub max_steer_message_bytes: usize,
     /// Turns of warning before the child's turn cap. See section 4.
     pub grace_turns: u32,
 }
 ```
 
 The default `max_queued_per_parent` is 16, flag `--max-queued-per-parent`. The default
-`max_queued_total` is 128, flag `--max-queued-total`. Either line, once full, refuses at once:
+`max_queued_total` is 128, flag `--max-queued-total`. Either line, once full, refuses at once.
+The default `queue_wait` is 600 seconds, flag `--queue-wait-secs`. The default
+`max_steer_message_bytes` is 16 KiB, flag `--max-agent-steer-bytes`.
+
+The refusals:
 
 ```rust
 pub enum SubagentError {
@@ -512,6 +552,12 @@ each holding a `CancelToken` and a `MessageQueue` of 32 messages, so the ceiling
 thousand queued messages. That number is bounded by a limit rho owns, not by how many sessions a
 host decides to open.
 
+**A message count is not a memory bound, so the message is capped in bytes too.** A child queue
+takes `max_steer_message_bytes`, which is 16 KiB. So one child queue holds at most 512 KiB, and
+the 160 queues of 128 waiting and 32 live children hold at most 80 MiB. `MessageQueue::push`
+refuses a larger message with `QueueError::TooLarge`. See `SPEC-steering` section 4 and decision
+D-a-steering-message-is-bounded-by-bytes.
+
 ### 2.7 Which caps still refuse
 
 Waiting frees a per-parent slot. Waiting adds no depth and breaks no cycle. Waiting on a
@@ -525,6 +571,7 @@ process-wide slot waits on another tree.
 | the cycle guard | refuse at once | waiting breaks no cycle |
 | `max_queued_per_parent` | refuse at once, checked first | this parent's wait line is full |
 | `max_queued_total` | refuse at once, checked second | the process wait line is full |
+| `queue_wait` | not checked here | it bounds the wait itself, so it fires in `started` |
 
 **The check order decides which scope a caller hears.** A call that trips both wait lines is told
 about its own line, because that is the tighter and more actionable bound. The order is stated here
@@ -559,18 +606,25 @@ D-per-parent-fifo-start-order.
 the child starts, so a task that waited does not arrive with less time. The retry ledger counts
 a death, and a wait is not a death, so waiting cannot consume a retry.
 
-**The cost, stated: a wide fan-out can hold a parent's turn for a long time.** A blocking spawn
-now waits instead of refusing, so the worst case for one tool call is
+**The cost, and the deadline that bounds it.** A blocking spawn waits instead of refusing. The
+worst case for one tool call used to be
 `ceil(max_queued_per_parent / max_children_per_parent) x child_timeout`. At the shipped defaults
-that is `ceil(16 / 4) x 600 s`, about forty minutes, and a prompt-injected model chooses both the
-fan-out width and the children that sleep. The old refusal always returned at once, so this is a
-real trade: rho took the wait away from the model and gave it to the parent's turn.
+that was `ceil(16 / 4) x 600 s`, about forty minutes, and a prompt-injected model chose both the
+fan-out width and the children that sleep. A security review named it, and this spec left it
+open.
 
-This spec does **not** bound that wait, and a security review named it. A queue-wait deadline,
-separate from `child_timeout`, is the fix, and it is a new contract: it needs its own error case,
-its own flag, and its own decision. It is out of scope here, and it is recorded in
-`.rho-work/progress.md` rather than left in a reviewer's head. Until then, a caller that cannot
-afford the wait uses `background: true`, which returns at once with an id.
+**It is closed now. `SubagentLimits::queue_wait` bounds the wait.** One waiter waits at most
+`queue_wait`, which is 600 seconds by default and one `child_timeout`. Then `started` resolves
+`Err(Dequeued::WaitedTooLong)`, and the parent gets its turn back. So the worst case for one
+tool call is `queue_wait + child_timeout`, about twenty minutes at the defaults, and it no
+longer grows with the wait line. The flag is `--queue-wait-secs`, and the command line defaults
+it to the effective `--child-timeout-secs`. A value of zero refuses any child that has to wait,
+and no value turns the deadline off. See decision D-a-waiter-has-a-deadline.
+
+The deadline applies to a background waiter too, because a queued entry holds a cancel token
+and a queue while it waits. A background waiter that runs out of patience records a report, so
+a parent that polls learns why the child never ran. A caller that cannot afford any wait uses
+`background: true`, which returns at once with an id.
 
 ### 2.9 Fairness and order
 
@@ -967,6 +1021,25 @@ name below is a test that exists:
 - `a_position_counts_only_its_own_siblings` — two parents with waiters. A break that counted every
   waiter in the process passed every other test.
 - `one_tree_cannot_steer_another_queued_child` — the scope guard covers the steer path too.
+- `a_waiter_refuses_when_its_deadline_passes_and_names_the_flag` — `Dequeued::WaitedTooLong`,
+  and the text names `--queue-wait-secs` and `background: true`.
+- `the_deadline_fires_before_the_worst_case_wait` — across three limit sets, the wait ends at
+  `queue_wait` and always inside
+  `ceil(max_queued_per_parent / max_children_per_parent) x child_timeout`. The invariant, not
+  one example.
+- `a_slot_that_frees_before_the_deadline_still_starts_the_child` — the deadline breaks no
+  happy path.
+- `a_zero_deadline_refuses_a_waiter_at_once` — zero means no waiting, so no value turns the
+  deadline off.
+- `a_timed_out_waiter_leaves_no_queued_entry_behind` — the drop guard runs on the new exit
+  too, which is the family of the `handed_out` defect.
+- `a_timed_out_waiter_frees_its_place_in_the_line` — the child behind it moves up from two to
+  one.
+- `a_cancel_beats_the_deadline` — a cancelled waiter past its deadline reports `Cancelled`.
+- `a_child_queue_carries_the_byte_cap_from_the_limits` — a queued child's queue refuses a
+  message over `max_steer_message_bytes`, so the flag is not a dead switch.
+- `a_started_child_queue_carries_the_byte_cap_from_the_limits` — the same for the arm that
+  starts at once.
 
 A queued child is addressable, and only by its owner, in `crates/rho-core/tests/subagent_slots.rs`
 and `crates/rho-tools/tests/subagent_tool.rs`:
@@ -997,6 +1070,8 @@ A child that never started still owes its parent a report, in `crates/rho-tools/
 - `a_cancelled_waiter_is_cancelled_and_a_full_process_is_a_failure` — the outcome of a
   `Dequeued`, as a pure function. A review swapped the two arms and every other test passed,
   because only a race reaches the second arm.
+- `a_waiter_that_ran_out_of_patience_is_a_failure_that_names_the_wait` — the third arm, and it
+  is a failure and never a cancel, because the parent did not ask for it.
 - `an_unstarted_report_claims_no_work` — zero turns, no summary, and no transcript.
 
 Named handles, in `crates/rho-core/tests/subagent_handles.rs`. **This section is built.**
@@ -1087,6 +1162,7 @@ names below are the tests that exist:
 **What it forbids.**
 
 - A queue that grows without a bound. The wait line is capped, and the product is stated.
+- A wait with no deadline. One waiter waits at most `queue_wait`, and no value turns that off.
 - A queued entry that outlives its child, on any path.
 - A wait on the process-wide cap, because it would let one tree hold another tree.
 - A queued child that no lookup can reach, and an unscoped lookup that reaches one.
@@ -1121,8 +1197,9 @@ better than implying an openness that does not exist.
 
 - A global start order across two parents. Order is per parent only.
 - A wait on the process-wide live cap. That cap refuses, as it does today.
-- A size cap on one steering message. The queue holds 32 messages, and a per-message size cap
-  belongs to `SPEC-steering`.
+- A retry of a waiter that ran out of patience. rho reports it, and the caller chooses again.
+- The byte cap on one steering message. `MessageQueue::push` holds it, and `SPEC-steering`
+  section 4 owns the numbers. This spec states only the child queue value.
 - A handle for a nested grandchild. A child gets a handle inside its own tree only.
 - A grace warning for the tool-call budget. The budget keeps its hard stop.
 - A grace warning for a plain top-level session by default. It stays opt-in there.
