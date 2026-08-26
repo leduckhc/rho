@@ -95,22 +95,13 @@ pub async fn load(request: LoadRequest) -> (Vec<Arc<dyn Tool>>, Subagents) {
     config.discover = discover;
 
     let set = rho_skills::discover_agents(&config).await;
-    let mut notices = Vec::new();
-    if !set.withheld.is_empty() {
-        let names: Vec<&str> = set.withheld.iter().map(|d| d.name.as_str()).collect();
-        notices.push(format!(
-            "{} project agent definition(s) were found and not loaded: {}. \
-             A definition carries a tool list and a model, and it runs unattended, so one \
-             from this repository stays off until you trust it. Pass --trust-project.",
-            set.withheld.len(),
-            names.join(", ")
-        ));
-    }
+    let mut notices = notices_for(&set);
 
     let registry = AgentRegistry::new(limits);
     let loaded = set.loaded.len();
     if loaded == 0 {
-        // No definitions, so no tool. See the note on the return type.
+        // No definitions, so no tool. See the note on the return type. The notices still
+        // go back, because this is the case that removes the tool from the session.
         return (
             Vec::new(),
             Subagents {
@@ -126,15 +117,7 @@ pub async fn load(request: LoadRequest) -> (Vec<Arc<dyn Tool>>, Subagents) {
         .into_iter()
         .map(|def| (def.name.clone(), def))
         .collect();
-    notices.push(format!(
-        "{} agent definition(s) available to spawn_agent: {}.",
-        definitions.len(),
-        {
-            let mut names: Vec<&str> = definitions.keys().map(String::as_str).collect();
-            names.sort();
-            names.join(", ")
-        }
-    ));
+    notices.push(available_notice(&definitions));
 
     // A temp directory, not the session root. A transcript under `.rho/` sits inside
     // the user's repository, `.gitignore` does not cover it, and it can be committed
@@ -183,9 +166,144 @@ fn root_node(registry: &AgentRegistry) -> AgentNode {
     registry.new_tree()
 }
 
+/// The most rejection lines to print. The rest are counted.
+///
+/// A directory of broken files must not push the real output off the screen.
+const MAX_REJECTION_LINES: usize = 5;
+
+/// Every line a discovery pass owes the user, in one place.
+///
+/// One place, because a second builder is how a report gets lost. The set holds three
+/// lists, and each one has a line here.
+fn notices_for(set: &rho_skills::AgentSet) -> Vec<String> {
+    let mut notices = Vec::new();
+
+    // A rejected file first, because it is the one the user must repair. It used to be
+    // dropped in silence, and a whole directory of rejects removed `spawn_agent`.
+    for rejected in set.rejected.iter().take(MAX_REJECTION_LINES) {
+        notices.push(rejected.notice());
+    }
+    let hidden = set.rejected.len().saturating_sub(MAX_REJECTION_LINES);
+    if hidden > 0 {
+        notices.push(format!(
+            "{hidden} more agent definition file(s) are not listed here. Repair the files \
+             above, then start rho again."
+        ));
+    }
+
+    if !set.withheld.is_empty() {
+        let names: Vec<&str> = set.withheld.iter().map(|d| d.name.as_str()).collect();
+        notices.push(format!(
+            "{} project agent definition(s) were found and not loaded: {}. \
+             A definition carries a tool list and a model, and it runs unattended, so one \
+             from this repository stays off until you trust it. Pass --trust-project.",
+            set.withheld.len(),
+            names.join(", ")
+        ));
+    }
+
+    notices
+}
+
+/// The line that lists what the model may spawn.
+fn available_notice(definitions: &HashMap<String, AgentDefinition>) -> String {
+    let mut names: Vec<&str> = definitions.keys().map(String::as_str).collect();
+    names.sort();
+    format!(
+        "{} agent definition(s) available to spawn_agent: {}.",
+        definitions.len(),
+        names.join(", ")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rho_skills::AgentConfig;
+    use std::path::Path;
+
+    /// Write one agent definition file, and return its path.
+    fn write_agent(dir: &Path, file: &str, body: &str) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(file);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// Discover only the definitions in one directory. It never reads a real home.
+    async fn discover_in(dir: &Path) -> rho_skills::AgentSet {
+        rho_skills::discover_agents(&AgentConfig {
+            user_dirs: vec![dir.to_path_buf()],
+            session_root: None,
+            project_trusted: false,
+            discover: true,
+        })
+        .await
+    }
+
+    const GOOD: &str = "---\nname: scout\ndescription: Recon.\ntools: read\n---\nbody\n";
+    const BROKEN: &str = "---\nname: broken\ndescription: Recon.\ntools: 5\n---\nbody\n";
+
+    #[tokio::test]
+    async fn a_rejected_definition_reaches_the_user_as_a_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(dir.path(), "scout.md", GOOD);
+        let broken = write_agent(dir.path(), "broken.md", BROKEN);
+
+        let set = discover_in(dir.path()).await;
+        let notices = notices_for(&set);
+        let joined = notices.join("\n");
+        assert!(
+            joined.contains(&broken.display().to_string()),
+            "the notice names the file: {joined}"
+        );
+        assert!(
+            joined.contains("did not load"),
+            "the notice says the file did not load: {joined}"
+        );
+        assert!(
+            joined.contains("tools: [read, list]"),
+            "the notice teaches the repair: {joined}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejection_is_reported_even_when_no_definition_loaded() {
+        // The silence this change repairs. Every file is broken, so no definition
+        // loads, so rho registers no spawn_agent at all. The user must be told why.
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(dir.path(), "broken.md", BROKEN);
+
+        let set = discover_in(dir.path()).await;
+        assert!(set.loaded.is_empty(), "nothing loaded, so no tool");
+        let joined = notices_for(&set).join("\n");
+        assert!(
+            joined.contains("did not load"),
+            "a session with no tool must still say why: {joined}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_flood_of_rejections_is_capped_and_counted() {
+        // A directory of broken files must not push the real output off the screen.
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..6 {
+            write_agent(dir.path(), &format!("broken-{index}.md"), BROKEN);
+        }
+
+        let set = discover_in(dir.path()).await;
+        assert_eq!(set.rejected.len(), 6);
+        let notices = notices_for(&set);
+        let lines = notices
+            .iter()
+            .filter(|line| line.contains("did not load"))
+            .count();
+        assert_eq!(lines, MAX_REJECTION_LINES, "at most five files are named");
+        assert!(
+            notices.iter().any(|line| line.contains("1 more")),
+            "the rest are counted: {notices:?}"
+        );
+    }
 
     #[test]
     fn a_child_factory_grants_only_the_named_tools() {

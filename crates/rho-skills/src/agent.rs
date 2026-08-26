@@ -14,9 +14,10 @@
 use std::path::{Path, PathBuf};
 
 use rho_core::{SandboxMode, ToolIntersection, intersect_tools};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use crate::frontmatter::{extract_frontmatter, read_bounded, sanitize};
+use crate::rejection::{Detail, RejectedDefinition, RejectionReason};
 use crate::types::SkillOrigin;
 
 /// The most characters allowed in a name. The same rule as a skill.
@@ -100,6 +101,10 @@ pub struct AgentSet {
     /// Project definitions found but withheld, because the project is not
     /// trusted.
     pub withheld: Vec<AgentDefinition>,
+    /// Files that did not load at all, with the reason for each one.
+    ///
+    /// A rejected file used to vanish. See decision D-a-rejected-definition-is-reported.
+    pub rejected: Vec<RejectedDefinition>,
 }
 
 /// Where to look for agent definitions, and what to trust.
@@ -141,8 +146,9 @@ pub async fn discover_agents(config: &AgentConfig) -> AgentSet {
 
     for dir in &config.user_dirs {
         for path in markdown_files(dir) {
-            if let Some(def) = load_definition(&path, SkillOrigin::User).await {
-                set.loaded.push(def);
+            match load_definition(&path, SkillOrigin::User).await {
+                Ok(def) => set.loaded.push(def),
+                Err(rejected) => set.rejected.push(rejected),
             }
         }
     }
@@ -154,12 +160,21 @@ pub async fn discover_agents(config: &AgentConfig) -> AgentSet {
         ];
         for dir in project_dirs {
             for path in markdown_files(&dir) {
-                if let Some(def) = load_definition(&path, SkillOrigin::Project).await {
-                    if config.project_trusted {
-                        set.loaded.push(def);
-                    } else {
-                        set.withheld.push(def);
+                match load_definition(&path, SkillOrigin::Project).await {
+                    Ok(def) => {
+                        if config.project_trusted {
+                            set.loaded.push(def);
+                        } else {
+                            set.withheld.push(def);
+                        }
                     }
+                    // An untrusted repository must not write its own prose onto a
+                    // start-up line, so the detail goes and the reason stays.
+                    Err(rejected) => set.rejected.push(if config.project_trusted {
+                        rejected
+                    } else {
+                        rejected.without_detail()
+                    }),
                 }
             }
         }
@@ -168,22 +183,58 @@ pub async fn discover_agents(config: &AgentConfig) -> AgentSet {
     set
 }
 
-/// Load one definition from a path. Return `None` when it does not load.
-pub async fn load_definition(path: &Path, origin: SkillOrigin) -> Option<AgentDefinition> {
+/// Load one definition from a path.
+///
+/// The error side carries the reason, so no caller can drop it by accident. It used to
+/// be an `Option`, and every failure was one `None`.
+pub async fn load_definition(
+    path: &Path,
+    origin: SkillOrigin,
+) -> Result<AgentDefinition, RejectedDefinition> {
+    let reject = |reason: RejectionReason| {
+        Err(RejectedDefinition {
+            path: path.to_path_buf(),
+            origin,
+            reason,
+        })
+    };
+
     let fallback_name = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    let text = read_bounded(path).await.ok()?;
-    let yaml = extract_frontmatter(&text)?;
-    let raw: RawFrontmatter = serde_yaml::from_str(&yaml).ok()?;
+    let text = match read_bounded(path).await {
+        Ok(text) => text,
+        Err(error) => {
+            return reject(RejectionReason::Unreadable {
+                detail: Detail::new(error.to_string()),
+            });
+        }
+    };
+    let Some(yaml) = extract_frontmatter(&text) else {
+        // Two different faults, and two different repairs. An unclosed block used to
+        // report "no frontmatter", which asks for a description the file already holds.
+        return reject(if opens_frontmatter(&text) {
+            RejectionReason::UnclosedFrontmatter
+        } else {
+            RejectionReason::NoFrontmatter
+        });
+    };
+    let raw: RawFrontmatter = match serde_yaml::from_str(&yaml) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return reject(RejectionReason::BadFrontmatter {
+                detail: Detail::new(error.to_string()),
+            });
+        }
+    };
 
     // A missing description does not load. The description is the only text the
     // model sees, so an agent without one can never be chosen.
     let description = match raw.description {
         Some(description) if !description.trim().is_empty() => sanitize(&description),
-        _ => return None,
+        _ => return reject(RejectionReason::NoDescription),
     };
 
     let mut warnings = Vec::new();
@@ -199,7 +250,12 @@ pub async fn load_definition(path: &Path, origin: SkillOrigin) -> Option<AgentDe
     warnings.extend(name_warnings(&name));
 
     let tools = match raw.tools {
-        Some(raw_tools) => resolve_tool_list(&raw_tools, &mut warnings),
+        Some(value) => match tool_tokens(&value) {
+            Ok(tokens) => resolve_tool_list(&tokens, &mut warnings),
+            // A broken tool list refuses the whole file. The only other reading is to
+            // ignore the field, and an ignored field inherits every parent tool.
+            Err(detail) => return reject(RejectionReason::BadToolsField { detail }),
+        },
         None => None,
     };
 
@@ -214,7 +270,7 @@ pub async fn load_definition(path: &Path, origin: SkillOrigin) -> Option<AgentDe
         None => None,
     };
 
-    Some(AgentDefinition {
+    Ok(AgentDefinition {
         name,
         description,
         path: path.to_path_buf(),
@@ -227,15 +283,85 @@ pub async fn load_definition(path: &Path, origin: SkillOrigin) -> Option<AgentDe
     })
 }
 
+/// True when the text starts a frontmatter block.
+///
+/// `extract_frontmatter` returns `None` for a file with no opening fence and for a
+/// file whose fence never closes. This tells the two apart.
+fn opens_frontmatter(text: &str) -> bool {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    text.lines()
+        .next()
+        .is_some_and(|line| line.trim_end() == "---")
+}
+
 /// The raw frontmatter, before validation. Unknown fields are ignored.
 #[derive(Debug, Deserialize)]
 struct RawFrontmatter {
     name: Option<String>,
     description: Option<String>,
-    tools: Option<String>,
+    /// The tool list, in whichever form the author wrote.
+    ///
+    /// A plain `Option<Value>` reads `tools:` with no value as `None`, which is the
+    /// value an absent field gives. That difference matters, because an absent field
+    /// inherits every parent tool. So an empty line arrives here as `Some(Null)`.
+    #[serde(default, deserialize_with = "present_value")]
+    tools: Option<serde_yaml::Value>,
     model: Option<String>,
     max_turns: Option<u32>,
     sandbox: Option<String>,
+}
+
+/// Read a present field as `Some`, even when it holds nothing.
+fn present_value<'de, D>(deserializer: D) -> Result<Option<serde_yaml::Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    serde_yaml::Value::deserialize(deserializer).map(Some)
+}
+
+/// Turn the `tools` field into tokens, whichever form the author wrote.
+///
+/// A string is the comma or space form. A sequence is the ordinary YAML form. Both
+/// mean the same thing. See decision D-a-tool-list-accepts-a-yaml-sequence.
+fn tool_tokens(value: &serde_yaml::Value) -> Result<Vec<String>, Detail> {
+    match value {
+        serde_yaml::Value::String(line) => Ok(parse_tool_list(line)),
+        serde_yaml::Value::Sequence(items) => {
+            let mut names = Vec::new();
+            for item in items {
+                match item {
+                    serde_yaml::Value::String(name) => names.extend(parse_tool_list(name)),
+                    other => {
+                        return Err(Detail::new(format!(
+                            "one item in the list is {}, and a tool name is a word",
+                            yaml_kind(other)
+                        )));
+                    }
+                }
+            }
+            Ok(names)
+        }
+        serde_yaml::Value::Null => Err(Detail::new(
+            "the line holds no value, and an empty line would inherit every parent tool",
+        )),
+        other => Err(Detail::new(format!(
+            "the field is {}, and a tool list is a line of words or a sequence",
+            yaml_kind(other)
+        ))),
+    }
+}
+
+/// A plain name for a YAML value, for a message a user reads.
+fn yaml_kind(value: &serde_yaml::Value) -> &'static str {
+    match value {
+        serde_yaml::Value::Null => "empty",
+        serde_yaml::Value::Bool(_) => "a true or false value",
+        serde_yaml::Value::Number(_) => "a number",
+        serde_yaml::Value::String(_) => "a word",
+        serde_yaml::Value::Sequence(_) => "a list",
+        serde_yaml::Value::Mapping(_) => "a map",
+        serde_yaml::Value::Tagged(_) => "a tagged value",
+    }
 }
 
 /// The keywords that mean "every tool the parent holds".
@@ -255,21 +381,21 @@ const KEYWORD_NONE: &str = "none";
 /// contradiction, so the keyword is dropped and the names stand. That narrows,
 /// and widening on an unclear line is the fail-open shape. See `SPEC-subagents`
 /// section 5 and decision D-a-tool-keyword-stands-alone.
-fn resolve_tool_list(raw: &str, warnings: &mut Vec<String>) -> Option<Vec<String>> {
+fn resolve_tool_list(tokens: &[String], warnings: &mut Vec<String>) -> Option<Vec<String>> {
     let mut names = Vec::new();
     let mut keywords = Vec::new();
     let mut wants_all = false;
     let mut wants_none = false;
-    for name in parse_tool_list(raw) {
+    for name in tokens {
         let lower = name.to_ascii_lowercase();
         if KEYWORDS_ALL.contains(&lower.as_str()) {
             wants_all = true;
-            keywords.push(name);
+            keywords.push(name.clone());
         } else if lower == KEYWORD_NONE {
             wants_none = true;
-            keywords.push(name);
+            keywords.push(name.clone());
         } else {
-            names.push(name);
+            names.push(name.clone());
         }
     }
 

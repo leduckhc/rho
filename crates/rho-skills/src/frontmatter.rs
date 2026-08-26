@@ -12,7 +12,7 @@ use tokio::io::AsyncReadExt;
 /// The frontmatter is small by design. This cap stops a huge or hostile file
 /// from filling memory during discovery. A file whose frontmatter does not close
 /// inside this many bytes does not load.
-const MAX_FRONTMATTER_BYTES: u64 = 16 * 1024;
+pub(crate) const MAX_FRONTMATTER_BYTES: u64 = 16 * 1024;
 
 /// The most characters allowed in a name.
 const MAX_NAME_LENGTH: usize = 64;
