@@ -1,0 +1,25 @@
+[package]
+name = "rho-jsonl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Headless JSONL frontend for rho: one JSON command per line on stdin, replies and events on stdout."
+
+[dependencies]
+async-trait = "0.1.92"
+futures = "0.3.34"
+rho-core = { version = "0.1.0", path = "../rho-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt", "macros", "io-util", "sync", "time"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+futures = "0.3.34"
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["full"] }
