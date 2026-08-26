@@ -88,13 +88,45 @@ impl AgentOutcome {
     }
 
     /// A short phrase for a human or a model, including the reason when there is one.
+    ///
+    /// **A phrase ends with no full stop.** A caller puts this inside a sentence of its
+    /// own, and a reason is often a whole sentence itself. So `agent_status` printed
+    /// "raise --queue-wait-secs.. 0 turn(s)" with two stops, and a live poll showed it.
     pub fn label(&self) -> String {
         match self {
             Self::Done => "done".to_string(),
             Self::OutOfTurns => "out of turns".to_string(),
             Self::Canceled => "cancelled".to_string(),
-            Self::Failed { reason } => format!("failed: {reason}"),
+            Self::Failed { reason } => {
+                format!("failed: {}", reason.trim_end().trim_end_matches('.'))
+            }
             Self::Rejected { failed } => format!("rejected: {}", failed.join(", ")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_label_is_a_phrase_and_not_a_sentence() {
+        // A live poll printed "raise --queue-wait-secs.. 0 turn(s)". The caller ends the
+        // sentence, so the phrase must not end it too. A reason is often a whole
+        // sentence, and every subagent refusal is.
+        let outcome = AgentOutcome::Failed {
+            reason: "the child waited 0 seconds for a slot. Ask for more.".to_string(),
+        };
+        let label = outcome.label();
+        assert!(
+            !label.ends_with('.'),
+            "a phrase must not end a sentence: {label}"
+        );
+        assert!(
+            label.contains("Ask for more"),
+            "and it keeps every word of the reason: {label}"
+        );
+        // The stop inside the reason stays, because only the end is a caller's business.
+        assert!(label.contains("slot. Ask"), "{label}");
     }
 }

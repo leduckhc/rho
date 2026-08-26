@@ -691,20 +691,28 @@ is what is wrong: it teaches nothing. The fix needs a contract decision first, b
 `AgentSet` carries only `loaded` and `withheld` and a rejected file has nowhere to go. It is
 not fixed in the slot-queue change.
 
-## Open items the slot queue left, both recorded rather than remembered
+## Open items the slot queue left, both now closed
 
-A local review pass over the queue found two costs. Neither is fixed, and each needs a contract
-decision of its own.
+A local review pass over the queue found two costs. Both are fixed, and each has its own
+contract decision. See `docs/verification/subagent-queue-bounds.md` for the live runs.
 
-1. **A blocking spawn has no wait deadline.** One `spawn_agents` call can hold a parent's turn for
-   `ceil(max_queued_per_parent / max_children_per_parent) x child_timeout`, about forty minutes at
-   the defaults, and a prompt-injected model picks the fan-out width and the sleeping children. A
-   fix needs a queue-wait deadline separate from `child_timeout`, with its own error case and its
-   own flag. See `SPEC-subagent-slots-handles-grace` section 2.8, which now states the cost.
-2. **A steering message is bounded by count, not by bytes.** `MessageQueue` holds 32 messages, and
-   the queue now exists for 128 waiting children as well as 32 live ones. Each message body is
-   model-written and its size is not capped. This is the shape of the bug that turned 8 MB of
-   `bash` output into 805 MB, so the cap belongs in `MessageQueue::push` with a named error.
+1. **A blocking spawn had no wait deadline.** One `spawn_agents` call could hold a parent's turn
+   for `ceil(max_queued_per_parent / max_children_per_parent) x child_timeout`, about forty
+   minutes at the defaults, and a prompt-injected model picked the fan-out width and the sleeping
+   children. **Fixed:** `SubagentLimits::queue_wait`, flag `--queue-wait-secs`, and
+   `Dequeued::WaitedTooLong`. One call now costs at most the deadline plus one child run, and it
+   no longer grows with the wait line. Zero refuses any child that must wait, and no value turns
+   the deadline off. See decision D-a-waiter-has-a-deadline.
+2. **A steering message was bounded by count, not by bytes.** `MessageQueue` held 32 messages of
+   any size, and the queue exists for 128 waiting children as well as 32 live ones. **Fixed:**
+   `MessageQueue::push` refuses a message over the queue's byte cap with `QueueError::TooLarge`.
+   A session queue allows 64 KiB, and a child queue allows 16 KiB, flag
+   `--max-agent-steer-bytes`. So the process holds at most 80 MiB of queued messages, where the
+   number was unbounded. See decision D-a-steering-message-is-bounded-by-bytes.
+
+A third defect came out of driving it: `agent_status` printed two full stops, because
+`AgentOutcome::label` ended a phrase that its caller also ended. It is fixed, and
+`a_failed_label_is_a_phrase_and_not_a_sentence` pins it.
 
 **Config keys for the subagent limits stay unwired, on purpose.** `rho-config` parses a
 `[subagents]` layer that no binary reads, so only a flag changes a limit today. That gap is

@@ -1052,7 +1052,7 @@ name below is a test that exists:
   one.
 - `a_cancel_beats_the_deadline` — a cancelled waiter past its deadline reports `Cancelled`.
 - `a_child_queue_carries_the_byte_cap_from_the_limits` — a queued child's queue refuses a
-  message over `max_steer_message_bytes`, so the flag is not a dead switch.
+  message over the byte cap the limits state, so the flag is not a dead switch.
 - `a_started_child_queue_carries_the_byte_cap_from_the_limits` — the same for the arm that
   starts at once.
 
@@ -1063,6 +1063,15 @@ changes nothing is dead surface:
   deadline is 900 seconds. A host that lengthens a child run lengthens the patience with it.
 - `the_agent_steer_byte_flag_reaches_the_limits` — `--max-agent-steer-bytes` sets the child
   queue cap, and the default is the stated 16 KiB.
+
+The stated defaults, in `crates/rho-core/src/subagent/limits.rs`:
+- `the_queue_wait_deadline_is_one_child_timeout` — the default patience is one whole sibling
+  run, and the two numbers are equal on purpose.
+
+One defect that only a live run showed, in `crates/rho-core/src/subagent/report.rs`:
+- `a_failed_label_is_a_phrase_and_not_a_sentence` — `agent_status` printed
+  `--queue-wait-secs.. 0 turn(s)` with two full stops, because the phrase ended a sentence its
+  caller also ended. The fix covers every failed outcome, and not only a waiter.
 
 A queued child is addressable, and only by its owner, in `crates/rho-core/tests/subagent_slots.rs`
 and `crates/rho-tools/tests/subagent_tool.rs`:
