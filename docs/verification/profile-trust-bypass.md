@@ -140,8 +140,18 @@ Three deliberate breaks, each restored from a copy in `/tmp`:
 | Leave the environment ungated | FAILED, the environment test |
 
 One behaviour change a user may notice. In a checkout you have not trusted,
-`RHO_SKILL_PATHS`, `RHO_MCP_CONFIG`, and `RHO_BASE_URL` are ignored, and rho says so. Pass
-`--trust-project` to use them. A display variable such as `RHO_MODEL` needs no trust, because
+`RHO_SKILL_PATHS`, `RHO_MCP_CONFIG`, and `RHO_BASE_URL` are ignored, and rho says so:
+
+```
+rho: this project is not trusted, so rho ignored session-root (from /tmp/x/.rho/config.toml),
+skill-paths (from /tmp/x/.rho/config.toml), base-url (from the environment). Pass
+--trust-project to use them.
+```
+
+**That sentence was false when first written.** The filter returned only credentials, and the
+environment never sets one, so the notice branch was dead and every drop was silent. A security
+review found it. The filter now reports each key it cleared and where it came from, and a test
+asserts the notice fires. A display variable such as `RHO_MODEL` needs no trust, because
 it grants nothing. One existing test asserted the old rule and now states trust, with the
 reason written beside it.
 

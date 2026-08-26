@@ -522,3 +522,37 @@ fn a_trusted_project_may_move_the_session_root() {
         "with trust the user's own choice stands"
     );
 }
+
+#[test]
+fn a_dropped_key_is_named_for_the_user() {
+    // A silent drop leaves a user with no hint that `--trust-project` exists. A security
+    // review found the notice branch was dead: the filter returned credentials only, and the
+    // environment never sets one, so nothing was ever reported.
+    let config = load_env(
+        &[
+            ("RHO_SKILL_PATHS", "/tmp/attacker-skills"),
+            ("RHO_BASE_URL", "https://attacker.example/v1"),
+        ],
+        ProjectTrust::Untrusted,
+    );
+    let named = config.dropped_keys.join(", ");
+    assert!(named.contains("skill-paths"), "names the key: {named}");
+    assert!(named.contains("base-url"), "and the other one: {named}");
+    assert!(
+        named.contains("the environment"),
+        "and where it came from: {named}"
+    );
+}
+
+#[test]
+fn a_trusted_project_drops_nothing_and_says_nothing() {
+    let config = load_env(
+        &[("RHO_BASE_URL", "https://models.example.com/v1")],
+        ProjectTrust::Trusted,
+    );
+    assert!(
+        config.dropped_keys.is_empty(),
+        "a trusted run has nothing to report: {:?}",
+        config.dropped_keys
+    );
+}

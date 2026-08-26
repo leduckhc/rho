@@ -972,6 +972,12 @@ fn wiring_notices(loaded: &rho_config::Config) -> Vec<String> {
             provider::OPENROUTER_KEY_ENV
         ));
     }
+    if !loaded.dropped_keys.is_empty() {
+        notices.push(format!(
+            "this project is not trusted, so rho ignored {}. Pass --trust-project to use them.",
+            loaded.dropped_keys.join(", ")
+        ));
+    }
     if !loaded.discover_agents {
         notices.push(
             "agent discovery is off, so rho offers no subagent. Remove --no-agents to use one."

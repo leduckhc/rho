@@ -47,6 +47,19 @@ pub enum ConfigError {
     Credential { name: String, message: String },
 }
 
+/// What an untrusted layer lost, so the caller can tell the user rather than stay silent.
+///
+/// Silence was the defect a security review named: a user who sets `RHO_SKILL_PATHS` in their
+/// shell profile is locked out in an untrusted checkout with no hint that `--trust-project`
+/// exists. See `D-trust-is-provenance-not-a-field-list`.
+#[derive(Clone, Debug, Default)]
+struct Stripped {
+    /// Every `!command` credential found, by name, so each becomes a refusal.
+    refused: BTreeMap<String, BTreeSet<String>>,
+    /// The keys that held a value and were cleared.
+    cleared: Vec<&'static str>,
+}
+
 /// One layer of configuration. Every field is optional. A layer states only what
 /// it overrides. `serde(deny_unknown_fields)` makes an unknown key an error.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -311,6 +324,11 @@ pub struct Config {
     pub base_url: Option<String>,
     /// Whether the terminal animates the working word. True by default.
     pub tui_motion: bool,
+    /// Every powerful key an untrusted source set and lost, named for a notice.
+    ///
+    /// A drop with no message is the shape a security review named: a user who set
+    /// `RHO_SKILL_PATHS` once is locked out in an untrusted checkout and told nothing.
+    pub dropped_keys: Vec<String>,
     /// Whether the TUI captures the mouse. False by default.
     pub tui_mouse: bool,
     /// How the TUI draws reasoning. `Summary` by default.
@@ -362,7 +380,7 @@ impl ConfigLayer {
     /// It returns the `!command` credentials it found, by name, so the caller can refuse
     /// them rather than drop them. A dropped credential would read as "no such name",
     /// which teaches the user nothing.
-    fn strip_powerful_keys(&mut self) -> BTreeMap<String, BTreeSet<String>> {
+    fn strip_powerful_keys(&mut self) -> Stripped {
         self.strip_powerful_keys_to_depth(0)
     }
 
@@ -372,7 +390,7 @@ impl ConfigLayer {
     /// bounds its own nesting today, and a guard that leans on a dependency's behaviour is
     /// not a guard: a parser change would remove it in silence. A review named this, so the
     /// bound lives here.
-    fn strip_powerful_keys_to_depth(&mut self, depth: usize) -> BTreeMap<String, BTreeSet<String>> {
+    fn strip_powerful_keys_to_depth(&mut self, depth: usize) -> Stripped {
         /// Deeper than any real config, and shallow enough that no stack is at risk.
         const MAX_PROFILE_DEPTH: usize = 16;
         // Every powerful key, in one place. `a_powerful_key_is_named_in_one_place` fails
@@ -382,6 +400,18 @@ impl ConfigLayer {
         // capability, and a probe proved it: with `session-root = "/tmp/escape"` an
         // untrusted file let `read` reach a file the same run refused without it. A
         // boundary is the most powerful key of all.
+        let mut cleared: Vec<&'static str> = Vec::new();
+        for (name, was_set) in [
+            ("session-root", self.session_root.is_some()),
+            ("session-file", self.session_file.is_some()),
+            ("skill-paths", self.skill_paths.is_some()),
+            ("mcp-config", self.mcp_config.is_some()),
+            ("base-url", self.base_url.is_some()),
+        ] {
+            if was_set {
+                cleared.push(name);
+            }
+        }
         self.session_root = None;
         self.session_file = None;
         self.skill_paths = None;
@@ -406,11 +436,17 @@ impl ConfigLayer {
                 profile.profiles.clear();
                 continue;
             }
-            for (name, values) in profile.strip_powerful_keys_to_depth(depth + 1) {
+            let deeper = profile.strip_powerful_keys_to_depth(depth + 1);
+            for (name, values) in deeper.refused {
                 refused.entry(name).or_default().extend(values);
             }
+            for name in deeper.cleared {
+                if !cleared.contains(&name) {
+                    cleared.push(name);
+                }
+            }
         }
-        refused
+        Stripped { refused, cleared }
     }
 
     /// Build a layer from the `RHO_*` variables. This maps every scalar config key,
@@ -849,6 +885,9 @@ impl Config {
         } // The project file arrives with a clone, so three keys need `--trust-project`.
         // See SPEC-config-call-site section 5, and the probe that proved the command path.
         let mut refused_commands: Option<(PathBuf, BTreeMap<String, BTreeSet<String>>)> = None;
+        // Every powerful key an untrusted source lost. The caller names them, because a
+        // silent drop leaves a user with no hint that `--trust-project` exists.
+        let mut dropped_keys: Vec<String> = Vec::new();
         if let Some(path) = &sources.project_file
             && let Some(mut layer) = Config::read_file(path)?
         {
@@ -857,9 +896,12 @@ impl Config {
                 // `D-project-skill-needs-trust`, a gate this repository already ships.
                 // `mcp-config` would launch attacker server processes at startup, and
                 // `base-url` would point the credential at a host the file chose.
-                let commands = layer.strip_powerful_keys();
-                if !commands.is_empty() {
-                    refused_commands = Some((path.clone(), commands));
+                let stripped = layer.strip_powerful_keys();
+                for name in &stripped.cleared {
+                    dropped_keys.push(format!("{name} (from {})", path.display()));
+                }
+                if !stripped.refused.is_empty() {
+                    refused_commands = Some((path.clone(), stripped.refused));
                 }
             }
             merged = merged.merge(layer);
@@ -880,9 +922,12 @@ impl Config {
         // it grants nothing. See `D-trust-is-provenance-not-a-field-list`.
         let mut env_layer = ConfigLayer::from_env(&sources.env);
         if sources.project_trust == ProjectTrust::Untrusted {
-            let refused_env = env_layer.strip_powerful_keys();
-            if !refused_env.is_empty() && refused_commands.is_none() {
-                refused_commands = Some((PathBuf::from("the environment"), refused_env));
+            let stripped = env_layer.strip_powerful_keys();
+            for name in &stripped.cleared {
+                dropped_keys.push(format!("{name} (from the environment)"));
+            }
+            if !stripped.refused.is_empty() && refused_commands.is_none() {
+                refused_commands = Some((PathBuf::from("the environment"), stripped.refused));
             }
         }
         merged = merged.merge(env_layer);
@@ -934,6 +979,7 @@ impl Config {
             discover_agents: !merged.no_agents.unwrap_or(false),
             base_url: merged.base_url.clone(),
             tui_motion: merged.tui_motion.unwrap_or(true),
+            dropped_keys,
             // On by default. rho owns the alternate screen, which has no scrollback, so with
             // capture off the wheel does nothing at all. The default flipped with
             // `D-the-wheel-needs-capture`, and this merge adopts it, because that renderer won.

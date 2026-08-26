@@ -34,6 +34,7 @@ fn config_holding(source: CredentialSource) -> Config {
         discover_agents: true,
         base_url: None,
         tui_motion: true,
+        dropped_keys: Vec::new(),
         tui_mouse: false,
         reasoning: rho_core::ReasoningDisplay::Summary,
         reasoning_effort: None,
