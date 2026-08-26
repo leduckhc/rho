@@ -2,6 +2,10 @@
 
 Status: draft for the wiring lane.
 Owning crate: `rho-core`, module `session`. Callers in `rho-cli` and `rho-tui`.
+
+> **Read section 15 first.** The wiring lane reviewed this contract again before it wrote
+> any code, because sections 3, 3a, 3b, 3c and 4 had already shipped. Section 15 lists every
+> correction, and it names the tests this lane deferred and who owns each one.
 Features: F-session-store, F-session-resume, F-session-list, F-session-delete,
 F-session-fork, F-session-branching, F-ephemeral-mode, F-session-title,
 F-session-crash-continue, F-append-only-session-log, F-slash-commands.
@@ -38,6 +42,14 @@ wire format.
 ## 3. Where a session lives
 
 See `D-session-store-layout`.
+
+**Sections 3, 3a, 3b, 3c and 4 are built.** They live in
+`crates/rho-core/src/session/key.rs`, and `crates/rho-core/tests/session_key_id.rs` holds
+their tests. The prose below is the contract they were built from. One rule arrived with
+the code and is stated here too: `sanitize_name` strips every leading dot, so a project
+named `.config` does not become a hidden store directory. Its test is
+`a_dot_named_project_does_not_hide_the_store`. `PrefixMatch` in section 4 was **not** built
+with them, because it needs the store.
 
 ```rust
 use std::path::{Path, PathBuf};
@@ -425,6 +437,46 @@ Session {
 },
 ```
 
+### 6d. The recorder writes the assistant turn
+
+See `D-a-recorder-writes-the-assistant-turn`. The wiring lane found this before it wrote
+any code, and the first draft of this spec did not name it.
+
+`SessionRecorder` is the only thing that turns a live run into records. It writes a tool
+result, a usage record, and a stop record. It writes **no assistant message and no tool
+call**, because its match has no `TurnEnd` arm and it reads no `StreamEvent` text or
+tool-call event. Its own doc comment claims otherwise.
+
+So a recorded session holds the prompts and the results, and nothing else. A resume then
+builds a message list with a `ToolResult` that matches no `ToolCall`, and every provider
+refuses that request. This defect makes the whole feature unusable, so it is fixed here.
+
+```rust
+impl SessionRecorder {
+    /// Fold one agent event.
+    ///
+    /// The recorder holds the parts of the current assistant turn. `TextDelta` appends
+    /// text. `ThinkingEnd` closes a reasoning block. `ToolCallEnd` completes a call with
+    /// its parsed arguments. `TurnEnd` writes one `Message` record with role `Assistant`,
+    /// in provider block order. An empty turn writes nothing.
+    ///
+    /// So the file order is always the call, then its result. A `ToolCall` on disk with no
+    /// `ToolResult` is then impossible on the run path.
+    pub fn observe(&mut self, event: &AgentEvent) -> Option<RecordId>;
+
+    /// Write an explicit title as a `Name` leaf record.
+    ///
+    /// An empty or blank title is refused, so a row never shows a blank name. See
+    /// `D-a-session-title-costs-nothing`.
+    pub fn record_name(&mut self, title: &str) -> Result<Option<RecordId>, SessionError>;
+}
+```
+
+- A reasoning payload is kept verbatim. A rewritten payload cannot replay.
+- Redaction still runs through `redact_block` before anything reaches the file.
+- A cancel writes the partial assistant message with the real arguments it holds, instead
+  of the empty object it invents today.
+
 ## 7. The store operations
 
 `create` takes one struct, not six arguments. A four-argument constructor already hid a
@@ -432,6 +484,21 @@ fake model id and an approve-all policy in this project. See
 `D-no-four-argument-session-new`.
 
 ```rust
+/// What a new session needs, when the caller has no id yet.
+///
+/// A review found `create_minted` naming a type the spec never defined. It is stated here,
+/// because a retry mints a second id and so the id cannot be a field of the request. See
+/// section 15, finding 2.
+#[derive(Clone, Debug)]
+pub struct NewSessionWithoutId<'a> {
+    pub cwd: &'a Path,
+    pub approval: &'a str,
+    pub sandbox: &'a str,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub forked_from: Option<ForkOrigin>,
+}
+
 /// What a new session needs. One struct, so a later field breaks no caller.
 #[derive(Clone, Debug)]
 pub struct NewSession<'a> {
@@ -463,11 +530,14 @@ impl SessionStore {
     ///
     /// This is what a run calls. It retries `MINT_ATTEMPTS` times, so a collision costs one
     /// more mint rather than a lost session.
+    ///
+    /// It returns the id it used beside the writer. A caller must print the id, and it
+    /// cannot recompute one that a retry replaced.
     pub fn create_minted(
         &self,
         now_millis: u64,
         new: NewSessionWithoutId<'_>,
-    ) -> Result<SessionWriter, SessionError>;
+    ) -> Result<(SessionId, SessionWriter), SessionError>;
 
     /// Every session in the store, newest first. A file rho cannot read is one row.
     ///
@@ -759,7 +829,10 @@ rho run --resume 20260825-09
 A space instead of an equals sign continues the wrong session. It also sends the id to the
 model as a question. No error appears. That is a fail-open shape, so the contract refuses it.
 
-- The flag sets `require_equals = true`.
+- The flag sets `require_equals = true`, **and** `num_args = 0..=1` with a
+  `default_missing_value`. A review found the first draft named the missing value and not
+  the argument count, and without the count a bare `--continue` yields no value at all. See
+  section 15, finding 5.
 - A prompt that matches the session id shape is refused. The message names `--resume=<id>`.
 - The refusal is the whole rule. rho never guesses which one the user meant.
 
@@ -1121,11 +1194,42 @@ and a caller that forgot to wire a guard is this project's signature defect.
 - `a_crash_offers_the_unclosed_session` — a store with an unclosed session offers it once.
 - `a_closed_session_is_never_offered` — a store of closed sessions offers nothing.
 
+**The recorder, which wrote no assistant turn.**
+- `a_run_records_the_assistant_text_of_a_turn` — a scripted stream of text deltas leaves one
+  `Message` record with role `Assistant` and the joined text. It must fail against a
+  recorder with no `TurnEnd` arm.
+- `a_run_records_a_tool_call_before_its_result` — the file holds the `ToolCall` block, and
+  it appears on an earlier line than its `ToolResult`.
+- `every_tool_call_on_disk_has_a_result_on_disk` — the invariant over a scripted run with
+  three tool calls. It is the pairing rule, checked on the file the run wrote.
+- `a_recorded_run_replays_as_a_valid_message_list` — read the file back, rebuild the branch,
+  and assert the pairing is complete and the assistant text survives. This is the resume
+  path, so it is the test that proves the feature works.
+- `an_empty_turn_writes_no_assistant_record` — a turn with no text and no call writes
+  nothing, so a file gains no blank message.
+- `a_reasoning_payload_survives_the_recorder_verbatim` — a provider replay payload reaches
+  the file unchanged.
+- `a_cancel_records_the_real_tool_arguments` — a cancel after a completed `ToolCallEnd`
+  writes the arguments the provider sent, not an empty object.
+- `an_empty_name_is_refused_by_the_recorder` — `record_name` with a blank string is an
+  error.
+
 **The budget.**
 - `a_list_of_five_hundred_sessions_reads_only_the_head_and_the_tail` — the deterministic
-  test. Across 500 files the bytes read stay at or under
-  `500 * (head line bytes + ROW_TAIL_BYTES)`, and exactly 500 files are opened. So no file is
-  fully decoded, and no directory is scanned twice.
+  test. It returns 500 rows, and one of the 500 files is a **sentinel**: it carries a `Name`
+  record after `ROW_HEAD_LINES` lines and more than `ROW_TAIL_BYTES` before the end. A
+  bounded `rows` cannot see that record, so the sentinel row reports
+  `title_is_explicit == false`. A `rows` that decodes the whole file reports `true`. So the
+  test fails against a full decode with no seam under `rows`.
+
+  A review found that the first draft asserted a byte bound over a method that opens its own
+  files, so no counting source could see the defect. That is `D-bash-line-cap` rebuilt one
+  level up. See `D-the-budget-test-needs-an-observable-difference`.
+- `create_minted_remints_after_a_collision` — the first id is taken, so `create_minted`
+  mints another and the existing file keeps every byte. It must fail against a
+  `create_minted` that propagates the collision.
+- `create_minted_gives_up_after_mint_attempts` — a store where every mint collides returns
+  an error after `MINT_ATTEMPTS` tries, and never spins.
 - The wall-clock number is **measured and printed, and it asserts nothing**. A shared CI
   runner makes a 100 millisecond assertion flaky, and on a fast machine it would pass against
   a full decode of small files. The number goes into `docs/benchmarks.md` with its command.
@@ -1186,3 +1290,48 @@ assume another defect of the same family was present. Both found one.
 3. Is any default fail-open? Look at the version rule and at the row fallbacks.
 4. Can `a_row_never_decodes_the_whole_file` fail against a full-file implementation?
 5. Does any test here pass against the defect it names?
+
+## 15. What the second review changed, before the wiring lane wrote code
+
+The wiring lane reviewed this contract again, because sections 3, 3a, 3b, 3c and 4 had
+already shipped between the first review and the start of the work. A reviewer that did not
+write the spec answered the five questions of section 14 against the real tree.
+
+**Nine findings. Each one is corrected above.**
+
+1. **Sections 3, 3a, 3b, 3c and 4 are built.** Section 3 now says so and names the file.
+   One rule arrived with the code and was missing here: a leading dot is stripped from a
+   key, so a project named `.config` does not hide the store. `PrefixMatch` was not built
+   with them, because it needs the store to resolve anything.
+2. **`NewSessionWithoutId` was named and never defined.** Section 7 defines it now.
+   `create_minted` also returns the id it used, because a retry replaces the first one and
+   a caller cannot recompute it.
+3. **The new `SessionSummary` replaces the old one.** It is not a second type of the same
+   name. `SessionStore::list` and the four-field `SessionSummary` both go, in the same
+   change, or the crate does not compile.
+4. **`Record::Session` gaining two fields breaks three sites.** `parse_header` matches the
+   variant with no rest pattern, and `create` and `fork` both build it as a literal. All
+   three are edits this lane must make, and none of them is optional.
+5. **Section 8c named `require_equals` and no argument count.** A bare `--continue` yields
+   no value without `num_args = 0..=1`. Section 8c states both now.
+6. **The recorder writes no assistant turn.** This is the worst finding, and the lane found
+   it, not the reviewer. Section 6d states the fix, and
+   `D-a-recorder-writes-the-assistant-turn` records the decision.
+7. **The budget test could not fail.** It asserted a byte bound over a method that opens
+   its own files, so no counting source could observe a full decode. Section 11 replaces it
+   with a sentinel row. See `D-the-budget-test-needs-an-observable-difference`.
+8. **`create_minted` had no test.** Section 11 names two.
+9. **Two named tests need a provider stub, and two need config keys.** The config keys
+   `ephemeral` and `session-file` already exist in `rho-config`, so this lane reads them and
+   edits nothing there. `rho-provider-testkit` supplies the stub, so no provider crate
+   changes either.
+
+### 15a. The extension point, restated
+
+A reviewer asked which new case needs an edit to shared code. One does: a second storage
+backend. Section 10 states it, keeps `SessionStore` a struct, and says a sqlite store is a
+fork. That is a deliberate choice, and it is written down rather than discovered.
+
+Everything else arrives without an edit to shared code. A new frontend calls the same store.
+A new record arrives as a leaf, and the referential check of section 6a catches a chain
+record that a build cannot read.
