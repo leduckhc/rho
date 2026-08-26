@@ -77,17 +77,6 @@ pub struct MotionInputs {
     pub stdout_is_terminal: bool,
 }
 
-impl MotionInputs {
-    /// The inputs under which the sweep animates: motion on, a terminal stdout, and
-    /// no reduced-motion preference.
-    pub fn animating() -> Self {
-        Self {
-            tui_motion: true,
-            stdout_is_terminal: true,
-        }
-    }
-}
-
 /// True when the sweep animates. False under any one stop condition.
 pub fn motion_enabled(inputs: MotionInputs) -> bool {
     inputs.tui_motion && inputs.stdout_is_terminal

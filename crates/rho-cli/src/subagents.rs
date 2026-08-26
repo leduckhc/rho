@@ -214,4 +214,71 @@ mod tests {
         let granted: Vec<String> = registry.specs().iter().map(|s| s.name.clone()).collect();
         assert_eq!(granted, vec!["read".to_string()]);
     }
+
+    // A provider that is never asked to stream. `load` stores the provider in the spawn
+    // environment but does not call it, so a stub with an erroring `stream` is enough and no
+    // test reaches the network.
+    struct StubProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for StubProvider {
+        fn id(&self) -> &str {
+            "stub"
+        }
+        async fn stream(
+            &self,
+            _request: rho_core::CompletionRequest,
+            _cancel: rho_core::CancelToken,
+        ) -> Result<rho_core::ProviderStream, rho_core::ProviderError> {
+            Err(rho_core::ProviderError::Decode(
+                "the stub never streams".to_string(),
+            ))
+        }
+    }
+
+    fn stub_request(session_root: &std::path::Path, discover: bool) -> LoadRequest {
+        let config = SessionConfig::new(
+            "m".to_string(),
+            session_root.to_path_buf(),
+            Arc::new(rho_core::AllowAllPolicy),
+        );
+        LoadRequest {
+            session_root: session_root.to_path_buf(),
+            trust_project: true,
+            discover,
+            parent_config: config,
+            provider: Arc::new(StubProvider),
+            hooks: Arc::new(HookChain::default()),
+            parent_tools: Vec::new(),
+            limits: SubagentLimits::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_agent_discovery_registers_no_spawn_tool() {
+        // D4, the behavioural half. `--no-agents` sets `discover_agents` false, and that must
+        // reach `discover` here and remove `spawn_agent`. When discovery is off,
+        // `rho_skills::discover_agents` returns before it scans any directory, so this reads
+        // no real `~/.rho` or `~/.agents` and its result cannot change per machine. A trusted
+        // project definition is present precisely to prove it is the switch, not an empty
+        // tree, that yields no tool.
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".rho").join("agents");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("scout.md"),
+            "---\nname: scout\ndescription: A scout that reads.\n---\nbody\n",
+        )
+        .unwrap();
+
+        let (tools, subagents) = load(stub_request(root.path(), false)).await;
+        assert!(
+            tools.is_empty(),
+            "agent discovery is off, so no spawn tool may be registered"
+        );
+        assert_eq!(
+            subagents.loaded, 0,
+            "a definition present but not discovered must not be loaded"
+        );
+    }
 }

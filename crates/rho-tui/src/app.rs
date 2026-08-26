@@ -154,6 +154,13 @@ impl App {
         self.state.live_rows()
     }
 
+    /// The current UI state the renderer draws. A test reads what the builder wired,
+    /// so it can drive the real `with_motion`, `with_reasoning`, or `with_context`
+    /// chain and render the result, instead of hand-building a `TuiState`.
+    pub fn state(&self) -> &TuiState {
+        &self.state
+    }
+
     /// The escape sequences this app writes at startup. A test reads the wiring.
     pub fn setup_sequence(&self) -> String {
         setup_sequences(self.mouse)
