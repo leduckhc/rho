@@ -115,6 +115,11 @@ does not.
 
 The cache in `D-no-list-cache-until-a-budget-fails` therefore does not ship.
 
+**Re-measured after the review changed the row builder**, because a number in a doc must match the
+tree it documents. Three runs: 21.88 ms, 19.43 ms, 20.13 ms. `docs/benchmarks.md` states all three,
+so a reader expects a spread and not one exact value. A documentation reviewer raised this: it ran
+the command and got 21.37 ms against a doc that named 20.68 ms.
+
 ## 4. The mutation proofs of the recorder slice
 
 `crates/rho-core/src/session/mod.rs` was copied to `/tmp/mod3.rs.good` first, and copied back
@@ -693,3 +698,46 @@ The test was restored, and both of its mutation proofs were re-run:
 | --- | --- |
 | only a `Text` block is expired | `a_handle_hidden_in_a_reasoning_block_expires_too` |
 | a nested tag survives in the kept head | the same |
+
+## 15. The printed examples in the spec are real output now
+
+A documentation reviewer found the spec's own examples drifting from the code, and one of them
+contradicted the contract: the `sessions show` header in section 8a printed `2 turns`, which section
+5 forbids because a turn count needs a whole file. A drafted example in a delivered spec is the
+stale-spec defect this project already has a decision about.
+
+Both examples were replaced with real output, from the built binary over a seeded store:
+
+```sh
+HOME=/tmp/rho-spec/home ./target/release/rho sessions show 20260825-09 --root /tmp/rho-spec/root
+HOME=/tmp/rho-spec/home ./target/release/rho sessions list --root /tmp/rho-spec/root
+HOME=/tmp/rho-spec/home ./target/release/rho sessions list --long --root /tmp/rho-spec/root
+```
+
+```
+session  20260825-094512-a3f9  "fix the parser"  claude-sonnet-4  closed
+  r1    09:25:12  model        bedrock claude-sonnet-4
+  r2    09:25:12  user         fix the parser
+  r3    09:25:12  assistant    I will read the file first.
+  r4    09:25:12  tool_call    read  path=src/parse.rs
+  r5    09:25:12  tool_result  read  1.2 KiB
+  r6    09:25:12  assistant    The bug is on line 42. Shall I fix it?
+  r7    09:25:12  user         yes
+  r8    09:25:12  assistant    Done. I changed one line.
+  r9    09:25:12  stop         EndTurn
+  r10   09:25:12  closed
+
+ID                   LAST ACTIVE TITLE              MODEL           TOKENS  COST
+20260825-094512-a3f9 just now    fix the parser     claude-sonnet-4      -     -
+20260824-171003-77b2 just now    add the retry test claude-haiku-4    3.1k $0.01
+20260823-092211-0c41 -           * unreadable: cannot decode a rec…      -     -
+
+ID                   LAST ACTIVE TITLE              MODEL           TOKENS  COST  CWD  FORK
+20260825-094512-a3f9 just now    fix the parser     claude-sonnet-4      -     -  /work/rho  -
+20260824-171003-77b2 just now    add the retry test claude-haiku-4    3.1k $0.01  /work/rho  -
+20260823-092211-0c41 -           * unreadable: cannot decode a rec…      -     -
+```
+
+Three things a reader can now check by eye. The first row shows a dash for its tokens, because that
+session recorded no `Usage` record. The `tool_result` line names the tool and 1.2 KiB and never the
+body. `--long` runs past 80 columns on purpose, and the default list does not.

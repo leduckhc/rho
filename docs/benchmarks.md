@@ -664,12 +664,17 @@ So a row comes from two bounded reads: the first `ROW_HEAD_LINES` lines, and the
 cargo test -p rho-core --test session_rows -- --nocapture a_list_of_five
 ```
 
+Three runs, on one machine, after the review changes to the row builder:
+
 | sessions | wall clock |
 | --- | --- |
-| 500 | 20.68 ms |
+| 500 | 21.88 ms |
+| 500 | 19.43 ms |
+| 500 | 20.13 ms |
 
-The budget holds with room to spare, so the cache in `D-no-list-cache-until-a-budget-fails` does
-not ship.
+**Three runs, and not one.** A single number invites a reader to reproduce it exactly, and this one
+varies by about two milliseconds per run. The budget is 100 milliseconds, so it holds with room to
+spare and the cache in `D-no-list-cache-until-a-budget-fails` does not ship.
 
 **The number asserts nothing.** A shared runner makes a 100 millisecond assertion flaky, and a
 fast machine would pass a full decode of small files. See `D-a-budget-is-measured-not-asserted`.

@@ -809,16 +809,26 @@ reason the fork command is usable.
 
 `rho sessions show <id-prefix>` prints one line per record. The format is fixed:
 
+**This is real output**, from the built binary over a seeded session. A drafted example drifts, and
+this one already had: it showed `2 turns` in the header, which section 5 forbids because a turn
+count needs a whole file.
+
 ```
-session  20260825-094512-a3f9  "fix the parser"  claude-sonnet-4  2 turns  closed
-  r1  09:45:12  user       fix the parser
-  r2  09:45:14  assistant  I will read the file first.
-  r3  09:45:14  tool_call  read  path=src/parse.rs
-  r4  09:45:15  tool_result  read  1.2 KiB
-  r5  09:45:19  assistant  The bug is on line 42. Shall I fix it?
-  r6  09:46:02  user       yes
-  r7  09:46:20  assistant  Done. I changed one line.
+session  20260825-094512-a3f9  "fix the parser"  claude-sonnet-4  closed
+  r1    09:25:12  model        bedrock claude-sonnet-4
+  r2    09:25:12  user         fix the parser
+  r3    09:25:12  assistant    I will read the file first.
+  r4    09:25:12  tool_call    read  path=src/parse.rs
+  r5    09:25:12  tool_result  read  1.2 KiB
+  r6    09:25:12  assistant    The bug is on line 42. Shall I fix it?
+  r7    09:25:12  user         yes
+  r8    09:25:12  assistant    Done. I changed one line.
+  r9    09:25:12  stop         EndTurn
+  r10   09:25:12  closed
 ```
+
+The `model` line is the record `create` writes, so a reader sees which model answered. The
+`tool_result` line names the tool and 1.2 KiB, and never the body.
 
 Rules for the format:
 
@@ -853,12 +863,18 @@ is nicer, and it is not the only way.
 
 The list is a user-facing surface, so its columns are part of the contract.
 
+Real output again, over the same seeded store:
+
 ```
-ID                    LAST ACTIVE  TITLE                          MODEL            TOKENS   COST
-20260825-094512-a3f9  2 min ago    fix the parser                 claude-sonnet-4   14.2k  $0.08
-20260824-171003-77b2  yesterday    add the retry test             claude-haiku-4     3.1k  $0.01
-20260823-092211-0c41  2 days ago   * unreadable: bad header       -                    -      -
+ID                   LAST ACTIVE TITLE              MODEL           TOKENS  COST
+20260825-094512-a3f9 just now    fix the parser     claude-sonnet-4      -     -
+20260824-171003-77b2 just now    add the retry test claude-haiku-4    3.1k $0.01
+20260823-092211-0c41 -           * unreadable: cannot decode a rec…      -     -
 ```
+
+The first row shows a dash for the tokens, because that session recorded no `Usage` record. rho
+shows no number it did not read. The unreadable row keeps its id and its reason, and its unknown
+fields are dashes.
 
 - Six columns, and they fit 80 columns. A test asserts the width.
 - The title column is cut with an ellipsis, never wrapped.
