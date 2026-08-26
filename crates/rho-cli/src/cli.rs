@@ -150,6 +150,10 @@ pub struct Cli {
     ///
     /// A message count is not a memory bound, because one message can be any size. A
     /// model writes a steer to a child, and 160 child queues may exist at once.
+    ///
+    /// **Raising this raises the memory ceiling with it.** The ceiling is this value times
+    /// 32 messages, times `--max-queued-total` plus `--max-live-agents`. At the defaults
+    /// that is 80 MiB. rho does not clamp the value, because the host owns the machine.
     #[arg(long, global = true, value_name = "BYTES")]
     pub max_agent_steer_bytes: Option<usize>,
 

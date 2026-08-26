@@ -714,6 +714,25 @@ A third defect came out of driving it: `agent_status` printed two full stops, be
 `AgentOutcome::label` ended a phrase that its caller also ended. It is fixed, and
 `a_failed_label_is_a_phrase_and_not_a_sentence` pins it.
 
+## Two items the queue-bound review left, both recorded rather than remembered
+
+A four-lens review and `codex review` found three real defects in the byte cap, and all three
+are fixed. Two findings are open on purpose, and each needs work outside that lane.
+
+1. **A child's failure reason reaches the parent model unsanitised.** `AgentOutcome::label`
+   builds `failed: {reason}`, and `agent_status` puts that string into a tool result the parent
+   reads. A reason can carry a provider's text or a child's text, so it can carry a newline or
+   an escape and forge a line that looks like rho's own. The fix is the pattern `rho-skills`
+   already uses: a newtype whose only constructor sanitises and bounds the value. It needs its
+   own decision, because the questions are where to sanitise, what to cap, and which callers
+   must change. See the security review in `docs/verification/subagent-queue-bounds.md`.
+2. **No flag has an upper bound.** `--max-agent-steer-bytes` near the top of `usize`
+   effectively removes the byte cap, and `--queue-wait-secs` near the top of `u64` effectively
+   removes the deadline. Neither panics, and tokio saturates the sleep. A host owns its own
+   machine, so this is documented rather than clamped: the flag help and
+   `docs/guide/subagents.md` now state the ceiling formula. A clamp would need a decision about
+   what a sane maximum is.
+
 **Config keys for the subagent limits stay unwired, on purpose.** `rho-config` parses a
 `[subagents]` layer that no binary reads, so only a flag changes a limit today. That gap is
 larger than the queue and it belongs to another worktree. See decision

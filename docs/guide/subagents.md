@@ -155,6 +155,10 @@ A steering message to a child is capped at `--max-agent-steer-bytes`. A larger m
 refused, and the refusal states the size and the limit. Write a long body to a file, and steer
 with the file name.
 
+Raising that cap raises the memory ceiling with it. The ceiling is the cap, times 32 messages,
+times the waiting and live child limits. At the defaults it is 80 MiB. rho does not clamp the
+value, because you own the machine.
+
 Grace turns exist because a child cannot ask for more turns.
 When a child is this many turns from its cap, rho tells it to write its summary early.
 
