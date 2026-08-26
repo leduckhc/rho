@@ -405,12 +405,18 @@ fn json_bytes(value: &serde_json::Value, depth: usize) -> usize {
         // A key is a payload too. A review deleted this charge and every test stayed
         // green, so one 60 KiB key counted ten bytes and passed a 64 KiB cap.
         //
-        // An entry carries no charge of its own beyond its key, because its value is a
-        // node and a node already costs the floor. A separate entry charge was redundant,
-        // and a deliberate break proved no test could see it. See AGENTS.md step 6.
+        // An entry costs the floor on top of its key and its value, because a map entry is
+        // a heap node in its own right. A first fix deleted that charge as redundant, and a
+        // re-review showed it is not: an object of short keys and empty values then counted
+        // four bytes an entry while each real entry costs tens. So an entry costs more than
+        // an array element, and `no_json_node_is_free_to_hold` pins that difference.
         serde_json::Value::Object(fields) => fields
             .iter()
-            .map(|(key, held)| json_bytes(held, depth + 1).saturating_add(key.len()))
+            .map(|(key, held)| {
+                json_bytes(held, depth + 1)
+                    .saturating_add(key.len())
+                    .saturating_add(JSON_NODE_MIN_BYTES)
+            })
             .fold(JSON_NODE_MIN_BYTES, usize::saturating_add),
     }
 }
@@ -785,6 +791,31 @@ mod tests {
                 "{what} counted {counted}, under the floor"
             );
         }
+
+        // An object entry costs more than an array element, because an entry is a heap node
+        // with a key slot. A first fix deleted that charge as redundant, and a map of short
+        // keys and empty values then counted four bytes an entry.
+        //
+        // **The key is empty on purpose.** With any key at all the key charge alone makes an
+        // object dearer than an array, and the entry charge could be deleted unseen. That is
+        // exactly what happened to the first version of this assertion.
+        let counted = |value| {
+            block_bytes(
+                &ContentBlock::ToolCall {
+                    id: String::new(),
+                    name: String::new(),
+                    arguments: value,
+                    state: None,
+                },
+                0,
+            )
+        };
+        let one_entry = serde_json::json!({ "": null });
+        let one_element = serde_json::json!([null]);
+        assert!(
+            counted(one_entry) > counted(one_element),
+            "an entry with no key must still cost more than an element"
+        );
 
         // And no node is free, so a value of many empty nodes still costs. The floor is
         // asserted per node, so an arm that charged nothing would fail here.

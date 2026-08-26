@@ -191,7 +191,7 @@ keeps its whole budget.
 
 ## 9. The deliberate breaks
 
-Twenty-six mutations ran, each with the file copied to `/tmp` first and copied back after.
+Twenty-seven mutations ran, each with the file copied to `/tmp` first and copied back after.
 Never `git checkout`. Every one was caught by the named tests, and the restored file passed
 again.
 
@@ -217,6 +217,7 @@ again.
 | an object key is free | `no_json_node_is_free_to_hold` |
 | a null node is free | `no_json_node_is_free_to_hold` |
 | an object loses its own floor | `no_json_node_is_free_to_hold` |
+| an object entry costs nothing of its own | `no_json_node_is_free_to_hold` |
 | an array loses its own floor | `no_json_node_is_free_to_hold` |
 | a string value is free | `no_json_node_is_free_to_hold`, `the_counted_size_covers_every_block_kind` |
 | the block walk has no depth guard | `a_nested_tool_result_too_deep_to_count_is_refused` |
@@ -244,9 +245,15 @@ mutation.
   showed a `Vec` of capacity 100000 holding one block, and a `String` of capacity 1000000
   holding two bytes. `push` now drops that room before it stores the message.
 
-Two charges turned out to be redundant, and a deliberate break proved no test could see either.
-They are deleted, per AGENTS.md step 6: an array element charge, and an object entry charge.
-Every value costs the floor already.
+One charge turned out to be redundant, and a deliberate break proved no test could see it. The
+array element charge is deleted, per AGENTS.md step 6, because every element costs the node
+floor already.
+
+A second charge looked redundant and was not. A re-review of the fix showed that deleting the
+object entry charge let a map of short keys and empty values count four bytes an entry, while a
+real map entry costs tens. It is restored, and the assertion that pins it uses an **empty** key.
+With any key at all the key charge alone makes an object dearer than an array, so the first
+version of that assertion could not see the entry charge, and a break proved it.
 
 **One process note.** `codex review` ran while the mutation harness was running, so it read a
 file in a mutated state and reported an unused variable that no commit ever held. Its other two

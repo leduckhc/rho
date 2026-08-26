@@ -1145,6 +1145,10 @@ async fn a_slot_that_frees_before_the_deadline_still_starts_the_child() {
     // The clock is paused and nothing is timed out here on purpose. An earlier version used
     // the real clock and a five second timeout, which a loaded machine could miss. A test
     // that fails on a busy box teaches nobody.
+    //
+    // This one covers a slot that is free before the wait. The wake path, where a slot frees
+    // while a waiter already waits, stays covered by `a_queued_child_starts_when_a_slot_frees`
+    // and by `every_waiter_eventually_starts_when_slots_free_one_at_a_time`.
     let registry = registry(one_slot_waiting(Duration::from_secs(30)));
     let (_root, live, queued) = hold_the_slot_and_queue_one(&registry, CancelToken::new());
     drop(live);
