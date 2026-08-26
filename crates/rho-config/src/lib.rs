@@ -540,10 +540,14 @@ impl ConfigLayer {
 /// is encrypted. Plain `http` puts the key on the wire in clear text, so it is allowed only
 /// where the traffic never leaves the machine.
 ///
-/// The host is read from a parser, never from the string. `http://127.0.0.1@evil.example`
-/// has host `evil.example`, and a substring check would send the key there. An encoded
-/// address such as `http://2130706433` is refused rather than decoded, because rho does not
-/// out-guess a resolver, and a DNS lookup here would be a TOCTOU of its own.
+/// The host is read from a parser, never from the string. `http://127.0.0.1@evil.example` has
+/// host `evil.example`, and a substring check would send the key there.
+///
+/// An encoded address is **decoded by the parser and then judged on the result**, which an
+/// earlier version of this comment denied. `http://2130706433` is 127.0.0.1, so it is allowed,
+/// and `http://3627734734` is not loopback, so it is refused. A live probe found the comment
+/// wrong while the behaviour was right. A name is never resolved, because a DNS lookup here
+/// would be a TOCTOU of its own, so only `localhost` is accepted by name.
 fn check_base_url(value: &str) -> Result<(), ConfigError> {
     let refuse = |message: &str| {
         Err(ConfigError::Value {

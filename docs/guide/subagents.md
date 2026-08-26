@@ -210,9 +210,9 @@ Rename the file to avoid a silent override.
 > `max_depth` is fixed at 1 in this version.
 > A definition that sets it has no effect.
 
-> **Partly built.** `--no-skills` also turns subagents off, and it says so nowhere. rho then
-> registers no `spawn_agent` and ignores every definition you wrote. Drop the flag to get
-> subagents back. A live run proved both halves.
+`--no-skills` leaves subagents alone. It used to turn them off and say nothing, so a definition
+was ignored and `spawn_agent` disappeared. Use `--no-agents` when you want no subagent, and rho
+says so at startup.
 
 ## See also
 
