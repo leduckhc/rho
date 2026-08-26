@@ -9,7 +9,7 @@
 //! and the reason states the repair. See `docs/specs/20260826-184110-SPEC-definition-rejection.md`.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::frontmatter::{MAX_FRONTMATTER_BYTES, sanitize};
 use crate::types::SkillOrigin;
@@ -17,18 +17,38 @@ use crate::types::SkillOrigin;
 /// The most characters a detail may hold, including the mark that says it was cut.
 const MAX_DETAIL_LENGTH: usize = 200;
 
+/// The most characters a path may hold when it is drawn.
+const MAX_PATH_LENGTH: usize = 200;
+
 /// What replaces the tail of a detail that is too long.
 const ELLIPSIS: &str = "...";
 
 /// The repair for an unclosed block names this size, so the two must agree.
 const _: () = assert!(MAX_FRONTMATTER_BYTES == 16 * 1024);
 
+/// A path, made safe to draw.
+///
+/// A file name is repository text. A name that holds a line break used to forge a
+/// second `rho:` line, which is how a repository would claim that rho trusts it. So
+/// every control character goes, and a long path is cut on the **left**, because the
+/// file name at the end is the part a user needs.
+fn safe_path(path: &Path) -> String {
+    let clean = sanitize(&path.display().to_string());
+    let length = clean.chars().count();
+    if length <= MAX_PATH_LENGTH {
+        return clean;
+    }
+    let keep = MAX_PATH_LENGTH - ELLIPSIS.chars().count();
+    let tail: String = clean.chars().skip(length - keep).collect();
+    format!("{ELLIPSIS}{tail}")
+}
+
 /// A short piece of text that explains a rejection.
 ///
 /// The text may quote a file inside the repository under edit, so it is untrusted.
 /// **The type is the guarantee.** A `Detail` holds no control character and at most
 /// [`MAX_DETAIL_LENGTH`] characters, because no caller can build one another way.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Detail(String);
 
 impl Detail {
@@ -195,7 +215,7 @@ impl RejectedDefinition {
         };
         format!(
             "agent definition {} did not load. {}.{} {}",
-            self.path.display(),
+            safe_path(&self.path),
             self.reason.explain(),
             quoted,
             self.reason.repair()
@@ -242,6 +262,21 @@ mod tests {
             Detail::withheld().is_empty(),
             "a withheld detail shows nothing"
         );
+    }
+
+    #[test]
+    fn a_bidi_override_cannot_reorder_a_line() {
+        // A control character is not the only way to disguise text. A right-to-left
+        // override reorders what follows, so a file could make its own words read as
+        // though rho wrote them.
+        let hostile = Detail::new("safe \u{202e}desrever\u{2066} and \u{2028}a new line");
+        for bad in ['\u{202e}', '\u{2066}', '\u{2028}'] {
+            assert!(
+                !hostile.as_str().contains(bad),
+                "{bad:?} must not reach the terminal: {:?}",
+                hostile.as_str()
+            );
+        }
     }
 
     #[test]

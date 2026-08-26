@@ -202,6 +202,18 @@ fn notices_for(set: &rho_skills::AgentSet) -> Vec<String> {
         ));
     }
 
+    // A definition that loaded may still hold a warning, for example a dropped tool
+    // keyword or a bad sandbox value. Nothing printed one, so a definition narrowed a
+    // child in silence. A skill warning has always printed.
+    //
+    // Only a loaded definition reports. A withheld one changes nothing in this session,
+    // and its warning would carry prose from a repository the user has not trusted.
+    for def in &set.loaded {
+        for warning in &def.warnings {
+            notices.push(format!("agent definition {}: {warning}", def.name));
+        }
+    }
+
     notices
 }
 
@@ -302,6 +314,78 @@ mod tests {
         assert!(
             notices.iter().any(|line| line.contains("1 more")),
             "the rest are counted: {notices:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_definition_warning_reaches_the_user_too() {
+        // A loaded definition may still hold a warning, for example a dropped tool
+        // keyword. Nothing printed one, so `tools: all, read` narrowed a child in
+        // silence. A skill warning has always printed. See SPEC-definition-rejection
+        // section 5.
+        let dir = tempfile::tempdir().unwrap();
+        write_agent(
+            dir.path(),
+            "scout.md",
+            "---\nname: scout\ndescription: Recon.\ntools: all, read\n---\nbody\n",
+        );
+
+        let set = discover_in(dir.path()).await;
+        assert_eq!(set.loaded.len(), 1);
+        assert!(!set.loaded[0].warnings.is_empty(), "the loader warned");
+        let joined = notices_for(&set).join("\n");
+        assert!(
+            joined.contains("scout"),
+            "the notice names the definition: {joined}"
+        );
+        assert!(
+            joined.contains("keyword"),
+            "the warning itself reaches the user: {joined}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_untrusted_project_definition_prints_no_warning() {
+        // A warning is rho's text with the file's text inside it. A rejection from an
+        // untrusted project quotes nothing, and a warning follows the same rule. The
+        // definition is not loaded, so its warning changes nothing in this session.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_agent(
+            &root.join(".rho").join("agents"),
+            "sneaky.md",
+            "---\nname: sneaky\ndescription: Recon.\ntools: all, rho-is-insecure\n---\nbody\n",
+        );
+        let config = rho_skills::AgentConfig {
+            user_dirs: Vec::new(),
+            session_root: Some(root.to_path_buf()),
+            project_trusted: false,
+            discover: true,
+        };
+        let set = rho_skills::discover_agents(&config).await;
+        assert_eq!(set.withheld.len(), 1, "it parsed, so it is withheld");
+        assert!(!set.withheld[0].warnings.is_empty(), "the loader warned");
+
+        let joined = notices_for(&set).join("\n");
+        assert!(
+            !joined.contains("rho-is-insecure"),
+            "an untrusted file puts no prose of its own on a line: {joined}"
+        );
+        assert!(
+            joined.contains("not loaded: sneaky"),
+            "the user still learns the file exists: {joined}"
+        );
+
+        // With trust, the same warning prints, because the user vouched for the file.
+        let trusted = rho_skills::AgentConfig {
+            project_trusted: true,
+            ..config
+        };
+        let set = rho_skills::discover_agents(&trusted).await;
+        let joined = notices_for(&set).join("\n");
+        assert!(
+            joined.contains("rho-is-insecure"),
+            "a trusted file reports its own warning: {joined}"
         );
     }
 

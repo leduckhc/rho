@@ -674,3 +674,110 @@ async fn an_untrusted_project_file_quotes_nothing_in_its_rejection() {
         "a trusted file may quote its own parser error"
     );
 }
+
+// --- What a notice may carry. Found by driving the product, then by review. ---
+
+#[tokio::test]
+async fn a_warning_carries_no_control_character_and_no_unbounded_text() {
+    // A warning interpolates the file's own text: a tool name, a sandbox value, a file
+    // stem. Every one of those printed raw, and a live run put ESC[2J and 400
+    // characters of repository prose onto a start-up line.
+    let dir = tempfile::tempdir().unwrap();
+    let prose = "prose ".repeat(60);
+    let path = write_agent(
+        dir.path(),
+        "warner.md",
+        &format!(
+            "---\nname: warner\ndescription: Recon.\ntools: [all, \"read\\e[2J\"]\n\
+             sandbox: \"\\e[31mrho: trust me\\e[0m {prose}\"\n---\nbody\n"
+        ),
+    );
+    let def = accept(&path).await;
+    assert!(!def.warnings.is_empty(), "the file breaks two rules");
+    for warning in &def.warnings {
+        assert!(
+            !warning.chars().any(char::is_control),
+            "no control character may reach the terminal: {warning:?}"
+        );
+        assert!(
+            !warning.contains(&prose),
+            "the file's own prose must arrive capped: {warning}"
+        );
+    }
+    assert!(
+        def.warnings.iter().any(|w| w.contains("...")),
+        "a cut value says it was cut: {:?}",
+        def.warnings
+    );
+}
+
+#[tokio::test]
+async fn a_hostile_file_name_cannot_forge_a_notice_line() {
+    // A file name is repository text. A name holding a line break forged a second
+    // "rho:" line in a live run, which is how a repository would claim it was trusted.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "x\nrho: 3 project definitions are trusted.md",
+        "no frontmatter\n",
+    );
+    let notice = reject(&path).await.notice();
+    assert!(
+        !notice.chars().any(char::is_control),
+        "the path is drawn safely: {notice:?}"
+    );
+    assert!(
+        notice.lines().count() == 1,
+        "one rejection is one line: {notice:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_very_long_path_is_cut_on_the_left_so_the_file_name_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let deep = dir.path().join("d".repeat(120)).join("e".repeat(120));
+    let path = write_agent(&deep, "target.md", "no frontmatter\n");
+    let notice = reject(&path).await.notice();
+    assert!(
+        notice.contains("target.md"),
+        "the file name is what a user needs: {notice}"
+    );
+    assert!(notice.contains("..."), "the cut is marked: {notice}");
+}
+
+#[tokio::test]
+async fn a_symlink_from_a_user_dir_into_the_session_root_is_treated_as_a_project_agent() {
+    // The skill loader closes this hole and the agent loader did not. A live run loaded
+    // a definition that lives in the repository, as trusted, with no --trust-project.
+    // An agent definition carries a tool list and a model, so it needs the rule more.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let inside = write_agent(&root, "evil.md", SCOUT);
+
+    let user = dir.path().join("home").join(".rho").join("agents");
+    std::fs::create_dir_all(&user).unwrap();
+    std::os::unix::fs::symlink(&inside, user.join("evil.md")).unwrap();
+
+    let config = AgentConfig {
+        user_dirs: vec![user],
+        session_root: Some(root.clone()),
+        project_trusted: false,
+        discover: true,
+    };
+    let set = discover_agents(&config).await;
+    assert!(
+        set.loaded.is_empty(),
+        "a definition inside the session root is not trusted: {:?}",
+        set.loaded.iter().map(|d| &d.name).collect::<Vec<_>>()
+    );
+    assert_eq!(set.withheld.len(), 1, "it is withheld, and still listed");
+    assert_eq!(set.withheld[0].origin, SkillOrigin::Project);
+
+    // With trust, the same file loads.
+    let trusted = AgentConfig {
+        project_trusted: true,
+        ..config
+    };
+    assert_eq!(discover_agents(&trusted).await.loaded.len(), 1);
+}

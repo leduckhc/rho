@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use rho_core::{SandboxMode, ToolIntersection, intersect_tools};
 use serde::{Deserialize, Deserializer};
 
+use crate::discover::is_inside;
 use crate::frontmatter::{extract_frontmatter, read_bounded, sanitize};
 use crate::rejection::{Detail, RejectedDefinition, RejectionReason};
 use crate::types::SkillOrigin;
@@ -144,12 +145,22 @@ pub async fn discover_agents(config: &AgentConfig) -> AgentSet {
         return set;
     }
 
+    // Resolve the root once. A user directory may hold a symlink that points inside
+    // the session root, and that file is a project file whatever directory found it.
+    let canonical_root = config
+        .session_root
+        .as_deref()
+        .and_then(|root| root.canonicalize().ok());
+
     for dir in &config.user_dirs {
         for path in markdown_files(dir) {
-            match load_definition(&path, SkillOrigin::User).await {
-                Ok(def) => set.loaded.push(def),
-                Err(rejected) => set.rejected.push(rejected),
-            }
+            let origin = if is_inside(&path, canonical_root.as_deref()) {
+                SkillOrigin::Project
+            } else {
+                SkillOrigin::User
+            };
+            let outcome = load_definition(&path, origin).await;
+            admit(&mut set, outcome, origin, config.project_trusted);
         }
     }
 
@@ -160,27 +171,46 @@ pub async fn discover_agents(config: &AgentConfig) -> AgentSet {
         ];
         for dir in project_dirs {
             for path in markdown_files(&dir) {
-                match load_definition(&path, SkillOrigin::Project).await {
-                    Ok(def) => {
-                        if config.project_trusted {
-                            set.loaded.push(def);
-                        } else {
-                            set.withheld.push(def);
-                        }
-                    }
-                    // An untrusted repository must not write its own prose onto a
-                    // start-up line, so the detail goes and the reason stays.
-                    Err(rejected) => set.rejected.push(if config.project_trusted {
-                        rejected
-                    } else {
-                        rejected.without_detail()
-                    }),
-                }
+                let outcome = load_definition(&path, SkillOrigin::Project).await;
+                admit(
+                    &mut set,
+                    outcome,
+                    SkillOrigin::Project,
+                    config.project_trusted,
+                );
             }
         }
     }
 
     set
+}
+
+/// File one load outcome into the set, under the trust rule.
+///
+/// One place decides trust, so the user pass and the project pass cannot drift apart.
+/// An untrusted rejection loses its detail, because a repository rho has not been told
+/// to trust must not put its own prose on a start-up line.
+fn admit(
+    set: &mut AgentSet,
+    outcome: Result<AgentDefinition, RejectedDefinition>,
+    origin: SkillOrigin,
+    project_trusted: bool,
+) {
+    let trusted = matches!(origin, SkillOrigin::User) || project_trusted;
+    match outcome {
+        Ok(def) => {
+            if trusted {
+                set.loaded.push(def);
+            } else {
+                set.withheld.push(def);
+            }
+        }
+        Err(rejected) => set.rejected.push(if trusted {
+            rejected
+        } else {
+            rejected.without_detail()
+        }),
+    }
 }
 
 /// Load one definition from a path.
@@ -241,8 +271,10 @@ pub async fn load_definition(
     let name = match raw.name {
         Some(name) => sanitize(&name),
         None => {
+            // The stem is repository text, so it goes through the bounded type.
             warnings.push(format!(
-                "the agent has no name. The file name \"{fallback_name}\" is used instead."
+                "the agent has no name. The file name \"{}\" is used instead.",
+                Detail::new(&fallback_name)
             ));
             sanitize(&fallback_name)
         }
@@ -262,8 +294,14 @@ pub async fn load_definition(
     let sandbox = match raw.sandbox {
         Some(text) => match text.parse::<SandboxMode>() {
             Ok(mode) => Some(mode),
-            Err(error) => {
-                warnings.push(error);
+            // rho-core's message quotes the whole value, and a value is repository
+            // text of any length. So the value goes through the bounded type here, and
+            // the repair stays whole.
+            Err(_) => {
+                warnings.push(format!(
+                    "the sandbox mode \"{}\" is unknown. Use off, confined, or strict.",
+                    Detail::new(&text)
+                ));
                 None
             }
         },
@@ -403,10 +441,11 @@ fn resolve_tool_list(tokens: &[String], warnings: &mut Vec<String>) -> Option<Ve
         return Some(names);
     }
     if !names.is_empty() {
+        // Both lists hold repository text, so both go through the bounded type.
         warnings.push(format!(
             "a tool keyword must stand alone. \"{}\" was dropped. These named tools stand: {}.",
-            keywords.join(", "),
-            names.join(", ")
+            Detail::new(keywords.join(", ")),
+            Detail::new(names.join(", "))
         ));
         return Some(names);
     }
