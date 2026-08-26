@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use rho_core::{ContentBlock, ProviderState, ReasoningOwner, SessionLog};
+use rho_core::{ContentBlock, NewSession, ProviderState, ReasoningOwner, SessionId, SessionLog};
 
 /// A writer that collects every log byte into a shared buffer.
 #[derive(Clone)]
@@ -73,7 +73,7 @@ fn recorded_in_dir(block: ContentBlock) -> (Vec<String>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("a temp dir");
     let store = rho_core::SessionStore::new(dir.path());
     let writer = store
-        .create("test-session", dir.path(), "allow-all", "off")
+        .create(new_session(&sid(1), dir.path(), "allow-all", "off"))
         .expect("the session file opens");
     let path = writer.path().to_path_buf();
     let mut recorder = rho_core::SessionRecorder::new(SessionLog::File(writer));
@@ -85,6 +85,34 @@ fn recorded_in_dir(block: ContentBlock) -> (Vec<String>, tempfile::TempDir) {
         .map(str::to_string)
         .collect();
     (lines, dir)
+}
+
+/// A stable session id. Minting takes a time and a suffix, so no test sleeps.
+fn sid(suffix: u16) -> SessionId {
+    SessionId::mint(1_756_000_000_000, suffix)
+}
+
+/// The create request these tests use.
+///
+/// `SessionStore::create` takes one struct, because a four-argument constructor already hid a
+/// fake model id and an approve-all policy in this project. See
+/// `D-no-four-argument-session-new`. It writes the header and one `ModelChange` record, so
+/// every created file starts with two lines.
+fn new_session<'a>(
+    id: &'a SessionId,
+    cwd: &'a std::path::Path,
+    approval: &'a str,
+    sandbox: &'a str,
+) -> NewSession<'a> {
+    NewSession {
+        id,
+        cwd,
+        approval,
+        sandbox,
+        provider: "testkit",
+        model: "test-model",
+        forked_from: None,
+    }
 }
 
 /// Rule 9. The payload is exempt from redaction, so it must never reach a log instead.

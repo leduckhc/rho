@@ -111,6 +111,11 @@ fn map_record(value: &Value) -> Result<Option<Entry>, Drop> {
             cwd: string_field(value, "cwd").unwrap_or_default().into(),
             approval: DEFAULT_APPROVAL.to_string(),
             sandbox: DEFAULT_SANDBOX.to_string(),
+            // A pi file states no rho session id, so the reader falls back to the file stem.
+            // Inventing one here would put a wrong id inside the file for ever.
+            session_id: None,
+            // A pi session is not a fork of a rho session.
+            forked_from: None,
         },
         "model_change" => {
             // The fixture names the field `model`; a real pi file names it `modelId`.

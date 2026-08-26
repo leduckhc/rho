@@ -404,11 +404,21 @@ Defence in depth, because one guard on one path is how `confine` stayed unproven
 ///
 /// A missing parent is an error, never a short list. A short list would drop the end of a
 /// conversation, and the provider request would look valid.
+///
+/// `root` names the header record id, which is not in `entries`, because `read_from`
+/// consumes the first line before its loop. A caller that read a file passes
+/// `Some(&read.header_id)`. A caller with hand-built entries passes `None`, and then every
+/// parent must resolve inside `entries`. Without this parameter the walk cannot tell the
+/// root from a hole, so it would refuse every real file. See section 15, finding 10.
 pub fn branch_messages(
     entries: &[Entry],
     head: &RecordId,
+    root: Option<&RecordId>,
 ) -> Result<Vec<Message>, SessionError>;
 ```
+
+`ReadResult` gains `header_id: RecordId` for the same reason. A fork needs it too, to
+re-parent its first copied record.
 
 ### 6c. The records
 
@@ -536,6 +546,26 @@ impl SessionStore {
     pub fn create_minted(
         &self,
         now_millis: u64,
+        new: NewSessionWithoutId<'_>,
+    ) -> Result<(SessionId, SessionWriter), SessionError>;
+
+    /// Create a session, taking each id suffix from `suffixes`.
+    ///
+    /// **The retry needs this seam, or its test is theatre.** `create_minted` draws its own
+    /// suffix, so two calls in one millisecond get two ids and no collision ever happens.
+    /// A test could then never reach the retry. So the suffix source is a parameter here,
+    /// exactly as `SessionReader::read_from` and `ProjectKey::resolve_from` take their
+    /// input.
+    ///
+    /// A test passes `[0x1234, 0x1234, 0x5678]`, so the first two attempts collide and the
+    /// third wins. A test that passes one repeated suffix reaches `MINT_ATTEMPTS`.
+    ///
+    /// `create_minted` calls this with a real suffix source, so the store path and the
+    /// tested path are the same code. See section 15, finding 8.
+    pub fn create_minted_from<I: Iterator<Item = u16>>(
+        &self,
+        now_millis: u64,
+        suffixes: I,
         new: NewSessionWithoutId<'_>,
     ) -> Result<(SessionId, SessionWriter), SessionError>;
 
@@ -687,6 +717,13 @@ pub enum SessionError {
     /// A record names a parent the reader skipped, so the chain has a hole.
     #[error("record {child} names parent {parent}, which this build could not read")]
     Orphan { child: RecordId, parent: RecordId },
+    /// A record names a leaf record as its parent. A leaf is never a parent.
+    ///
+    /// A reviewer asked for the name. Section 11 names the test and the first draft had no
+    /// error for it, so the refusal would have arrived as a bare decode message. See section
+    /// 15, finding 9a.
+    #[error("record {child} names parent {parent}, which is a leaf record and never a parent")]
+    LeafParent { child: RecordId, parent: RecordId },
     /// Two records in one file share an id.
     #[error("record id {id} appears twice in the file")]
     DuplicateId { id: RecordId },
@@ -1225,11 +1262,12 @@ and a caller that forgot to wire a guard is this project's signature defect.
   A review found that the first draft asserted a byte bound over a method that opens its own
   files, so no counting source could see the defect. That is `D-bash-line-cap` rebuilt one
   level up. See `D-the-budget-test-needs-an-observable-difference`.
-- `create_minted_remints_after_a_collision` — the first id is taken, so `create_minted`
-  mints another and the existing file keeps every byte. It must fail against a
-  `create_minted` that propagates the collision.
-- `create_minted_gives_up_after_mint_attempts` — a store where every mint collides returns
-  an error after `MINT_ATTEMPTS` tries, and never spins.
+- `create_minted_remints_after_a_collision` — the suffix source hands out one taken suffix
+  and then a free one, through `create_minted_from`. The second id differs from the first,
+  and the existing file keeps every byte. It must fail against a `create_minted` that
+  propagates the collision.
+- `create_minted_gives_up_after_mint_attempts` — a suffix source that repeats one value
+  forever returns an error after `MINT_ATTEMPTS` tries, and never spins.
 - The wall-clock number is **measured and printed, and it asserts nothing**. A shared CI
   runner makes a 100 millisecond assertion flaky, and on a fast machine it would pass against
   a full decode of small files. The number goes into `docs/benchmarks.md` with its command.
@@ -1320,7 +1358,9 @@ write the spec answered the five questions of section 14 against the real tree.
 7. **The budget test could not fail.** It asserted a byte bound over a method that opens
    its own files, so no counting source could observe a full decode. Section 11 replaces it
    with a sentinel row. See `D-the-budget-test-needs-an-observable-difference`.
-8. **`create_minted` had no test.** Section 11 names two.
+8. **`create_minted` had no test, and no seam.** Section 11 names two tests, and section 7
+   adds `create_minted_from`. Without the seam a test cannot force a collision, because two
+   calls in one millisecond draw two different suffixes.
 9. **Two named tests need a provider stub, and two need config keys.** The config keys
    `ephemeral` and `session-file` already exist in `rho-config`, so this lane reads them and
    edits nothing there. `rho-provider-testkit` supplies the stub, so no provider crate
@@ -1335,3 +1375,17 @@ fork. That is a deliberate choice, and it is written down rather than discovered
 Everything else arrives without an edit to shared code. A new frontend calls the same store.
 A new record arrives as a leaf, and the referential check of section 6a catches a chain
 record that a build cannot read.
+
+### 15b. Three more items needed a name
+
+Section 11 names `a_hand_built_leaf_parent_is_refused`, and section 7e listed no error for
+it. So the refusal would have arrived as a bare decode message, and a caller could not match
+on it. Section 7e adds `SessionError::LeafParent`, which names both ids.
+
+A fork at a record the file does not hold needed a name too. A user typing
+`--at r99` reaches it, so section 7e adds `SessionError::NoSuchRecord`.
+`SessionError::MintExhausted` names the bounded retry of section 7c.
+
+10. **`branch_messages` could not tell the root from a hole.** The header record is not in
+    `entries`, so the first entry of every real file names a parent the walk cannot see.
+    Section 6b adds the `root` parameter, and `ReadResult` gains `header_id`.
