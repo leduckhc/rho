@@ -31,6 +31,16 @@ The list runs weakest first, strongest last.
 A CLI flag beats every file value.
 An environment variable beats every file value and every profile value.
 
+Five keys are powerful: `base-url`, `skill-paths`, `mcp-config`, `session-root`, and
+`session-file`. rho drops these five from the environment under one condition. The project must
+be untrusted, and rho must have read a project config file. A notice then names each key it
+dropped. In a plain directory with no project config file, every environment variable works.
+Pass `--trust-project` to use them in a project you trust.
+
+`RHO_SESSION_ROOT` is stricter. It needs `--trust-project` in every directory, because it selects
+which project config file rho reads. rho makes that choice before it reads any file, so the
+"a project file was read" test is not available yet.
+
 ## Keys
 
 All keys are kebab-case.

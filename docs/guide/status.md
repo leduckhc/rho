@@ -2,7 +2,7 @@
 
 rho streams answers, calls tools, and runs subagents today.
 It does not record sessions, and it does not ask before a mutating tool call.
-This page describes rho as of 2026-08-23.
+This page describes rho as of 2026-08-26.
 
 ## Works today
 
@@ -30,7 +30,7 @@ This page describes rho as of 2026-08-23.
 | `--no-agents`, separate from `--no-skills` | [commands and flags](cli.md) |
 | The two minute tour, three pages, keys generated from the binding table | [terminal interface](terminal.md) |
 | Slash-command list (`/` opens it, typing filters it) | [terminal interface](terminal.md) |
-| 1464 tests passing in the workspace | — |
+| 1592 tests passing in the workspace | — |
 
 ## Partly built
 
@@ -39,7 +39,6 @@ This page describes rho as of 2026-08-23.
 | `approval = "ask"` parses in the config. | rho refuses it with an error message. Use `--read-only` to block writes, or omit the flag to allow all. |
 | `session-file` and `ephemeral` parse and merge correctly. | Neither value reaches the agent loop. No session file is written. Silence: rho starts without error and records nothing. |
 | The `[subagents]` table parses in the config. | No value from it reaches the agent. Pass the limits as flags: `--max-children-per-parent`, `--max-live-agents`, `--child-timeout-secs`, `--max-queued-per-parent`, `--max-queued-total`, `--agent-grace-turns`, `--max-agent-tool-calls`. |
-
 | A subagent can be steered while it runs, with `steer_agent`. | You cannot steer your own turn. The terminal interface wires no queue for your session. A message you type mid-run never reaches the running turn, and Enter starts a new turn instead. |
 | A background task reports progress, and rho summarises it. | The terminal interface never draws the summary. The task row ignores the field, so a long build shows no percentage. |
 | The approval panel is drawn and its keys are unwired. | Nothing opens it in a real run. This is why `approval = "ask"` has nowhere to go, even in the terminal build. |

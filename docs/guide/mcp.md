@@ -20,9 +20,9 @@ Until this version the cache was never written, so no MCP tool ever reached the 
 run repeated that notice forever. A live probe found it; see
 `docs/verification/mcp-live-probe.md`.
 
-> **Partly built.** Two rho processes writing the cache at the same moment can lose one
-> entry, because the write holds no lock. The cost is one extra handshake in a later session,
-> since a live connection always wins over the cache.
+> **Partly built.** The cache lock is nonce-guarded. A writer stalled past the steal
+> timeout can still race a successor writer. There is also no eviction bound: the cache
+> file grows without limit as you add and remove servers.
 
 ## Add a server
 
@@ -52,14 +52,13 @@ Create `~/.rho/mcp.json` and start rho:
 }
 ```
 
-Every run with a server configured prints this:
+The first run with a server configured prints this:
 
 ```
-2 MCP server(s) are configured, and no tool schema is cached yet. Their tools appear in the next session.
+2 MCP server(s) are configured, and no tool schema is cached yet. rho is connecting now, and their tools are available in the next session.
 ```
 
-Starting rho again changes nothing, because nothing writes the cache. The notice is wrong
-about the next session. See the note at the top of this page.
+rho writes the cache before it exits. The next run reads it and advertises those tools.
 
 ### Field reference
 

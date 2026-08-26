@@ -67,9 +67,30 @@ rho: agent discovery is off, so rho offers no subagent. Remove --no-agents to us
 
 ## Motion
 
-`state.animate` was read by the renderer and assigned nowhere, so the sweep never drew. The
-app now carries the choice, and `--no-motion`, `tui-motion = false`, and `RHO_REDUCE_MOTION=1`
-each stop it. The footer names the state in words either way, so nothing rests on movement.
+`state.animate` was read by the renderer and assigned nowhere, so the sweep never drew.
+The app now carries the choice.
+
+Driven for real. Each form parses correctly and reaches the config layer:
+
+```sh
+# --no-motion bare: turns animation off
+rho run "say OK" --no-skills --no-motion
+# exits: rho: authentication failed: OpenRouter rejected the API key (status 401).
+# no argument error, flag parsed as Some(true)
+
+# --no-motion false: overrides a global tui-motion = false
+rho run "say OK" --no-skills --no-motion false
+# exits: same auth error, no argument error, flag parsed as Some(false)
+
+# bad value: parser rejects it
+rho run "say OK" --no-motion bad
+error: invalid value 'bad' for '--no-motion [<NO_MOTION>]'
+  [possible values: true, false]
+```
+
+The TUI runs only in an interactive session. In a headless run, the flag reaches the config
+layer and stops there. The footer names the motion state in words either way, so nothing rests
+on movement being visible.
 
 ## The MCP cache
 
@@ -80,16 +101,64 @@ before that, so a write there would have cached nothing.
 It reads the file, updates one entry, and renames a temporary file over the old one, under a
 lock file that spans all three steps. An earlier version of this paragraph claimed two sessions
 could never lose each other's entry with the rename alone, and a review disproved it: eight
-writers left one entry. The lock is why the claim holds now. The persisted key is a hash of the
-config
-fingerprint, because a fingerprint embeds server `env` values and would otherwise write a
-token to disk in clear text. A test asserts the file holds no secret.
+writers left one entry. The lock is why the claim holds now.
+
+The persisted key still hashes the full `fingerprint()`, including server `env` values.
+An intermediate fix dropped `env` values from the key, and it was reverted.
+The pool keys on `fingerprint()`, so dropping values made two servers that differ only
+by an `env` value share one cache entry and serve the wrong tool list at turn one.
+Hashing alone does not protect a low-entropy `env` value from offline brute force anyway:
+the hash is unsalted 64-bit FNV-1a over a format that is public in the source.
+Confidentiality comes from the file mode: the cache is `0o600` in a `0o700` directory,
+matching `rho-core/src/transcript.rs`, and a test pins it.
+
+Driven for real. An isolated `HOME` under `mktemp -d` and a minimal stdio MCP server in Python.
+
+```sh
+# Cache absent before the run
+ls $HOME/.rho/
+ls: /tmp/isolated-home/.rho/: No such file or directory
+
+# Run 1: cache does not exist yet
+HOME=/tmp/isolated-home rho run "say OK" \
+  --mcp-config /tmp/mcp-probe/mcp.json --no-skills --model openai/gpt-4o-mini
+rho: 1 MCP server(s) are configured, and no tool schema is cached yet. rho is
+      connecting now, and their tools are available in the next session.
+rho: authentication failed: OpenRouter rejected the API key (status 401).
+
+# Cache present after the run:
+ls $HOME/.rho/
+mcp-schema-cache.json
+
+cat $HOME/.rho/mcp-schema-cache.json
+{
+  "version": 1,
+  "entries": {
+    "1c9d59af7d65f9cd": {
+      "server": "probe",
+      "tools": [{"name": "echo_upper", ...}],
+      "last_used": "1787773614748"
+    }
+  }
+}
+
+# Run 2: notice is gone, tools are available
+HOME=/tmp/isolated-home rho run "say OK" \
+  --mcp-config /tmp/mcp-probe/mcp.json --no-skills --model openai/gpt-4o-mini
+rho: authentication failed: OpenRouter rejected the API key (status 401).
+# No MCP notice. The cache was read and echo_upper was advertised.
+```
+
+The critical defect was: `spawn_connect` wrote the cache on a detached `tokio::spawn` that
+nobody joined. A fast `rho run` exited and killed the write, so the cache was never written
+and the notice repeated forever. `drain_connects` lands after every turn and awaits those tasks
+before the process exits. The second run above proves the fix.
 
 ## The guards
 
 ```sh
 python3 bench/check-flag-names.py
-VIOLATIONS 0 (checked against 73 defined flags)
+VIOLATIONS 0 (checked against 27 defined flags)
 ```
 
 Broken on purpose, by restoring the old message:
@@ -106,18 +175,32 @@ read-modify-write held no lock, so each writer overwrote the others, and a multi
 cache never converged. That is the same class this whole change exists to fix, so the earlier
 note calling it "one extra handshake" was wrong.
 
-`record_tools` now holds a lock file across the read, the write, and the rename. A stale lock
-is broken after two seconds, because a cache must never wedge a session.
+`record_tools` now holds a lock file across the read, the write, and the rename. A stale
+lock is broken after two seconds, because a cache must never wedge a session. Each
+`LockGuard` writes an unguessable nonce when it acquires the lock. A guard steals only
+when the same nonce persisted unchanged past the timeout. `Drop` removes the file only
+when it still holds that guard's nonce, so a guard can no longer delete a successor's
+lock — that was a real defect a critic found and proved with overlapping writers.
+
+Two residuals, named so they are not lost. A writer stalled past the steal timeout can
+still be raced by a second steal. There is no eviction bound: `last_used` is recorded,
+but no pruning runs yet.
 
 `eight_concurrent_writers_keep_every_entry` exercises it, and **it stays green with the lock
 removed on this machine**: the whole critical section finishes inside one scheduling quantum, so
 the writers serialise by luck even behind a barrier. The lock's necessity rests on the review's
 demonstration and on the shape of a read-modify-write, not on that test, and the test says so.
 
-`bench/check-dead-surface.py` reports its ledger. It is **not** in the ship gate yet: after
-the five entries I could justify precisely, 35 remain, and each needs its owning spec to write
-an honest reason. Marking thirty-five in one pass would build the dustbin the decision
-forbids, so the triage is the next job.
+`bench/check-dead-surface.py` reports its ledger. It is **not** in the ship gate yet.
+The count moves as code changes, so the command output is the authoritative figure.
+Each uncalled item needs its owning spec before an honest reason can be written.
+`bench/allowed-uncalled.txt` holds the current allowlist. Marking every item in one
+pass would build the dustbin the decision forbids, so the triage is the next job.
+
+```sh
+python3 bench/check-dead-surface.py 2>&1 | tail -1
+VIOLATIONS 45 (checked 112 source files)
+```
 
 ## Breaks that trip
 

@@ -218,9 +218,8 @@ A render must never read a clock. The tick is the only time source. That keeps t
 render pure and testable.
 
 The sweep stops, and the word renders plain, under any of these conditions. The user
-sets `tui.motion = false`. The user passes `--no-motion`. Stdout is not a terminal. A
-reduced-motion preference is set by `tui.reduce_motion = true`. The variable
-`RHO_REDUCE_MOTION=1` is set.
+sets `tui-motion = false`. The user passes `--no-motion`. Stdout is not a terminal. The
+variable `RHO_REDUCE_MOTION=1` is set; it maps to `tui-motion = false` in `rho-config`.
 
 With motion off the interface loses no information. The word names the state. The
 durations still count.
@@ -449,11 +448,9 @@ Concise mode:
 Motion:
 - `motion_is_a_function_of_a_tick` — the same tick yields the same frame.
 - `motion_period_is_twenty_ticks` — `tick` and `tick + 20` yield the same frame.
-- `motion_off_when_tui_motion_false` — `tui.motion = false` renders the word plain.
+- `motion_off_when_tui_motion_false` — `tui-motion = false` renders the word plain.
 - `motion_off_when_no_motion_flag` — `--no-motion` renders the word plain.
 - `motion_off_when_stdout_not_a_terminal` — a non-terminal stdout renders the word plain.
-- `motion_off_when_reduce_motion_setting` — `tui.reduce_motion = true` renders the word plain.
-- `motion_off_when_reduce_motion_env` — `RHO_REDUCE_MOTION=1` renders the word plain.
 - `render_never_reads_a_clock` — the render is a pure function of state, with no time read.
 
 Help and the theme:
