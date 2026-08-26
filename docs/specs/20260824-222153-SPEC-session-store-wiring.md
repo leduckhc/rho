@@ -482,6 +482,13 @@ impl SessionRecorder {
 }
 ```
 
+**A tool result was not wrapped either.** `ToolEnd` wrote the raw output blocks as the
+content of the tool message, so the record carried no `tool_call_id`. `Agent::finish_tool`
+wraps the same output in a `ContentBlock::ToolResult`, so the recorded conversation had a
+different shape from the one the model saw. A resume then sent a tool message no provider can
+match to a call, and `branch_messages` invented a synthetic error result beside the real one.
+The recorder now writes the same shape the live context holds.
+
 - A reasoning payload is kept verbatim. A rewritten payload cannot replay.
 - Redaction still runs through `redact_block` before anything reaches the file.
 - A cancel writes the partial assistant message with the real arguments it holds, instead

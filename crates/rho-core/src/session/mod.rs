@@ -5,7 +5,7 @@
 //!
 //! Stage T4 defined the public surface. Stage T5 made every body real.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -1745,10 +1745,88 @@ impl SessionLog {
 }
 
 /// Folds the agent event stream into session records.
+///
+/// **It folds the stream. It does not record it.** The file holds messages, so a resume needs
+/// no second fold. See `D-recorder-consumes-events`.
 pub struct SessionRecorder {
     log: SessionLog,
-    /// The tool calls opened in the current turn that have no result yet.
-    open_calls: Vec<(String, String)>,
+    /// The blocks of the assistant turn now streaming, keyed by the provider block index.
+    ///
+    /// The index orders them, so a replay sends the blocks back in the order the provider
+    /// produced them. Without this the recorder wrote no assistant message at all, and a
+    /// resume replayed a `ToolResult` that matched no `ToolCall`. See
+    /// `D-a-recorder-writes-the-assistant-turn`.
+    turn: BTreeMap<u32, TurnBlock>,
+    /// Calls whose `ToolCall` block is on disk and whose result is not.
+    ///
+    /// A cancel completes each one with a synthetic error result, so the file never holds half
+    /// a pairing. See `D-cancel-keeps-the-session-open`.
+    awaiting_result: Vec<(String, String)>,
+    /// Calls a `ToolStart` announced with no `ToolCall` block on disk.
+    ///
+    /// A provider that emits no tool-call stream event lands here, and so does a caller that
+    /// drives `ToolStart` directly. A cancel then writes the call with an empty argument
+    /// object, because nothing better is known.
+    unwritten_calls: Vec<(String, String)>,
+}
+
+/// One block of the assistant turn being folded.
+enum TurnBlock {
+    Text(String),
+    /// Reasoning text, and the provider payload that replays it.
+    Thinking {
+        text: String,
+        state: Option<crate::ProviderState>,
+    },
+    Call {
+        id: String,
+        name: String,
+        /// `None` until `ToolCallEnd` states the parsed arguments.
+        arguments: Option<serde_json::Value>,
+        state: Option<crate::ProviderState>,
+    },
+}
+
+impl TurnBlock {
+    /// The name of this block kind, for a warning that names what it dropped.
+    fn kind(&self) -> &'static str {
+        match self {
+            TurnBlock::Text(_) => "text",
+            TurnBlock::Thinking { .. } => "thinking",
+            TurnBlock::Call { .. } => "tool_call",
+        }
+    }
+
+    /// The content block this turn block becomes on disk, or `None` when it holds nothing.
+    fn into_content(self) -> Option<ContentBlock> {
+        match self {
+            TurnBlock::Text(text) if text.is_empty() => None,
+            TurnBlock::Text(text) => Some(ContentBlock::Text { text }),
+            // A payload means the provider needs the reasoning echoed back, so the block must
+            // be able to travel. With no payload it is history for the reader alone.
+            TurnBlock::Thinking { text, state } => match state {
+                Some(state) => Some(ContentBlock::ReasoningReplay {
+                    text,
+                    state: Some(state),
+                }),
+                None if text.is_empty() => None,
+                None => Some(ContentBlock::ReasoningTrace { text }),
+            },
+            TurnBlock::Call {
+                id,
+                name,
+                arguments,
+                state,
+            } => Some(ContentBlock::ToolCall {
+                id,
+                name,
+                // An empty object stands in only when the provider never completed the call.
+                // A guessed argument set would be replayed as if the model had sent it.
+                arguments: arguments.unwrap_or_else(|| serde_json::json!({})),
+                state,
+            }),
+        }
+    }
 }
 
 /// Redact every credential-shaped tool argument inside one content block. A message
@@ -1796,7 +1874,9 @@ impl SessionRecorder {
     pub fn new(log: SessionLog) -> Self {
         Self {
             log,
-            open_calls: Vec::new(),
+            turn: BTreeMap::new(),
+            awaiting_result: Vec::new(),
+            unwritten_calls: Vec::new(),
         }
     }
 
@@ -1810,25 +1890,139 @@ impl SessionRecorder {
         self.log.record(Record::Message { message }, None)
     }
 
-    /// Fold one agent event. Write an assistant message at a turn end, a tool
-    /// result at a tool end, a usage record on a usage event, and a stop record at
-    /// the agent end. Redact every tool argument first. Return an id when it writes.
+    /// Fold one agent event.
+    ///
+    /// The recorder holds the parts of the current assistant turn. `TextDelta` appends text.
+    /// `ThinkingEnd` closes a reasoning block with its replay payload. `ToolCallEnd` completes
+    /// a call with its parsed arguments. `TurnEnd` writes **one** `Message` record with role
+    /// `Assistant`, in provider block order. An empty turn writes nothing.
+    ///
+    /// So the file order is always the call, then its result, and a `ToolCall` on disk with no
+    /// `ToolResult` is impossible on the run path. See section 6d.
+    ///
+    /// Redaction runs on every block before it reaches the file. Return an id when it writes.
     pub fn observe(&mut self, event: &AgentEvent) -> Option<RecordId> {
         match event {
             AgentEvent::TurnStart => {
-                self.open_calls.clear();
+                self.turn.clear();
                 None
             }
+            // A provider may begin the assistant message after the turn started. The blocks of
+            // the previous turn are already written, so this only guards a provider that emits
+            // no `TurnStart`.
+            AgentEvent::Stream(StreamEvent::MessageStart { .. }) => {
+                self.turn.clear();
+                None
+            }
+            AgentEvent::Stream(StreamEvent::TextStart { index }) => {
+                self.turn.insert(*index, TurnBlock::Text(String::new()));
+                None
+            }
+            AgentEvent::Stream(StreamEvent::TextDelta { index, delta }) => {
+                match self
+                    .turn
+                    .entry(*index)
+                    .or_insert_with(|| TurnBlock::Text(String::new()))
+                {
+                    TurnBlock::Text(text) => text.push_str(delta),
+                    // A provider that reuses an index for two kinds is a provider defect, and
+                    // dropping the delta is better than corrupting the other block.
+                    other => tracing::warn!(
+                        index = *index,
+                        kind = other.kind(),
+                        "a text delta arrived for a block of another kind; it was dropped"
+                    ),
+                }
+                None
+            }
+            AgentEvent::Stream(StreamEvent::ThinkingStart { index }) => {
+                self.turn.insert(
+                    *index,
+                    TurnBlock::Thinking {
+                        text: String::new(),
+                        state: None,
+                    },
+                );
+                None
+            }
+            AgentEvent::Stream(StreamEvent::ThinkingDelta { index, delta }) => {
+                match self
+                    .turn
+                    .entry(*index)
+                    .or_insert_with(|| TurnBlock::Thinking {
+                        text: String::new(),
+                        state: None,
+                    }) {
+                    TurnBlock::Thinking { text, .. } => text.push_str(delta),
+                    other => tracing::warn!(
+                        index = *index,
+                        kind = other.kind(),
+                        "a thinking delta arrived for a block of another kind; it was dropped"
+                    ),
+                }
+                None
+            }
+            AgentEvent::Stream(StreamEvent::ThinkingEnd { index, state }) => {
+                if let Some(TurnBlock::Thinking { state: slot, .. }) = self.turn.get_mut(index) {
+                    // Verbatim. A rewritten payload cannot replay, so rule 9 keeps it whole.
+                    *slot = state.clone();
+                }
+                None
+            }
+            AgentEvent::Stream(StreamEvent::ToolCallStart { index, id, name }) => {
+                self.turn.insert(
+                    *index,
+                    TurnBlock::Call {
+                        id: id.clone(),
+                        name: name.clone(),
+                        arguments: None,
+                        state: None,
+                    },
+                );
+                None
+            }
+            AgentEvent::Stream(StreamEvent::ToolCallEnd {
+                index,
+                arguments,
+                state,
+            }) => {
+                if let Some(TurnBlock::Call {
+                    arguments: slot,
+                    state: payload,
+                    ..
+                }) = self.turn.get_mut(index)
+                {
+                    *slot = Some(arguments.clone());
+                    *payload = state.clone();
+                }
+                None
+            }
+            AgentEvent::TurnEnd { .. } => self.flush_turn(),
             AgentEvent::ToolStart { id, name, .. } => {
-                self.open_calls.push((id.clone(), name.clone()));
+                // The call is already on disk when the stream announced it. Only a provider
+                // that emits no tool-call event, or a caller driving this directly, lands here.
+                let known = self.awaiting_result.iter().any(|(open, _)| open == id);
+                if !known {
+                    self.unwritten_calls.push((id.clone(), name.clone()));
+                }
                 None
             }
             AgentEvent::ToolEnd { id, output } => {
-                self.open_calls.retain(|(open, _)| open != id);
-                let content = output.content.iter().map(redact_block).collect();
+                self.awaiting_result.retain(|(open, _)| open != id);
+                self.unwritten_calls.retain(|(open, _)| open != id);
+                // **The result is wrapped in a `ToolResult` block, and it names its call.**
+                // The old body wrote the raw output blocks, so the record carried no
+                // `tool_call_id`. The live context wraps it, in `Agent::finish_tool`, so the
+                // recorded conversation had a different shape from the one the model saw. A
+                // resume then sent a tool message a provider cannot match to any call, and
+                // `branch_messages` invented a synthetic error result beside the real one.
                 let message = Message {
                     role: Role::Tool,
-                    content,
+                    content: vec![redact_block(&ContentBlock::ToolResult {
+                        tool_call_id: id.clone(),
+                        content: output.content.clone(),
+                        is_error: output.is_error,
+                    })],
                 };
                 self.log.record(Record::Message { message }, None)
             }
@@ -1845,22 +2039,73 @@ impl SessionRecorder {
         }
     }
 
-    /// On a cancel, complete any open tool pairing, then write the stop record.
-    /// See section 8.
+    /// Write the assistant message the turn built, and forget the parts.
+    ///
+    /// It writes nothing for a turn with no content, so a file gains no blank message.
+    fn flush_turn(&mut self) -> Option<RecordId> {
+        let parts = std::mem::take(&mut self.turn);
+        let mut content = Vec::new();
+        for block in parts.into_values() {
+            if let TurnBlock::Call { id, name, .. } = &block {
+                self.awaiting_result.push((id.clone(), name.clone()));
+            }
+            if let Some(block) = block.into_content() {
+                content.push(redact_block(&block));
+            }
+        }
+        if content.is_empty() {
+            return None;
+        }
+        self.log.record(
+            Record::Message {
+                message: Message {
+                    role: Role::Assistant,
+                    content,
+                },
+            },
+            None,
+        )
+    }
+
+    /// Write an explicit title as a `Name` leaf record.
+    ///
+    /// An empty or blank title is refused, so a row never shows a blank name. A title costs no
+    /// model call. See `D-a-session-title-costs-nothing`.
+    pub fn record_name(&mut self, title: &str) -> Result<Option<RecordId>, SessionError> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(SessionError::Decode(
+                "a session title cannot be empty".to_string(),
+            ));
+        }
+        Ok(self.log.record(
+            Record::Name {
+                title: title.to_string(),
+            },
+            None,
+        ))
+    }
+
+    /// On a cancel, write the partial assistant message, complete any open tool pairing, then
+    /// write the stop record. See `D-cancel-keeps-the-session-open`.
+    ///
+    /// The partial message carries the **real** arguments the provider sent, because the turn
+    /// holds them. The old body invented an empty object for every open call, so a resume
+    /// replayed a call the model never made.
     pub fn record_cancel(&mut self) -> Option<RecordId> {
-        let mut last = None;
-        let open = std::mem::take(&mut self.open_calls);
-        if !open.is_empty() {
-            // Write the assistant message that carries the open tool calls, so every
-            // ToolCall is on disk before its result. The arguments are not known here,
-            // so an empty object stands in; the id and the name keep the pairing valid.
-            let calls = open
+        // Whatever the turn already built goes to disk, including a completed tool call.
+        let mut last = self.flush_turn();
+        // A call a `ToolStart` announced with no block on disk. An empty object stands in,
+        // because nothing better is known, and the id and the name keep the pairing valid.
+        let unwritten = std::mem::take(&mut self.unwritten_calls);
+        if !unwritten.is_empty() {
+            let calls = unwritten
                 .iter()
                 .map(|(id, name)| ContentBlock::ToolCall {
                     id: id.clone(),
                     name: name.clone(),
                     arguments: serde_json::json!({}),
-                    // The payload is not known here, and a guessed one would be replayed.
+                    // A guessed payload would be replayed as if the provider had sent it.
                     state: None,
                 })
                 .collect();
@@ -1873,14 +2118,15 @@ impl SessionRecorder {
                 },
                 None,
             );
-            for (id, _) in open {
-                last = self.log.record(
-                    Record::Message {
-                        message: synthetic_error_result(&id, "the tool call was cancelled"),
-                    },
-                    None,
-                );
-            }
+            self.awaiting_result.extend(unwritten);
+        }
+        for (id, _) in std::mem::take(&mut self.awaiting_result) {
+            last = self.log.record(
+                Record::Message {
+                    message: synthetic_error_result(&id, "the tool call was cancelled"),
+                },
+                None,
+            );
         }
         let stop = self.log.record(
             Record::Stop {

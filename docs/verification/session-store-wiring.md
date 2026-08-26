@@ -114,3 +114,25 @@ one of the 500 files carries a `Name` record past the head window and more than
 does not.
 
 The cache in `D-no-list-cache-until-a-budget-fails` therefore does not ship.
+
+## 4. The mutation proofs of the recorder slice
+
+`crates/rho-core/src/session/mod.rs` was copied to `/tmp/mod3.rs.good` first, and copied back
+before and after every break.
+
+| Break | Tests that failed |
+| --- | --- |
+| no `TurnEnd` arm, exactly as the defect was | `a_run_records_the_assistant_text_of_a_turn`, `a_run_records_a_tool_call_before_its_result`, `every_tool_call_on_disk_has_a_result_on_disk`, `a_recorded_run_replays_as_a_valid_message_list`, `a_reasoning_payload_survives_the_recorder_verbatim`, `a_recorded_secret_named_argument_is_masked` |
+| text deltas are not accumulated | `a_run_records_the_assistant_text_of_a_turn`, `a_recorded_run_replays_as_a_valid_message_list` |
+| a tool call is not folded | five tests, including `every_tool_call_on_disk_has_a_result_on_disk` |
+| the parsed arguments are replaced by an empty object | `a_run_records_a_tool_call_before_its_result`, `a_cancel_records_the_real_tool_arguments`, `a_recorded_secret_named_argument_is_masked` |
+| a tool result is not wrapped in a `ToolResult` block | `a_run_records_a_tool_call_before_its_result`, `every_tool_call_on_disk_has_a_result_on_disk` |
+| an empty turn writes a blank message | `an_empty_turn_writes_no_assistant_record` |
+| the reasoning payload is dropped | `a_reasoning_payload_survives_the_recorder_verbatim` |
+| the reasoning payload is rewritten | `a_reasoning_payload_survives_the_recorder_verbatim` |
+| a cancel does not flush the turn | `a_cancel_records_the_real_tool_arguments` |
+| a cancel writes no synthetic result | `cancel_leaves_no_half_written_tool_pairing` |
+| redaction is skipped on the folded turn | `a_recorded_secret_named_argument_is_masked` |
+| an empty title is accepted | `an_empty_name_is_refused_by_the_recorder` |
+
+Every break was caught on the first attempt in this slice. Twelve of twelve.

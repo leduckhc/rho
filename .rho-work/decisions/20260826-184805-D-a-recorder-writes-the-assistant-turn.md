@@ -37,6 +37,21 @@ The recorder folds the stream into one assistant message per turn.
   the file order is always call, then result.
 - A cancel writes the partial assistant message, with the real arguments it already holds.
 
+## The second half of the same defect
+
+`ToolEnd` wrote the raw output blocks as the content of the tool message. So the record
+carried no `tool_call_id`, while `Agent::finish_tool` wraps the same output in a
+`ContentBlock::ToolResult`. The recorded conversation therefore had a different shape from the
+one the model saw.
+
+A resume then sent a tool message no provider can match to a call. Worse,
+`branch_messages` looks for a `ToolResult` block to pair a call, so it found none and invented
+a synthetic error result **beside** the real result. A model would have read "the tool call did
+not finish" next to the output it produced.
+
+So `ToolEnd` writes a `ToolResult` block that names its call. The shape on disk is now the
+shape in the context, and `every_tool_call_on_disk_has_a_result_on_disk` pins it.
+
 ## Rules that hold
 
 - The pairing invariant is now provable on the run path. For any run, every `ToolCall` on
