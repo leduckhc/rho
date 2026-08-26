@@ -1,6 +1,6 @@
 # SPEC-session-store-wiring — the session store, reached from the command line
 
-Status: draft for the wiring lane.
+Status: delivered by the wiring lane.
 Owning crate: `rho-core`, module `session`. Callers in `rho-cli` and `rho-tui`.
 
 > **Read section 15 first.** The wiring lane reviewed this contract again before it wrote
@@ -1050,13 +1050,13 @@ because `resolve_prefix` reads a directory. The tester found the misplacement.
   shows no number it did not read.
 - `a_row_states_the_model_from_the_second_line` — `create` writes the `ModelChange` record,
   so the row shows the model with no full read.
-- `a_row_states_its_start_time_and_its_last_activity` — `started_millis` comes from the
-  header, and `last_active_millis` comes from the file metadata.
+- `a_row_states_its_start_time_and_its_last_activity` — the start time comes from the header,
+  and the last activity comes from the file metadata.
 - `a_row_states_its_size` — `size_bytes` matches the file length.
-- `a_row_prefers_an_explicit_name` — with a `Name` record the title is the name, and
-  `title_is_explicit` is true.
-- `a_row_falls_back_to_the_first_prompt` — with no `Name` record the title is the first
-  line of the first prompt, and `title_is_explicit` is false.
+- `a_row_prefers_an_explicit_name` — with a `Name` record the title is the name, and the row
+  says the title is explicit.
+- `a_row_falls_back_to_the_first_prompt` — with no `Name` record the title is the first line of
+  the first prompt, cut at 60 bytes, and the row says the title is not explicit.
 - `a_tail_read_drops_a_partial_first_line` — a tail that starts inside a line yields no
   broken record.
 - `a_row_marks_a_closed_session` — a file that ends with `Closed` reports closed.
@@ -1113,9 +1113,11 @@ and a caller that forgot to wire a guard is this project's signature defect.
 - `a_new_session_titles_itself_from_the_first_prompt` — the title is the first line, capped
   at 60 characters.
 - `the_newest_name_record_wins` — two `Name` records resolve to the later one.
-- `an_empty_title_is_refused` — `sessions name` with an empty string is an error.
-- `a_title_costs_no_model_call` — the title path calls no provider. The test asserts the
-  provider stub was never called.
+- `an_empty_name_is_refused_by_the_recorder` — `sessions name` with an empty string is an
+  error, and the error has its own name. A live drive showed the first version reporting
+  `cannot decode a record`, which reads like file corruption.
+- `a_title_costs_no_model_call` — the title path calls no provider. The recorder holds no
+  provider at all, which is the structural proof.
 
 **Recording, and the default.**
 - `a_run_writes_a_session_file_by_default` — the store holds one file after a run.
@@ -1154,15 +1156,18 @@ and a caller that forgot to wire a guard is this project's signature defect.
 - `show_names_a_tool_and_never_prints_a_result_body` — a tool result row shows the tool and a
   byte count. A secret inside a result never reaches the terminal by accident.
 - `show_marks_a_sibling_branch` — two answers to one question are shown as two branches.
-- `show_sends_nothing_to_a_model` — the provider stub is never called, so looking is free.
+- `show_sends_nothing_to_a_model` — the real binary runs `sessions show` with a provider name
+  that does not exist and no credential in the environment. It still prints the records, so
+  looking is free.
 - `list_prints_six_columns_inside_eighty` — the header and every row fit 80 columns.
 - `list_shows_an_unreadable_row_with_its_reason` — the id and the reason survive, and every
   unknown field is a dash.
 - `list_shows_no_turn_count` — no column reports a number that needs a whole file.
-- `the_fork_flow_works_from_the_two_printed_commands` — the end-to-end proof. Run a session,
-  run `show`, take a record id from its output, run `fork --at <that id>`, and the new file
-  holds the branch. **The test reads the id from the real output, so it fails if the id is
-  not printed.** This is the owner's ask, pinned as one test.
+- `the_fork_flow_works_from_the_two_printed_commands` — the end-to-end proof, driven through
+  the real binary. Write a session, run `show`, take a record id from its output, run
+  `fork --at <that id>`, and the new file holds the branch. **The test reads the id from the
+  real output, so it fails if the id is not printed.** This is the owner's ask, pinned as one
+  test.
 
 **Delete, which had no test at all.**
 - `delete_removes_the_session_and_its_sidecars` — the file and every `<id>.*.sidecar` are
@@ -1198,8 +1203,10 @@ and a caller that forgot to wire a guard is this project's signature defect.
 - `a_second_process_cannot_open_a_live_session` — a second `lock` on one session returns
   `SessionError::Busy`, and the message names the session.
 - `two_worktrees_continuing_at_once_never_share_a_file` — the defect from the review, driven
-  end to end. Two runs continue at the same moment, and each ends with its own file whose
-  record ids are unique. It must fail against an implementation with no lock.
+  end to end. Two worktrees of one repository share a project key. Two runs open at the same
+  moment, and each ends with its own file whose record ids are unique. Its partner
+  `a_second_process_cannot_continue_a_live_session` is what fails against an implementation
+  with no lock.
 - `newest_open_skips_a_locked_session` — `--continue` moves past a live session, and takes
   the next one.
 - `a_lock_is_released_when_the_process_ends` — dropping the lock frees the session, so a
@@ -1233,8 +1240,8 @@ and a caller that forgot to wire a guard is this project's signature defect.
 - `a_resumed_context_holds_no_live_result_handle` — every stale preview is rewritten to say
   the evidence expired, and the byte count survives. See
   `D-a-stale-result-handle-expires-on-resume`.
-- `a_fork_at_a_record_starts_a_new_file_and_keeps_the_original` — the original file is
-  byte-identical, and the new file names its origin.
+- `fork_copies_the_branch_and_keeps_the_original` — the original file is byte-identical, and
+  `a_row_shows_its_fork_origin` proves the new file names its origin.
 - `a_crash_offers_the_unclosed_session` — a store with an unclosed session offers it once.
 - `a_closed_session_is_never_offered` — a store of closed sessions offers nothing.
 

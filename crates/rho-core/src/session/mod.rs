@@ -248,6 +248,13 @@ pub enum SessionError {
     /// `--continue` found no session to continue.
     #[error("no session to continue in {project}; start one without --continue")]
     NoSessionToContinue { project: String },
+    /// A session title was empty or blank.
+    ///
+    /// It had no name at first, so the refusal arrived as a decode error and read like file
+    /// corruption. A live drive showed `cannot decode a record: a session title cannot be
+    /// empty`. Every error case gets a name.
+    #[error("a session title cannot be empty")]
+    EmptyTitle,
     /// A create could not find a free id after `MINT_ATTEMPTS` tries.
     #[error("could not mint a free session id after {attempts} tries; the store may be full")]
     MintExhausted { attempts: usize },
@@ -490,8 +497,18 @@ impl SessionWriter {
         } else {
             entry
         };
+        // **A leaf record never becomes the head.** A leaf is never a parent, so a later record
+        // that linked to it would name a leaf as its parent and the whole file would be refused
+        // at read time. A live drive met exactly that after `rho sessions name`:
+        //
+        //     record r24 names parent r23, which is a leaf record and never a parent
+        //
+        // So the chain skips a leaf, and the next record links to the last chain record.
+        let is_leaf = is_leaf_record(&entry.record);
         self.write_entry(&entry)?;
-        self.head = Some(id.clone());
+        if !is_leaf {
+            self.head = Some(id.clone());
+        }
         Ok(id)
     }
 
@@ -1317,10 +1334,15 @@ impl SessionStore {
     /// Open an existing file to append more records. Used by resume and fork.
     pub fn append_to(&self, path: &Path) -> Result<SessionWriter, SessionError> {
         let read = SessionReader::read(path)?;
+        // The head is the last **chain** record, and never a leaf. A leaf is never a parent, so a
+        // reopen that took a trailing `Name` record as the head would make the next append name a
+        // leaf and the file would be refused. A live drive met that after `rho sessions name`.
         let head = read
             .entries
-            .last()
-            .map(|e| e.id.clone())
+            .iter()
+            .rev()
+            .find(|entry| !is_leaf_record(&entry.record))
+            .map(|entry| entry.id.clone())
             .unwrap_or_else(|| read.header_id.clone());
         // Hold an appending handle for the life of the reopened session.
         let file = OpenOptions::new()
@@ -1434,24 +1456,48 @@ impl SessionStore {
 
     /// The newest session in this store that holds no `Closed` record.
     ///
-    /// This is what a crash offers, and it is what `--continue` takes.
+    /// **This is the crash offer, and it is not what `--continue` takes.** A run that ends on
+    /// its own writes a `Closed` record, so this skips it. The first version of the contract
+    /// used one method for both questions, and then bare `--continue` answered "no session to
+    /// continue" right after a successful run. A live drive found it, and every unit test had
+    /// passed. See `D-continue-takes-the-newest-session-closed-or-not`.
     ///
-    /// It skips a session another process holds, so `--continue` never picks a live session and
-    /// two worktrees never write one file. See section 7d.
+    /// It skips a session another process holds. See section 7d.
     pub fn newest_open(&self) -> Result<Option<SessionId>, SessionError> {
+        self.newest_matching(|summary| !summary.closed)
+    }
+
+    /// The newest session `--continue` takes, closed or not.
+    ///
+    /// A closed file reopens, and `append_to` states the reopen on disk. So continuing a
+    /// conversation a user closed is normal, and it is the common case.
+    ///
+    /// It skips a session another process holds, and it skips a file rho cannot read.
+    pub fn newest_resumable(&self) -> Result<Option<SessionId>, SessionError> {
+        self.newest_matching(|_| true)
+    }
+
+    /// The newest readable, unlocked session that passes `wanted`.
+    ///
+    /// One walk for both questions above, so the lock skip and the unreadable skip cannot drift
+    /// between them.
+    fn newest_matching(
+        &self,
+        wanted: impl Fn(&SessionSummary) -> bool,
+    ) -> Result<Option<SessionId>, SessionError> {
         for row in self.rows()? {
             let SessionRow::Session(summary) = row else {
                 // An unreadable file cannot be resumed. It can be deleted, so a user can clean
                 // the store. See `D-a-bad-session-file-is-one-row`.
                 continue;
             };
-            if summary.closed {
+            if !wanted(&summary) {
                 continue;
             }
             if lock::is_locked_elsewhere(&self.lock_path(&summary.id), summary.id.as_str()) {
                 tracing::debug!(
                     id = summary.id.as_str(),
-                    "a session is open in another process; --continue moved past it"
+                    "a session is open in another process; the search moved past it"
                 );
                 continue;
             }
@@ -1503,7 +1549,11 @@ impl SessionStore {
                     .and_then(|n| n.to_str())
                     .map(|n| n.starts_with(&prefix))
                     .unwrap_or(false);
-                if is_sidecar && matches {
+                // The lock file goes too. `flock` dies with the process, so the file left behind
+                // holds nothing, and a delete that left it would leave a name in the store for a
+                // session that no longer exists. A live drive showed the leftover after a crash.
+                let is_lock = sidecar.extension().and_then(|e| e.to_str()) == Some("lock");
+                if (is_sidecar || is_lock) && matches {
                     let _ = std::fs::remove_file(&sidecar);
                 }
             }
@@ -2163,9 +2213,7 @@ impl SessionRecorder {
     pub fn record_name(&mut self, title: &str) -> Result<Option<RecordId>, SessionError> {
         let title = title.trim();
         if title.is_empty() {
-            return Err(SessionError::Decode(
-                "a session title cannot be empty".to_string(),
-            ));
+            return Err(SessionError::EmptyTitle);
         }
         Ok(self.log.record(
             Record::Name {

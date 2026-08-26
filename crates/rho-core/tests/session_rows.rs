@@ -826,6 +826,72 @@ fn a_crash_offers_the_unclosed_session() {
 }
 
 #[test]
+fn continue_takes_the_newest_session_closed_or_not() {
+    // A headless run that ends on its own writes a `Closed` record, so `newest_open` skips it.
+    // Then bare `--continue` found nothing right after a successful run, which is the most
+    // common case a user wants. A live drive found it. See
+    // `D-continue-takes-the-newest-session-closed-or-not`.
+    let (_guard, store, _root) = temp_store();
+    let older = id_at(0, 0x0001);
+    let newer = id_at(60, 0x0002);
+    for id in [&older, &newer] {
+        let mut writer = store
+            .create(new_session(id, Path::new("/work")))
+            .expect("a created session");
+        writer.close().expect("closed");
+    }
+
+    let resumable = store.newest_resumable().expect("no error");
+
+    assert_eq!(
+        resumable,
+        Some(newer),
+        "--continue must take the newest session, closed or not"
+    );
+    assert_eq!(
+        store.newest_open().expect("no error"),
+        None,
+        "the crash offer still means a session that never closed"
+    );
+}
+
+#[test]
+fn newest_resumable_skips_a_locked_session() {
+    let (_guard, store, _root) = temp_store();
+    let live = id_at(60, 0x0001);
+    let free = id_at(0, 0x0002);
+    for id in [&live, &free] {
+        session_with_prompt(&store, id, "a session");
+    }
+
+    let _held = store.lock(&live).expect("the lock");
+    let resumable = store.newest_resumable().expect("no error");
+
+    assert_eq!(
+        resumable,
+        Some(free),
+        "--continue must never pick a session another process holds"
+    );
+}
+
+#[test]
+fn newest_resumable_skips_an_unreadable_file() {
+    let (_guard, store, root) = temp_store();
+    let good = id_at(0, 0x0001);
+    session_with_prompt(&store, &good, "a session");
+    // A newer file rho cannot read. It must be skipped, not resumed.
+    std::fs::write(root.join("20990101-000000-dead.jsonl"), "not a header\n").expect("the file");
+
+    let resumable = store.newest_resumable().expect("no error");
+
+    assert_eq!(
+        resumable,
+        Some(good),
+        "an unreadable file is never resumable"
+    );
+}
+
+#[test]
 fn a_closed_session_is_never_offered() {
     let (_guard, store, _root) = temp_store();
     for n in 0..3 {
@@ -1145,4 +1211,96 @@ fn the_child_lock_helper() {
         Err(SessionError::Busy { .. }) => println!("CHILD:busy"),
         Err(other) => println!("CHILD:error {other}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Delete, which had no test of its own for a sidecar or a lock file.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn delete_removes_the_session_and_its_sidecars() {
+    let (_guard, store, root) = temp_store();
+    let session = id(0x0020);
+    let path = {
+        let mut writer = store
+            .create(new_session(&session, Path::new("/work")))
+            .expect("a created session");
+        // An oversize record spills its payload to a sidecar beside the session file.
+        writer
+            .append(
+                Record::Message {
+                    message: Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: "x".repeat(80 * 1024),
+                        }],
+                    },
+                },
+                writer.head(),
+            )
+            .expect("appended");
+        writer.path().to_path_buf()
+    };
+    // A lock file, as a crash leaves behind. `flock` dies with the process, so the file holds
+    // nothing, and a delete that left it would leave a name for a session that is gone.
+    let lock = root.join(format!("{}.lock", session.as_str()));
+    std::fs::write(&lock, "").expect("the lock file");
+    let sidecars: Vec<PathBuf> = std::fs::read_dir(&root)
+        .expect("the directory")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("sidecar"))
+        .collect();
+    assert!(!sidecars.is_empty(), "an oversize record must spill");
+
+    store.delete(&session).expect("the delete");
+
+    assert!(!path.exists(), "the session file is gone");
+    assert!(!lock.exists(), "the lock file is gone");
+    for sidecar in sidecars {
+        assert!(!sidecar.exists(), "{} is gone", sidecar.display());
+    }
+}
+
+#[test]
+fn delete_keeps_a_session_forked_from_this_one() {
+    let (_guard, store, _root) = temp_store();
+    let source = id(0x0021);
+    let path = session_with_prompt(&store, &source, "the original");
+    let head = rho_core::SessionReader::read(&path)
+        .expect("the file reads back")
+        .entries
+        .last()
+        .expect("a record")
+        .id
+        .clone();
+    let forked = id(0x0022);
+    let fork_path = store
+        .fork(&path, &head, &forked)
+        .expect("a fork")
+        .path()
+        .to_path_buf();
+
+    store.delete(&source).expect("the delete");
+
+    assert!(!path.exists(), "the source is gone");
+    assert!(
+        fork_path.exists(),
+        "a fork is its own file, so it survives a delete of its source"
+    );
+}
+
+#[test]
+fn delete_of_an_absent_session_names_the_path() {
+    let (_guard, store, _root) = temp_store();
+
+    let error = store
+        .delete(&id(0x0023))
+        .expect_err("deleting a session that is not there must be an error");
+
+    let message = error.to_string();
+    assert!(
+        message.contains(id(0x0023).as_str()),
+        "the error must name the file, not just a reason, got {message}"
+    );
 }

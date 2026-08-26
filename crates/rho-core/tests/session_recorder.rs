@@ -434,10 +434,17 @@ fn an_empty_name_is_refused_by_the_recorder() {
     let (mut recorder, path) = recorder(&store, 0x0009);
 
     for blank in ["", "   ", "\n\t"] {
-        recorder
+        let error = recorder
             .record_name(blank)
             .map(|_| ())
             .expect_err("an empty title must be refused, so a row never shows a blank name");
+        // The refusal has its own name. It arrived as a decode error at first, and a live drive
+        // showed a user reading "cannot decode a record", which reads like file corruption.
+        assert!(
+            matches!(error, rho_core::SessionError::EmptyTitle),
+            "expected EmptyTitle, got {error:?}"
+        );
+        assert_eq!(error.to_string(), "a session title cannot be empty");
     }
     recorder
         .record_name("a real title")

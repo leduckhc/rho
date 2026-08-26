@@ -36,6 +36,34 @@ See [configuration](configuration.md) for the full order.
 When you omit `--model`, rho picks the provider default and prints a notice.
 Azure has no default. You must pass `--model` or set `RHO_MODEL`.
 
+## Sessions
+
+`rho run` writes a session file by default. See [sessions](sessions.md) for the store, the
+lock, and the security notes.
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--continue[=<ID>]`, `-c[=<ID>]` | off | Bare, it continues the newest session of this project. With a value, it continues that one. A prefix of an id is enough while it is unique. **The value needs an equals sign.** |
+| `--resume[=<ID>]` | off | The same argument, with another spelling. So the two can never disagree, and using both is an error. |
+| `--ephemeral` | off | Write no session file at all. |
+| `--allow-widen` | off | Allow a resume that widens the approval mode or the sandbox mode. It is an error without a session flag. |
+
+```sh
+rho run "and now fix it" --continue
+rho run "and now fix it" --resume=20260826-2047
+rho run "a throwaway question" --ephemeral
+```
+
+Subcommands:
+
+| Command | What it does |
+|---|---|
+| `rho sessions list [--long]` | Every session, newest first. |
+| `rho sessions show <id-prefix> [--full]` | One line per record, with its record id in the first column. |
+| `rho sessions name <id-prefix> "<title>"` | Write an explicit title. |
+| `rho sessions fork <id-prefix> --at <record-id>` | Copy the branch ending at that record into a new session. |
+| `rho sessions delete <id-prefix>` | Remove one session file, its sidecars, and its lock file. |
+
 ## What rho may do
 
 | Flag | Default | What it does |
@@ -112,8 +140,9 @@ When the queue hits `--max-queued-per-parent`, rho refuses with an error that na
 
 ## What does not work yet
 
-> **Not built yet.** rho records no session file today. There is no `--resume` flag
-> and no session list. Each run starts fresh. Nothing persists between sessions.
+> **Not built yet.** The terminal records no session, and `/sessions` opens no picker. Use
+> `rho run` when you want a session, and `rho sessions list` as the picker. There is no rewind
+> and no replay.
 
 > **Partly built.** `--no-skills` also turns off subagent discovery, and it says nothing.
 > rho then registers no `spawn_agent`, so the model cannot delegate, and your agent

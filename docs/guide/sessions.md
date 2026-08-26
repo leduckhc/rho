@@ -1,9 +1,113 @@
 # Sessions
 
 This page describes what rho keeps after a run and what it throws away.
-rho 0.1.0 writes no session file. Every run starts fresh. Nothing carries over.
 
-## What you can do today
+**`rho run` writes a session file by default.** You can list your sessions, read one, continue
+one, name one, fork one, and delete one. The terminal does not record yet; only `rho run` does.
+
+## Where a session lives
+
+```
+~/.rho/sessions/<project-key>/<session-id>.jsonl
+```
+
+The project key is the directory name plus eight hex characters. The hex comes from the git
+common directory, so **every worktree of one repository shares one pool of sessions**. rho reads
+the `.git` entry itself and spawns no git process.
+
+The session id is `<YYYYMMDD-HHMMSS>-<4 hex characters>`, so the file names sort newest last.
+
+The store is private. A session file is `0o600`, and every directory rho creates under the store
+root is `0o700`. rho does not trust your umask for this, because the file holds a whole
+conversation.
+
+## The commands
+
+```sh
+rho sessions list                       # every session, newest first
+rho sessions list --long                # also the directory and the fork origin
+rho sessions show <id-prefix>           # one line per record, with its record id
+rho sessions show <id-prefix> --full    # the whole text of each record
+rho sessions name <id-prefix> "a title" # an explicit title
+rho sessions fork <id-prefix> --at r5   # copy the branch ending at r5 into a new session
+rho sessions delete <id-prefix>         # remove one session file
+```
+
+A prefix is enough while it is unique. An ambiguous prefix is refused, and the message lists
+every match. rho never picks one for you.
+
+`show` and `list` send nothing to a model. Looking at yesterday's session costs nothing.
+
+A real listing:
+
+```
+ID                   LAST ACTIVE TITLE              MODEL           TOKENS  COST
+20260826-204754-f8c9 just now    the sign bug       us.anthropic.c…   2.1k     -
+```
+
+The cost is a dash when the provider reports none. rho shows no number it did not read. There is
+no turn count, because counting turns needs the whole file.
+
+## Continue a conversation
+
+```sh
+rho run "and now fix it" --continue                 # the newest session of this project
+rho run "and now fix it" --continue=20260826-2047   # that one
+rho run "and now fix it" --resume=20260826-2047     # --resume is the same flag
+```
+
+**The value needs an equals sign.** `--resume 20260826-2047` puts the id where the prompt goes,
+so rho refuses it and tells you to write `--resume=20260826-2047`.
+
+A resume replays the earlier conversation to the model. So the model remembers what it read and
+what it said, and it does not read your files again.
+
+A session that ended cleanly is still resumable. rho writes a reopen record, so the file always
+says what happened.
+
+### After a crash
+
+A run that dies leaves a session with no close record. Run `rho run "..." --continue` and rho
+opens it. Nothing needs cleaning by hand: the lock dies with the process.
+
+### Two rho processes
+
+A live session holds an advisory lock. A second rho that tries the same session says:
+
+```
+rho: session 20260826-204754-f8c9 is open in another process. Use another session, or close that one.
+```
+
+A bare `--continue` moves past a live session and takes the next one. `list` and `show` always
+work, because a read takes no lock.
+
+## Fork a session
+
+Two commands you can type:
+
+```sh
+rho sessions show 20260826-2047
+rho sessions fork 20260826-2047 --at r4
+```
+
+`show` prints the record id in the first column, so you copy it into `--at`. The original file
+stays byte-identical, and the new session names its origin.
+
+A tool result in `show` reports the tool and a byte count, never the body. So a secret inside a
+result does not reach your terminal by accident.
+
+## Write no file at all
+
+```sh
+rho run "a throwaway question" --ephemeral
+```
+
+The `ephemeral` config key does the same. `--ephemeral` with `--continue` is refused, because
+there would be nothing to continue.
+
+The `session-file` config key names one exact file, and it overrides the store.
+
+## Keeping a plain text record too
 
 Redirect stdout to keep a record of a run.
 
@@ -69,28 +173,67 @@ Event types are `TurnStart`, `Text`, `ToolStart`, `ToolUpdate`, `ToolEnd`, `Usag
 
 The transcript directory is not removed by rho when the session ends. It is under the system temp folder, so the OS may clear it on reboot.
 
+## A resume cannot widen a permission
+
+A session file records the approval mode and the sandbox mode it ran under. A resume may
+**tighten** either one, and it may never widen one:
+
+```
+rho: a resume would widen approval from read-only to allow-all; pass --allow-widen to allow it
+```
+
+Pass `--allow-widen` when you mean it. The flag is an error on its own.
+
+A session file is untrusted input. So the stored mode can only take a permission away, never
+grant one, and a forged file cannot stand in for the flag. The working directory the run uses
+comes from your config, never from the file. A fork origin is shown and never followed.
+
+## What a session file does not protect
+
+**rho does not encrypt a session file, and it removes no old session.** The store grows until
+you delete something.
+
+Redaction masks a **credential-shaped argument key**, such as `api_key`, inside a tool call. It
+matches a key name, and nothing else. So a session file holds these verbatim:
+
+- a secret you pasted into a prompt,
+- a secret inside a tool **result**, such as the output of `cat .env`,
+- a secret on a `bash` command line, because the key there is `command`,
+- a token inside a URL, such as a git remote.
+
+If you record a secret, delete that session.
+
+```sh
+rho sessions delete <id-prefix>
+```
+
+Delete removes the session file, every sidecar beside it, and its lock file. It does not
+overwrite the bytes, so a recovery tool may still find them. It does not remove a session forked
+from this one, because a fork is its own file.
+
+The four hex characters in an id are not a secret. They stop two sessions in the same second from
+colliding. The `0o700` on the store is what keeps other users out.
+
 ## What does not work yet
 
 > **Not built yet.** The `/sessions` slash command appears in the [terminal](terminal.md)
-> command list, and it does nothing. rho answers `/sessions is not built yet. See
-> F-slash-commands in docs/features.md.` No session file is written today.
+> command list, and it does nothing. **A terminal session records no file either.** Use
+> `rho run` when you want a session, and `rho sessions list` as the picker.
 
-> **Not built yet.** The `session-file` config key parses without error, and nothing reads it. Setting it has no effect today.
+> **Not built yet.** `/name` does not exist. Use `rho sessions name`.
 
-> **Not built yet.** The `ephemeral` config key parses without error, and nothing reads it. Setting it has no effect today.
-
-Because no session file exists, there is no resume command and no way to continue a past
-conversation.
-
-The library holds a resume rule. It refuses a resume that would widen the approval or the
-sandbox mode. A session saved under `read-only` cannot come back as allow-all. The refusal
-tells the caller to pass `--allow-widen`, and that flag does not exist on the command line.
-Nothing here reaches you today, because the command writes no session file to resume.
+> **Not built yet.** There is no rewind and no replay. `rho sessions fork` is the way to go back
+> to an earlier point.
 
 See [status.md](status.md) for the full list of what is not yet wired.
 
 ## If you embed rho as a library
 
-The library holds what the binary does not: a session record format, resume, a permission
-check on resume, and conversation branching. None of it is wired into the `rho` command.
+`SessionStore` is the seam. A caller injects the store root and the project key, so a frontend
+gets the same behaviour the command line has. `SessionStore::rows` builds a picker, `row_from`
+is the bounded row builder, `SessionStore::newest_resumable` answers "continue", and
+`Session::replay` puts a rebuilt conversation back into a context.
+
+`SessionStore` is a struct and not a trait. A different storage backend is a fork, and
+`SPEC-session-store-wiring` section 10 says why.
 See [architecture](../architecture.md) for where each piece sits.

@@ -182,3 +182,224 @@ Two changes fixed it:
 The stale-handle test had the same shape of hole: it called `expire_stale_result_handles`
 directly, so it would have passed while the resume forgot to call it. It now seeds a session
 file with a stored preview and resumes it.
+
+## 6. Driven for real, on Bedrock
+
+This is `AGENTS.md` step 11. Every command and every output below is real. The provider is AWS
+Bedrock and the model is the latest haiku, which is cheap enough for a full sweep.
+
+```sh
+cargo build --release -p rho-cli
+unset AWS_PROFILE
+export HOME=/tmp/rho-sess-e2e/home    # so no drive touches the real ~/.rho
+export MODEL=us.anthropic.claude-haiku-4-5-20251001-v1:0
+mkdir -p /tmp/rho-sess-e2e/root && cd /tmp/rho-sess-e2e/root && git init -q .
+echo "the parser reads a number, and it forgets the sign" > sample.txt
+```
+
+### A run writes a session
+
+```sh
+./target/release/rho run "Read sample.txt and say in one short sentence what the bug is." \
+  --provider bedrock --model $MODEL --root /tmp/rho-sess-e2e/root
+```
+
+```
+rho: session 20260826-204754-f8c9 at /tmp/rho-sess-e2e/home/.rho/sessions/root-e3764aec/20260826-204754-f8c9.jsonl
+I'll read the sample.txt file for you.
+The bug is: the parser reads a number but forgets to include the sign.
+```
+
+The store is private, and the mode is not the umask:
+
+```
+drwx------  /tmp/rho-sess-e2e/home/.rho/sessions
+drwx------  /tmp/rho-sess-e2e/home/.rho/sessions/root-e3764aec
+-rw-------  20260826-204754-f8c9.jsonl
+```
+
+```sh
+./target/release/rho sessions list --root /tmp/rho-sess-e2e/root
+```
+
+```
+ID                   LAST ACTIVE TITLE              MODEL           TOKENS  COST
+20260826-204754-f8c9 just now    Read sample.txt a… us.anthropic.c…   2.1k     -
+```
+
+The cost column is a dash because Bedrock reports no cost. rho shows no number it did not read.
+
+### A resume, and then the same thing twice
+
+```sh
+./target/release/rho run "Which word in the file names the thing it forgets? One word." \
+  --continue --provider bedrock --model $MODEL --root /tmp/rho-sess-e2e/root
+```
+
+```
+rho: continuing session 20260826-204754-f8c9 in /tmp/rho-sess-e2e/root (4 messages)
+The word is "sign".
+```
+
+```sh
+./target/release/rho run "Say the same word again." --continue ...
+```
+
+```
+rho: continuing session 20260826-204754-f8c9 in /tmp/rho-sess-e2e/root (6 messages)
+sign
+```
+
+**The model never re-read the file.** It answered from the conversation the resume replayed, and
+the message count grew from four to six. That is the proof the replay works, and no fixture
+could give it.
+
+### A crash continue, after a real SIGKILL
+
+```sh
+./target/release/rho run "Write a 900 word essay about integer parsing, one sentence per line." ... &
+sleep 1.5 && kill -9 $!
+```
+
+```
+SIGKILL sent to 58086
+the crashed session is 20260826-204830-5c0a
+--- its last record, which must not be a close ---
+message
+--- the lock file is left behind, and the operating system released the lock ---
+/tmp/.../20260826-204830-5c0a.lock
+--- the crash continue ---
+rho: continuing session 20260826-204830-5c0a in /tmp/rho-sess-e2e/root (1 messages)
+RECOVERED
+```
+
+The killed process left no `Closed` record, so the crash offer finds it. The operating system
+released the `flock`, so the next run could take it with no cleanup by hand.
+
+### Two processes, and the lock
+
+```
+--- the second process, on the same session ---
+rho: session 20260826-202353-16b1 is open in another process. Use another session, or close that one.
+--- and a bare --continue while it is live ---
+rho: continuing session 20260826-202432-ddca ...     # it moved to the next one
+--- a read-only command on a live session ---
+ID                   LAST ACTIVE TITLE              MODEL           TOKENS  COST
+20260826-202432-ddca just now    Read sample.txt a… us.anthropic.c…   2.1k     -
+```
+
+### The fork flow, from the two printed commands
+
+```sh
+./target/release/rho sessions show 20260826-2047 --root /tmp/rho-sess-e2e/root
+```
+
+```
+session  20260826-204754-f8c9  "Read sample.txt and say in one short sentence w…
+  r1    20:47:54  model        bedrock us.anthropic.claude-haiku-4-5-20251001-v…
+  r2    20:47:54  user         Read sample.txt and say in one short sentence wh…
+  r3    20:47:56  usage        2.1k
+  r4    20:47:56  tool_call    read  path=sample.txt
+  r5    20:47:56  tool_result  read  50 B
+  r6    20:47:57  usage        2.1k
+  r7    20:47:57  assistant    The bug is that the parser reads a number but fo…
+  r8    20:47:57  stop         EndTurn
+  r9    20:47:57  closed
+```
+
+The tool result shows the tool and 50 bytes, and never the body. A secret inside a result
+cannot reach the terminal by accident.
+
+```sh
+./target/release/rho sessions fork 20260826-2047 --at r4 --root /tmp/rho-sess-e2e/root
+```
+
+```
+forked session 20260826-204754-f8c9 at record r4 into 20260826-204813-937c.
+--- the original is byte-identical? ---
+yes, d827290a7c9bf50b7c3d90741c13b6b6c7d9a53f
+```
+
+### The failure paths, including the same thing twice
+
+```
+--- an absent session ---            rho: no session in this project starts with 19700101-00   (exit 1)
+--- the SAME absent session, twice --- rho: no session in this project starts with 19700101-00 (exit 1)
+--- an ambiguous prefix ---          rho: the id prefix 2026 matches 3 sessions: 20260826-204754-f8c9, 20260826-204807-0497, 20260826-204813-937c
+--- an id as the prompt, with a space --- rho: the prompt "20260826-2023" looks like a session id. The value needs an equals sign, so write --resume=20260826-2023 and give the prompt after it.
+--- --allow-widen with no session flag --- error: the following required arguments were not provided: --continue[=<ID>]
+--- --continue with --ephemeral ---  rho: --ephemeral writes no file, so there is nothing to continue. Drop one of the two.
+--- a fork at a record that is not there --- rho: the session holds no record r999
+--- an empty title ---               rho: a session title cannot be empty
+--- a widening resume ---            rho: a resume would widen approval from read-only to allow-all; pass --allow-widen to allow it
+--- with --allow-widen ---           WIDE.
+--- --ephemeral ---                  rho: this session is ephemeral, so rho writes no session file.
+                                     session files before 3, after 3
+--- delete, then the fork survives --- deleted session 20260826-204754-f8c9. ... /…/20260826-204813-937c.jsonl
+--- deleting the same session twice --- rho: no session in this project starts with 20260826-204754-f8c9
+```
+
+## 7. What the live drive found that every test had missed
+
+**Four defects. Every one of them passed the whole suite first.**
+
+### 1. Bare `--continue` could never work
+
+A run that ends on its own writes a `Closed` record, and `newest_open` skips a closed session.
+So right after a successful run:
+
+```
+rho: no session to continue in root-e3764aec; start one without --continue
+```
+
+The most common thing a user wants was impossible. Every unit test passed, because every test
+seeded a session that never closed. `SessionStore::newest_resumable` now answers `--continue`,
+and `newest_open` stays the crash offer. See
+`D-continue-takes-the-newest-session-closed-or-not`. Tests:
+`continue_takes_the_newest_session_closed_or_not`, `newest_resumable_skips_a_locked_session`,
+`newest_resumable_skips_an_unreadable_file`,
+`a_closed_session_is_continued_and_states_its_reopen`.
+
+The old test `a_closed_session_is_never_continued` asserted the defect, so it is replaced and
+recorded in `bench/deleted-tests.txt`.
+
+### 2. `rho sessions name` made the session unreadable
+
+```
+rho: record r24 names parent r23, which is a leaf record and never a parent
+```
+
+A `Name` record is a leaf, and the writer made it the chain head. The next append then named a
+leaf as its parent, and the integrity check of section 6a refused the whole file. **The guard
+worked, and the writer produced the bad file.** A leaf no longer moves the head, and a reopen
+takes the last chain record. Tests: `a_leaf_record_never_becomes_the_chain_head`,
+`a_named_session_reopens_and_stays_readable`.
+
+### 3. `show` printed a staircase
+
+Indentation counted the whole chain to the root, so a linear conversation stepped one column
+deeper per record and the text ran off the line after six records. Indentation exists to show a
+**branch**, so it now counts branch points. Tests:
+`show_does_not_indent_a_linear_conversation`, `show_indents_only_below_a_branch_point`.
+
+A long title also pushed the model and the close state off the header. The title gives way now,
+because a user can read it again on the first prompt line. Test:
+`show_keeps_the_model_and_the_state_when_the_title_is_long`.
+
+### 4. Two smaller ones
+
+- An empty title refused with `cannot decode a record: a session title cannot be empty`, which
+  reads like file corruption. `SessionError::EmptyTitle` names it. Test:
+  `an_empty_name_is_refused_by_the_recorder`.
+- Neither renderer ended with a newline, so the shell prompt ran into the last row. Test:
+  `both_renderers_end_with_a_newline`.
+- A crash leaves an `<id>.lock` file, and `delete` did not remove it. Test:
+  `delete_removes_the_session_and_its_sidecars`.
+
+## 8. What is not verified live
+
+- **The terminal.** `/sessions` is not built, and the TUI records no session. See the note in
+  `docs/features.md`. Only `rho run` and `rho sessions` are wired.
+- **One provider.** Bedrock only. The change touches no wire format, so a provider cannot see
+  it, and `SessionRecorder` folds the same normalised events for every provider. That is a
+  reason, not a measurement.

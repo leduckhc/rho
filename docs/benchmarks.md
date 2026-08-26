@@ -650,3 +650,32 @@ pinned a function that no longer exists.
 A reviewer named it, and it is still true. The number is the cost of building the frame, through
 `TestBackend`. Nothing is drawn to a real terminal, so no write, no flush, and no terminal-side
 cost is in it.
+
+## The session list
+
+`SPEC-session-store-wiring` section 8e sets a budget: a list of 500 sessions completes under 100
+milliseconds. A full typed decode cannot meet it. `ADR-jsonl-codec` measured one 1848-record
+session at 2.01 milliseconds, so 500 of those cost about a second.
+
+So a row comes from two bounded reads: the first `ROW_HEAD_LINES` lines, and the last
+`ROW_TAIL_BYTES` bytes.
+
+```sh
+cargo test -p rho-core --test session_rows -- --nocapture a_list_of_five
+```
+
+| sessions | wall clock |
+| --- | --- |
+| 500 | 20.68 ms |
+
+The budget holds with room to spare, so the cache in `D-no-list-cache-until-a-budget-fails` does
+not ship.
+
+**The number asserts nothing.** A shared runner makes a 100 millisecond assertion flaky, and a
+fast machine would pass a full decode of small files. See `D-a-budget-is-measured-not-asserted`.
+The assertion that proves the bound is a sentinel row: one of the 500 files carries a `Name`
+record past both windows, so a full decode reports an explicit title and a bounded read does not.
+See `D-the-budget-test-needs-an-observable-difference`.
+
+The 500 files are small, and one is 128 kB. So this measures the per-file cost of opening,
+seeking, and decoding a bounded window, and not the cost of a large store on a slow disk.

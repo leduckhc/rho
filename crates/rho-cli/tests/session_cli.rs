@@ -910,8 +910,9 @@ fn a_second_process_cannot_continue_a_live_session() {
 
 #[test]
 fn two_runs_at_once_never_share_a_file() {
-    // Two worktrees of one repository share a project key, so two runs reach one store. Each
-    // must end with its own file, and every record id in each file must be unique.
+    // Two runs in one project reach one store. Each must end with its own file, and every record
+    // id in each file must be unique. `session_binary.rs` drives the two-worktree half through
+    // the real binary, in `two_worktrees_continuing_at_once_never_share_a_file`.
     let dir = tempfile::tempdir().expect("a temporary directory");
     let root = project(dir.path());
 
@@ -963,31 +964,66 @@ fn a_crash_continue_takes_the_session_that_never_closed() {
         recording.id.clone().expect("an id")
     };
 
-    let offered = recording::open(request(dir.path(), &root, SessionSelector::Newest))
-        .expect("a crash continue opens");
+    // The crash offer is `newest_open`, and it means a session that really did not close. Using
+    // the resume choice here would pass whatever the close records said, because the crashed
+    // session is also the newest.
+    let (store, _key) = recording::store_for(dir.path(), &root);
+    let offered = store.newest_open().expect("no error");
 
     assert_eq!(
-        offered.id,
-        Some(crashed),
-        "a crash continue takes the session that never closed"
+        offered,
+        Some(crashed.clone()),
+        "a crash offers the session that never closed"
     );
+    // And a resume really opens it.
+    let resumed = recording::open(request(dir.path(), &root, SessionSelector::Newest))
+        .expect("a crash continue opens");
+    assert_eq!(resumed.id, Some(crashed));
 }
 
 #[test]
-fn a_closed_session_is_never_continued() {
+fn a_closed_session_is_continued_and_states_its_reopen() {
+    // A run that ends on its own writes a `Closed` record. Continuing it is the common case, and
+    // the reopen is stated on disk so a reader never finds `Closed` in the middle of a file.
+    //
+    // The earlier test asserted the opposite, and it asserted a defect. A live drive showed bare
+    // --continue answering "no session to continue" right after a successful run. See
+    // `D-continue-takes-the-newest-session-closed-or-not`.
     let dir = tempfile::tempdir().expect("a temporary directory");
     let root = project(dir.path());
-    let mut recording =
-        recording::open(request(dir.path(), &root, SessionSelector::New)).expect("a session");
-    recording.recorder.record_prompt(&[ContentBlock::Text {
-        text: "a finished session".to_string(),
-    }]);
-    recording.close();
-    drop(recording);
+    let id = {
+        let mut recording =
+            recording::open(request(dir.path(), &root, SessionSelector::New)).expect("a session");
+        recording.start(&[ContentBlock::Text {
+            text: "a finished session".to_string(),
+        }]);
+        recording.close();
+        recording.id.clone().expect("an id")
+    };
+
+    let resumed = recording::open(request(dir.path(), &root, SessionSelector::Newest))
+        .expect("a closed session must still be resumable");
+    assert_eq!(resumed.id, Some(id.clone()));
+    drop(resumed);
+
+    let (store, _key) = recording::store_for(dir.path(), &root);
+    let read = SessionReader::read(&store.path_of(&id)).expect("the file reads back");
+    let reopened = read
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.record, Record::Reopened))
+        .count();
+    assert_eq!(reopened, 1, "the reopen is stated on disk exactly once");
+}
+
+#[test]
+fn an_empty_store_cannot_be_continued() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let root = project(dir.path());
 
     let error = recording::open(request(dir.path(), &root, SessionSelector::Newest))
         .map(|_| ())
-        .expect_err("a store of closed sessions offers nothing");
+        .expect_err("an empty store offers nothing");
 
     assert!(
         error.to_string().contains("no session to continue"),

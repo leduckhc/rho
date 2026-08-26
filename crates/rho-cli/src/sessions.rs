@@ -37,6 +37,8 @@ pub fn render_list(rows: &[SessionRow], now_millis: u64, long: bool) -> String {
         out.push('\n');
         out.push_str(&list_row(row, now_millis, long));
     }
+    // A trailing newline, so a shell prompt does not run into the last row.
+    out.push('\n');
     out
 }
 
@@ -121,6 +123,9 @@ pub fn render_show(read: &ReadResult, id: &SessionId, full: bool) -> String {
         let is_sibling = siblings.contains(&entry.id.0);
         out.push_str(&show_row(entry, depth, is_sibling, &names, full));
     }
+    // A trailing newline, so a shell prompt does not run into the last row. A live drive found
+    // the missing one.
+    out.push('\n');
     out
 }
 
@@ -133,6 +138,12 @@ fn show_header(read: &ReadResult, id: &SessionId) -> String {
     } else {
         "open"
     };
+    // **The title gives way, and never the model or the state.** A live drive showed a long title
+    // pushing both off the end of the line, so the header said nothing a user needed. The title is
+    // the one field a user can already read on the next line, in the first prompt.
+    let fixed = format!("session  {}  \"\"  {model}  {closed}", id.as_str());
+    let room = LINE_WIDTH.saturating_sub(display_width(&fixed));
+    let title = fit(&title, room);
     let line = format!("session  {}  \"{title}\"  {model}  {closed}", id.as_str());
     fit(&line, LINE_WIDTH)
 }
@@ -320,6 +331,22 @@ fn sibling_ids(entries: &[Entry]) -> std::collections::HashSet<String> {
 
 /// The indent depth of every record, counted from ancestors inside the entry set.
 fn depths(entries: &[Entry]) -> HashMap<String, usize> {
+    // **The depth counts branch points, not chain length.**
+    //
+    // A first version counted the whole chain to the root. A live drive then showed a linear
+    // conversation as a staircase: every record sat one level deeper than the one before it, and
+    // the text ran off the 80 column line after six records. See
+    // `docs/verification/session-store-wiring.md` section 6.
+    //
+    // Indentation exists to show a **branch**. So a record goes one level deeper only when it
+    // descends from a record that has more than one child. A conversation with no fork then
+    // prints flat, and a fork prints one level in.
+    let mut children: HashMap<String, usize> = HashMap::new();
+    for entry in entries {
+        if let Some(parent) = &entry.parent_id {
+            *children.entry(parent.to_string()).or_insert(0) += 1;
+        }
+    }
     let mut by_id: HashMap<String, &Entry> = HashMap::new();
     for entry in entries {
         by_id.insert(entry.id.to_string(), entry);
@@ -329,11 +356,11 @@ fn depths(entries: &[Entry]) -> HashMap<String, usize> {
         let mut depth = 0;
         let mut cursor = entry.parent_id.as_ref().map(|p| p.to_string());
         while let Some(pid) = cursor {
+            if children.get(&pid).copied().unwrap_or(0) > 1 {
+                depth += 1;
+            }
             match by_id.get(&pid) {
-                Some(parent) => {
-                    depth += 1;
-                    cursor = parent.parent_id.as_ref().map(|p| p.to_string());
-                }
+                Some(parent) => cursor = parent.parent_id.as_ref().map(|p| p.to_string()),
                 None => break,
             }
         }

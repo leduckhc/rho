@@ -34,6 +34,13 @@ fn entry(rid: &str, parent: Option<&str>, millis: u64, record: Record) -> Entry 
     }
 }
 
+fn model_change(model: &str) -> Record {
+    Record::ModelChange {
+        provider: "bedrock".to_string(),
+        model: model.to_string(),
+    }
+}
+
 fn user(text: &str) -> Record {
     Record::Message {
         message: Message {
@@ -393,5 +400,111 @@ fn list_long_adds_the_directory_and_the_fork_origin() {
     assert!(
         !short.contains("20260101-000000-1111"),
         "the short list adds no fork origin"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// What a live drive of the real binary found. See
+// `docs/verification/session-store-wiring.md` section 6.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn show_does_not_indent_a_linear_conversation() {
+    // A first version counted the whole chain to the root, so a linear conversation printed as a
+    // staircase and the text ran off the line after six records. Indentation exists to show a
+    // branch, so a conversation with no fork prints flat.
+    let read = read_result(vec![
+        entry("r1", Some("r0"), NOW, user("the first prompt")),
+        entry("r2", Some("r1"), NOW, assistant("the first answer")),
+        entry("r3", Some("r2"), NOW, user("the second prompt")),
+        entry("r4", Some("r3"), NOW, assistant("the second answer")),
+        entry("r5", Some("r4"), NOW, user("the third prompt")),
+        entry("r6", Some("r5"), NOW, assistant("the third answer")),
+    ]);
+
+    let text = render_show(&read, &id(), false);
+
+    let columns: Vec<usize> = text
+        .lines()
+        .skip(1)
+        .map(|line| line.find('r').expect("a record id"))
+        .collect();
+    assert_eq!(
+        columns,
+        vec![2, 2, 2, 2, 2, 2],
+        "a chain with no fork must print flat, got\n{text}"
+    );
+}
+
+#[test]
+fn show_indents_only_below_a_branch_point() {
+    // Two answers to one question. Both descend from a record with two children, so both go one
+    // level in, and the later one is marked.
+    let read = read_result(vec![
+        entry("r1", Some("r0"), NOW, user("one question")),
+        entry("r2", Some("r1"), NOW, assistant("the first answer")),
+        entry("r3", Some("r1"), NOW, assistant("the second answer")),
+    ]);
+
+    let text = render_show(&read, &id(), false);
+
+    // The column the record id starts in. A sibling replaces the last indent level with a mark,
+    // so its leading spaces are fewer while its id sits in the same column.
+    let columns: Vec<usize> = text
+        .lines()
+        .skip(1)
+        .map(|line| line.find('r').expect("a record id"))
+        .collect();
+    assert_eq!(
+        columns,
+        vec![2, 4, 4],
+        "only a record below a branch point is indented, got\n{text}"
+    );
+    assert!(
+        text.lines().any(|line| line.trim_start().starts_with("+ ")),
+        "the later of two answers to one question is marked, got\n{text}"
+    );
+}
+
+#[test]
+fn both_renderers_end_with_a_newline() {
+    // A live drive showed the shell prompt running into the last row.
+    let read = read_result(vec![entry("r1", Some("r0"), NOW, user("a prompt"))]);
+    assert!(render_show(&read, &id(), false).ends_with('\n'));
+
+    let rows = vec![summary("20260825-094512-a3f9", "a title", "m", None)];
+    assert!(render_list(&rows, 1_756_000_000_000, false).ends_with('\n'));
+}
+
+#[test]
+fn show_keeps_the_model_and_the_state_when_the_title_is_long() {
+    // A live drive showed a long title pushing the model and the close state off the header. The
+    // title gives way, because a user can read it again on the first prompt line.
+    let read = read_result(vec![
+        entry(
+            "r1",
+            Some("r0"),
+            NOW,
+            model_change("a-very-long-model-identifier"),
+        ),
+        entry("r2", Some("r1"), NOW, user(&"t".repeat(300))),
+        entry("r3", Some("r2"), NOW, Record::Closed),
+    ]);
+
+    let text = render_show(&read, &id(), false);
+    let header = text.lines().next().expect("a header");
+
+    assert!(
+        header.contains("a-very-long-model-identifier"),
+        "the model must survive a long title, got {header}"
+    );
+    assert!(
+        header.ends_with("closed"),
+        "the close state must survive a long title, got {header}"
+    );
+    assert!(
+        header.chars().count() <= 80,
+        "got {} columns",
+        header.chars().count()
     );
 }

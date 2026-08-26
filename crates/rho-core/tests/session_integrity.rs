@@ -758,6 +758,89 @@ fn a_reopen_of_a_reopened_file_writes_one_more_reopened_record() {
     );
 }
 
+#[test]
+fn a_leaf_record_never_becomes_the_chain_head() {
+    // `rho sessions name` writes a `Name` leaf. The writer then made it the head, so the next
+    // append named a leaf as its parent and the whole file became unreadable:
+    //
+    //     record r24 names parent r23, which is a leaf record and never a parent
+    //
+    // A live drive found it, after `sessions name` ran on a session and the next run resumed it.
+    // The integrity check of section 6a did its job, and the writer had produced the bad file.
+    let (_guard, store, _root) = temp_store();
+    let mut writer = store
+        .create(new_session(&id(0x0aaa), Path::new("/tmp")))
+        .expect("a created session");
+    let base = writer.head().expect("the model record");
+    let before = writer
+        .append(message_record("a prompt"), Some(base))
+        .expect("appended");
+
+    let name = writer
+        .append(
+            Record::Name {
+                title: "a title".to_string(),
+            },
+            Some(before.clone()),
+        )
+        .expect("a name is written");
+
+    assert_eq!(
+        writer.head(),
+        Some(before),
+        "a leaf must not move the head, or the next record names it as a parent"
+    );
+    // The next append, exactly as a resume makes.
+    let head = writer.head();
+    writer
+        .append(message_record("after the name"), head)
+        .expect("appended");
+    let read = SessionReader::read(writer.path()).expect("the file must still read back");
+    assert!(
+        read.entries.iter().any(|entry| entry.id == name),
+        "the name record is still in the file"
+    );
+}
+
+#[test]
+fn a_named_session_reopens_and_stays_readable() {
+    // The same defect through the store path, which is how a user meets it: name a session, then
+    // resume it.
+    let (_guard, store, _root) = temp_store();
+    let session = id(0x0bbb);
+    let path = {
+        let mut writer = store
+            .create(new_session(&session, Path::new("/tmp")))
+            .expect("a created session");
+        let base = writer.head();
+        writer
+            .append(message_record("a prompt"), base)
+            .expect("appended");
+        writer.path().to_path_buf()
+    };
+    {
+        let mut writer = store.append_to(&path).expect("reopened to name it");
+        let head = writer.head();
+        writer
+            .append(
+                Record::Name {
+                    title: "the sign bug".to_string(),
+                },
+                head,
+            )
+            .expect("a name is written");
+    }
+    {
+        let mut writer = store.append_to(&path).expect("reopened to continue");
+        let head = writer.head();
+        writer
+            .append(message_record("the next prompt"), head)
+            .expect("appended");
+    }
+
+    SessionReader::read(&path).expect("a named session must still read back");
+}
+
 // ---------------------------------------------------------------------------
 // Section 7c. An exclusive create, because a collision truncates.
 // ---------------------------------------------------------------------------

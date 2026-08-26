@@ -374,7 +374,10 @@ fn target(
 ) -> anyhow::Result<SessionId> {
     match selector {
         SessionSelector::New => unreachable!("a new session never resolves a target"),
-        SessionSelector::Newest => match store.newest_open()? {
+        // `--continue` takes the newest session, closed or not. `newest_open` is the crash
+        // offer, and using it here made a clean run unresumable. See
+        // `D-continue-takes-the-newest-session-closed-or-not`.
+        SessionSelector::Newest => match store.newest_resumable()? {
             Some(id) => Ok(id),
             None => Err(SessionError::NoSessionToContinue {
                 project: key.as_str().to_string(),

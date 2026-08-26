@@ -1,8 +1,9 @@
 # Status at version 0.1.0
 
 rho streams answers, calls tools, and runs subagents today.
-It does not record sessions, and it does not ask before a mutating tool call.
-This page describes rho as of 2026-08-23.
+`rho run` records a session, and `rho sessions` reads, names, forks, and deletes one.
+rho does not ask before a mutating tool call.
+This page describes rho as of 2026-08-26.
 
 ## Works today
 
@@ -22,6 +23,11 @@ This page describes rho as of 2026-08-23.
 | Polling, steering, and cancelling a running subagent | [subagents](subagents.md) |
 | Background tasks the agent can tail or cancel | [tools](tools.md) |
 | OS sandbox for bash (`--sandbox confined` or `strict`) | [tools](tools.md) |
+| A session file per `rho run`, private to you | [sessions](sessions.md) |
+| Continue a session with `--continue` or `--resume=<id>` | [sessions](sessions.md) |
+| Continue after a crash, with no cleanup by hand | [sessions](sessions.md) |
+| List, read, name, fork, and delete a session | [sessions](sessions.md) |
+| A lock, so two rho processes never write one session | [sessions](sessions.md) |
 | Skills loaded from `SKILL.md` files | [skills](skills.md) |
 | `/help`, `/quit`, and `/guide` slash commands | [terminal interface](terminal.md) |
 | The two minute tour, three pages, keys generated from the binding table | [terminal interface](terminal.md) |
@@ -33,7 +39,7 @@ This page describes rho as of 2026-08-23.
 | What works | What does not, and the workaround |
 |---|---|
 | `approval = "ask"` parses in the config. | rho refuses it with an error message. Use `--read-only` to block writes, or omit the flag to allow all. |
-| `session-file` and `ephemeral` parse and merge correctly. | Neither value reaches the agent loop. No session file is written. Silence: rho starts without error and records nothing. |
+| `rho run` records a session, and `--continue` resumes one. `session-file` and `ephemeral` both reach the run. | The terminal records nothing, and `/sessions` opens no picker. Use `rho run` when you want a session, and `rho sessions list` as the picker. See [sessions](sessions.md). |
 | The `[subagents]` table parses in the config. | No value from it reaches the agent. Pass the limits as flags: `--max-children-per-parent`, `--max-live-agents`, `--child-timeout-secs`, `--max-queued-per-parent`, `--max-queued-total`, `--agent-grace-turns`, `--max-agent-tool-calls`. |
 | `--no-skills` stops the skill search, as its help says. | It also stops subagent discovery, and warns about neither. rho then offers no `spawn_agent`. Drop the flag to keep subagents. |
 | A subagent can be steered while it runs, with `steer_agent`. | You cannot steer your own turn. The terminal interface wires no queue for your session. A message you type mid-run never reaches the running turn, and Enter starts a new turn instead. |
