@@ -204,3 +204,29 @@ decision claimed every field was classified. That is why `session_root` walked p
 `every_field_is_classified_as_powerful_or_harmless` replaces it. It reads every field name from
 the layer's own Debug text, including nested ones, and fails when a field is in neither set. A
 deliberate break added a `hook_path` field, and the guard named it.
+
+### A redirect carried the credential too
+
+A security review noted that `reqwest` strips the `Authorization` header across origins, and
+that a same-host `https` to `http` downgrade is not a different origin. So a redirect could put
+the bearer token on the wire in clear text and defeat `check_base_url`, which exists to prevent
+exactly that.
+
+A probe confirmed it. An endpoint that answered `307 Location: http://127.0.0.1:8144/leaked`
+received the token on every hop:
+
+```
+HOP path=/v1/chat/completions auth=PRESENT
+HOP path=/leaked auth=PRESENT      (ten hops, and the retry policy repeated the whole set five times)
+```
+
+The client now follows no redirect at all. A `3xx` becomes an error the user sees, which is the
+right answer: an endpoint that redirects a chat request is not the endpoint they named. The same
+probe now records one hop and zero to `/leaked`.
+
+### Still latent, and named so it is not lost
+
+An untrusted project file's `env:VAR` and `${VAR}` credentials are not refused. Only a
+`!command` credential is. Nothing resolves a credential today, so no value reaches a provider
+and the gap is inert. It becomes real the moment credentials are wired, especially beside a
+trusted `base-url`, so `[credentials]` must gate every form then, not one.

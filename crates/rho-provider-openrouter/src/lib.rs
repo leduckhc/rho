@@ -42,13 +42,20 @@ pub fn bypasses_proxy(base_url: &str) -> bool {
 
 /// The HTTP client for a base url. A loopback host gets a client with no proxy at all.
 fn build_client(base_url: &str) -> reqwest::Client {
+    // **No redirect is followed.** The request carries a bearer token. `reqwest` strips the
+    // header across origins, and a same-host `https` to `http` downgrade is not a different
+    // origin, so a redirect could put the credential on the wire in clear text and defeat
+    // `check_base_url`, which exists to prevent exactly that. A security review named it.
+    //
+    // A 3xx therefore becomes an error the user sees, which is the right answer: an endpoint
+    // that redirects a chat request is not the endpoint they named.
+    let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
     if bypasses_proxy(base_url) {
-        return reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        // A loopback host must not go through a proxy. A live probe captured
+        // `Bearer sk-...` at an attacker's proxy before this.
+        builder = builder.no_proxy();
     }
-    reqwest::Client::new()
+    builder.build().unwrap_or_else(|_| reqwest::Client::new())
 }
 
 /// The path every other OpenAI-compatible host serves.
