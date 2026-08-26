@@ -161,6 +161,13 @@ name, a sandbox value, a file stem. Each one goes through `Detail`, so no warnin
 control character or unbounded prose. The `sandbox` warning is rho's own sentence now, because
 the message from `SandboxMode::from_str` quotes the whole value and the repair sat after it.
 
+**What a second frontend can reuse, and what it cannot.** `RejectedDefinition`,
+`RejectionReason`, and `Detail` live in `rho-skills`, so any frontend renders a rejection from
+the data or calls `notice`. `AgentDefinition::notices` and `safe_name` are there too. The
+**assembly** of a whole report is not: `notices_for` sits in `rho-cli`, and no crate may depend
+on `rho-cli`. So a second frontend would repeat that function's ordering and its caps. Section
+11 says why that is deliberate today.
+
 ### What the contract forbids
 
 - No catch-all reason. A new case is a new variant, and `repair` does not compile without it.
@@ -202,6 +209,14 @@ sequence that holds a value which is not a string, and a nested sequence.
 
 An empty `tools:` line rejects on purpose. It looks like an absent field, and an absent field
 inherits every parent tool. So the safe reading of an empty line is no reading at all.
+
+### Which fault wins
+
+A file may break two rules. The loader reports the first fault it meets, in this order: the
+read, the frontmatter fences, the YAML parse, the description, then the `tools` field. So a
+file with no description **and** a bad `tools` field reports the description. The user meets
+the second fault on the next run. "The same thing twice" is a step in AGENTS.md for this
+reason, and it is how a second fault surfaces.
 
 ### Every other field
 
@@ -475,3 +490,10 @@ Recorded and not fixed here, each with its reason:
   and `markdown_files` sorts, so a unit test would pin no invariant that code could break.
 - **The terminal frontend takes the same notice list and no test or live run covers that
   hop.**
+- **`notices_for` assembles four kinds of line inside `rho-cli`, so a new kind edits one
+  function.** The correctness lens called that an SRP violation, and it is one. The pieces it
+  assembles already live in `rho-skills`, so the move would be small. It waits for a second
+  consumer, because no crate may depend on `rho-cli` and no other frontend renders this report
+  yet. Moving it now would design an interface for one caller, and AGENTS.md prefers the
+  smaller interface. When the terminal interface renders these lines itself, `AgentSet` grows
+  one method and `notices_for` becomes its caller.
