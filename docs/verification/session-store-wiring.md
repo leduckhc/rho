@@ -741,3 +741,38 @@ ID                   LAST ACTIVE TITLE              MODEL           TOKENS  COST
 Three things a reader can now check by eye. The first row shows a dash for its tokens, because that
 session recorded no `Usage` record. The `tool_result` line names the tool and 1.2 KiB and never the
 body. `--long` runs past 80 columns on purpose, and the default list does not.
+
+## 16. What the security lens asked, and what it cost to answer
+
+The security lens attacked six claims and found the cycle, the mode window, the tool-message body,
+and the handle expiry. Sections 12 and 13 hold those fixes. It also asked one question this document
+could only answer with a measurement: **what bounds a whole-file read?**
+
+`rho sessions list` never reads a whole file. A resume does, because `branch_messages` walks parent
+links and a walk needs the set. Two caps already bound that read, `MAX_LINE_BYTES` and
+`MAX_DROPPED_RECORDS`, and neither bounds the record count.
+
+So it was measured, with a scratch binary depending on `rho-core`:
+
+```
+records=20000   file=4.2 MiB   read=27.76ms   rss delta=12.9 MiB  per record=675 bytes
+records=100000  file=21.2 MiB  read=102.93ms  rss delta=60.8 MiB  per record=637 bytes
+```
+
+**About 640 bytes per record, and about three times the file size, linear in both.** A session of a
+thousand turns costs under a megabyte. `docs/benchmarks.md` holds the table, the harness, and the
+commands, and `docs/guide/sessions.md` tells a user the same thing in their own terms.
+
+The cap is **not** added, and the reason is written down rather than left as an omission: capping the
+record count means deciding which end of a conversation to lose, and losing the front breaks its
+beginning. That belongs with `F-context-compaction`, which section 10 of the spec keeps out of this
+lane.
+
+Two more of its findings were answered in prose rather than in code, and both are now stated where a
+reader meets them:
+
+- A project key has no length cap. A four kilobyte `gitdir:` line gives `ENAMETOOLONG`, which is a
+  degrade and not a traversal. The sanitizer still holds: no separator and no `..` survives it.
+- A `session-file` in a directory the user already owns keeps that directory's mode. rho sets `0o700`
+  on a directory it creates and `0o600` on the file, and it does not chmod a directory it found. The
+  guide says so, next to the rest of the privacy notes.

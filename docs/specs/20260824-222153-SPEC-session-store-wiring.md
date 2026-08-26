@@ -1546,6 +1546,14 @@ one rule has one spelling.
   lock is taken before any write.
 - A project key has no length cap, so a four kilobyte `gitdir:` line yields a long directory
   component and `ENAMETOOLONG`. That is a degrade and not a traversal.
+- **No cap bounds the record count of one read.** `MAX_LINE_BYTES` bounds a line and
+  `MAX_DROPPED_RECORDS` bounds the bad ones, and a resume still holds every good record: about 640
+  bytes each, roughly three times the file size, measured in `docs/benchmarks.md`. Capping it means
+  deciding which end of a conversation to lose, and losing the front breaks its beginning. That
+  belongs with `F-context-compaction`, which section 10 keeps out of this lane.
+- **A `session-file` in a directory the user already owns keeps that directory's mode.** rho sets
+  `0o700` on a directory it creates and `0o600` on the file, and it does not chmod a directory it
+  found. `docs/guide/sessions.md` says so.
 - The prior-art table in section 7d is a reading of pi, jcode and fx. It is editorial context about
   other projects, and no rho test can back it.
 

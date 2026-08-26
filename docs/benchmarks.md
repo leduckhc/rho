@@ -684,3 +684,38 @@ See `D-the-budget-test-needs-an-observable-difference`.
 
 The 500 files are small, and one is 128 kB. So this measures the per-file cost of opening,
 seeking, and decoding a bounded window, and not the cost of a large store on a slow disk.
+
+## Reading one whole session
+
+`rho sessions list` never reads a whole file. **A resume does.** `SessionReader::read` holds every
+record of the branch in memory, because `branch_messages` walks parent links and a walk needs the
+set. A security review asked what bounds that, and the answer is the file: the read is linear, and
+there is no cap on the record count. So the cost is worth a number.
+
+The harness is a scratch binary that depends on `rho-core`. It writes a session of N one-line user
+turns, reads it whole, and reports the change in resident memory:
+
+```rust
+let read = rho_core::SessionReader::read(&path).expect("the file reads back");
+// rss measured with `ps -o rss= -p <pid>` before and after
+```
+
+```sh
+cargo run --release -- 20000
+cargo run --release -- 100000
+```
+
+| records | file | read | resident memory | per record |
+| --- | --- | --- | --- | --- |
+| 20,000 | 4.2 MiB | 27.8 ms | 12.9 MiB | 675 bytes |
+| 100,000 | 21.2 MiB | 102.9 ms | 60.8 MiB | 637 bytes |
+
+**About 640 bytes per record, and about three times the file size in memory.** It is linear in both,
+so a session has to reach millions of turns before the read is the problem. A real session of a
+thousand turns costs under a megabyte.
+
+Two caps already bound the read: `MAX_LINE_BYTES` per line, and `MAX_DROPPED_RECORDS` for lines that
+do not decode. **No cap bounds the record count**, and that is stated rather than fixed here.
+Capping it means deciding which end of a conversation to lose, and losing the front breaks its
+beginning. That decision belongs with `F-context-compaction`, which `SPEC-session-store-wiring`
+section 10 keeps out of this lane.

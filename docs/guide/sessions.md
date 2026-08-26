@@ -193,6 +193,17 @@ comes from your config, never from the file. A fork origin is shown and never fo
 **rho does not encrypt a session file, and it removes no old session.** The store grows until
 you delete something.
 
+**A resume reads the whole file.** `rho sessions list` does not, so a big session slows no listing.
+A resume holds about 640 bytes per record, which is roughly three times the file size. A session of
+a thousand turns costs under a megabyte, and one of a hundred thousand turns costs about 61 MiB. The
+numbers and their command are in [benchmarks](../benchmarks.md). No cap bounds the record count, so
+a session you never end keeps growing.
+
+**A `session-file` outside the store is your directory, not rho's.** rho makes any directory it
+creates itself private, `0o700`, and it sets the file to `0o600`. It does **not** change the mode of
+a directory you already have. So a key that points into a shared or a synced folder puts the file
+there, private to you, in a directory whose mode you chose.
+
 Redaction masks a **credential-shaped argument key**, such as `api_key`, inside a tool call. It
 matches a key name, and nothing else. So a session file holds these verbatim:
 
