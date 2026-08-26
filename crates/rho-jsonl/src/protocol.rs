@@ -286,8 +286,13 @@ pub enum Event {
     },
     /// A streamed line of tool output.
     ToolUpdate { id: String, output: String },
-    /// A tool call finished. `success` is the inverse of `ToolOutput::is_error`.
-    ToolEnd { id: String, success: bool },
+    /// A tool call finished. `ok` is the inverse of `ToolOutput::is_error`.
+    ///
+    /// The field is `ok` and not `success`. A client routes a line by looking for
+    /// `success`, which only a reply carries, so an event named its own field
+    /// `success` would be read as a reply. An invariant test pins the rule. See
+    /// D-no-event-carries-the-success-key.
+    ToolEnd { id: String, ok: bool },
     /// A steered message was queued. `position` counts from one.
     MessageQueued { position: usize },
     /// Queued messages reached the model at a turn boundary. This is how a client

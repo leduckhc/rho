@@ -29,7 +29,7 @@ use crate::subagents;
 const EXIT_FAILURE: i32 = 1;
 
 /// rho is a composable coding agent harness.
-#[derive(Debug, Parser)]
+#[derive(Clone, Debug, Parser)]
 #[command(name = "rho", version, about = "A composable coding agent harness.")]
 pub struct Cli {
     /// The provider to use. It beats the RHO_PROVIDER variable, through the merge.
@@ -203,13 +203,19 @@ impl From<SandboxArg> for SandboxMode {
 }
 
 /// The subcommands of `rho`.
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Command {
     /// Run one prompt without the terminal UI. Print the answer to stdout.
     Run {
         /// The prompt text.
         prompt: String,
     },
+    /// Speak the JSONL protocol on stdin and stdout, so another process drives rho.
+    ///
+    /// One JSON command per line goes in. One reply or event per line comes out.
+    /// Diagnostics go to stderr, so stdout carries only the protocol. See
+    /// `docs/specs/20260819-102749-SPEC-jsonl-frontend.md`.
+    Jsonl,
 }
 
 /// Build a `SessionConfig` from the loaded configuration, and print any notice.
@@ -234,7 +240,7 @@ fn build_config(config: &rho_config::Config) -> anyhow::Result<SessionConfig> {
 /// Build a `SessionConfig`, and collect every notice instead of printing it. State every
 /// choice. A notice is data here, so a frontend can draw it where the user is looking.
 /// See `D-a-notice-reaches-the-transcript`.
-fn build_config_with_notices(
+pub(crate) fn build_config_with_notices(
     config: &rho_config::Config,
     notices: &mut Vec<String>,
 ) -> anyhow::Result<SessionConfig> {
@@ -312,7 +318,7 @@ fn build_config_with_notices(
 ///
 /// Returns the session and its task registry. A caller keeps the registry alive for
 /// as long as the session, because dropping it kills every background task.
-async fn build_session(
+pub(crate) async fn build_session(
     cli: &Cli,
     loaded: &rho_config::Config,
     mut config: SessionConfig,
@@ -416,12 +422,12 @@ async fn build_session(
 }
 
 /// What a caller must hold, and what it should show the user.
-struct SessionExtras {
+pub(crate) struct SessionExtras {
     /// The result store directory. Dropping it removes the stored results.
     #[allow(dead_code)]
     results_dir: Option<tempfile::TempDir>,
     /// Lines to print once, before the session starts.
-    notices: Vec<String>,
+    pub(crate) notices: Vec<String>,
     /// The subagent registry. Holding it keeps the process-wide live cap in force for as
     /// long as the session, and the spawn tree shares this handle.
     #[allow(dead_code)]
@@ -528,8 +534,26 @@ fn assemble_prompt(system: &str, instructions: &str, skills: &str) -> String {
 pub async fn run(cli: Cli) -> i32 {
     match &cli.command {
         Some(Command::Run { prompt }) => run_headless(&cli, prompt.clone()).await,
+        Some(Command::Jsonl) => run_jsonl(&cli).await,
         None => run_interactive(&cli).await,
     }
+}
+
+/// Serve the JSONL protocol. Present only when the `jsonl` feature is on.
+#[cfg(feature = "jsonl")]
+async fn run_jsonl(cli: &Cli) -> i32 {
+    crate::jsonl::run_jsonl(cli).await
+}
+
+/// Say why the frontend is absent, rather than exit in silence.
+///
+/// A build without the feature still parses `rho jsonl`, so a user who asks for it must
+/// be told it was left out. A quiet exit here would look like a crash to a client. See
+/// D-dead-surface-is-a-defect-class.
+#[cfg(not(feature = "jsonl"))]
+async fn run_jsonl(_cli: &Cli) -> i32 {
+    eprintln!("rho: this build has no jsonl frontend. Rebuild with --features jsonl to use it.");
+    EXIT_FAILURE
 }
 
 /// Run one prompt headless. Print the answer to stdout. Print diagnostics to
@@ -817,7 +841,7 @@ fn validate_reasoning_sources(cli: &Cli, env: &[(String, String)]) -> anyhow::Re
 }
 
 /// Load the configuration once for this process. Every later reader takes `&Config`.
-fn load_config(cli: &Cli) -> anyhow::Result<rho_config::Config> {
+pub(crate) fn load_config(cli: &Cli) -> anyhow::Result<rho_config::Config> {
     let env = rho_env_vars();
     let root = bootstrap_root(cli, &env)?;
     load_config_from(cli, env, &root, &rho_config::SystemEnv)

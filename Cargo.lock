@@ -2781,12 +2781,14 @@ name = "rho-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "futures",
  "rho-acp",
  "rho-config",
  "rho-core",
  "rho-instructions",
+ "rho-jsonl",
  "rho-mcp",
  "rho-plugin",
  "rho-provider-azure",

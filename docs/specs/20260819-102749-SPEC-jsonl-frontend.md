@@ -1,6 +1,6 @@
 # SPEC-jsonl-frontend — JSONL headless frontend
 
-Status: draft. Owning crate: `rho-jsonl` (new). Depends on `rho-core` only.
+Status: delivered. Owning crate: `rho-jsonl`, with the host seam in `rho-cli`. Depends on `rho-core` only.
 Links no provider crate. `rho-core` keeps no terminal and no HTTP dependency.
 
 Features covered: F-jsonl-frontend, F-jsonl-prompt, F-jsonl-steer,
@@ -23,6 +23,8 @@ file, and the contract below is the corrected one.
 | Framing said how to split a line | It never bounded one. This is the third unbounded reader in the project | `D-a-command-line-is-capped` |
 | Clients ignore unknown fields | True for an event. Wrong for a command, where it means half-obeying | `D-a-command-is-strict-and-an-event-is-loose` |
 | No answer for who builds a session | `set_model` needs a provider, and this crate must not link one | `D-rho-jsonl-asks-a-factory-for-a-session` |
+| Route a line on the `success` field | One event carried a `success` field of its own, so a client read it as a reply | `D-no-event-carries-the-success-key` |
+| Settle when the event stream ends | A failed run's stream never ends, because rho-core leaks the task that holds its sender | `D-an-error-on-the-event-stream-ends-the-run` |
 
 Two events the draft omitted are now in the contract. `rho_core::AgentEvent` has
 `MessageQueued` and `MessageDelivered`. Without them a client cannot see a steered
@@ -144,8 +146,15 @@ every side must keep.
 
 A reply is a JSON object on stdout. `req_id` echoes the value from the command.
 `command` names the command type. Replies and events share the same stream.
-Distinguish them by the top-level `"success"` field: replies carry it, events
-do not.
+
+A client routes each line by these two rules, and either one is enough:
+
+- A reply carries `command` and `success`. It never carries `type`.
+- An event carries `type`. It never carries `success`.
+
+`success` is a reserved field name. Only a reply may use it. An invariant test builds
+one of every event and fails if any of them carries it. See
+D-no-event-carries-the-success-key.
 
 ```rust
 /// A reply to one command. Emitted on stdout as one JSON line.
@@ -360,11 +369,23 @@ The event mapping from `rho_core::AgentEvent`:
 | `Stream(TextDelta { index, delta })` | `TextDelta { index, delta }` |
 | `ToolStart { id, name, kind }` | `ToolStart { id, name, kind }` |
 | `ToolUpdate { id, output }` | `ToolUpdate { id, output }` |
-| `ToolEnd { id, output }` | `ToolEnd { id, success: !output.is_error }` |
+| `ToolEnd { id, output }` | `ToolEnd { id, ok: !output.is_error }` |
 | `MessageQueued { position }` | `MessageQueued { position }` |
 | `MessageDelivered { count }` | `MessageDelivered { count }` |
 | `AgentEnd { stop_reason }` | `Settled { stop_reason: reason.into() }` |
-| `Err(Error)` from the stream | `Fault { kind, message }` |
+| `Err(Error)` from the stream | `Fault { kind, message }`, then `Settled { faulted }` |
+
+**Two spellings of one word travel on this wire.** `turn_end` carries `canceled`, from
+`rho_core::StopReason`. `settled` carries `cancelled`, from `rho_core::AgentStopReason`,
+which has a serde rename so its value matches ACP. See `D-acp-cancelled-spelling`. A
+client must accept both, one per event. Changing either would change a persisted format
+that another lane owns, so this spec records the wart instead of hiding it. Two tests pin
+the two spellings, so neither can drift.
+
+**An error ends the run.** When an error arrives, the frontend writes the `Fault`, writes
+`Settled { stop_reason: faulted }`, and stops reading. It does not wait for the stream to
+close. See `D-an-error-on-the-event-stream-ends-the-run`, which records the rho-core leak
+that makes waiting a hang.
 
 These `AgentEvent` variants are out of scope, and `rho-jsonl` drops each one:
 every other `Stream` variant, `TaskStart`, `TaskProgressed`, `TaskEnd`,
@@ -484,6 +505,11 @@ writes a newline cannot grow the reader without limit. See
 
 ## 5. Ordering and one-writer discipline
 
+The frontend runs as `rho jsonl`, behind the `jsonl` cargo feature. The feature is on in
+the default build and in the `minimal` build, because a headless build with no headless
+frontend can answer only one prompt.
+
+
 One task writes stdout. Every reply and every event goes through it, so two
 lines never interleave. A reader on the far side may assume every line is whole.
 
@@ -536,8 +562,20 @@ pub async fn serve<R, W>(
     output: W,
 ) -> std::io::Result<()>
 where
-    R: tokio::io::AsyncRead + Unpin + Send + 'static,
-    W: tokio::io::AsyncWrite + Unpin + Send + 'static;
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin + Send + Sync + 'static;
+
+/// Map one core event onto its wire event. `None` means the variant is out of scope.
+pub fn map_event(event: &rho_core::AgentEvent) -> Option<Event>;
+
+/// Drive one run's events onto the writer, and settle it exactly once.
+///
+/// It takes any stream of run events, not only `rho_core::AgentEvents`. That is what
+/// makes the pairing testable with no provider and no network.
+pub async fn pump_run<S, W>(events: S, out: &Writer<W>) -> std::io::Result<RunOutcome>
+where
+    S: futures::Stream<Item = Result<rho_core::AgentEvent, rho_core::Error>> + Unpin,
+    W: tokio::io::AsyncWrite + Unpin;
 ```
 
 ## 9. The extension point
@@ -554,9 +592,27 @@ no provider crate. See `D-rho-jsonl-asks-a-factory-for-a-session`.
 pub trait SessionFactory: Send + Sync {
     /// Build a session for this provider and model. Called for the first session,
     /// and again for every `set_model` and `new_session`.
-    async fn build(&self, request: &SessionRequest) -> Result<rho_core::Session, FactoryError>;
-    /// The provider names this build has. `get_state` reports them.
-    fn providers(&self) -> Vec<String>;
+    ///
+    /// `asker` reaches the client over the protocol. A host that wants a human in the
+    /// approval loop wraps it in `DialogApproval` and puts that in the `SessionConfig`.
+    /// Passing it here is what makes the dialog sub-protocol reachable, rather than a
+    /// shape with no producer.
+    async fn build(
+        &self,
+        request: &SessionRequest,
+        asker: std::sync::Arc<dyn Asker>,
+    ) -> Result<rho_core::Session, FactoryError>;
+}
+
+/// What a host uses to ask the client a question.
+#[async_trait::async_trait]
+pub trait Asker: Send + Sync {
+    /// Ask a blocking question. A timeout resolves as `Cancelled`.
+    async fn ask(&self, request: DialogRequest) -> DialogAnswer;
+    /// Tell the client something. It expects no answer.
+    async fn notify(&self, message: String);
+    /// Mint a fresh dialog id.
+    fn next_dialog_id(&self) -> String;
 }
 
 /// Which provider and model a session runs on.
@@ -588,58 +644,127 @@ pub enum FactoryError {
 }
 ```
 
-A third party adds no enum variant and edits no shared file. It writes one impl
-of `SessionFactory` and calls `serve`. A new command variant is upstream work,
-and a client discovers what a build accepts with `get_commands`.
+A third party adds no enum variant and edits no shared file. It writes one impl of
+`SessionFactory` and calls `serve`. A new command variant is upstream work, and a client
+discovers what a build accepts with `get_commands`.
+
+The trait has exactly one method. An earlier draft also had `providers`, so `get_state`
+could list the provider names a build has. It came out again, because `rho-cli` cannot
+answer it without a second copy of its provider list, and a copied list is the drift this
+spec already refused once. A client discovers a provider by trying `set_model` and reading
+the named error, which is how it discovers a command too.
+
+`rho-cli` holds the only implementation in the tree, in `crates/rho-cli/src/jsonl.rs`. It
+reuses the same config merge, provider set, tool registry, and skill loader that `rho run`
+uses, so a config file reaches a JSONL session exactly as it reaches a headless run.
 
 ## 10. Test cases
 
-Each test uses a scripted fake provider in the test file. No test uses the
-network. No test uses `sleep`. Async tests synchronise with a channel, or with
-`tokio::time` pause and advance.
+Every test uses a scripted fake provider in `tests/support/mod.rs`. No test uses the
+network. No test uses `sleep`. The timeout tests use `tokio::time` pause and advance. Each
+session root is a `tempfile::TempDir`, so no test reads the real `~/.rho`.
+
+The live transcripts are in `docs/verification/jsonl-frontend.md`.
+
+### Framing, in `tests/frame.rs`
 
 | Test name | Assertion |
 |---|---|
-| `reply_carries_req_id` | A reply carries the `req_id` from its command, and a command with no `req_id` gets a reply with no `req_id` key. |
-| `unknown_command_is_reply_error` | An unknown `type` produces a `ReplyError::UnknownCommand` reply, not a process fault. |
-| `parse_error_is_reply_error` | A malformed JSON line produces a `ReplyError::ParseError` reply. The session stays open, and the next command works. |
-| `an_unknown_field_on_a_command_is_refused` | A `prompt` with an extra field is refused whole with `ParseError`. The message names the field. |
-| `crlf_line_parses` | A line ending with `\r\n` parses as one record. The `\r` is stripped before deserialization. |
-| `unicode_line_separator_inside_string` | A line holding U+2028 inside a JSON string parses as one record. The reader does not split on it. |
-| `an_over_long_line_is_refused_and_bounded` | A line past the cap yields `LineTooLong`, and the reader reads no more than the cap plus one line of bytes. It asserts bytes read, not bytes kept. |
-| `an_unterminated_line_cannot_grow_without_limit` | A peer that writes no newline is stopped at the cap. |
-| `the_reader_resumes_after_an_over_long_line` | The command after an over-long line parses normally. |
-| `fault_after_acceptance_is_event` | A provider error after a `Prompt` reply arrives as a `Fault` event. No second reply arrives for the same `req_id`. |
-| `a_faulting_run_still_settles_once` | A run whose stream ends with an error and no `AgentEnd` still yields exactly one `Settled`, with `stop_reason: faulted`. |
-| `settled_is_the_last_event_of_a_run` | `Settled` is the last event for that prompt. No event follows it. |
-| `every_accepted_prompt_settles_exactly_once` | Over three prompts, the count of `Settled` events equals the count of accepted prompts. It pins the pairing, not one example. |
-| `a_second_prompt_while_running_is_refused` | A `Prompt` during a run yields `AlreadyStreaming`, and the running run is untouched. |
-| `steer_before_a_run_is_accepted` | A `Steer` with no run going succeeds and reports its queued position. It proves no `NotStreaming` error exists. |
-| `steer_lands_at_a_turn_boundary` | A `Steer` during a run yields `MessageQueued`, then `MessageDelivered`, and the delivered event arrives between a `TurnEnd` and the next `TurnStart`. |
-| `a_full_queue_is_queue_full` | A `Steer` into a full queue yields `ReplyError::QueueFull`, and the earlier messages stay queued. |
-| `abort_during_stream_settles_cancelled` | An `Abort` during a run produces `Settled` with `stop_reason: cancelled`. |
-| `abort_with_no_run_is_accepted` | An `Abort` with no run going replies `success: true` and emits no event. |
-| `two_aborts_settle_once` | Two `Abort` commands for one run produce exactly one `Settled`. |
-| `set_model_round_trip` | `SetModel` replies `success: true` with data naming the new provider and model, and `get_state` then reports them. |
-| `set_model_on_an_unknown_provider_names_the_case` | A `SetModel` for a provider the factory refuses yields `UnknownProvider`, and the old session still works. |
-| `set_model_while_running_is_refused` | `SetModel` during a run yields `AlreadyStreaming` and keeps the model. |
-| `new_session_clears_the_messages` | `NewSession` replies `success: true`, and `get_messages` then returns an empty list. |
-| `get_state_reports_the_model_and_the_run_flag` | `GetState` reports the provider, the model, the provider list, and whether a run is going. |
-| `get_messages_returns_the_conversation` | After a completed run, `GetMessages` returns the user message and the assistant message. |
-| `get_commands_lists_every_command` | `GetCommands` lists a name for every `Command` variant. It fails when a variant is added and not listed. |
-| `dialog_timeout_auto_resolves_cancelled` | A `Select` with a timeout resolves as `Cancelled` on the agent side. No second dialog event arrives for that id, and the run continues. |
-| `dialog_notify_expects_no_reply` | A `Notify` does not block. The next event arrives with no `DialogResponse`. |
-| `dialog_response_id_matches_request` | A `DialogResponse` with the right `id` unblocks the dialog. A wrong `id` is dropped and the dialog stays open. |
-| `a_late_dialog_answer_is_dropped` | An answer for an already-resolved dialog id changes nothing and emits no event. |
-| `a_dialog_answer_with_two_keys_is_invalid_argument` | `{"confirmed":true,"cancelled":true}` yields `InvalidArgument`, and the dialog stays open. |
-| `a_dialog_answer_with_no_key_is_invalid_argument` | `{}` as an answer yields `InvalidArgument`. |
-| `dialog_approval_denies_on_a_timeout` | `DialogApproval` returns `Deny` when the client answers nothing. |
-| `dialog_approval_allows_only_an_explicit_yes` | `Confirmed(true)` allows. `Confirmed(false)`, `Cancelled`, and `Value` all deny. |
-| `a_success_reply_carries_no_error_field` | A `ReplyOk` serialises with `success: true` and no `error` key. The struct cannot hold one. |
-| `an_error_reply_always_says_success_false` | A `ReplyErr` serialises with `success: false`, a named `error`, and a `message`. |
-| `a_reply_routes_on_the_success_field` | `Reply` round trips both ways, and `success` alone picks the arm. |
-| `an_event_has_a_type_and_no_success_field` | Every `Event` variant serialises with a `type` key and no `success` key, so a client can route every line. |
-| `every_settle_reason_has_a_wire_value` | Every `AgentStopReason` maps to a distinct `SettleReason`, and `cancelled` keeps its ACP spelling. |
-| `a_new_field_on_an_event_is_ignored_by_an_old_reader` | An event line with an extra key still parses. It proves the loose-reader half of the contract. |
-| `the_writer_never_interleaves_two_lines` | Every written line is whole JSON, with concurrent replies and events. |
-| `a_line_holding_a_newline_in_a_string_is_escaped` | A prompt holding a newline round trips, because serde_json escapes it. |
+| `crlf_line_parses` | A line ending with CRLF is one record. The CR is stripped before parsing. |
+| `unicode_line_separator_inside_string` | A line holding U+2028 inside a JSON string is one record. |
+| `a_last_line_with_no_newline_is_a_record` | The final line needs no newline. |
+| `an_empty_input_yields_no_record` | An empty input yields nothing, and no error. |
+| `a_blank_line_is_an_empty_record` | A blank line is a record, so the reply count matches the line count. |
+| `invalid_utf8_reaches_the_caller_as_bytes` | Invalid UTF-8 is not a reader error. The caller replies with a parse error. |
+| `an_over_long_line_is_refused_and_bounded` | A line past the cap yields `TooLong`. It asserts the bytes read, never the bytes kept. |
+| `the_reader_resumes_after_an_over_long_line` | The command after a refused line parses normally. |
+| `an_unterminated_line_cannot_grow_without_limit` | A peer that sends no newline is stopped at the cap, and each call returns. |
+| `a_dropped_next_line_loses_no_bytes` | The read future is cancel safe. A dropped read loses no byte of a command. |
+
+### The wire format, in `tests/protocol.rs`
+
+| Test name | Assertion |
+|---|---|
+| `a_success_reply_carries_no_error_field` | A `ReplyOk` serialises with `success: true` and no `error` key. |
+| `an_error_reply_always_says_success_false` | A `ReplyErr` carries `success: false`, a named error, and a message. |
+| `a_reply_routes_on_the_success_field` | `Reply` round trips, and `success` alone picks the arm. |
+| `reply_carries_req_id` | A reply echoes the `req_id`. An absent one serialises to no key at all. |
+| `an_event_has_a_type_and_no_success_field` | Every event variant carries `type` and never `success`. It pins the routing rule. |
+| `every_settle_reason_has_a_wire_value` | Every core stop reason maps to a distinct wire value, and `cancelled` keeps the ACP spelling. |
+| `every_turn_end_stop_reason_has_a_wire_value` | Every `StopReason` has a pinned wire value on `turn_end`. |
+| `every_tool_kind_reaches_the_wire` | Every one of the ten `ToolKind` variants has a pinned wire value. |
+| `unknown_command_is_reply_error` | An unknown `type` is refused, and the reader names the variant. |
+| `parse_error_is_reply_error` | Malformed JSON, and a missing required field, are both refused. |
+| `an_unknown_field_on_a_command_is_refused` | A command with an extra field is refused whole, and the message names the field. |
+| `a_new_field_on_an_event_is_ignored_by_an_old_reader` | An event with an extra key still parses. It pins the loose-reader half. |
+| `an_absent_req_id_reads_as_none` | `req_id` is optional with no `serde(default)`. |
+| `get_commands_lists_every_command` | `Command::NAMES` holds one entry per variant, and the reader accepts each name. |
+| `a_dialog_answer_holds_exactly_one_value` | Each answer shape round trips to its one wire key. |
+| `a_dialog_answer_with_two_keys_is_invalid_argument` | Two answers in one object are refused, and the message says the rule. |
+| `a_dialog_answer_with_no_key_is_invalid_argument` | An empty answer is refused. |
+| `a_dialog_request_round_trips_under_two_tags` | A dialog survives nesting under both `type` and `method`. |
+| `a_line_holding_a_newline_in_a_string_is_escaped` | A prompt holding a newline stays one record. |
+
+### The event pump, in `tests/pump.rs`
+
+| Test name | Assertion |
+|---|---|
+| `settled_is_the_last_event_of_a_run` | `Settled` is last, and it arrives once. |
+| `no_event_arrives_after_settled` | The pump stops at `Settled`, even when the stream keeps talking. |
+| `a_faulting_run_still_settles_once` | A run whose stream errors settles once, as `faulted`, after one `Fault`. |
+| `a_silent_stream_end_is_an_incomplete_fault` | A stream that ends with no result settles, and says nothing explained it. |
+| `every_accepted_prompt_settles_exactly_once` | Over three run shapes, the `Settled` count equals the run count. It pins the pairing. |
+| `every_error_variant_has_a_named_fault_kind` | Every `rho_core::Error` case maps to its own fault kind. |
+| `a_tool_failure_is_reported_as_not_ok` | `ok` is the inverse of `is_error`, in both directions. |
+| `the_event_map_drops_only_what_the_spec_lists` | Every mapped variant maps, and every out-of-scope variant drops. |
+
+### The dialog sub-protocol, in `tests/dialog.rs`
+
+| Test name | Assertion |
+|---|---|
+| `dialog_timeout_auto_resolves_cancelled` | A timeout resolves as `Cancelled`, emits no second request, and frees the slot. |
+| `dialog_response_id_matches_request` | The right id resolves a dialog. A wrong id is dropped and the dialog stays open. |
+| `a_late_dialog_answer_is_dropped` | An answer for a resolved id changes nothing and emits no event. |
+| `dialog_notify_expects_no_reply` | A notify opens no slot and blocks nothing. |
+| `asking_a_notify_does_not_block` | Passing a notify to `ask` returns instead of hanging the run. |
+| `dialog_ids_are_unique` | No id repeats, so one answer cannot resolve two dialogs. |
+| `dialog_approval_allows_only_an_explicit_yes` | Only `Confirmed(true)` allows. Every other answer denies. |
+| `dialog_approval_denies_on_a_timeout` | A silent client never gets a tool approved. |
+| `the_approval_dialog_carries_no_tool_arguments` | A secret in a tool argument never reaches the dialog. |
+| `the_approval_dialog_always_carries_a_timeout` | The approval gate cannot hang, because its dialog always has a timeout. |
+| `every_tool_kind_gets_a_plain_word` | Every tool kind reads as a word a human can understand. |
+
+### The serve loop, in `tests/serve.rs`
+
+| Test name | Assertion |
+|---|---|
+| `a_prompt_replies_then_streams_then_settles` | The reply precedes every event of that run, and one reply is sent. |
+| `unknown_command_is_reply_error` | An unknown command is named, and the session stays open. |
+| `parse_error_is_reply_error_and_the_session_stays_open` | A malformed line is refused, and the next command works. |
+| `an_unknown_field_on_a_command_is_refused` | The whole command is refused, and no run starts. |
+| `a_crlf_command_line_is_accepted` | A CRLF command line works end to end. |
+| `steer_before_a_run_is_accepted` | An early steer succeeds and reports its position. |
+| `steer_lands_at_a_turn_boundary` | Delivery sits between a turn end and the next turn start. |
+| `a_full_queue_is_queue_full` | A full queue is named, and every earlier message stays queued. |
+| `abort_with_no_run_is_accepted` | An abort with no run succeeds and emits no event. |
+| `a_prompt_after_a_settled_run_is_accepted` | A prompt sent after `settled` starts a second run. |
+| `a_second_prompt_while_running_is_refused` | A prompt during a run is refused, and the run is untouched. |
+| `abort_during_stream_settles_cancelled` | An abort settles the run as `cancelled`. |
+| `two_aborts_settle_once` | Two aborts settle one run exactly once. |
+| `set_model_while_running_is_refused` | A model swap during a run is refused, and the model is kept. |
+| `stdin_eof_mid_run_still_settles` | A run drains to `settled` when the client closes stdin. |
+| `new_session_clears_the_messages` | A fresh session starts with an empty conversation. |
+| `a_faulting_provider_settles_and_the_session_survives` | Two provider failures settle once each, and the session lives. |
+| `a_stream_that_ends_with_no_done_still_settles` | A truncated provider stream still settles. |
+| `set_model_round_trip` | A swap replies with the new model, and `get_state` then reports it. |
+| `every_factory_failure_has_its_own_named_case` | Each of the four factory errors maps to its own wire case. |
+| `a_missing_credential_reply_names_the_variable_and_no_secret` | The reply names the variable to set, and no value. |
+| `get_commands_lists_every_command` | `get_commands` reports one name per command. |
+| `an_over_long_line_is_refused_once_and_the_next_command_works` | One long line is one reply, not one per buffer. |
+| `a_dialog_answer_with_a_wrong_shape_is_invalid_argument` | A malformed answer is refused, and the session stays open. |
+| `a_dialog_answer_for_no_open_dialog_is_dropped` | The reply says the answer was not delivered. |
+| `the_first_session_failure_is_reported_and_serve_stops` | A build failure at start is reported, never a silent exit. |
+| `no_line_is_ever_half_written` | Every line is whole JSON, with replies and events racing. |
+| `a_dialog_reaches_the_client_and_its_answer_runs_the_tool` | The whole dialog round trip over the wire, and the tool then runs. |
+| `a_denied_dialog_stops_the_tool` | An explicit no leaves the tool unrun. |
+| `a_client_that_answers_no_dialog_denies_the_tool_and_the_run_continues` | A client with no dialog support cannot hang rho, and gets no tool approved. |

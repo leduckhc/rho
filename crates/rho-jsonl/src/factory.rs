@@ -5,9 +5,13 @@
 //! HTTP client. `rho-core` links neither. So the host builds the session and the
 //! frontend asks for one. See decision D-rho-jsonl-asks-a-factory-for-a-session.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use rho_core::Session;
+
+use crate::dialog::Asker;
 
 /// Which provider and model a session runs on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +62,13 @@ pub enum FactoryError {
 /// `rho-cli` implements this. So does any embedder that wants the protocol over its
 /// own streams, with its own providers, tools, and approval policy. An implementor
 /// edits no shared code and adds no enum variant.
+///
+/// It has exactly one method. An earlier draft also had `providers`, so `get_state`
+/// could list the provider names a build has. It came out again: `rho-cli` cannot
+/// answer it without a second copy of its provider list, and a copied list is the
+/// drift this crate already refused once. See
+/// D-the-wire-reuses-the-core-stop-reason. A client discovers a provider by trying
+/// `set_model` and reading the named error, which is how it discovers a command too.
 #[async_trait]
 pub trait SessionFactory: Send + Sync {
     /// Build a session for this provider and model.
@@ -65,9 +76,15 @@ pub trait SessionFactory: Send + Sync {
     /// The frontend calls it for the first session, and again for every `set_model`
     /// and every `new_session`. Each call must return a session with an empty
     /// context, because `new_session` means an empty conversation.
-    async fn build(&self, request: &SessionRequest) -> Result<Session, FactoryError>;
-
-    /// The provider names this build has. `get_state` reports them, so a client can
-    /// offer a choice instead of guessing one.
-    fn providers(&self) -> Vec<String>;
+    ///
+    /// `asker` reaches the client over the protocol. A host that wants a human in the
+    /// approval loop wraps it in `DialogApproval` and puts that in the
+    /// `SessionConfig`. A host that approves everything ignores it. Passing it here is
+    /// what makes the dialog sub-protocol reachable, rather than a shape with no
+    /// producer.
+    async fn build(
+        &self,
+        request: &SessionRequest,
+        asker: Arc<dyn Asker>,
+    ) -> Result<Session, FactoryError>;
 }

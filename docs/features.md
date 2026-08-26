@@ -210,18 +210,22 @@ and the ACP frontend (`rho-acp`). Those two crates hold an empty `lib.rs` today.
 
 ## Frontends — JSONL
 
-`docs/specs/20260819-102749-SPEC-jsonl-frontend.md` owns these rows. This protocol lands before
-ACP, because it is small. ACP stays the interop target and arrives as a bridge. See
+`docs/specs/20260819-102749-SPEC-jsonl-frontend.md` owns these rows. This protocol landed
+before ACP, because it is small. ACP stays the interop target and arrives as a bridge. See
 decision D-jsonl-before-acp.
+
+Run it with `rho jsonl`. The crate sits behind the `jsonl` cargo feature, which is on in the
+default build and in the `minimal` build. `docs/verification/jsonl-frontend.md` holds the
+real transcripts, including the two defects the live runs found.
 
 | ID | Name | Outcome | Owning crate | Status | Extension point |
 |----|------|---------|--------------|--------|-----------------|
-| F-jsonl-frontend | JSONL frontend | A client drives rho headlessly over stdin and stdout, one JSON object per line. Any process that reads and writes lines can embed rho. | `rho-jsonl` | `planned` | `rho-jsonl` is an optional crate. Any language implements a client. The protocol is documented. |
-| F-jsonl-prompt | JSONL prompt command | The client sends a `prompt` command. The agent streams events. The run ends with a settled event. | `rho-jsonl` | `planned` | The protocol is the extension point. Any language can implement a client. |
-| F-jsonl-steer | JSONL steer command | The client sends a `steer` command while the agent runs. The message delivers after the current tool calls finish. | `rho-jsonl` | `planned` | Same protocol extension point as F-jsonl-prompt. |
-| F-jsonl-abort | JSONL abort command | The client sends an `abort` command. rho cancels the current turn and settles with a cancelled stop reason. | `rho-jsonl` | `planned` | Same protocol extension point as F-jsonl-prompt. |
-| F-jsonl-session-commands | JSONL session commands | The client reads state, switches models, starts a session, and lists messages and commands over the protocol. | `rho-jsonl` | `planned` | Same protocol extension point as F-jsonl-prompt. |
-| F-jsonl-dialog-sub-protocol | JSONL dialog sub-protocol | The agent asks the client for a select, a confirm, an input, or a notify. A dialog blocks until the client answers. The agent side owns the timeout. | `rho-jsonl` | `planned` | A client that answers no dialog receives the default value after the timeout. |
+| F-jsonl-frontend | JSONL frontend | A client drives rho headlessly over stdin and stdout, one JSON object per line. Any process that reads and writes lines can embed rho. | `rho-jsonl`, `rho-cli` | `sprint-4` | `rho-jsonl` is an optional crate behind the `jsonl` feature. A host implements `SessionFactory` and calls `serve`. The protocol is documented in `SPEC-jsonl-frontend`. |
+| F-jsonl-prompt | JSONL prompt command | The client sends a `prompt` command. The agent streams events. Exactly one `settled` event ends every accepted prompt, even when the provider fails. | `rho-jsonl` | `sprint-4` | The wire is the extension point. Any language implements a client. A new command is a new `type` value, never a new field. |
+| F-jsonl-steer | JSONL steer command | The client sends a `steer` command while the agent runs. The message reaches the model at the next turn boundary, and `message_delivered` says when. | `rho-jsonl` | `sprint-4` | Same wire extension point as F-jsonl-prompt. A steer sent with no run going is kept, not refused. |
+| F-jsonl-abort | JSONL abort command | The client sends an `abort` command. rho cancels the run and settles with `stop_reason: cancelled`. Two aborts settle one run once. | `rho-jsonl` | `sprint-4` | Same wire extension point as F-jsonl-prompt. |
+| F-jsonl-session-commands | JSONL session commands | The client reads state and switches provider and model. It starts a fresh session, lists messages, and lists the command names this build accepts. | `rho-jsonl`, `rho-cli` | `sprint-4` | `SessionFactory` is the seam. Each of its four failures maps to its own named wire error. `get_commands` is how a client discovers the command set. |
+| F-jsonl-dialog-sub-protocol | JSONL dialog sub-protocol | The agent asks the client for a select, a confirm, an input, or a notify. A blocking dialog waits for the client. The agent side owns the timeout, and a timeout denies. | `rho-jsonl` | `sprint-4` | `Asker` is the trait a host uses to raise a dialog. `DialogApproval` implements `rho_core::ApprovalPolicy` over it, so `approval = "ask"` works headlessly for the first time. |
 
 ---
 

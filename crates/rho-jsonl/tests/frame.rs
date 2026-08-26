@@ -203,3 +203,84 @@ async fn invalid_utf8_reaches_the_caller_as_bytes() {
         Line::TooLong { .. } => panic!("expected a record"),
     }
 }
+
+/// A reader that serves its chunks one at a time, and returns `Pending` between them.
+///
+/// It models a real pipe, where a command line can arrive in pieces.
+struct Chunked {
+    chunks: std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>,
+    /// True when the next poll must return `Pending` instead of a chunk.
+    gap: std::sync::Mutex<bool>,
+}
+
+impl AsyncRead for Chunked {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let mut gap = self.gap.lock().expect("gap");
+        if *gap {
+            *gap = false;
+            // Wake at once, so the next poll makes progress. The point is the Pending,
+            // not a real delay.
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        drop(gap);
+        let mut chunks = self.chunks.lock().expect("chunks");
+        match chunks.pop_front() {
+            Some(chunk) => {
+                buf.put_slice(&chunk);
+                // A gap follows every chunk, so a caller that wants the rest of the
+                // line must poll again. That is what a real pipe does.
+                *self.gap.lock().expect("gap") = true;
+                Poll::Ready(Ok(()))
+            }
+            // No more chunks means end of file.
+            None => Poll::Ready(Ok(())),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_dropped_next_line_loses_no_bytes() {
+    // `next_line` must be cancel safe. The serve loop races it against the run's event
+    // stream in a `select!`, so the future is dropped whenever an event wins. If the
+    // partial line lived in the future, those bytes would vanish and the command would
+    // be lost. A live abort was swallowed exactly that way.
+    let reader = Chunked {
+        chunks: std::sync::Mutex::new(
+            vec![b"{\"type\":\"ab".to_vec(), b"ort\"}\n".to_vec()]
+                .into_iter()
+                .collect(),
+        ),
+        gap: std::sync::Mutex::new(false),
+    };
+    let mut reader = LineReader::with_cap(reader, 1024);
+
+    // Poll once. It consumes the first chunk, finds no newline, and returns Pending.
+    {
+        let mut future = Box::pin(reader.next_line());
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        // The first poll takes chunk one, then asks for more and gets the gap.
+        assert!(
+            std::future::Future::poll(future.as_mut(), &mut cx).is_pending(),
+            "the first poll must not complete the line"
+        );
+        // Drop the future, exactly as `select!` does when the other branch wins.
+    }
+
+    // The bytes from the first chunk must still be in the reader.
+    let line = reader
+        .next_line()
+        .await
+        .expect("the reader must not fail")
+        .expect("one record");
+    assert_eq!(
+        text(&line),
+        r#"{"type":"abort"}"#,
+        "a dropped read must lose no byte of the command"
+    );
+}

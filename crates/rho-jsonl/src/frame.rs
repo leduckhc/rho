@@ -44,14 +44,26 @@ pub enum Line {
 
 /// A reader that yields one JSONL record at a time, with a byte cap per line.
 ///
-/// Two guarantees hold for every call to [`LineReader::next_line`]. It consumes no
-/// more than the cap plus one read buffer. It always returns.
+/// Three guarantees hold for every call to [`LineReader::next_line`]. It consumes no
+/// more than the cap plus one read buffer. It always returns. And it is **cancel
+/// safe**: dropping the future loses no byte.
 pub struct LineReader<R> {
     inner: BufReader<R>,
     cap: usize,
     /// True while the reader is throwing away the tail of an over-long line. It
     /// stops when the next newline arrives.
     discarding: bool,
+    /// The bytes of the line being read.
+    ///
+    /// It lives here and not in `next_line`, so the future is cancel safe. The serve
+    /// loop races `next_line` against the run's event stream in a `select!`, and the
+    /// loser is dropped part way through. With the partial line inside the future,
+    /// those bytes vanished and the command was lost: a live abort was swallowed that
+    /// way, and the run then never settled.
+    partial: Vec<u8>,
+    /// Bytes consumed for the line being read. It is the read count, not the keep
+    /// count, and it lives here for the same reason as `partial`.
+    consumed: usize,
 }
 
 impl<R: AsyncRead + Unpin> LineReader<R> {
@@ -67,6 +79,8 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
             inner: BufReader::new(inner),
             cap,
             discarding: false,
+            partial: Vec::new(),
+            consumed: 0,
         }
     }
 
@@ -88,19 +102,14 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
             }
         }
 
-        let mut kept: Vec<u8> = Vec::new();
-        // Bytes consumed for this line so far. It is the read count, not the keep
-        // count.
-        let mut consumed = 0usize;
-
         loop {
             let available = self.inner.fill_buf().await?;
             if available.is_empty() {
                 // End of file. A last line with no newline is still a record.
-                if consumed == 0 {
+                if self.consumed == 0 {
                     return Ok(None);
                 }
-                return Ok(Some(Line::Record(strip_cr(kept))));
+                return Ok(Some(Line::Record(self.take_partial())));
             }
 
             match available.iter().position(|byte| *byte == b'\n') {
@@ -108,34 +117,45 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
                     // Copy before `consume`, because `available` borrows the buffer.
                     let line: Vec<u8> = available[..at].to_vec();
                     self.inner.consume(at + 1);
-                    consumed += at + 1;
-                    if kept.len() + at > self.cap {
+                    self.consumed += at + 1;
+                    if self.partial.len() + at > self.cap {
                         // The cap applies here too, not only when the newline is
                         // absent. A whole over-long line often arrives inside one read
                         // buffer, and checking only the no-newline branch let it
                         // through. The newline is already consumed, so the reader is
                         // lined up on the next record and needs no discard.
-                        return Ok(Some(Line::TooLong { bytes: consumed }));
+                        let bytes = self.consumed;
+                        self.partial = Vec::new();
+                        self.consumed = 0;
+                        return Ok(Some(Line::TooLong { bytes }));
                     }
-                    kept.extend_from_slice(&line);
-                    return Ok(Some(Line::Record(strip_cr(kept))));
+                    self.partial.extend_from_slice(&line);
+                    return Ok(Some(Line::Record(self.take_partial())));
                 }
                 None => {
                     let taken = available.len();
-                    kept.extend_from_slice(available);
-                    consumed += taken;
+                    self.partial.extend_from_slice(available);
+                    self.consumed += taken;
                     self.inner.consume(taken);
-                    if kept.len() > self.cap {
+                    if self.partial.len() > self.cap {
                         // Return now. Waiting for a newline that may never arrive is
-                        // the hang this branch exists to prevent. Drop the bytes
+                        // the hang this branch exists to prevent. Release the bytes
                         // before returning, so the cap bounds memory as well as time.
                         self.discarding = true;
-                        drop(kept);
-                        return Ok(Some(Line::TooLong { bytes: consumed }));
+                        let bytes = self.consumed;
+                        self.partial = Vec::new();
+                        self.consumed = 0;
+                        return Ok(Some(Line::TooLong { bytes }));
                     }
                 }
             }
         }
+    }
+
+    /// Take the finished line, and reset the partial state for the next one.
+    fn take_partial(&mut self) -> Vec<u8> {
+        self.consumed = 0;
+        strip_cr(std::mem::take(&mut self.partial))
     }
 
     /// Throw away bytes up to and including the next newline, for at most one cap.

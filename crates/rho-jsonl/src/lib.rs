@@ -15,13 +15,21 @@
 //! the top level, and no numeric error codes. Do not call it RPC. See decision
 //! D-jsonl-before-acp.
 
+mod dialog;
 mod factory;
 mod frame;
 mod protocol;
+mod pump;
+mod serve;
+mod writer;
 
+pub use dialog::{APPROVAL_TIMEOUT_MS, Asker, DialogApproval, DialogHost};
 pub use factory::{FactoryError, SessionFactory, SessionRequest};
 pub use frame::{Line, LineReader, MAX_COMMAND_LINE_BYTES};
 pub use protocol::{
     AnswerError, Command, DialogAnswer, DialogRequest, Event, False, FaultKind, Reply, ReplyErr,
     ReplyError, ReplyOk, SettleReason, True,
 };
+pub use pump::{RunOutcome, map_event, pump_run};
+pub use serve::serve;
+pub use writer::Writer;
