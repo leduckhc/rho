@@ -18,3 +18,10 @@ the_mouse_is_off_by_default a33c958 renamed to the_mouse_is_on_by_default_throug
 a_bad_env_value_leaves_the_mouse_off a33c958 renamed to a_bad_env_value_leaves_the_mouse_at_its_default, for the same reason
 resolve_mouse a33c958 the helper is gone; the merged config decides, and mouse_tests asserts the same rules through it
 the_config_key_defaults_to_false a33c958 renamed to the_config_key_defaults_to_true; the alternate-screen renderer reversed the default
+
+a_powerful_key_is_named_in_one_place  8bdb013  It claimed to prove every ConfigLayer field was
+  classified as powerful or harmless, and it asserted four hard-coded names instead. A security
+  review called it decorative and was right: `session_root` walked past it, and an untrusted
+  project file could move rho's confinement boundary.
+  `every_field_is_classified_as_powerful_or_harmless` replaces it and reads every field name
+  from the layer's own Debug text, nested fields included.
