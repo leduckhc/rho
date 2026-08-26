@@ -450,6 +450,17 @@ impl ConfigLayer {
                 _ => {}
             }
         }
+        // `RHO_REDUCE_MOTION` is read after the loop, so it always wins over
+        // `RHO_TUI_MOTION`. Both write one field, and the winner used to depend on the order
+        // the variables arrived in, which an external review caught. A reduced-motion
+        // request is an accessibility signal, so it is the one that decides.
+        for (name, value) in vars {
+            if name == "RHO_REDUCE_MOTION"
+                && parse_env_bool("reduce-motion", value).ok() == Some(true)
+            {
+                layer.tui_motion = Some(false);
+            }
+        }
         layer
     }
 }

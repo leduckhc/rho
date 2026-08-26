@@ -176,3 +176,20 @@ fn from_env_leaves_an_unaccepted_boolean_unset() {
         "from_env must omit an unaccepted boolean, not read it as false"
     );
 }
+
+#[test]
+fn reduce_motion_wins_over_the_motion_key() {
+    // Both variables write one field, and the winner used to depend on the order they
+    // arrived in. A reduced-motion request is an accessibility signal, so it decides.
+    for pair in [
+        vec![("RHO_TUI_MOTION", "true"), ("RHO_REDUCE_MOTION", "1")],
+        vec![("RHO_REDUCE_MOTION", "1"), ("RHO_TUI_MOTION", "true")],
+    ] {
+        let sources = empty_sources().with_env(env_vars(&pair));
+        let config = Config::load(&sources).expect("the environment resolves");
+        assert!(
+            !config.tui_motion,
+            "reduce-motion wins whichever order they arrive in: {pair:?}"
+        );
+    }
+}
