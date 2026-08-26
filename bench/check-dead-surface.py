@@ -77,14 +77,43 @@ IGNORED = {
 
 
 def source_files() -> list[pathlib.Path]:
-    """Every crate source file, excluding a test tree."""
+    """Every crate source file, excluding a test tree and an examples tree.
+
+    An `examples/` file builds and runs, but it is not production. Counting it as a caller
+    kept `sweep_frame` and `MotionInputs::animating` alive, because the only use of each was
+    in `crates/rho-tui/examples/frame_bench.rs`. A user never runs an example.
+    """
     files = []
     for path in CRATES.rglob("*.rs"):
         parts = set(path.parts)
-        if "target" in parts or "tests" in parts or "benches" in parts:
+        if parts & {"target", "tests", "benches", "examples"}:
             continue
         files.append(path)
     return files
+
+
+def strip_comments(text: str) -> str:
+    """Drop every comment, so a doc comment never counts as a caller.
+
+    A doc comment like ``/// See `Foo::bar` `` names a function, it does not call it. With
+    the comments left in, three functions read as live on a doc mention alone, and
+    `crates/rho-tui/src/paste.rs::units` looked alive on two. So both block comments and
+    line comments go before anything is counted. A `//` inside a URL scheme such as
+    `https://` is kept, because it is not a comment.
+    """
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    out: list[str] = []
+    for line in text.splitlines():
+        cut = None
+        position = 0
+        while position < len(line) - 1:
+            if line[position] == "/" and line[position + 1] == "/":
+                if position == 0 or line[position - 1] != ":":
+                    cut = position
+                    break
+            position += 1
+        out.append(line if cut is None else line[:cut])
+    return "\n".join(out)
 
 
 def without_test_modules(text: str) -> str:
@@ -159,7 +188,9 @@ def read_allowlist() -> tuple[dict[str, str], list[str]]:
 
 def main() -> int:
     files = source_files()
-    bodies = {path: without_test_modules(path.read_text()) for path in files}
+    bodies = {
+        path: strip_comments(without_test_modules(path.read_text())) for path in files
+    }
     allowed, problems = read_allowlist()
     used_entries: set[str] = set()
 
@@ -175,15 +206,18 @@ def main() -> int:
                 # A `pub use` line moves a name, it does not call it. Counting it as a use
                 # hid every dead item that was not last in a braced list.
                 countable = strip_use_statements(other_text)
-                hits = len(pattern.findall(countable))
                 if other == path:
-                    # Its own definition line is not a call. Only the definition is
-                    # subtracted, never a real call from the same file: a function whose one
-                    # caller sits beside it used to score zero, which a review found.
-                    hits -= len(
-                        re.findall(rf"pub (?:async )?fn {re.escape(name)}\s*[(<]", countable)
+                    # Remove the definition line itself, then count. Subtracting a separate
+                    # count of `pub fn <name>(` was wrong for a generic: `use_pattern` never
+                    # matches `read_from<`, so the definition scored zero hits, and the
+                    # subtraction then cancelled a real same-file call. Removing the whole
+                    # declaration line leaves every genuine call in place.
+                    countable = re.sub(
+                        rf"(?m)^[ \t]*pub (?:async )?fn {re.escape(name)}\s*[(<].*$",
+                        "",
+                        countable,
                     )
-                callers += max(hits, 0)
+                callers += len(pattern.findall(countable))
             if callers > 0:
                 key = f"{relative}::{name}"
                 if key in allowed:

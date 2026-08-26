@@ -4,7 +4,12 @@
 # commit that removes a test names it too, and the guard cannot tell the two apart from the
 # words alone. So a removal is recorded here, with the commit that did it and the reason.
 #
-# One name per line: <name> <commit> <reason>
+# One entry per physical line: <test_name> <commit-hash> <reason>. The parser is strict. It
+# reads the first token as the test name and the second as a real hex commit, and it fails
+# loudly on any line it cannot parse. A continuation line that began with a real test name
+# would otherwise exempt that test from the guard forever, which is the loss this file exists
+# to stop. Keep each reason on the same line as its name. Verify a hash with
+# `git log -S"fn <name>"` before you write it.
 a_bad_flag_value_falls_back_to_summary 2f807c4 asserted a silent fallback, which the owner's ruling reversed
 a_long_reasoning_row_draws_only_its_tail a33c958 the renderer it guarded was replaced by main's scrolling transcript, where a tail would lose a reachable line
 a_long_answer_row_draws_only_its_tail a33c958 same reason: the fixed band it assumed is gone
@@ -18,19 +23,7 @@ the_mouse_is_off_by_default a33c958 renamed to the_mouse_is_on_by_default_throug
 a_bad_env_value_leaves_the_mouse_off a33c958 renamed to a_bad_env_value_leaves_the_mouse_at_its_default, for the same reason
 resolve_mouse a33c958 the helper is gone; the merged config decides, and mouse_tests asserts the same rules through it
 the_config_key_defaults_to_false a33c958 renamed to the_config_key_defaults_to_true; the alternate-screen renderer reversed the default
-
-a_powerful_key_is_named_in_one_place  8bdb013  It claimed to prove every ConfigLayer field was
-  classified as powerful or harmless, and it asserted four hard-coded names instead. A security
-  review called it decorative and was right: `session_root` walked past it, and an untrusted
-  project file could move rho's confinement boundary.
-  `every_field_is_classified_as_powerful_or_harmless` replaces it and reads every field name
-  from the layer's own Debug text, nested fields included.
-
-motion_off_when_reduce_motion_setting  HEAD  The `tui.reduce_motion` setting was ruled out by
-  D-motion-answers-to-one-switch: two names for one idea. One key decides now.
-motion_off_when_reduce_motion_env  HEAD  It drove a `MotionInputs` field that production set to
-  false and only a test ever set true, so it exercised a path the product never takes. A
-  completeness review found the field dead. `RHO_REDUCE_MOTION` still works, through the config
-  layer, and `reduce_motion_wins_over_the_motion_key` in rho-config pins it on the real path.
-the_reduce_motion_variable_stops_the_sweep  HEAD  Same reason: it set the dead field. The
-  variable's behaviour is pinned in rho-config, where it is actually read.
+a_powerful_key_is_named_in_one_place 8bdb013 it asserted four hard-coded names, not every field; a security review called it decorative and was right, and every_field_is_classified_as_powerful_or_harmless replaces it by reading every field name from the layer's own Debug text
+motion_off_when_reduce_motion_setting d74b4fb the tui.reduce_motion setting was ruled out by D-motion-answers-to-one-switch: two names for one idea, and one key decides now
+motion_off_when_reduce_motion_env d74b4fb it drove a MotionInputs field that production set to false and only a test set true; RHO_REDUCE_MOTION still works through the config layer, pinned by reduce_motion_wins_over_the_motion_key in rho-config
+the_reduce_motion_variable_stops_the_sweep d74b4fb same reason: it set the dead field, and the variable's behaviour is pinned in rho-config where it is actually read
