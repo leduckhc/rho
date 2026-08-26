@@ -5,12 +5,16 @@
 
 mod common;
 
-use common::{sse_reasoning, sse_text, sse_tool_call, stream_body};
+use common::{RESPONSES_PATH, sse_reasoning, sse_text, sse_tool_call, stream_body};
 use futures::StreamExt;
-use rho_core::StreamEvent;
-use rho_provider_azure::{AZURE_ENTRA_AUDIENCE, AzureAuth, AzureConfig, Secret};
+use rho_core::{CancelToken, Provider, StreamEvent};
+use rho_provider_azure::{
+    AZURE_ENTRA_AUDIENCE, AzureAuth, AzureConfig, AzureProvider, RetryPolicy, Secret,
+};
 use std::time::Duration;
 use tokio::time::timeout;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 async fn drain(mut stream: rho_core::ProviderStream) -> Vec<StreamEvent> {
     let mut out = Vec::new();
@@ -362,4 +366,128 @@ fn a_set_effort_is_reported_as_having_no_effect() {
     // And rho invents no field, because an unknown field is a failed turn.
     assert!(body.get("reasoning").is_none(), "no guessed field: {body}");
     assert!(body.get("reasoning_effort").is_none());
+}
+
+// --- The HTTP client policy, from a security review ------------------------
+//
+// Azure carries an api-key on every request, and its base URL comes from
+// `AZURE_OPENAI_ENDPOINT`, which the config trust filter never touches. So the
+// client must not follow a redirect, and must not route a loopback request
+// through a proxy. These two tests pin that. Break the client policy and both
+// fail. See TODO items B2 and B3.
+
+/// A redirect must not be followed, so the api-key never reaches a second origin.
+#[tokio::test]
+async fn a_redirect_is_not_followed_so_the_api_key_stays_on_the_named_host() {
+    // The origin the api-key must never reach.
+    let attacker = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(RESPONSES_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse_text(), "text/event-stream"))
+        .mount(&attacker)
+        .await;
+
+    // The named endpoint answers 307 to the attacker origin. A 307 preserves the
+    // POST method and body, so a followed hop would resend the whole request.
+    let named = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(RESPONSES_PATH))
+        .respond_with(
+            ResponseTemplate::new(307)
+                .append_header("location", format!("{}{RESPONSES_PATH}", attacker.uri())),
+        )
+        .mount(&named)
+        .await;
+
+    let config = AzureConfig::new(
+        named.uri(),
+        "gpt-4o",
+        AzureAuth::ApiKey(Secret::new("sk-secret")),
+    )
+    .with_retry(RetryPolicy::none());
+    let provider = AzureProvider::new(config);
+    let result = provider
+        .stream(common::sample_request(), CancelToken::new())
+        .await;
+
+    assert!(
+        result.is_err(),
+        "a 3xx redirect must surface as an error, not a followed hop"
+    );
+    let hits = attacker.received_requests().await.unwrap_or_default();
+    assert!(
+        hits.is_empty(),
+        "the api-key must never reach the redirect target; saw {} request(s)",
+        hits.len()
+    );
+}
+
+/// Serialises the proxy tests, because a proxy variable is process-global.
+static PROXY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A loopback request must bypass a proxy variable, so the api-key never reaches it.
+#[tokio::test]
+async fn a_loopback_request_bypasses_a_proxy_variable() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(RESPONSES_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse_text(), "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    // Build the client inside a synchronous critical section that owns the process-global
+    // proxy variables. `reqwest` reads the variables when the client is built, and the
+    // client build is synchronous, so the guard never crosses an `.await`. That keeps the
+    // proxy tests deterministic without holding a lock across a suspension point.
+    let provider = {
+        let _guard = PROXY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        // A dead proxy. If the client honoured it, the loopback request would route
+        // there and fail.
+        const PROXY_VARS: [&str; 3] = ["HTTP_PROXY", "http_proxy", "ALL_PROXY"];
+        let prior: Vec<(&str, Option<String>)> = PROXY_VARS
+            .iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect();
+        for key in PROXY_VARS {
+            // SAFETY: the guard serialises the proxy tests, and every other client this
+            // crate builds targets a loopback host and so calls `no_proxy`, which makes it
+            // immune to this variable. The variable is restored before the guard drops.
+            unsafe { std::env::set_var(key, "http://127.0.0.1:1") };
+        }
+
+        let config = AzureConfig::new(
+            server.uri(),
+            "gpt-4o",
+            AzureAuth::ApiKey(Secret::new("sk-secret")),
+        )
+        .with_retry(RetryPolicy::none());
+        let provider = AzureProvider::new(config);
+
+        for (key, value) in prior {
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+        provider
+    };
+
+    let result = provider
+        .stream(common::sample_request(), CancelToken::new())
+        .await
+        .map(|_| ());
+    assert!(
+        result.is_ok(),
+        "a loopback request must bypass the proxy, got {:?}",
+        result.err()
+    );
+    let hits = server.received_requests().await.unwrap_or_default();
+    assert_eq!(
+        hits.len(),
+        1,
+        "the loopback server must receive the request directly"
+    );
 }

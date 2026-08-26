@@ -55,7 +55,18 @@ fn build_client(base_url: &str) -> reqwest::Client {
         // `Bearer sk-...` at an attacker's proxy before this.
         builder = builder.no_proxy();
     }
-    builder.build().unwrap_or_else(|_| reqwest::Client::new())
+    // Fail loudly, never fall back to an insecure client. `Client::new()` follows up to
+    // ten redirects and honours `HTTP_PROXY`, which are the two behaviours the comment
+    // above forbids, each named by a security review or a live probe. A build error here
+    // is not a per-request condition a caller can handle: it means the TLS backend did
+    // not initialise, which is process-wide and unrecoverable, and no secure fallback
+    // exists. So this panics rather than degrade. `OpenRouterProvider::new` is infallible
+    // and its two callers in `rho-cli` wrap it in `Ok(Arc::new(..))` with no error arm,
+    // so returning a `Result` would only push an unhandleable error up one level. See
+    // the `ToolKind::Other` fail-open defect in AGENTS.md step 8.
+    builder
+        .build()
+        .expect("the reqwest TLS backend failed to initialise")
 }
 
 /// The path every other OpenAI-compatible host serves.

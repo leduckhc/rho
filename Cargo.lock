@@ -2781,6 +2781,7 @@ name = "rho-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "futures",
  "rho-acp",
@@ -2895,6 +2896,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
  "wiremock",
 ]
 

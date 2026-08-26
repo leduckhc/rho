@@ -7,7 +7,7 @@
 mod common;
 
 use common::{project_sources, temp_dir, write_file};
-use rho_config::{Config, ProjectTrust};
+use rho_config::{BaseUrlRejection, Config, ConfigError, ProjectTrust};
 
 /// Resolve one base url from a trusted project file.
 fn load(url: &str) -> Result<Config, rho_config::ConfigError> {
@@ -113,4 +113,66 @@ fn a_base_url_with_a_query_or_fragment_is_refused() {
     // the user never named.
     load("https://host.example/v1?api-version=2024").unwrap_err();
     load("https://host.example/v1#frag").unwrap_err();
+}
+
+#[test]
+fn a_base_url_refusal_tells_a_safety_block_from_a_typo() {
+    // C5. The five refusals used to collapse into one stringly-typed `ConfigError::Value`, so
+    // a caller could only echo the message and could not tell "blocked to protect your
+    // credential" from "you made a typo". The reason is typed now.
+    let safety = load("http://models.example.com/v1").expect_err("plaintext to a remote host");
+    match safety {
+        ConfigError::BaseUrl { reason, .. } => assert!(
+            reason.is_safety_block(),
+            "cleartext transport is a safety block, got {reason:?}"
+        ),
+        other => panic!("a base-url refusal must be ConfigError::BaseUrl, got {other:?}"),
+    }
+
+    let typo = load("gopher://host.example/v1").expect_err("an unknown scheme");
+    match typo {
+        ConfigError::BaseUrl { reason, .. } => {
+            assert_eq!(reason, BaseUrlRejection::UnknownScheme);
+            assert!(
+                !reason.is_safety_block(),
+                "an unknown scheme is a typo, not a safety block, got {reason:?}"
+            );
+        }
+        other => panic!("a base-url refusal must be ConfigError::BaseUrl, got {other:?}"),
+    }
+
+    // The message still names the key, so an existing caller that reads the text is unbroken.
+    assert!(
+        load("http://models.example.com/v1")
+            .unwrap_err()
+            .to_string()
+            .contains("base-url")
+    );
+}
+
+#[test]
+fn an_https_base_url_with_userinfo_is_refused_as_a_safety_block() {
+    // C9. `https://user:pass@host.example/v1` parses, and its scheme is https, so no other
+    // rule refuses it: only the userinfo rule does. A userinfo component in a provider
+    // endpoint has no legitimate use, and it masks the real host in any notice rho prints, so
+    // the verdict is refuse, and it is a safety block. Without this test the userinfo rule
+    // had no test that needed it: the one userinfo test used a plain-http host that the
+    // transport rule already refused, so deleting the userinfo check left the suite green.
+    let error = load("https://user:pass@host.example/v1").expect_err("userinfo is refused");
+    match &error {
+        ConfigError::BaseUrl { reason, value } => {
+            assert_eq!(
+                *reason,
+                BaseUrlRejection::HasUserinfo,
+                "the reason names the userinfo rule"
+            );
+            assert!(reason.is_safety_block(), "userinfo is a safety block");
+            assert!(
+                value.contains("host.example"),
+                "the value is carried: {value}"
+            );
+        }
+        other => panic!("must be a BaseUrl rejection, got {other:?}"),
+    }
+    assert!(error.to_string().contains("base-url"));
 }

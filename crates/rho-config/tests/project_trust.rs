@@ -360,6 +360,54 @@ fn an_untrusted_project_keeps_a_harmless_environment_variable() {
 }
 
 #[test]
+fn an_untrusted_run_with_no_project_file_keeps_a_powerful_environment_variable() {
+    // C2. The environment is gated only for a cloned project that configures rho, and the
+    // signal for that is a project config file that was actually read. With no `.rho` config
+    // file at all, rho runs in the user's own directory, so a variable the user exported in
+    // their own shell is honored even under the default Untrusted trust. The old code gated
+    // the environment whenever trust was Untrusted, which is the default in every directory,
+    // so `RHO_BASE_URL` and its siblings never worked anywhere without `--trust-project`. A
+    // live probe proved it in an empty directory. See `D-trust-is-provenance-not-a-field-list`.
+    let dir = temp_dir();
+    let missing = dir.path().join(".rho").join("config.toml");
+    assert!(
+        !missing.exists(),
+        "the project file must be absent for this test"
+    );
+    let sources = Sources::from_paths(ConfigPaths {
+        global: None,
+        project: Some(missing),
+    })
+    .with_project_trust(ProjectTrust::Untrusted)
+    .with_env(common::env_vars(&[
+        ("RHO_BASE_URL", "https://models.example.com/v1"),
+        ("RHO_SKILL_PATHS", "/home/me/skills"),
+        ("RHO_MCP_CONFIG", "/home/me/mcp.json"),
+    ]));
+    let config = Config::load(&sources).expect("the environment resolves");
+    assert_eq!(
+        config.base_url.as_deref(),
+        Some("https://models.example.com/v1"),
+        "with no project file the user's own RHO_BASE_URL is honored"
+    );
+    assert_eq!(
+        config.skill_paths,
+        vec![PathBuf::from("/home/me/skills")],
+        "and RHO_SKILL_PATHS"
+    );
+    assert_eq!(
+        config.mcp_config,
+        Some(PathBuf::from("/home/me/mcp.json")),
+        "and RHO_MCP_CONFIG"
+    );
+    assert!(
+        config.dropped_keys.is_empty(),
+        "nothing was gated, so nothing is reported: {:?}",
+        config.dropped_keys
+    );
+}
+
+#[test]
 fn every_field_is_classified_as_powerful_or_harmless() {
     // The real completeness guard. An earlier version wrote a fixture with the four keys it
     // already knew and asserted those were cleared, which proves nothing about a field
@@ -446,6 +494,21 @@ fn every_field_is_classified_as_powerful_or_harmless() {
     assert_eq!(config.mcp_config, None);
     assert_eq!(config.base_url, None);
     assert_eq!(config.session_file, None);
+    // C7: the two powerful keys the old assertion block never checked. A break that stops
+    // clearing `session_root` moves the confinement boundary of every file tool, and a break
+    // that stops gating the credential runs an attacker command, and neither was asserted.
+    assert_eq!(
+        config.session_root, None,
+        "an untrusted file must not move the session root"
+    );
+    assert!(
+        matches!(
+            config.credentials.get("openrouter"),
+            Some(CredentialSource::RefusedProjectCommand { .. })
+        ),
+        "an untrusted command credential must be refused, not resolved, got {:?}",
+        config.credentials.get("openrouter")
+    );
 }
 
 /// Every powerful key, at the top level, for the completeness guard above.
