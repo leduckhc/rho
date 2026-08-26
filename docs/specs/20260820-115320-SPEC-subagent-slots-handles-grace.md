@@ -628,10 +628,10 @@ longer grows with the wait line. The flag is `--queue-wait-secs`, and the comman
 it to the effective `--child-timeout-secs`. A value of zero refuses any child that has to wait,
 and no value turns the deadline off. See decision D-a-waiter-has-a-deadline.
 
-The deadline applies to a background waiter too, because a queued entry holds a cancel token
-and a queue while it waits. A background waiter that runs out of patience records a report, so
-a parent that polls learns why the child never ran. A caller that cannot afford any wait uses
-`background: true`, which returns at once with an id.
+The deadline applies to a background waiter too. A queued entry holds a cancel token and a
+queue while it waits, so the deadline bounds how long it holds them. A background waiter that
+runs out of patience records a report. A parent that polls then learns why the child never ran.
+A caller that cannot afford any wait uses `background: true`, which returns at once with an id.
 
 **Two rules for a test, because the default hides a mistake.** The default `queue_wait` and
 the default `child_timeout` are both 600 seconds, so a test at the defaults cannot tell which

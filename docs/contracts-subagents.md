@@ -383,11 +383,15 @@ trips, so `max_tool_calls` exists to bound a single turn that asks for forty too
 
 **A blocking spawn waits, and the wait is bounded.** One waiter waits at most `queue_wait`,
 which is the child timeout by default. Then `started` resolves `Dequeued::WaitedTooLong` and the
-parent gets its turn back. So one tool call costs at most `queue_wait + child_timeout`, and that
-no longer grows with the wait line. Before this bound the cost was
+parent gets its turn back. So one tool call costs at most `queue_wait + child_timeout`. That cost
+no longer grows with the wait line. Before this bound it was
 `ceil(max_queued_per_parent / max_children_per_parent) x child_timeout`, about forty minutes at
-the defaults. A caller that cannot afford any wait passes `background: true` and gets an id at
-once. See decision D-a-waiter-has-a-deadline.
+the defaults. See decision D-a-waiter-has-a-deadline.
+
+**The deadline applies to a background waiter too.** A background spawn returns an id at once, so
+it holds no turn. But its queued entry holds a cancel token and a queue, and the deadline bounds
+how long it holds them. A background waiter that runs out of patience records a report, so a
+parent that polls learns why the child never ran.
 
 ## 5. The task, and the gate that verifies it
 
@@ -542,6 +546,9 @@ session with that queue.
 ```rust
 pub const STEER_QUEUE_CAPACITY: usize = 32;
 pub const MAX_STEER_MESSAGE_BYTES: usize = 64 * 1024;
+pub const BLOCK_OVERHEAD_BYTES: usize = 64;
+pub const JSON_NODE_MIN_BYTES: usize = 4;
+pub const MAX_COUNTED_JSON_DEPTH: usize = 64;
 
 pub struct MessageQueue { /* a clone shares one queue */ }
 impl MessageQueue {
@@ -581,7 +588,9 @@ Five rules bind every side:
   which names the size and the limit. A count cap alone bounds nothing, because one message can
   be any size. A session queue allows `MAX_STEER_MESSAGE_BYTES`, and a child queue allows
   `SubagentLimits::max_steer_message_bytes`. The cap sits in `push`, the one door into the
-  queue. See decision D-a-steering-message-is-bounded-by-bytes.
+  queue. The count charges for each block and each JSON node, counts every object key, and
+  refuses anything nested past `MAX_COUNTED_JSON_DEPTH`. See decision
+  D-a-steering-message-is-bounded-by-bytes.
 - **A cancel keeps the queue.** Dropping user input as a side effect is the worse failure, so
   only an explicit `clear` empties it.
 

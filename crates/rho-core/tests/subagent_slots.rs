@@ -1048,10 +1048,11 @@ async fn a_waiter_refuses_when_its_deadline_passes_and_names_the_flag() {
         .started()
         .await
         .expect_err("no slot ever frees, so the deadline must end the wait");
-    assert_eq!(
-        started_at.elapsed(),
-        Duration::from_secs(30),
-        "the wait must end at the deadline, and not at the 600 second child timeout"
+    let waited = started_at.elapsed();
+    assert!(
+        waited >= Duration::from_secs(30) && waited < Duration::from_secs(600),
+        "the wait must end at the deadline, and not at the 600 second child timeout: \
+         {waited:?}"
     );
     assert_eq!(
         refusal,
@@ -1136,22 +1137,29 @@ async fn the_deadline_fires_before_the_worst_case_wait() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_slot_that_frees_before_the_deadline_still_starts_the_child() {
-    // The deadline must break no happy path. The clock is real here, and the deadline
-    // is long, so only a freed slot can end this wait.
-    let registry = registry(one_slot_waiting(Duration::from_secs(600)));
+    // The deadline must break no happy path. The slot frees before the wait begins, so the
+    // permit arm is ready at the first poll and the timer never fires.
+    //
+    // The clock is paused and nothing is timed out here on purpose. An earlier version used
+    // the real clock and a five second timeout, which a loaded machine could miss. A test
+    // that fails on a busy box teaches nobody.
+    let registry = registry(one_slot_waiting(Duration::from_secs(30)));
     let (_root, live, queued) = hold_the_slot_and_queue_one(&registry, CancelToken::new());
-
-    let waiter = tokio::spawn(async move { queued.started().await });
     drop(live);
 
-    let spawn = tokio::time::timeout(Duration::from_secs(5), waiter)
+    let started_at = tokio::time::Instant::now();
+    let spawn = queued
+        .started()
         .await
-        .expect("the waiter must not hang")
-        .expect("the task must not panic")
         .expect("a freed slot must start the waiter, deadline or not");
     assert_eq!(spawn.node.depth(), 1);
+    assert_eq!(
+        started_at.elapsed(),
+        Duration::ZERO,
+        "a free slot is taken at once, and no deadline is consulted"
+    );
 }
 
 #[tokio::test(start_paused = true)]

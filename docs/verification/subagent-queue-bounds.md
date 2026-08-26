@@ -138,8 +138,8 @@ and none freed, so the work was not started. Run it again later, spawn it with
 background: true, or ask the user to raise --queue-wait-secs.. 0 turn(s), 0 token(s).
 ```
 
-**This run found a defect.** The reason ends with a full stop, and `agent_status` added a
-second one: `--queue-wait-secs.. 0 turn(s)`. `AgentOutcome::label` builds a phrase, and the
+**This run found a defect, and the fix is in this branch.** The reason ends with a full stop,
+and `agent_status` added a second one: `--queue-wait-secs.. 0 turn(s)`. `AgentOutcome::label` builds a phrase, and the
 caller builds the sentence, so the phrase must not end one. It is fixed, and
 `a_failed_label_is_a_phrase_and_not_a_sentence` pins it. The same fix covers every failed
 outcome, not only this one. After the fix, both runs printed one stop:
@@ -191,7 +191,7 @@ keeps its whole budget.
 
 ## 9. The deliberate breaks
 
-Seventeen mutations ran, each with the file copied to `/tmp` first and copied back after.
+Twenty-six mutations ran, each with the file copied to `/tmp` first and copied back after.
 Never `git checkout`. Every one was caught by the named tests, and the restored file passed
 again.
 
@@ -214,10 +214,47 @@ again.
 | a failed label keeps its full stop | `a_failed_label_is_a_phrase_and_not_a_sentence` |
 | a block is free to hold, so only payload counts | `a_block_is_never_free_to_hold` |
 | the count walks a value of any depth | `a_value_too_deep_to_count_is_refused` |
+| an object key is free | `no_json_node_is_free_to_hold` |
+| a null node is free | `no_json_node_is_free_to_hold` |
+| an object loses its own floor | `no_json_node_is_free_to_hold` |
+| an array loses its own floor | `no_json_node_is_free_to_hold` |
+| a string value is free | `no_json_node_is_free_to_hold`, `the_counted_size_covers_every_block_kind` |
+| the block walk has no depth guard | `a_nested_tool_result_too_deep_to_count_is_refused` |
+| the nested walk forgets the depth | `a_nested_tool_result_too_deep_to_count_is_refused` |
+| the queue keeps the caller's allocation | `the_queue_keeps_no_capacity_the_message_did_not_need` |
+| a nested block list keeps its room | `the_queue_keeps_no_capacity_the_message_did_not_need` |
+| a full queue answers before an oversized message | `an_oversized_message_is_too_large_and_not_merely_full` |
 
 The harness is `/tmp/rho-mutations/prove.py`. It reports `ESCAPED MUTATIONS 0`.
 
-The last two rows come from a second review, which asked what the count misses. A message of
+## 10. The review round, and what four lenses plus an outside tool found
+
+Four reviewers read the change in parallel, one lens each, and `codex review` read it from
+outside this harness. Three findings were real, and each is fixed with a test and a proved
+mutation.
+
+- **An object key was counted, and no test said so.** A test lens deleted the key charge, and
+  the whole suite of 1532 tests stayed green. A message of one 60 KiB key would then count ten
+  bytes and pass a 64 KiB cap. The count now has one named floor, `JSON_NODE_MIN_BYTES`, and
+  `no_json_node_is_free_to_hold` pins a key, a string, an empty container, and a node.
+- **The block walk had no depth guard while the value walk did.** Two lenses and codex found it
+  independently. A probe outside the repository proved that an unguarded walk aborts the
+  process: `thread 'main' has overflowed its stack`. `block_bytes` now carries the same guard.
+- **A count reads a length, so a caller's spare room was invisible.** codex found it. A probe
+  showed a `Vec` of capacity 100000 holding one block, and a `String` of capacity 1000000
+  holding two bytes. `push` now drops that room before it stores the message.
+
+Two charges turned out to be redundant, and a deliberate break proved no test could see either.
+They are deleted, per AGENTS.md step 6: an array element charge, and an object entry charge.
+Every value costs the floor already.
+
+**One process note.** `codex review` ran while the mutation harness was running, so it read a
+file in a mutated state and reported an unused variable that no commit ever held. Its other two
+findings were real. Do not run an outside reviewer and a mutation harness over one working tree
+at the same time.
+
+The last two rows of the table above come from a second review, which asked what the count
+misses. A message of
 ten thousand empty blocks counted nothing and held ten thousand allocations. And a value
 nested deeper than the walk would have ended the process on the stack. Both are closed, and
 both have a test.

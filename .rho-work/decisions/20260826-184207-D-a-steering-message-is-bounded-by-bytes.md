@@ -45,12 +45,20 @@ whatever its payload, because a message of ten thousand empty blocks was free to
 JSON value nested deeper than 64 counts as over any cap, because the walk is recursive and a
 hostile value would end the process on the stack. Every addition saturates.
 
+Two more holes came from an outside review, and both are closed. The block walk had no depth
+guard while the value walk did, and a probe outside the repository proved an unguarded walk
+aborts the process. And a count reads a length, so a caller's spare room was invisible: `push`
+now drops that room before it stores the message.
+
 ## Rules out
 
 **One default for both kinds of queue.** 64 KiB per child queue would put the process
 ceiling at 320 MiB, and 16 KiB would refuse a paste from a user.
 
 **A cap in a caller.** Five callers push, so five caps would drift.
+
+**A count that reads a length and stores a capacity.** What the queue keeps is what the count
+charged for.
 
 **A silent truncation.** A queue that shortens a message changes what the user said. The
 push fails, the caller reports the refusal, and the user or the model sends less.
