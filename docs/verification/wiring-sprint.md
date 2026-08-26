@@ -97,6 +97,20 @@ line defines no such flag.
 VIOLATIONS 1
 ```
 
+**The cache lock, and a test that does not prove it.** A concurrency review ran eight servers
+on eight threads against one cache file and one entry of eight survived, on every run. The
+read-modify-write held no lock, so each writer overwrote the others, and a multi-server user's
+cache never converged. That is the same class this whole change exists to fix, so the earlier
+note calling it "one extra handshake" was wrong.
+
+`record_tools` now holds a lock file across the read, the write, and the rename. A stale lock
+is broken after two seconds, because a cache must never wedge a session.
+
+`eight_concurrent_writers_keep_every_entry` exercises it, and **it stays green with the lock
+removed on this machine**: the whole critical section finishes inside one scheduling quantum, so
+the writers serialise by luck even behind a barrier. The lock's necessity rests on the review's
+demonstration and on the shape of a read-modify-write, not on that test, and the test says so.
+
 `bench/check-dead-surface.py` reports its ledger. It is **not** in the ship gate yet: after
 the five entries I could justify precisely, 35 remain, and each needs its owning spec to write
 an honest reason. Marking thirty-five in one pass would build the dustbin the decision

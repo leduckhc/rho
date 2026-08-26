@@ -120,16 +120,14 @@ impl McpSchemaCache {
 
 /// Record one server's tools in the cache file, keeping every other entry.
 ///
-/// It reads the file, updates one entry, writes a temporary file, and renames it over the
-/// old one, so no reader ever sees a half-written file and two servers in one process cannot
-/// share a temporary path.
+/// The write is serialised by a lock file beside the cache, so the read, the update, and the
+/// rename are one step. Without it the read-modify-write lost entries: a review ran eight
+/// servers on eight threads and **one entry of eight survived, on every run**. That is the
+/// same "no MCP tool reaches the model" class this whole change exists to fix, so a bounded
+/// cost was the wrong answer.
 ///
-/// **It does not hold a lock, so two processes can still lose an entry.** Both may read the
-/// same file, add a different entry, and the second rename wins. Two reviews found this, and
-/// an earlier version of this comment claimed the opposite. The cost is bounded: a lost entry
-/// means one more handshake in a later session, because a cache is a hint and a live
-/// connection always wins. An inter-process lock is the fix, and it is recorded as a
-/// follow-up rather than claimed here.
+/// A lock that cannot be taken is not an error worth failing a session over. rho retries
+/// briefly and then gives up, because a cache is a hint and a live connection always wins.
 pub fn record_tools(
     path: &Path,
     config: &McpServerConfig,
@@ -138,12 +136,15 @@ pub fn record_tools(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let lock = path.with_extension("lock");
+    let _guard = LockGuard::acquire(&lock)?;
+
     let mut cache = McpSchemaCache::load(path).unwrap_or_else(|_| McpSchemaCache::new());
     cache.update(config, tools);
 
-    // A name keyed by the process id alone collides when two servers in one process finish
-    // together, and one rename then overwrites the other's half-written file. The counter
-    // makes every write its own path, and a failed write cleans up after itself.
+    // A name keyed by the process id alone collided when two servers in one process finished
+    // together, so the counter makes every write its own path. The lock above is what keeps
+    // the entries, and this keeps the temporary files apart.
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let ticket = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let temporary = path.with_extension(format!("tmp{}.{ticket}", std::process::id()));
@@ -156,4 +157,48 @@ pub fn record_tools(
         return Err(error);
     }
     Ok(())
+}
+
+/// An advisory lock held by the existence of a file, released on drop.
+///
+/// `create_new` is atomic, so exactly one writer wins the race. A stale lock from a killed
+/// process is broken after the timeout rather than blocking forever, because a cache must
+/// never wedge a session.
+struct LockGuard {
+    path: std::path::PathBuf,
+}
+
+impl LockGuard {
+    fn acquire(path: &Path) -> std::io::Result<Self> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2_000);
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(_) => {
+                    return Ok(Self {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if std::time::Instant::now() >= deadline {
+                        // A lock nobody released, so take it. The alternative is a session
+                        // that never records a schema again.
+                        let _ = std::fs::remove_file(path);
+                        continue;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }

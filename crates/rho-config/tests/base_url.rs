@@ -105,3 +105,12 @@ fn a_url_with_no_scheme_is_refused() {
     load("models.example.com/v1").unwrap_err();
     load("//models.example.com/v1").unwrap_err();
 }
+
+#[test]
+fn a_base_url_with_a_query_or_fragment_is_refused() {
+    // The endpoint is built by appending a path, so a query would land mid-url. A review
+    // printed `https://host/v1?token=leak/v1/chat/completions`, which is a request to a place
+    // the user never named.
+    load("https://host.example/v1?api-version=2024").unwrap_err();
+    load("https://host.example/v1#frag").unwrap_err();
+}

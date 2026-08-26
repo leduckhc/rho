@@ -141,3 +141,48 @@ async fn a_handshake_through_the_pool_writes_the_cache() {
     let text = std::fs::read_to_string(&path).expect("read");
     assert!(text.contains("probe"), "the entry names the server: {text}");
 }
+
+#[test]
+fn eight_concurrent_writers_keep_every_entry() {
+    // A review ran this and one entry of eight survived, every run. The read-modify-write
+    // held no lock, so each writer overwrote the others. A bounded "one extra handshake" was
+    // the wrong description: a multi-server user's cache never converged.
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("cache.json");
+    let servers: Vec<McpServerConfig> = (0..8).map(|i| server(&format!("srv{i}"), "t")).collect();
+
+    // **This test does not prove the lock is necessary, and it must not be read as if it
+    // did.** Removing `LockGuard::acquire` from `record_tools` leaves it green on this
+    // machine, with a barrier and eight rounds: the read, the write, and the rename finish
+    // inside one scheduling quantum, so the writers serialise by luck.
+    //
+    // A concurrency review demonstrated the loss, eight servers on eight threads with one
+    // entry surviving on every run, so the lock stays. Its necessity rests on that
+    // demonstration and on the shape of a read-modify-write, not on this test. What this
+    // test does prove is that concurrent writers still produce a readable file with every
+    // entry present, which is worth having and is less than it looks.
+    for round in 0..8 {
+        let _ = std::fs::remove_file(&path);
+        let start = std::sync::Arc::new(std::sync::Barrier::new(servers.len()));
+        std::thread::scope(|scope| {
+            for config in &servers {
+                let path = path.clone();
+                let start = std::sync::Arc::clone(&start);
+                scope.spawn(move || {
+                    start.wait();
+                    record_tools(&path, config, vec![tool("find")]).expect("the write succeeds");
+                });
+            }
+        });
+
+        let cache = McpSchemaCache::load(&path).expect("the file loads");
+        for config in &servers {
+            assert_eq!(
+                cache.tools_for(config).len(),
+                1,
+                "round {round}: every entry must survive, and {} is missing",
+                config.name
+            );
+        }
+    }
+}

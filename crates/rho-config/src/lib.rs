@@ -559,6 +559,12 @@ fn check_base_url(value: &str) -> Result<(), ConfigError> {
     let Ok(url) = url::Url::parse(value) else {
         return refuse("it is not a url with a scheme, for example https://host/v1");
     };
+    // The endpoint is built by appending a path, so a query or a fragment would land in the
+    // middle of the url and the request would go somewhere the user did not name. A review
+    // printed `https://host/v1?token=leak/v1/chat/completions`.
+    if url.query().is_some() || url.fragment().is_some() {
+        return refuse("a base url may not carry a query or a fragment");
+    }
     if !url.username().is_empty() || url.password().is_some() {
         return refuse(
             "a url with a user or a password is refused, because the host is not what it looks like",
