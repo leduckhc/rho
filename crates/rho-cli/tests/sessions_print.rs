@@ -169,10 +169,22 @@ fn show_prints_one_line_per_record_with_its_id() {
 #[test]
 fn show_fits_eighty_columns() {
     // The invariant over long text and over wide unicode, not one example.
+    //
+    // A test reviewer found two gaps in the first version: it stressed no **tool name** and no
+    // **model**, so the header and the tool rows were never pushed. An MCP tool name can be long,
+    // and a real Bedrock model id is 41 characters. Both are here now, and
+    // `show_keeps_the_state_when_the_model_is_long` pins what the header gives way to.
     let long_ascii = "a".repeat(5000);
     let wide_unicode = "字".repeat(300);
+    let long_tool = "mcp__a-very-long-server-name__an_even_longer_tool_name_than_that".to_string();
     let entries = vec![
-        entry("r1", Some("r0"), NOW, user(&long_ascii)),
+        entry(
+            "r0m",
+            Some("r0"),
+            NOW,
+            model_change("anthropic.claude-3-5-sonnet-20241022-v2:0"),
+        ),
+        entry("r1", Some("r0m"), NOW, user(&long_ascii)),
         entry("r2", Some("r1"), NOW, assistant(&wide_unicode)),
         entry(
             "r3",
@@ -180,6 +192,22 @@ fn show_fits_eighty_columns() {
             NOW,
             user(&format!("{long_ascii}{wide_unicode}")),
         ),
+        // A long tool name, in both the call row and the result row.
+        entry(
+            "r4",
+            Some("r3"),
+            NOW,
+            tool_call("c1", &long_tool, serde_json::json!({ "path": long_ascii })),
+        ),
+        entry("r5", Some("r4"), NOW, tool_result("c1", &long_ascii)),
+        // A wide-unicode tool name too, because a width is not a byte count.
+        entry(
+            "r6",
+            Some("r5"),
+            NOW,
+            tool_call("c2", &wide_unicode, serde_json::json!({ "k": "v" })),
+        ),
+        entry("r7", Some("r6"), NOW, tool_result("c2", &wide_unicode)),
     ];
     let out = render_show(&read_result(entries), &id(), false);
     assert!(

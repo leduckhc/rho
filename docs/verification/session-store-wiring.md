@@ -776,3 +776,51 @@ reader meets them:
 - A `session-file` in a directory the user already owns keeps that directory's mode. rho sets `0o700`
   on a directory it creates and `0o600` on the file, and it does not chmod a directory it found. The
   guide says so, next to the rest of the privacy notes.
+
+## 17. The test-quality lens, and a flaw in this document's own method
+
+The test lens ran its own breaks rather than reasoning about them, and it confirmed the finding that
+mattered most: **the grep of `cli.rs` passes against `if false`.** Section 12 holds that fix. It also
+found three tests that were weaker than their names, and all three are sharper now.
+
+### The 500-file budget test was only accidentally sharp
+
+The sentinel `Name` record sat about two kilobytes from the **start** of a 128 kilobyte file. So a
+tail read had to be about 126 kilobytes wrong before the test noticed, and a merely doubled window
+would have passed. The byte-precise bound lived only in `a_row_never_decodes_the_whole_file`.
+
+The sentinel now sits just past one tail window plus a four kilobyte margin, and the test asserts
+that placement so it cannot drift back:
+
+| Break | Tests that failed |
+| --- | --- |
+| the tail window is twice as large | `a_list_of_five_hundred_sessions_reads_only_the_head_and_the_tail`, `a_tail_read_drops_a_partial_first_line` |
+| the tail window is 8 KiB too large | the same two |
+
+Before the change, neither break failed the 500-file test.
+
+### Two more tests stressed less than they claimed
+
+- `show_fits_eighty_columns` covered long ASCII and wide unicode, and no **tool name** and no
+  **model**. An MCP tool name can be long, and a real Bedrock model id is 41 characters. Both are in
+  it now, in a call row and a result row, in ASCII and in wide unicode. Break: the row no longer cuts
+  its detail to the remaining width. Failed: `show_fits_eighty_columns`,
+  `show_cuts_a_long_text_and_never_wraps`.
+- `delete_refuses_a_live_session` asserted the error **variant** and not its message, and the message
+  is what a user reads when their delete is refused. Break: the `Busy` message no longer names the
+  session. Failed: `delete_refuses_a_live_session`, `a_busy_session_stops_the_run`.
+
+### The flaw in this document's own method
+
+The last break above exposed it. A mutation harness that runs `cargo test -p rho-core -p rho-cli`
+**stops at the first failing target**, because nothing passes `--no-fail-fast`. So a table row built
+from one such run can list fewer tests than really catch the break: the `Busy` message break first
+showed only `a_busy_session_stops_the_run`, and a targeted re-run showed
+`delete_refuses_a_live_session` failing as well.
+
+**Every row in every table here names at least one test that really failed**, and that is the claim
+each row makes. Where a row was built from a multi-package run, the list may be incomplete rather
+than wrong. A reader who wants the full set for one break should re-run it with `--no-fail-fast`.
+
+That is worth stating, because a method that over-reports is a false claim and a method that
+under-reports is only an incomplete one. This one under-reports.

@@ -1210,13 +1210,22 @@ fn a_list_of_five_hundred_sessions_reads_only_the_head_and_the_tail() {
     // The hidden name. It sits past the head window.
     file.push_str(&name_line("r3", "a name only a full decode can see"));
     file.push('\n');
-    // Then more than the tail window of filler, so the tail read cannot reach the name.
+    let name_ends_at = file.len();
+    // **The margin is deliberate, and small.** A test reviewer showed that a sentinel near the start
+    // of a 128 kilobyte file is only caught by a tail read of about that size, so an implementation
+    // with a merely doubled window would pass. The filler stops just past one tail window plus this
+    // margin, so a tail even four kilobytes too large finds the name and fails the test.
+    const MARGIN: usize = 4 * 1024;
     let mut n = 0;
-    while file.len() < (ROW_TAIL_BYTES as usize) * 2 {
+    while file.len() - name_ends_at < ROW_TAIL_BYTES as usize + MARGIN {
         file.push_str(&usage_line(&format!("rf{n}"), "r2"));
         file.push('\n');
         n += 1;
     }
+    assert!(
+        file.len() - name_ends_at < ROW_TAIL_BYTES as usize + MARGIN * 2,
+        "the sentinel must sit just outside the tail window, not far outside it"
+    );
     std::fs::write(root.join(format!("{}.jsonl", sentinel.as_str())), &file)
         .expect("the sentinel file");
 
@@ -1433,6 +1442,17 @@ fn delete_refuses_a_live_session() {
     assert!(
         matches!(error, SessionError::Busy { .. }),
         "expected Busy, got {error:?}"
+    );
+    // The message is what a user reads when their delete is refused, so it is asserted and not
+    // only the variant. A test reviewer named this shape.
+    let message = error.to_string();
+    assert!(
+        message.contains(session.as_str()),
+        "the refusal must name the session, got {message}"
+    );
+    assert!(
+        message.contains("another process"),
+        "the refusal must say why, got {message}"
     );
     assert!(path.exists(), "the file survives a refused delete");
 }
