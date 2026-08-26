@@ -279,6 +279,9 @@ The type that carries a detail, in `crates/rho-skills/src/rejection.rs`:
   inside the test carries no wildcard, so a new variant does not compile until it is listed.
 - `a_withheld_rejection_keeps_its_reason_and_drops_its_detail` — `without_detail` keeps the
   variant and empties the text.
+- `every_reason_explains_its_own_subject` — each reason names the thing it is about, so two
+  arms swapped by a copy and paste fail. `notice` is built from `explain`, so a test that only
+  reads the notice cannot see that.
 
 Discovery, in `crates/rho-skills/tests/agents.rs`:
 
@@ -311,6 +314,8 @@ What a line may hold, and how many, in `crates/rho-skills/tests/agents.rs`:
   16 000-character name to 64.
 - `a_definition_bounds_the_number_of_lines_it_owes` — nine warnings yield five lines and one
   count.
+- `a_valid_sandbox_value_narrows_the_child` — `sandbox: strict` reaches the definition. This
+  change rewrote the invalid path, so the valid one needs a test.
 
 The notice, in `crates/rho-cli/src/subagents.rs`:
 
@@ -435,6 +440,17 @@ real, and each one is now a test and a live probe. See
    warnings, and the cap is five, so removing the cap changed nothing. The mutation proof
    caught it. The test now builds a definition with nine warnings.
 
+The test lens also found three weak assertions, and all three are repaired. A notice test
+pinned a literal fragment of a repair string, so a reworded repair would have failed it; it
+asserts `reason.repair()` now. A warning test pinned the word "keyword"; it asserts that
+**every** warning the loader raised reaches the user. And `every_rejection_reason_states_a_repair`
+was circular, because `notice` is built from the text it asserted; `every_reason_explains_its_own_subject`
+ties each reason to its own subject instead.
+
+Two tests are Unix only, and they carry `#[cfg(unix)]` now: one makes a symlink, and one puts
+a line break in a file name. Neither is legal on Windows, and without the gate a Windows build
+would fail to compile rather than skip them.
+
 Recorded and not fixed here, each with its reason:
 
 - **`is_inside` returns false when a path or root will not resolve**, which reads as "not
@@ -451,3 +467,11 @@ Recorded and not fixed here, each with its reason:
   closed to `strict`. A child can never widen past its parent, so this cannot escalate.
 - **`Eq` on the three new types is never exercised**, and `Display for Detail` is asserted
   only through `notice`.
+- **`Unreadable` from a denied permission has live evidence only.** The unit tests cover the
+  missing-file path. A `chmod 000` test would pass as an ordinary user and fail as root,
+  because root reads the file anyway, and a test that depends on who runs it is worse than
+  none.
+- **The same start-up twice has live evidence only.** Discovery holds no state between runs
+  and `markdown_files` sorts, so a unit test would pin no invariant that code could break.
+- **The terminal frontend takes the same notice list and no test or live run covers that
+  hop.**

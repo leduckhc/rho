@@ -307,8 +307,12 @@ mod tests {
             joined.contains("did not load"),
             "the notice says the file did not load: {joined}"
         );
+        // The invariant is "the notice carries the reason's own repair", not a literal
+        // fragment of today's wording. A reworded repair must not fail this test, and a
+        // dropped repair must.
+        let repair = set.rejected[0].reason.repair();
         assert!(
-            joined.contains("tools: [read, list]"),
+            joined.contains(repair),
             "the notice teaches the repair: {joined}"
         );
     }
@@ -531,10 +535,13 @@ mod tests {
             joined.contains("scout"),
             "the notice names the definition: {joined}"
         );
-        assert!(
-            joined.contains("keyword"),
-            "the warning itself reaches the user: {joined}"
-        );
+        // Every warning the loader raised must reach the user, whatever it says.
+        for warning in &set.loaded[0].warnings {
+            assert!(
+                joined.contains(warning.as_str()),
+                "this warning never reached the user: {warning}"
+            );
+        }
     }
 
     #[tokio::test]

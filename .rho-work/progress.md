@@ -709,6 +709,18 @@ One member of this family is still open. `parse_skill_file` returns a reason and
 `discover` sends it to `tracing::warn!` only, so a **skill** that does not load is quiet for
 any user who did not set `RHO_LOG`. `SkillSet` needs the same `rejected` list.
 
+## A flaky test outside this lane, with its mechanism named
+
+`a_live_connection_replaces_the_cached_entry` in `crates/rho-mcp/tests/cache.rs` failed once
+during a gate run on the branch `fix/agent-definition-failure-path`, with
+`ConnectTimeout { server: "stub" }`. It passes three times out of three on its own, and that
+branch changes no file under `crates/rho-mcp`.
+
+The mechanism is line 78: the test gives a stub server a **two second wall-clock deadline** to
+connect. The failing run shared the machine with a `cargo build --release`, so the deadline
+expired. AGENTS.md step 5 forbids a `sleep` in an async test for this reason, and a wall-clock
+connect deadline is the same defect in another shape. It belongs to whoever owns `rho-mcp`.
+
 ## Open items the slot queue left, both recorded rather than remembered
 
 A local review pass over the queue found two costs. Neither is fixed, and each needs a contract

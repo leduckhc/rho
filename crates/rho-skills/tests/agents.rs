@@ -711,6 +711,7 @@ async fn a_warning_carries_no_control_character_and_no_unbounded_text() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_hostile_file_name_cannot_forge_a_notice_line() {
     // A file name is repository text. A name holding a line break forged a second
@@ -745,6 +746,7 @@ async fn a_very_long_path_is_cut_on_the_left_so_the_file_name_stays() {
     assert!(notice.contains("..."), "the cut is marked: {notice}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_symlink_from_a_user_dir_into_the_session_root_is_treated_as_a_project_agent() {
     // The skill loader closes this hole and the agent loader did not. A live run loaded
@@ -863,4 +865,23 @@ async fn a_definition_bounds_the_number_of_lines_it_owes() {
     let def = accept(&path).await;
     assert!(def.warnings.len() >= 3, "{:?}", def.warnings);
     assert_eq!(def.notices().len(), def.warnings.len());
+}
+
+#[tokio::test]
+async fn a_valid_sandbox_value_narrows_the_child() {
+    // The invalid path was rewritten by this change, so the valid one needs a test. A
+    // sandbox may only narrow, and the loader must carry the mode it read.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "strict.md",
+        "---\nname: strict\ndescription: Recon.\nsandbox: strict\n---\nbody\n",
+    );
+    let def = accept(&path).await;
+    assert_eq!(
+        def.sandbox,
+        Some(rho_core::SandboxMode::Strict),
+        "the definition asked for strict, so the child gets strict"
+    );
+    assert!(def.warnings.is_empty(), "{:?}", def.warnings);
 }

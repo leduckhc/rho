@@ -337,6 +337,42 @@ mod tests {
     }
 
     #[test]
+    fn every_reason_explains_its_own_subject() {
+        // `notice` is built from `explain` and `repair`, so asserting that the notice
+        // contains them is circular: it cannot see two arms swapped by a copy and paste.
+        // Each reason is tied to the word a reader would search for instead.
+        for (reason, subject) in [
+            (
+                RejectionReason::Unreadable {
+                    detail: Detail::new("io"),
+                },
+                "read",
+            ),
+            (RejectionReason::NoFrontmatter, "frontmatter"),
+            (RejectionReason::UnclosedFrontmatter, "closes"),
+            (
+                RejectionReason::BadFrontmatter {
+                    detail: Detail::new("yaml"),
+                },
+                "YAML",
+            ),
+            (RejectionReason::NoDescription, "description"),
+            (
+                RejectionReason::BadToolsField {
+                    detail: Detail::new("tools"),
+                },
+                "tools",
+            ),
+        ] {
+            assert!(
+                reason.explain().contains(subject),
+                "{reason:?} must explain {subject}, and it says: {}",
+                reason.explain()
+            );
+        }
+    }
+
+    #[test]
     fn a_withheld_rejection_keeps_its_reason_and_drops_its_detail() {
         let rejected = RejectedDefinition {
             path: PathBuf::from("/repo/.rho/agents/x.md"),
