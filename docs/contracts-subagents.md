@@ -11,6 +11,7 @@ page is a defect.
 | Contract | Owning spec |
 | --- | --- |
 | The agent definition on disk | `SPEC-subagents` section 5 |
+| A definition file that does not load | `SPEC-definition-rejection` |
 | Confinement | `SPEC-subagents` section 3 |
 | The spawn tree and its limits | `SPEC-subagents` section 7 |
 | A live child, and polling a background one | `SPEC-subagents` section 7a |
@@ -61,7 +62,7 @@ pub struct AgentDefinition {
 | --- | --- | --- |
 | `name` | yes | The same character rules as a skill. |
 | `description` | yes | The model reads it to choose. Without it the definition does not load. |
-| `tools` | no | Intersected with the parent's set. `None` inherits. `all` and `*` also inherit. `none` means no tools. An empty list means no tools. |
+| `tools` | no | Intersected with the parent's set. `None` inherits. `all` and `*` also inherit. `none` means no tools. An empty list means no tools. A line of words and a YAML sequence both work. |
 | `model` | no | Overrides the inherited model. The provider is never overridable. |
 | `max_turns` | no | Capped by the parent's. |
 | `sandbox` | no | May only narrow. |
@@ -76,6 +77,25 @@ warns. The narrow reading wins every time, because a wrong widening is an escala
 narrowing is a visible failure. The keyword is resolved by the loader in `rho-skills`, never by
 `intersect_tools`, so the security core keeps one literal meaning. See decision
 D-a-tool-keyword-stands-alone.
+
+**Two spellings, one meaning.** `tools: read, list` and `tools: [read, list]` are the same
+list. A `tools` value of any other type refuses the file, and so does an empty `tools:`
+line. See decision D-a-tool-list-accepts-a-yaml-sequence.
+
+**A file that does not load is reported.** `load_definition` returns
+`Result<AgentDefinition, RejectedDefinition>`, and `AgentSet` carries a `rejected` list
+beside `loaded` and `withheld`. Each rejection names the path, the origin, and one reason
+from a closed set, and each reason states its repair. A rejection from an untrusted project
+file quotes nothing of that file. `SPEC-definition-rejection` owns this contract.
+
+**A definition inside the session root is a project definition, however it was found.** A
+symlink in `~/.rho/agents` that points into the repository is withheld like any project file.
+One function, `is_inside`, decides that for skills and for agents. See decision
+D-an-agent-symlink-cannot-smuggle-trust.
+
+**A warning prints only for a definition that loaded.** A warning quotes the file, so it is
+sanitised and bounded like a rejection detail. A withheld definition prints none, because it
+changes nothing until the user trusts the project.
 
 ## 2. Confinement: a child is never more permissive than its parent
 

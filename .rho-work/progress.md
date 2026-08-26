@@ -678,18 +678,36 @@ attribution was wrong, and both places are corrected.
    documents carried a change that no longer existed. One `grep` for the type would have caught it at
    the time.
 
-## Open defect, found by driving the slot queue for real
+## Fixed defect, found by driving the slot queue for real
 
-`rho-skills` reads a definition's `tools` field as a string. A file that writes a YAML
-sequence, `tools: [read, list]`, fails `serde_yaml`, and `load_definition` returns `None`.
-The whole definition then disappears with no notice, so `spawn_agent` is never registered
-and the model answers that it has no such tool. Two live runs were wasted before the cause
-was found. See `docs/verification/subagent-slot-queue.md` section 6.
+`rho-skills` read a definition's `tools` field as a string. A file that wrote a YAML
+sequence, `tools: [read, list]`, failed `serde_yaml`, and `load_definition` returned `None`.
+The whole definition then disappeared with no notice, so `spawn_agent` was never registered
+and the model answered that it had no such tool. Two live runs were wasted before the cause
+was found.
 
-The documented spelling is `tools: read, list`, so no contract is broken. The failure path
-is what is wrong: it teaches nothing. The fix needs a contract decision first, because
-`AgentSet` carries only `loaded` and `withheld` and a rejected file has nowhere to go. It is
-not fixed in the slot-queue change.
+**Fixed on the branch `fix/agent-definition-failure-path`.** `load_definition` returns a
+`Result`, `AgentSet` carries a `rejected` list, the sequence form loads, and every rejected
+file prints one start-up line with its path, its reason, and its repair. The contract is
+`SPEC-definition-rejection`, and the decisions are D-a-rejected-definition-is-reported and
+D-a-tool-list-accepts-a-yaml-sequence.
+
+Driving it for real found two more silent failures in the same family. `tools: 5` used to
+**load**, because `serde_yaml` reads a plain scalar into a `String`, so the child ran with an
+empty tool set and said nothing. And `AgentDefinition::warnings` was never printed anywhere,
+so a dropped tool keyword narrowed a child in silence. Both are fixed and covered. See
+`docs/verification/agent-definition-rejection.md`.
+
+The two reviews after green found three more, each probed live before the repair. A hostile
+file name forged a `rho:` line, because the notice printed the path verbatim. The new warning
+line carried a raw escape and 400 characters of file prose. And a symlink in `~/.rho/agents`
+smuggled a repository definition into the **trusted** set, because the agent loader never
+resolved a path before classifying it while the skill loader always did. See
+D-an-agent-symlink-cannot-smuggle-trust.
+
+One member of this family is still open. `parse_skill_file` returns a reason and
+`discover` sends it to `tracing::warn!` only, so a **skill** that does not load is quiet for
+any user who did not set `RHO_LOG`. `SkillSet` needs the same `rejected` list.
 
 ## Open items the slot queue left, both recorded rather than remembered
 

@@ -1,10 +1,11 @@
 # SPEC-definition-rejection — A definition file that does not load
 
-Status: draft. It becomes delivered when the tests in section 6 exist.
+Status: delivered.
 Owning crates: `rho-skills` for the loader and the reason set, `rho-cli` for the notice.
 Features: F-agent-definitions and F-tool-list-keywords. See `docs/features.md`.
 
-Decisions: D-a-rejected-definition-is-reported and D-a-tool-list-accepts-a-yaml-sequence.
+Decisions: D-a-rejected-definition-is-reported, D-a-tool-list-accepts-a-yaml-sequence, and
+D-an-agent-symlink-cannot-smuggle-trust.
 
 Reviewed once before any code. The review changed the contract in four places. See section 8.
 
@@ -42,7 +43,7 @@ persisted format of a definition file, and the behaviour rule that a refusal mus
 /// The text may quote a file inside the repository under edit, so it is untrusted. **The
 /// type is the guarantee.** A `Detail` holds no control character and at most 200
 /// characters, because no caller can build one any other way. Only `rho-skills` builds one.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Detail(String);
 
 impl Detail {
@@ -131,6 +132,16 @@ pub async fn load_definition(
 `AgentSet::rejected`. For a project file that the user has not trusted, it pushes
 `without_detail` instead.
 
+**A path is drawn safely too.** `notice` renders the path through the same sanitiser, and it
+cuts a path longer than 200 characters **on the left**, so the file name at the end stays. A
+file name is repository text: one holding a line break forged a second `rho:` line in a live
+run.
+
+**A warning is bounded by the same type.** A warning interpolates the file's own text: a tool
+name, a sandbox value, a file stem. Each one goes through `Detail`, so no warning can carry a
+control character or unbounded prose. The `sandbox` warning is rho's own sentence now, because
+the message from `SandboxMode::from_str` quotes the whole value and the repair sat after it.
+
 ### What the contract forbids
 
 - No catch-all reason. A new case is a new variant, and `repair` does not compile without it.
@@ -184,12 +195,21 @@ ignored, and that rule does not change.
 the path, the reason, and the repair. The lines print before the session starts, with the
 other start-up notices.
 
-Two rules:
+Three rules:
 
 - A rejection prints even when no definition loaded. That case removed the tool, so it is the
   case that most needs the report.
 - At most five lines print. The rest become one counted line, so a directory of broken files
   cannot push the real output away.
+- A **warning** on a definition that did load prints too, with the definition name. A
+  warning is not a fault, so the file still loads. Nothing printed one before, and section 9
+  says what that cost.
+- A withheld definition prints **no** warning. It changes nothing in this session, and its
+  warning would carry prose from a repository the user has not trusted. Once the user passes
+  `--trust-project`, the same warning prints.
+
+One function builds every line, `notices_for`. One place, because a second builder is how a
+report gets lost.
 
 ## 6. Test cases
 
@@ -201,7 +221,7 @@ The tool list, in `crates/rho-skills/tests/agents.rs`:
 - `a_keyword_in_a_sequence_still_stands_alone` — `[all]` inherits, and `[all, read]` keeps
   `read` and warns.
 - `a_tools_field_that_is_not_a_list_is_rejected_and_says_so` — `tools: 5` rejects with
-  `BadToolsField`, and the notice names the file.
+  `BadToolsField`, and the notice names the file and the type it found.
 - `a_tool_name_that_is_not_a_string_is_rejected` — `tools: [read, 5]` rejects, and the detail
   names the item.
 - `an_empty_tools_line_is_rejected_rather_than_inherited` — `tools:` with no value rejects,
@@ -215,28 +235,52 @@ The reason set, in `crates/rho-skills/tests/agents.rs`:
 - `a_file_with_no_frontmatter_is_rejected_with_the_reason` — `NoFrontmatter`. An empty file
   gets the same reason.
 - `an_unclosed_frontmatter_block_says_it_is_unclosed` — a file that opens `---` and never
-  closes it rejects with `UnclosedFrontmatter`. Its repair names the closing line and the
-  bounded read. It never asks the user to add a description they already wrote.
-- `a_wrong_type_in_a_scalar_field_is_rejected_with_the_field_name` — `max_turns: "12"` rejects
-  with `BadFrontmatter`, and the detail names `max_turns`.
+  closes it rejects with `UnclosedFrontmatter`. A block larger than the bounded read is the
+  same fault. The repair names the closing line, and it never asks for a description the
+  file already holds.
+- `a_wrong_type_in_a_scalar_field_is_rejected_with_the_field_name` — `max_turns: "12"`
+  rejects with `BadFrontmatter`, and the detail names `max_turns`.
 - `a_repeated_key_is_rejected` — two `tools` lines reject with `BadFrontmatter`.
 - `frontmatter_that_is_not_a_mapping_is_rejected` — a bare YAML list rejects with
   `BadFrontmatter`.
 - `a_missing_file_is_rejected_as_unreadable` — `Unreadable`, and the path is the missing one.
-- `every_rejection_reason_states_a_repair` — every variant returns a non-empty repair, and
-  `notice` holds the path, the reason, and the repair.
-- `a_rejection_detail_is_sanitised_and_bounded` — a control character in the file cannot reach
-  the terminal through a detail, and a long detail is capped at 200 characters.
+- `a_long_parser_message_is_capped_before_it_reaches_the_user` — a parser message that quotes
+  400 characters of the file arrives capped, and it says it was cut.
+
+The type that carries a detail, in `crates/rho-skills/src/rejection.rs`:
+
+- `a_rejection_detail_is_sanitised_and_bounded` — the constructor strips every control
+  character and caps the text. The test drives the constructor, because the type is the
+  guarantee.
+- `every_rejection_reason_states_a_repair` — every variant returns a non-empty repair and a
+  non-empty explanation, and `notice` holds the path, the reason, and the repair. The match
+  inside the test carries no wildcard, so a new variant does not compile until it is listed.
+- `a_withheld_rejection_keeps_its_reason_and_drops_its_detail` — `without_detail` keeps the
+  variant and empties the text.
 
 Discovery, in `crates/rho-skills/tests/agents.rs`:
 
 - `a_broken_definition_is_reported_and_the_good_one_still_loads` — one bad file and one good
   file in one directory. The good one loads, and the bad one is in `rejected`.
 - `a_broken_project_definition_is_rejected_and_not_hidden` — an untrusted project file that
-  does not parse lands in `rejected` with `SkillOrigin::Project`.
-- `an_untrusted_project_file_quotes_nothing_in_its_rejection` — the security rule. The
-  detail is dropped for an untrusted project file, and the path, the reason, and the repair
-  stay. A trusted project file keeps its detail.
+  does not parse lands in `rejected` with `SkillOrigin::Project`, and not in `withheld`.
+- `an_untrusted_project_file_quotes_nothing_in_its_rejection` — the security rule. The detail
+  is dropped for an untrusted project file, and the path, the reason, and the repair stay. A
+  trusted project file keeps its detail.
+
+What a line may carry, in `crates/rho-skills/tests/agents.rs`:
+
+- `a_warning_carries_no_control_character_and_no_unbounded_text` — a file with an escape in a
+  tool name and 400 characters in `sandbox` produces warnings that hold neither.
+- `a_hostile_file_name_cannot_forge_a_notice_line` — a file name with a line break yields one
+  line, and no control character.
+- `a_very_long_path_is_cut_on_the_left_so_the_file_name_stays` — a 250-character path keeps its
+  file name, and the cut is marked.
+- `a_symlink_from_a_user_dir_into_the_session_root_is_treated_as_a_project_agent` — the trust
+  rule of D-an-agent-symlink-cannot-smuggle-trust. The file is withheld without
+  `--trust-project`, and it loads with it.
+- `a_bidi_override_cannot_reorder_a_line`, in `crates/rho-skills/src/rejection.rs` — a
+  right-to-left override, a bidi isolate, and a line separator never reach the terminal.
 
 The notice, in `crates/rho-cli/src/subagents.rs`:
 
@@ -246,6 +290,10 @@ The notice, in `crates/rho-cli/src/subagents.rs`:
   Every file is broken, so no tool is registered, and the user is still told why.
 - `a_flood_of_rejections_is_capped_and_counted` — six broken files print five lines and one
   count.
+- `a_definition_warning_reaches_the_user_too` — a definition that loads with a warning
+  reports it, with the definition name.
+- `an_untrusted_project_definition_prints_no_warning` — a withheld definition's warning stays
+  unprinted, and the same warning prints once the project is trusted.
 
 ## 7. Out of scope
 
@@ -262,6 +310,12 @@ The notice, in `crates/rho-cli/src/subagents.rs`:
   user definition, and that is a separate open item.
 - **Repairing the file for the user.** rho reports and continues. It never edits a
   definition.
+- **An unknown `sandbox` value.** It warns, and the field falls to `None`, which inherits the
+  parent's mode. A child can never widen past its parent, so this cannot escalate. The resume
+  path fails closed to `strict` instead, and the two are inconsistent. That is a separate
+  decision, and this change only makes the warning visible.
+- **A directory named `x.md`.** `markdown_files` keeps files only, so such a directory is
+  skipped and never reported.
 
 ## 8. What the review changed
 
@@ -280,3 +334,42 @@ back, and the first two were blocking.
    repair asks for a description that the file already holds. It has its own variant now.
 4. **A wrong-typed scalar and a repeated key had no stated behaviour.** Section 4 now states
    both, and section 6 names a test for each.
+
+## 9. What driving it for real changed
+
+Step 11 ran the fixed binary and the binary from the commit before it, over the same
+directories. Two more silent failures came out of that, and both are fixed here.
+
+1. **`tools: 5` used to load.** `serde_yaml` reads a plain scalar into a `String`, so the old
+   loader took `"5"` as a tool name. The intersection dropped it, and the child ran with an
+   empty tool set. A live child was asked to name its tools and answered `NONE`. So the
+   original defect had a twin that no test and no reading found.
+2. **A definition warning printed nowhere.** `AgentDefinition::warnings` held the dropped
+   tool keyword, the bad name, and the bad sandbox value, and no code read the field. A skill
+   warning has printed since sprint 2. So `tools: all, read` narrowed a child in silence.
+   Section 5 now states the rule, and `a_definition_warning_reaches_the_user_too` holds it.
+
+See `docs/verification/agent-definition-rejection.md` for the commands and the output.
+
+## 10. What the second review changed
+
+The implementation went through two reviews after it was green: one for correctness and one
+for security. Three findings were blocking, and each one is now a test and a live probe. See
+`docs/verification/agent-definition-rejection.md` section 9.
+
+1. **A file name forged a notice line.** `notice` printed the path verbatim. A file called
+   `x\nrho: 3 project definitions are trusted.md`, in an untrusted repository, produced two
+   lines and the second read as though rho wrote it. The path is sanitised now.
+2. **The new warning line carried raw file text.** The warning loop was the only new path that
+   the `Detail` rule did not cover, so `tools: [all, "read\e[2J"]` sent a clear-screen escape
+   to the terminal on the `rho run` path, and a 400-character `sandbox` value printed whole.
+   Every warning interpolation goes through `Detail` now, and a withheld definition prints no
+   warning at all.
+3. **A symlink smuggled a repository definition into the trusted set.** The skill loader
+   resolves a path before it classifies it, and the agent loader did not. A live probe loaded a
+   repository definition with no `--trust-project`. Both loaders call one `is_inside` now, and
+   one `admit` function decides trust for every pass. See
+   D-an-agent-symlink-cannot-smuggle-trust.
+
+`sanitize` also grew: it replaces a bidirectional override, a bidi isolate, a line separator,
+and a byte order mark. A control character was never the only way to disguise a line.
