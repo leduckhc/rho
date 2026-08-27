@@ -79,6 +79,19 @@ await() {
 finish() {
   # Close rho's stdin. It drains any run to its settled event, then returns.
   exec 3>&-
+  # Bound the wait. `await` grew a read timeout because a hung rho blocked this script
+  # for ever, and an unbounded `wait` here reopens exactly that hole on the exit path.
+  waited=0
+  while kill -0 "$RHO_PID" 2>/dev/null; do
+    if [ "$waited" -ge "${FINISH_TIMEOUT:-60}" ]; then
+      echo "!!! rho did not exit within ${FINISH_TIMEOUT:-60}s after stdin closed. Killing it."
+      kill -9 "$RHO_PID" 2>/dev/null
+      rc=1
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
   wait "$RHO_PID"
   code=$?
   echo "=== rho exit code: $code"

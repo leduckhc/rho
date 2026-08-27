@@ -100,7 +100,15 @@ impl SessionFactory for CliFactory {
         for notice in notices.iter().chain(extras.notices.iter()) {
             eprintln!("rho: {notice}");
         }
-        *self.held.lock().await = Some(Held { tasks, extras });
+        // Swap under the lock, then drop the old set outside it. Dropping in place ran the
+        // previous session's teardown while the lock was held: killing its background
+        // tasks and stopping its MCP servers. A later `set_model` would then wait behind
+        // that work for no reason.
+        let previous = {
+            let mut held = self.held.lock().await;
+            held.replace(Held { tasks, extras })
+        };
+        drop(previous);
         Ok(session)
     }
 }

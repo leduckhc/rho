@@ -101,13 +101,12 @@ impl<W: AsyncWrite + Unpin> DialogHost<W> {
     /// and emits no event, because a second reply for a resolved dialog would race
     /// with the run. See D-a-dialog-timeout-cancels.
     pub fn answer(&self, id: &str, answer: DialogAnswer) -> bool {
-        let sender = {
-            let mut open = self
-                .pending
-                .open
-                .lock()
-                .expect("the dialog map is poisoned");
-            open.remove(id)
+        // A poisoned map means another thread panicked while holding it. Treat that as
+        // "no such dialog" rather than panic here. It matches `Slot::drop`, and it stays
+        // fail-closed, because an unanswered dialog denies.
+        let sender = match self.pending.open.lock() {
+            Ok(mut open) => open.remove(id),
+            Err(_) => None,
         };
         match sender {
             // The receiver is gone only when the asking side stopped waiting, so a
@@ -120,11 +119,8 @@ impl<W: AsyncWrite + Unpin> DialogHost<W> {
     /// How many dialogs are open. A test asserts it, so a resolved dialog cannot
     /// leak its slot.
     pub fn open_count(&self) -> usize {
-        self.pending
-            .open
-            .lock()
-            .expect("the dialog map is poisoned")
-            .len()
+        // Same rule as `answer`: a poisoned map reports no open dialogs.
+        self.pending.open.lock().map(|open| open.len()).unwrap_or(0)
     }
 }
 

@@ -114,6 +114,13 @@ impl Provider for ScriptedProvider {
 /// denies it and the approval gate must be consulted.
 pub struct Touch {
     pub ran: Arc<std::sync::atomic::AtomicUsize>,
+    /// When set, the tool waits here before it returns.
+    ///
+    /// A test that needs a command to arrive **while a turn is busy** cannot race an
+    /// instant tool: the turn boundary is gone before the write lands. This lets the test
+    /// hold the tool open, send its command, and then release it. `Notify` remembers one
+    /// `notify_one` that arrives early, so there is no race either way.
+    pub release: Option<Arc<tokio::sync::Notify>>,
 }
 
 #[async_trait]
@@ -136,6 +143,9 @@ impl Tool for Touch {
         _ctx: ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         self.ran.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(release) = &self.release {
+            release.notified().await;
+        }
         Ok(ToolOutput::text("touched"))
     }
 }
@@ -149,10 +159,11 @@ pub fn session_with(
     approval: Arc<dyn ApprovalPolicy>,
     root: &tempfile::TempDir,
     ran: Arc<std::sync::atomic::AtomicUsize>,
+    release: Option<Arc<tokio::sync::Notify>>,
 ) -> Session {
     let config = SessionConfig::new("scripted-model", root.path(), approval);
     let mut tools = ToolRegistry::new();
-    tools.register(Arc::new(Touch { ran }));
+    tools.register(Arc::new(Touch { ran, release }));
     Session::with_config(
         config,
         Arc::new(ScriptedProvider::new(turns)),
@@ -178,6 +189,8 @@ pub struct ScriptedFactory {
     pub builds: Arc<std::sync::atomic::AtomicUsize>,
     /// How many times the `touch` tool really ran. A denial must leave it at zero.
     pub tool_ran: Arc<std::sync::atomic::AtomicUsize>,
+    /// When set, every `touch` call waits on it, so a test can hold a turn open.
+    pub release: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl ScriptedFactory {
@@ -188,7 +201,15 @@ impl ScriptedFactory {
             ask_for_approval: false,
             builds: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             tool_ran: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            release: None,
         }
+    }
+
+    /// Hold every `touch` call until the returned handle is notified.
+    pub fn holding(mut self) -> (Self, Arc<tokio::sync::Notify>) {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        self.release = Some(Arc::clone(&gate));
+        (self, gate)
     }
 
     /// Every session this factory builds then asks the client before a mutating tool
@@ -240,6 +261,7 @@ impl SessionFactory for ScriptedFactory {
             approval,
             &self.root,
             Arc::clone(&self.tool_ran),
+            self.release.clone(),
         ))
     }
 }

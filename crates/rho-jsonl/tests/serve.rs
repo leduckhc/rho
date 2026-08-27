@@ -322,41 +322,75 @@ async fn steer_before_a_run_is_accepted() {
 
 #[tokio::test]
 async fn steer_lands_at_a_turn_boundary() {
-    // The steered message must be queued during the run and delivered between turns.
-    // Two turns, so there is a boundary for it to land on.
-    let out = drive(
-        ScriptedFactory::new(vec![
-            Turn::Text("first".to_string()),
-            Turn::Text("second".to_string()),
-        ]),
-        // The steer is queued before the prompt, so the first boundary delivers it.
-        "{\"type\":\"steer\",\"message\":\"also do this\"}\n{\"type\":\"prompt\",\"message\":\"go\"}\n",
-    )
-    .await;
+    // A steer must reach the model between two turns: after the current turn's tool calls
+    // finish, and before the next provider request. So the run needs two turns, and a tool
+    // call gives it one.
+    //
+    // This test used to send the steer before the prompt through the pipelining harness.
+    // Delivery was then the very first event of the run, which is a boundary in the
+    // trivial sense and proves nothing about landing between turns. It passed only because
+    // the assertion carried an `is_empty` escape. Removing the escape failed it, which is
+    // what a review asked for. It now uses the waiting client, so the steer really does
+    // arrive while turn one is busy.
+    // Hold the tool open. An instant tool finishes before the steer can be written, and
+    // the boundary is then already past, which is how the old version of this test came to
+    // pass on the wrong event.
+    let (factory, release) =
+        ScriptedFactory::new(vec![Turn::CallTool, Turn::Text("done".to_string())]).holding();
+    let mut client = Client::start(factory);
 
-    let events = events(&out);
+    client
+        .send(r#"{"type":"prompt","req_id":"p1","message":"use the tool"}"#)
+        .await;
+    // The tool is now running and waiting on the gate.
+    client
+        .read_until(|item| matches!(item, Out::Event(Event::ToolStart { .. })))
+        .await;
+
+    client
+        .send(r#"{"type":"steer","req_id":"s1","message":"also say banana"}"#)
+        .await;
+    // Read the steer's own reply, so the message is certainly queued before the tool ends.
+    client
+        .read_until(|item| match item {
+            Out::Reply(reply) => matches!(reply, Reply::Ok(ok) if ok.command == "steer"),
+            Out::Event(_) => false,
+        })
+        .await;
+
+    // Let the tool finish. The boundary happens now, with the steer already queued.
+    release.notify_one();
+    let rest = client.settled().await;
+    let events = events(&rest);
+
     let delivered = events
         .iter()
-        .position(|event| matches!(event, Event::MessageDelivered { count: 1 }));
-    let delivered = delivered.unwrap_or_else(|| {
-        panic!("a queued message must reach the model at a boundary: {events:?}")
-    });
+        .position(|event| matches!(event, Event::MessageDelivered { count: 1 }))
+        .unwrap_or_else(|| {
+            panic!("a queued message must reach the model at a boundary: {events:?}")
+        });
+    let queued = events
+        .iter()
+        .position(|event| matches!(event, Event::MessageQueued { .. }))
+        .unwrap_or_else(|| panic!("the queue must announce the push: {events:?}"));
+    assert!(queued < delivered, "queued before delivered: {events:?}");
 
-    // It lands at a boundary: a turn ended before it, and a turn starts after it.
+    // The boundary itself. The current turn's tool finished before delivery, and a fresh
+    // turn starts after it. No escape hatch: both halves must really be there.
     assert!(
         events[..delivered]
             .iter()
-            .any(|event| matches!(event, Event::TurnEnd { .. }))
-            || events[..delivered].is_empty(),
-        "delivery must not land inside a turn: {events:?}"
+            .any(|event| matches!(event, Event::ToolEnd { .. })),
+        "delivery must wait for the running tool to finish: {events:?}"
     );
     assert!(
         events[delivered + 1..]
             .iter()
             .any(|event| matches!(event, Event::TurnStart)),
-        "a turn must follow the delivery: {events:?}"
+        "a new turn must follow the delivery: {events:?}"
     );
-    assert_eq!(settled(&out), 1);
+    assert_eq!(settled(&rest), 1);
+    client.finish().await;
 }
 
 #[tokio::test]
