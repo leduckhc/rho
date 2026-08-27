@@ -2862,9 +2862,13 @@ mod shutdown_tests {
         // `build_session` forwards `loaded.discover_agents`, not a literal. Comments are
         // stripped first, because a call surviving only in a comment is the trap two earlier
         // reviews found on this branch.
+        //
+        // The spelling changed when `#5` moved the discovery fields into `AgentConfig`. The
+        // invariant did not: the value comes from `loaded.discover_agents` and never from a
+        // literal. Only the expected text moved with the merge.
         let source = production_source();
         assert!(
-            source.contains("discover: loaded.discover_agents"),
+            source.contains("agents.discover = loaded.discover_agents"),
             "build_session must pass the config's discover_agents to subagents::load, not a literal"
         );
     }

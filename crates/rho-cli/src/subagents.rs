@@ -645,9 +645,13 @@ mod tests {
             Arc::new(rho_core::AllowAllPolicy),
         );
         LoadRequest {
-            session_root: session_root.to_path_buf(),
-            trust_project: true,
-            discover,
+            agents: {
+                let mut agents =
+                    rho_skills::AgentConfig::with_default_user_dirs(session_root.to_path_buf());
+                agents.project_trusted = true;
+                agents.discover = discover;
+                agents
+            },
             parent_config: config,
             provider: Arc::new(StubProvider),
             hooks: Arc::new(HookChain::default()),
