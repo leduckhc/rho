@@ -147,7 +147,7 @@ impl MessageQueue {
         // `String` with room for a million bytes and two bytes in it, and the count charges
         // for the two. Storing that allocation would put the cap and the memory back out of
         // step, which is the whole defect this cap exists to close.
-        shrink_to_payload(&mut message);
+        shrink_to_payload(&mut message, 0);
         let position = {
             let mut messages = self.lock();
             if messages.len() >= self.inner.capacity {
@@ -251,12 +251,22 @@ pub const MAX_COUNTED_JSON_DEPTH: usize = 64;
 /// because a count reads a length. An outside review found that a caller could pass one
 /// small block inside a large allocation and the queue would retain it.
 ///
-/// The recursion is bounded, because `push` measures before it normalises, and a message
-/// nested past [`MAX_COUNTED_JSON_DEPTH`] is refused rather than stored.
+/// **It carries its own depth guard.** The refusal in `push` is not enough on its own: it
+/// rests on `usize::MAX` being larger than the cap, and a host may set the cap to
+/// `usize::MAX` through `with_limits` or `--max-agent-steer-bytes`. At that one value a
+/// too-deep message is accepted, and an unguarded walk would then end the process. A
+/// reviewer found that the guard was indirect and that one setting removed it. So the walk
+/// stops where the count stops, and no caller can arrange the failure.
+///
+/// A part below the depth keeps its spare room. That is the safe trade: rho cannot measure
+/// it, so rho does not walk it either.
 ///
 /// A `serde_json::Map` keeps its own spare room, and serde_json exposes no way to shrink
 /// it. That room is bounded by the entries the count charged for, keys included.
-fn shrink_to_payload(message: &mut Vec<ContentBlock>) {
+fn shrink_to_payload(message: &mut Vec<ContentBlock>, depth: usize) {
+    if depth > MAX_COUNTED_JSON_DEPTH {
+        return;
+    }
     message.shrink_to_fit();
     for block in message.iter_mut() {
         match block {
@@ -266,7 +276,7 @@ fn shrink_to_payload(message: &mut Vec<ContentBlock>) {
             ContentBlock::ReasoningReplay { text, state } => {
                 text.shrink_to_fit();
                 if let Some(state) = state {
-                    shrink_json(&mut state.value);
+                    shrink_json(&mut state.value, depth);
                 }
             }
             ContentBlock::ToolCall {
@@ -277,9 +287,9 @@ fn shrink_to_payload(message: &mut Vec<ContentBlock>) {
             } => {
                 id.shrink_to_fit();
                 name.shrink_to_fit();
-                shrink_json(arguments);
+                shrink_json(arguments, depth);
                 if let Some(state) = state {
-                    shrink_json(&mut state.value);
+                    shrink_json(&mut state.value, depth);
                 }
             }
             ContentBlock::ToolResult {
@@ -288,7 +298,7 @@ fn shrink_to_payload(message: &mut Vec<ContentBlock>) {
                 is_error: _,
             } => {
                 tool_call_id.shrink_to_fit();
-                shrink_to_payload(content);
+                shrink_to_payload(content, depth + 1);
             }
             ContentBlock::Image { source } => {
                 source.data.shrink_to_fit();
@@ -299,18 +309,23 @@ fn shrink_to_payload(message: &mut Vec<ContentBlock>) {
 }
 
 /// Drop the spare room inside a JSON value. A map keeps its own, and serde_json hides it.
-fn shrink_json(value: &mut serde_json::Value) {
+///
+/// It carries the same depth guard as the count, for the reason `shrink_to_payload` states.
+fn shrink_json(value: &mut serde_json::Value, depth: usize) {
+    if depth > MAX_COUNTED_JSON_DEPTH {
+        return;
+    }
     match value {
         serde_json::Value::String(text) => text.shrink_to_fit(),
         serde_json::Value::Array(items) => {
             items.shrink_to_fit();
             for held in items.iter_mut() {
-                shrink_json(held);
+                shrink_json(held, depth + 1);
             }
         }
         serde_json::Value::Object(fields) => {
             for held in fields.values_mut() {
-                shrink_json(held);
+                shrink_json(held, depth + 1);
             }
         }
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
@@ -961,6 +976,65 @@ mod tests {
                 }
             }
             other => panic!("the second block is a tool result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_shrink_walk_stops_where_the_count_stops() {
+        // The refusal in `push` rests on `usize::MAX` being larger than the cap, and a host
+        // may set the cap to `usize::MAX`. At that one value a too-deep message is accepted,
+        // and an unguarded walk would then end the process. A reviewer found that the guard
+        // was indirect and that one setting removed it.
+        //
+        // The proof is observable and needs no crash: what the walk reaches is shrunk, and
+        // what lies past the depth keeps its spare room.
+        let mut deep_text = String::with_capacity(4096);
+        deep_text.push_str("deep");
+        let mut deep = ContentBlock::Text { text: deep_text };
+        for _ in 0..(MAX_COUNTED_JSON_DEPTH + 2) {
+            deep = ContentBlock::ToolResult {
+                tool_call_id: String::new(),
+                content: vec![deep],
+                is_error: false,
+            };
+        }
+        let mut top_text = String::with_capacity(4096);
+        top_text.push_str("top");
+
+        // The cap is the one value that makes the refusal in `push` stop working.
+        let queue = MessageQueue::with_limits(32, usize::MAX);
+        queue
+            .push(vec![ContentBlock::Text { text: top_text }, deep])
+            .expect("a cap of usize::MAX refuses nothing");
+
+        let held = queue.drain();
+        match &held[0][0] {
+            ContentBlock::Text { text } => assert_eq!(
+                text.capacity(),
+                text.len(),
+                "the walk reaches the top block, so it is shrunk"
+            ),
+            other => panic!("the first block is text, got {other:?}"),
+        }
+
+        // Walk to the bottom and read the block the guard stopped short of.
+        let mut here = &held[0][1];
+        let mut levels = 0usize;
+        while let ContentBlock::ToolResult { content, .. } = here {
+            here = &content[0];
+            levels += 1;
+        }
+        assert_eq!(
+            levels,
+            MAX_COUNTED_JSON_DEPTH + 2,
+            "the nesting is what it was"
+        );
+        match here {
+            ContentBlock::Text { text } => assert!(
+                text.capacity() > text.len(),
+                "a block past the depth keeps its room, because the walk stopped"
+            ),
+            other => panic!("the deepest block is text, got {other:?}"),
         }
     }
 

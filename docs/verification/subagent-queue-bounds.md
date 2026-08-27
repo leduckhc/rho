@@ -191,7 +191,7 @@ keeps its whole budget.
 
 ## 9. The deliberate breaks
 
-Twenty-seven mutations ran, each with the file copied to `/tmp` first and copied back after.
+Twenty-nine mutations ran, each with the file copied to `/tmp` first and copied back after.
 Never `git checkout`. Every one was caught by the named tests, and the restored file passed
 again.
 
@@ -224,6 +224,8 @@ again.
 | the nested walk forgets the depth | `a_nested_tool_result_too_deep_to_count_is_refused` |
 | the queue keeps the caller's allocation | `the_queue_keeps_no_capacity_the_message_did_not_need` |
 | a nested block list keeps its room | `the_queue_keeps_no_capacity_the_message_did_not_need` |
+| the shrink walk has no guard of its own | `the_shrink_walk_stops_where_the_count_stops` |
+| every trailing stop is eaten | `a_failed_label_is_a_phrase_and_not_a_sentence` |
 | a full queue answers before an oversized message | `an_oversized_message_is_too_large_and_not_merely_full` |
 
 The harness is `/tmp/rho-mutations/prove.py`. It reports `ESCAPED MUTATIONS 0`.
@@ -259,6 +261,31 @@ version of that assertion could not see the entry charge, and a break proved it.
 file in a mutated state and reported an unused variable that no commit ever held. Its other two
 findings were real. Do not run an outside reviewer and a mutation harness over one working tree
 at the same time.
+
+## 11. The pull request review
+
+A reviewer read the branch on pull request 6. CodeRabbit had hit its free-plan rate limit, so it
+reported nothing, and the human read was the first outside read of the whole branch. It confirmed
+the gate, the arithmetic, and one deliberate break of its own. It raised two nits, and both were
+real:
+
+- **The depth guard was indirect, and one setting removed it.** The walk that drops spare room
+  had no guard of its own. It was safe only because a too-deep message counts `usize::MAX` and
+  `push` then refuses it. A host that sets the cap to `usize::MAX`, through `with_limits` or
+  `--max-agent-steer-bytes`, stops that refusal working, and the walk would then recurse without
+  a bound. Both walks now carry the guard, so no caller can arrange the failure.
+  `the_shrink_walk_stops_where_the_count_stops` proves it without a crash: what the walk reaches
+  is shrunk, and what lies past the depth keeps its room.
+- **`AgentOutcome::label` stripped every trailing stop, not one.** A reason that ended in an
+  ellipsis lost all three dots, so it stopped saying that it trailed off. It now removes one
+  stop. The test covers an ellipsis, one stop, and no stop.
+
+Both fixes were proved by a break: `the-shrink-walk-has-no-guard` and
+`every-trailing-stop-is-eaten`, each caught by its named test.
+
+**One caveat the reviewer raised and I did not close.** `live_permits` is per `AgentRegistry`,
+so the 80 MiB ceiling is per registry. A host that opens many registries in one process holds
+that many ceilings. The code says so already, and no test drives many registries.
 
 The last two rows of the table above come from a second review, which asked what the count
 misses. A message of

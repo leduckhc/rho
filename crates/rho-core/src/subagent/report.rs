@@ -98,7 +98,12 @@ impl AgentOutcome {
             Self::OutOfTurns => "out of turns".to_string(),
             Self::Canceled => "cancelled".to_string(),
             Self::Failed { reason } => {
-                format!("failed: {}", reason.trim_end().trim_end_matches('.'))
+                // One stop, not every stop. `trim_end_matches` ate all three dots of an
+                // ellipsis, so a reason that trailed off lost the fact that it trailed off.
+                // A reviewer found it. No caller writes one today, and a caller may.
+                let reason = reason.trim_end();
+                let reason = reason.strip_suffix('.').unwrap_or(reason);
+                format!("failed: {reason}")
             }
             Self::Rejected { failed } => format!("rejected: {}", failed.join(", ")),
         }
@@ -128,5 +133,22 @@ mod tests {
         );
         // The stop inside the reason stays, because only the end is a caller's business.
         assert!(label.contains("slot. Ask"), "{label}");
+
+        // One stop leaves, not every stop. An ellipsis says the reason trailed off, and
+        // that is part of what the reason says.
+        let trailing_off = AgentOutcome::Failed {
+            reason: "the child stopped mid sentence...".to_string(),
+        };
+        assert!(
+            trailing_off.label().ends_with(".."),
+            "an ellipsis keeps two of its three dots: {}",
+            trailing_off.label()
+        );
+
+        // And a reason with no stop at all is unchanged.
+        let bare = AgentOutcome::Failed {
+            reason: "no stop here".to_string(),
+        };
+        assert_eq!(bare.label(), "failed: no stop here");
     }
 }
