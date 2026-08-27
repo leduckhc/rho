@@ -234,6 +234,9 @@ whether you passed `--no-skills`.
 > search, so rho offers no subagent, and `--no-skills` still loads subagents. Pass
 > `--no-agents` to drop subagents without dropping skills.
 
+A definition file that does not load is a different case, and rho names it at start-up. See
+[subagents](subagents.md).
+
 When discovery works, rho says so at startup:
 
 ```

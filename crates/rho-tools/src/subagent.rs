@@ -400,6 +400,10 @@ async fn start_background_child(
 fn dequeued_outcome(dequeued: Dequeued) -> AgentOutcome {
     match dequeued {
         Dequeued::Cancelled => AgentOutcome::Canceled,
+        // The parent did not ask for this, so it is a failure and never a cancel.
+        Dequeued::WaitedTooLong { .. } => AgentOutcome::Failed {
+            reason: dequeued.to_string(),
+        },
         Dequeued::ProcessWideFull { .. } => AgentOutcome::Failed {
             reason: dequeued.to_string(),
         },
@@ -1086,6 +1090,29 @@ mod unstarted_child_tests {
                 "the reason must name the flag that would raise the limit: {reason}"
             ),
             other => panic!("a full process is a failure, not {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_waiter_that_ran_out_of_patience_is_a_failure_that_names_the_wait() {
+        // The parent did not ask for this, so it is a failure and never a cancel. A
+        // parent that read "cancelled" here would think its own cancel worked. See
+        // decision D-a-waiter-has-a-deadline.
+        let outcome = dequeued_outcome(Dequeued::WaitedTooLong {
+            limit: std::time::Duration::from_secs(600),
+        });
+        match outcome {
+            AgentOutcome::Failed { reason } => {
+                assert!(
+                    reason.contains("--queue-wait-secs"),
+                    "the reason must name the flag that raises the deadline: {reason}"
+                );
+                assert!(
+                    reason.contains("600"),
+                    "and how long the child waited: {reason}"
+                );
+            }
+            other => panic!("a wait that ran out is a failure, not {other:?}"),
         }
     }
 

@@ -102,7 +102,7 @@ pub async fn load_skills(
 /// Name a few items, then count the rest.
 ///
 /// A full list of forty names is as unreadable as forty separate lines.
-fn summarise_names(names: &[String]) -> String {
+pub(crate) fn summarise_names(names: &[String]) -> String {
     const SHOWN: usize = 3;
     if names.len() <= SHOWN {
         return names.join(", ");

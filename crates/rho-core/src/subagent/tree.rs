@@ -797,7 +797,14 @@ impl AgentNode {
         // other task can observe a half-admitted child. Per-parent is checked first,
         // because it is the tighter and more actionable bound.
         let id = self.registry.allocate_id();
-        let queue = crate::MessageQueue::new();
+        // The queue a child reads is capped in bytes as well as in messages, and the cap
+        // comes from the limits so a host can tune it. A count cap alone bounds nothing,
+        // because one message can be any size. See decision
+        // D-a-steering-message-is-bounded-by-bytes.
+        let queue = crate::MessageQueue::with_limits(
+            crate::STEER_QUEUE_CAPACITY,
+            limits.max_steer_message_bytes,
+        );
         {
             let mut state = self.registry.state();
             let waiting_here = state
@@ -899,7 +906,14 @@ impl AgentNode {
         };
         let child_id = child.id;
         let (progress_tx, progress_rx) = tokio::sync::watch::channel(AgentProgress::default());
-        let queue = queue.unwrap_or_default();
+        // A fresh queue takes the byte cap from the limits, exactly as a queued child's
+        // does. The two arms must not differ, or one path would be uncapped.
+        let queue = queue.unwrap_or_else(|| {
+            crate::MessageQueue::with_limits(
+                crate::STEER_QUEUE_CAPACITY,
+                self.registry.limits().max_steer_message_bytes,
+            )
+        });
         let handle = LiveAgent {
             id: child.id,
             agent,
@@ -974,11 +988,21 @@ pub enum Admission {
     Queued(QueuedChild),
 }
 
-/// Why a queued child never started. Both are results a parent can act on.
+/// Why a queued child never started. Every one is a result a parent can act on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dequeued {
     /// The child was cancelled while it waited, alone or with its parent.
+    ///
+    /// A cancel wins over the deadline below, because a cancel is what the parent asked
+    /// for. The select in `started` is biased for that reason.
     Cancelled,
+    /// The child waited for `SubagentLimits::queue_wait` and no slot freed.
+    ///
+    /// It bounds one blocking spawn. Without it, one call could hold a parent's turn for
+    /// the wait line depth times `child_timeout`, about forty minutes at the defaults,
+    /// and a prompt-injected model chose both factors. See decision
+    /// D-a-waiter-has-a-deadline.
+    WaitedTooLong { limit: std::time::Duration },
     /// A slot freed under this parent, and the process-wide cap was full by then.
     ///
     /// A queued child holds no process-wide permit while it waits, so the cap can
@@ -991,6 +1015,13 @@ impl std::fmt::Display for Dequeued {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Dequeued::Cancelled => f.write_str("the queued subagent was cancelled before it ran."),
+            Dequeued::WaitedTooLong { limit } => write!(
+                f,
+                "the child waited {} seconds for a slot and none freed, so the work was not \
+                 started. Run it again later, spawn it with background: true, or ask the user \
+                 to raise --queue-wait-secs.",
+                limit.as_secs()
+            ),
             Dequeued::ProcessWideFull { limit } => write!(
                 f,
                 "a slot freed for this child, and the process-wide limit of {limit} live agents \
@@ -1073,17 +1104,33 @@ impl QueuedChild {
     /// process-wide permit without waiting, because waiting on that cap is waiting on
     /// another tree. A failure there releases the per-parent permit first, so a
     /// waiter that gives up blocks no sibling.
+    ///
+    /// The wait is bounded. `SubagentLimits::queue_wait` ends it, and the child then
+    /// reports `Dequeued::WaitedTooLong`. The clock starts at the first poll of this
+    /// future, which is when the child begins to wait. See decision
+    /// D-a-waiter-has-a-deadline.
     pub async fn started(mut self) -> Result<ChildSpawn, Dequeued> {
         let limits = *self.parent.registry.limits();
         let permits = Arc::clone(&self.parent.child_permits);
         let child_permit = tokio::select! {
+            // Biased, so the arms are read in the order this contract states: a cancel
+            // first, then a free slot, then the deadline. A fair select would report
+            // either reason for a waiter that was cancelled and expired.
+            biased;
+            () = self.cancel.cancelled() => return Err(Dequeued::Cancelled),
             // `acquire_owned` is cancel-safe: dropping the future takes no permit,
             // and a permit taken on a lost race returns as it drops.
             permit = permits.acquire_owned() => match permit {
                 Ok(permit) => permit,
                 Err(_) => return Err(Dequeued::Cancelled),
             },
-            () = self.cancel.cancelled() => return Err(Dequeued::Cancelled),
+            () = tokio::time::sleep(limits.queue_wait) => {
+                // The wait ran out. The child holds no permit here, so nothing is
+                // released, and `Drop` removes its queued entry as `self` falls.
+                return Err(Dequeued::WaitedTooLong {
+                    limit: limits.queue_wait,
+                });
+            }
         };
         if self.cancel.is_cancelled() {
             return Err(Dequeued::Cancelled);

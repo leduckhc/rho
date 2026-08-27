@@ -11,6 +11,7 @@ page is a defect.
 | Contract | Owning spec |
 | --- | --- |
 | The agent definition on disk | `SPEC-subagents` section 5 |
+| A definition file that does not load | `SPEC-definition-rejection` |
 | Confinement | `SPEC-subagents` section 3 |
 | The spawn tree and its limits | `SPEC-subagents` section 7 |
 | A live child, and polling a background one | `SPEC-subagents` section 7a |
@@ -61,7 +62,7 @@ pub struct AgentDefinition {
 | --- | --- | --- |
 | `name` | yes | The same character rules as a skill. |
 | `description` | yes | The model reads it to choose. Without it the definition does not load. |
-| `tools` | no | Intersected with the parent's set. `None` inherits. `all` and `*` also inherit. `none` means no tools. An empty list means no tools. |
+| `tools` | no | Intersected with the parent's set. `None` inherits. `all` and `*` also inherit. `none` means no tools. An empty list means no tools. A line of words and a YAML sequence both work. |
 | `model` | no | Overrides the inherited model. The provider is never overridable. |
 | `max_turns` | no | Capped by the parent's. |
 | `sandbox` | no | May only narrow. |
@@ -76,6 +77,45 @@ warns. The narrow reading wins every time, because a wrong widening is an escala
 narrowing is a visible failure. The keyword is resolved by the loader in `rho-skills`, never by
 `intersect_tools`, so the security core keeps one literal meaning. See decision
 D-a-tool-keyword-stands-alone.
+
+**Two spellings, one meaning.** `tools: read, list` and `tools: [read, list]` are the same
+list. A `tools` value of any other type refuses the file, and so does an empty `tools:`
+line. See decision D-a-tool-list-accepts-a-yaml-sequence.
+
+**A file that does not load is reported.** `load_definition` returns
+`Result<AgentDefinition, RejectedDefinition>`, and `AgentSet` carries a `rejected` list
+beside `loaded` and `withheld`. Each rejection names the path, the origin, and one reason
+from a closed set, and each reason states its repair. A rejection from an untrusted project
+file quotes nothing of that file. `SPEC-definition-rejection` owns this contract.
+
+**A definition inside the session root is a project definition, however it was found.** A
+symlink in `~/.rho/agents` that points into the repository is withheld like any project file.
+One function, `is_inside`, decides that for skills and for agents. See decision
+D-an-agent-symlink-cannot-smuggle-trust.
+
+**A warning prints only for a definition that loaded.** A warning quotes the file, so it is
+sanitised and bounded like a rejection detail. A withheld definition prints none, because it
+changes nothing until the user trusts the project.
+
+**Every start-up line is bounded, in length and in count.**
+
+```rust
+/// The most lines of one kind a start-up report may print. The rest are counted.
+pub const MAX_LINES_PER_KIND: usize = 5;
+
+impl AgentDefinition {
+    /// The name, made safe to draw and short enough to read.
+    pub fn safe_name(&self) -> String;
+
+    /// The lines this definition owes the user, and no more than a bounded number.
+    pub fn notices(&self) -> Vec<String>;
+}
+```
+
+A repository chooses how many files it holds and how long each name is. So a name is cut at
+64 characters, one definition prints at most five lines, and each kind of line stops at the
+cap and counts the rest. A live run printed 800 KB from one untrusted repository before these
+bounds existed. See `SPEC-definition-rejection` section 11.
 
 ## 2. Confinement: a child is never more permissive than its parent
 
@@ -288,6 +328,7 @@ pub enum Admission {
 
 pub enum Dequeued {
     Cancelled,
+    WaitedTooLong { limit: Duration },
     ProcessWideFull { limit: usize },
 }
 
@@ -346,6 +387,8 @@ pub struct SubagentLimits {
     pub max_tool_calls: u32,
     pub max_queued_per_parent: usize,
     pub max_queued_total: usize,
+    pub queue_wait: Duration,
+    pub max_steer_message_bytes: usize,
     pub grace_turns: u32,
 }
 ```
@@ -359,6 +402,8 @@ pub struct SubagentLimits {
 | `max_tool_calls` | 64 | `--max-agent-tool-calls` | yes |
 | `max_queued_per_parent` | 16 | `--max-queued-per-parent` | yes, through `spawn_agents` |
 | `max_queued_total` | 128 | `--max-queued-total` | across sessions in one process |
+| `queue_wait` | the child timeout | `--queue-wait-secs` | yes, and zero means no waiting |
+| `max_steer_message_bytes` | 16 KiB | `--max-agent-steer-bytes` | yes, for every child queue |
 | `grace_turns` | 5 for a child, 0 for a plain session | `--agent-grace-turns` | yes |
 
 The CLI depth is 1 and has no flag, because a command-line child receives no spawn tool and no
@@ -376,10 +421,17 @@ trips, so `max_tool_calls` exists to bound a single turn that asks for forty too
 **A queued child spends none of its timeout while it waits.** The clock lives in
 `collect_report`, which runs only after `started` resolves.
 
-**A blocking spawn now waits, and the wait has a stated cost.** One tool call can hold a
-parent's turn for `ceil(max_queued_per_parent / max_children_per_parent) x child_timeout`, about
-forty minutes at the defaults. rho does not bound that separately today. A caller that cannot
-afford the wait passes `background: true` and gets an id at once.
+**A blocking spawn waits, and the wait is bounded.** One waiter waits at most `queue_wait`,
+which is the child timeout by default. Then `started` resolves `Dequeued::WaitedTooLong` and the
+parent gets its turn back. So one tool call costs at most `queue_wait + child_timeout`. That cost
+no longer grows with the wait line. Before this bound it was
+`ceil(max_queued_per_parent / max_children_per_parent) x child_timeout`, about forty minutes at
+the defaults. See decision D-a-waiter-has-a-deadline.
+
+**The deadline applies to a background waiter too.** A background spawn returns an id at once, so
+it holds no turn. But its queued entry holds a cancel token and a queue, and the deadline bounds
+how long it holds them. A background waiter that runs out of patience records a report, so a
+parent that polls learns why the child never ran.
 
 ## 5. The task, and the gate that verifies it
 
@@ -533,11 +585,17 @@ session with that queue.
 
 ```rust
 pub const STEER_QUEUE_CAPACITY: usize = 32;
+pub const MAX_STEER_MESSAGE_BYTES: usize = 64 * 1024;
+pub const BLOCK_OVERHEAD_BYTES: usize = 64;
+pub const JSON_NODE_MIN_BYTES: usize = 4;
+pub const MAX_COUNTED_JSON_DEPTH: usize = 64;
 
 pub struct MessageQueue { /* a clone shares one queue */ }
 impl MessageQueue {
     pub fn new() -> Self;
     pub fn with_capacity(capacity: usize) -> Self;
+    pub fn with_limits(capacity: usize, max_message_bytes: usize) -> Self;
+    pub fn max_message_bytes(&self) -> usize;
     pub fn push(&self, message: Vec<ContentBlock>) -> Result<usize, QueueError>;
     pub fn drain(&self) -> Vec<Vec<ContentBlock>>;
     pub fn clear(&self);
@@ -547,6 +605,9 @@ impl MessageQueue {
     pub fn unobserve(&self);
 }
 
+/// The bytes one message holds, counted the way `push` counts them.
+pub fn message_bytes(message: &[ContentBlock]) -> usize;
+
 impl Session {
     pub fn steer(&self, message: Vec<ContentBlock>) -> Result<usize, QueueError>;
     pub fn queue(&self) -> MessageQueue;
@@ -554,14 +615,22 @@ impl Session {
 }
 ```
 
-Four rules bind every side:
+Five rules bind every side:
 
 - **One delivery point.** The driver drains the queue after the current tool calls finish and
   before it builds the next request. A message never lands inside a provider request.
 - **Append only.** Delivery adds a user turn through `Context::append` and edits no earlier
   turn, so the stable prefix stays byte-identical and the provider cache stays warm.
-- **Bounded, and never a silent drop.** A full queue returns `QueueError::Full` and keeps every
-  earlier message. An unbounded queue is a memory defect, and this project shipped one before.
+- **Bounded in messages, and never a silent drop.** A full queue returns `QueueError::Full` and
+  keeps every earlier message. An unbounded queue is a memory defect, and this project shipped
+  one before.
+- **Bounded in bytes too.** A message over the queue's byte cap returns `QueueError::TooLarge`,
+  which names the size and the limit. A count cap alone bounds nothing, because one message can
+  be any size. A session queue allows `MAX_STEER_MESSAGE_BYTES`, and a child queue allows
+  `SubagentLimits::max_steer_message_bytes`. The cap sits in `push`, the one door into the
+  queue. The count charges for each block and each JSON node, counts every object key, and
+  refuses anything nested past `MAX_COUNTED_JSON_DEPTH`. See decision
+  D-a-steering-message-is-bounded-by-bytes.
 - **A cancel keeps the queue.** Dropping user input as a side effect is the worse failure, so
   only an explicit `clear` empties it.
 
@@ -682,6 +751,7 @@ pub enum QueueScope {
 
 pub enum QueueError {
     Full { capacity: usize },
+    TooLarge { limit: usize, size: usize },
 }
 ```
 
@@ -691,7 +761,8 @@ section 3.
 `TooManyChildren` stays in the set, because `spawn_child` still refuses. `admit_child` never
 returns it, because that cap queues. `TooManyLiveAgents` refuses twice: at admission, and again
 at the start through `Dequeued::ProcessWideFull`, because a waiter holds no process-wide permit
-while it waits.
+while it waits. `Dequeued::WaitedTooLong` is the third way a waiter ends, and it names
+`--queue-wait-secs`.
 
 **A refusal must teach something true.** The depth message once named a flag that did not
 exist, so it sent the reader after a fix that could not work.

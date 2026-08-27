@@ -94,6 +94,9 @@ tools: read, grep, list
 You locate code and report where things are. You do not change files.
 ```
 
+Write the tool list on one line, or as a YAML sequence: `tools: [read, grep, list]`. When a
+file does not load, rho says which file, what is wrong, and what to change.
+
 ```sh
 rho run "Have the scout find where the parser lives" --trust-project
 ```
