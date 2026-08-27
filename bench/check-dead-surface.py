@@ -56,18 +56,179 @@ ALLOWLIST = ROOT / "bench/allowed-uncalled.txt"
 
 # A `pub fn` or `pub async fn`, capturing the name.
 DEFINITION = re.compile(r"^\s*pub (?:async )?fn ([a-z_][a-z0-9_]*)", re.M)
-# A name used as a call, a method, or a value passed to something else.
-def use_pattern(name: str) -> re.Pattern[str]:
-    escaped = re.escape(name)
-    # `name(`, `.name(`, `::name`, and `name` as a bare value in a call or a list.
-    #
-    # A brace is in the alternation because a re-export ends `…, name}`. Without it the
-    # position of a name inside `pub use x::{a, b, c}` decided the verdict: a mid-list name
-    # matched the comma and read as called, and only the last name was ever reported. A
-    # review found the same construct giving opposite answers.
-    return re.compile(
-        rf"(?<![a-zA-Z0-9_]){escaped}\s*(?:\(|,|\)|;|\]|\}}|\bas\b)|::{escaped}\b"
-    )
+# Counting a use by regex alone cannot see the one shape that hurts most: a struct
+# field-init shorthand. `Thing { foo }` and `Thing { a, foo }` both end a bare `foo`
+# on `}` or `,`, which is exactly the shape a value passed to a call ends on. An earlier
+# alternation counted that as a use, so a public `fn foo` that only ever named a struct
+# field read as live. rho names many functions after the field they fill, so this was
+# not a corner case. It is the same family as the defect this guard exists to catch: a
+# check that passes on the shape it was written to report buys false confidence.
+#
+# The fix is to know the enclosing bracket. A bare value inside `(` or `[` is a use; a
+# bare identifier inside a struct-literal `{` is a field, not a use. A regex cannot track
+# nesting, so we tokenise once and classify each identifier by its neighbours and by the
+# bracket that encloses it. A re-export never reaches here: `strip_use_statements` drops
+# every `use`/`pub use`/`pub(crate) use` line before we count, so a name that is only
+# re-exported correctly reads as unwired.
+
+_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[0-9][A-Za-z0-9_.]*|.", re.S)
+# A `{` that opens a struct literal is preceded by a type path (`Thing`, `mod::Variant`,
+# `Self`). A `{` that opens a block sits after these instead, and a bare identifier under
+# such a `{` is a statement or a block value, never a field shorthand.
+_TYPE_INTRO = {"->", "impl", "for", "struct", "enum", "trait", "union", "where", "dyn", "as"}
+
+
+def tokenize(text: str) -> list[str]:
+    """Split Rust source into coarse tokens, skipping strings and char literals.
+
+    Brackets inside a string or a char literal must not move the nesting stack, or the
+    enclosing-bracket verdict drifts for the rest of the file. Comments are already gone
+    by the time this runs. Lifetimes (`'a`) read as a `'` punctuation token followed by an
+    identifier, which is harmless.
+    """
+    tokens: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c.isspace():
+            i += 1
+            continue
+        if c == '"' or ((c == "r" or c == "b") and i + 1 < n and text[i + 1] in '#"'):
+            i = _skip_string(text, i)
+            continue
+        if c == "'":
+            end = _skip_char(text, i)
+            if end is not None:
+                i = end
+                continue
+            tokens.append("'")
+            i += 1
+            continue
+        match = _TOKEN.match(text, i)
+        assert match is not None
+        tokens.append(match.group(0))
+        i = match.end()
+    return tokens
+
+
+def _skip_string(text: str, i: int) -> int:
+    """Return the index just past a string literal that starts at `i`."""
+    n = len(text)
+    # A raw string `r".."`, `r#".."#`, or a byte variant carries no escapes.
+    if text[i] in "rb":
+        j = i + 1
+        if j < n and text[j] in "rb":
+            j += 1
+        hashes = 0
+        while j < n and text[j] == "#":
+            hashes += 1
+            j += 1
+        if j < n and text[j] == '"':
+            close = '"' + "#" * hashes
+            end = text.find(close, j + 1)
+            return end + len(close) if end != -1 else n
+        # Not a raw string after all, e.g. a bare identifier `b`.
+        return i + 1
+    j = i + 1
+    while j < n:
+        if text[j] == "\\":
+            j += 2
+            continue
+        if text[j] == '"':
+            return j + 1
+        j += 1
+    return n
+
+
+def _skip_char(text: str, i: int) -> int | None:
+    """Return the index past a char literal at `i`, or None for a lifetime."""
+    n = len(text)
+    if i + 1 < n and text[i + 1] == "\\":
+        j = i + 2
+        if j < n:
+            j += 1
+        while j < n and text[j] != "'":
+            j += 1
+        return j + 1 if j < n else n
+    if i + 2 < n and text[i + 2] == "'":
+        return i + 3
+    return None
+
+
+def _opens_struct_literal(tokens: list[str], brace_index: int) -> bool:
+    """Does the `{` at `brace_index` open a struct literal rather than a block?
+
+    A struct literal is a type path immediately before `{`. A block follows a keyword,
+    a `)`, `=>`, `->`, or another delimiter. Getting this right is what separates a field
+    shorthand from a block value, and rho's UpperCamel types make the path recognisable.
+    """
+    k = brace_index - 1
+    if k < 0 or not _is_ident(tokens[k]):
+        return False
+    last = tokens[k]
+    if last != "Self" and not last[0].isupper():
+        return False
+    # Walk back over the path (`a::b::C`, with generics) to what introduces it.
+    while k - 1 >= 0 and tokens[k - 1] == ":" and k - 2 >= 0 and tokens[k - 2] == ":":
+        k -= 2
+        if k - 1 >= 0 and _is_ident(tokens[k - 1]):
+            k -= 1
+    intro = tokens[k - 1] if k - 1 >= 0 else ""
+    return intro not in _TYPE_INTRO and intro != ":"
+
+
+def _is_ident(token: str) -> bool:
+    return bool(token) and (token[0].isalpha() or token[0] == "_")
+
+
+def count_uses(tokens: list[str]) -> dict[str, int]:
+    """Count, per identifier, how many times it is used as a function.
+
+    A use is a call `foo(`, a method call `.foo(`, a path `::foo` or `foo::<T>()`, a cast
+    `foo as`, a value passed inside `(` or `[` (`Some(foo)`, `map(x, foo)`, `[foo]`), an
+    assignment or default value `= foo`, a struct-field or dispatch-table value `field: foo`,
+    or a match-arm value `=> foo`. A field-init shorthand under a struct-literal `{` is not
+    a use, and a definition `fn foo` is not a use of itself.
+    """
+    counts: dict[str, int] = {}
+    stack: list[str] = []  # enclosing brackets: '(', '[', or '{' / '{s' for a struct literal.
+    for index, token in enumerate(tokens):
+        if token in "([":
+            stack.append(token)
+            continue
+        if token == "{":
+            stack.append("{s" if _opens_struct_literal(tokens, index) else "{")
+            continue
+        if token in ")]}":
+            if stack:
+                stack.pop()
+            continue
+        if not _is_ident(token):
+            continue
+        prev = tokens[index - 1] if index > 0 else ""
+        prev2 = tokens[index - 2] if index > 1 else ""
+        nxt = tokens[index + 1] if index + 1 < len(tokens) else ""
+        nxt2 = tokens[index + 2] if index + 2 < len(tokens) else ""
+        enclosing = stack[-1] if stack else ""
+        if prev == "fn":
+            continue  # a definition, not a use
+        if nxt == "!":
+            continue  # a macro name, not this function
+        used = (
+            nxt == "("                                   # call or method call
+            or (nxt == ":" and nxt2 == ":")              # `foo::bar`, `foo::<T>()`
+            or (prev == ":" and prev2 == ":")            # `Type::foo`, `Self::foo`
+            or nxt == "as"                               # `foo as fn()`
+            or prev in "(["                              # first value in a call or list
+            or (prev == "," and enclosing in ("(", "["))  # later value in a call or list
+            or prev == "="                               # `let f = foo;`, `default = foo`
+            or (prev == ":" and prev2 != ":")            # `field: foo`, a dispatch-table value
+            or (prev == ">" and prev2 == "=")            # `=> foo`, a match-arm value
+        )
+        if used:
+            counts[token] = counts.get(token, 0) + 1
+    return counts
 
 # A name too generic to attribute, or one the language calls for us.
 IGNORED = {
@@ -137,17 +298,20 @@ def without_test_modules(text: str) -> str:
 
 
 def strip_use_statements(text: str) -> str:
-    """Drop every `use` and `pub use` statement, including one that wraps over lines.
+    """Drop every `use`, `pub use`, and `pub(crate) use` statement, wrapped or not.
 
     A re-export moves a name; it never calls it. An earlier version filtered one line at a
     time, so a wrapped `pub use crate::{a,\n    b}` kept its later lines and every name on
-    them read as called. A review found the same construct giving opposite verdicts.
+    them read as called. A review found the same construct giving opposite verdicts. A
+    `pub(crate) use` re-export must go too, or a crate-local re-export of an otherwise dead
+    name would read as a caller.
     """
+    starts_use = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?use\s")
     out: list[str] = []
     in_use = False
     for line in text.splitlines():
         stripped = line.strip()
-        if not in_use and (stripped.startswith("use ") or stripped.startswith("pub use ")):
+        if not in_use and starts_use.match(stripped):
             in_use = not stripped.endswith(";")
             continue
         if in_use:
@@ -194,39 +358,29 @@ def main() -> int:
     allowed, problems = read_allowlist()
     used_entries: set[str] = set()
 
+    # Count every use once. A `pub use` line moves a name, it does not call it, so it is
+    # stripped before counting; a definition `fn foo` is not counted as a use of itself,
+    # so no per-file definition-line surgery is needed.
+    callers_by_name: dict[str, int] = {}
+    for text in bodies.values():
+        for name, count in count_uses(tokenize(strip_use_statements(text))).items():
+            callers_by_name[name] = callers_by_name.get(name, 0) + count
+
     for path, text in bodies.items():
         relative = path.relative_to(ROOT).as_posix()
         for match in DEFINITION.finditer(text):
             name = match.group(1)
             if name in IGNORED or len(name) < 4:
                 continue
-            pattern = use_pattern(name)
-            callers = 0
-            for other, other_text in bodies.items():
-                # A `pub use` line moves a name, it does not call it. Counting it as a use
-                # hid every dead item that was not last in a braced list.
-                countable = strip_use_statements(other_text)
-                if other == path:
-                    # Remove the definition line itself, then count. Subtracting a separate
-                    # count of `pub fn <name>(` was wrong for a generic: `use_pattern` never
-                    # matches `read_from<`, so the definition scored zero hits, and the
-                    # subtraction then cancelled a real same-file call. Removing the whole
-                    # declaration line leaves every genuine call in place.
-                    countable = re.sub(
-                        rf"(?m)^[ \t]*pub (?:async )?fn {re.escape(name)}\s*[(<].*$",
-                        "",
-                        countable,
-                    )
-                callers += len(pattern.findall(countable))
+            callers = callers_by_name.get(name, 0)
+            key = f"{relative}::{name}"
             if callers > 0:
-                key = f"{relative}::{name}"
                 if key in allowed:
                     problems.append(
                         f"{key} has a caller now, so its allowlist entry is unnecessary. Remove it."
                     )
                     used_entries.add(key)
                 continue
-            key = f"{relative}::{name}"
             if key in allowed:
                 used_entries.add(key)
                 continue

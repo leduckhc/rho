@@ -330,11 +330,94 @@ pub struct ConfigPaths {
     pub global: Option<PathBuf>,
     /// `<bootstrap_root>/.rho/config.toml`.
     pub project: Option<PathBuf>,
+    /// Candidate paths of files that can inject environment variables: `.envrc` for direnv,
+    /// `.env` for dotenv loaders, and `.devcontainer/devcontainer.json`. `Config::load` tests
+    /// their **presence**; rho never reads or runs them, because running a `.envrc` is
+    /// arbitrary shell and would be a worse defect.
+    ///
+    /// The list spans every directory from the project root **up to the git root**, because
+    /// direnv and its kin load a parent `.envrc`, so a hostile clone injects the environment
+    /// in every subdirectory. The git root is the honest top of the clone. With no git
+    /// repository the project root alone is listed, because there is no clone boundary above
+    /// it. The home directory and every directory above it are never listed, because a home
+    /// directory is not a clone. See `D-trust-is-provenance-not-a-field-list`.
+    pub env_injecting_files: Vec<PathBuf>,
+}
+
+/// The names of the files, in a project directory, that inject environment variables. Each
+/// arrives with a clone: `.envrc` runs under direnv, `.env` is read by dotenv loaders and
+/// docker compose, and `.devcontainer/devcontainer.json` sets `containerEnv` and
+/// `remoteEnv`. The list is the whole rule, so a new such format is one more entry here.
+const ENV_INJECTING_FILES: &[&str] = &[".envrc", ".env", ".devcontainer/devcontainer.json"];
+
+/// The nearest ancestor of `start`, `start` included, that holds a `.git` entry. This is the
+/// git root, the honest top of a clone. The search never goes above the home directory,
+/// because a directory above home is never the clone under edit. It returns `None` when
+/// `start` is in no git repository. A directory `.git`, a git worktree's `.git` file, both
+/// count, because presence is the test and no git binary runs. See
+/// `D-trust-is-provenance-not-a-field-list`.
+fn find_git_root(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    let mut current = start;
+    loop {
+        if current.join(".git").exists() {
+            return Some(current.to_path_buf());
+        }
+        if Some(current) == home {
+            return None;
+        }
+        match current.parent() {
+            Some(parent) if parent != current => current = parent,
+            _ => return None,
+        }
+    }
+}
+
+/// The directories rho examines for a file that injects the environment.
+///
+/// The scan starts at the project root and walks upward to the git root, because direnv
+/// loads a parent `.envrc`, so the whole clone injects every subdirectory. With no git
+/// repository the project root alone is scanned, because there is no honest clone boundary
+/// above it. The home directory and every directory above it are never scanned, because a
+/// home directory is not a clone. The filesystem root is never reached.
+fn env_injecting_scan_dirs(project_root: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+    let git_root = find_git_root(project_root, home);
+    let mut dirs = Vec::new();
+    let mut current = project_root;
+    loop {
+        if Some(current) == home {
+            break; // a home directory is not a clone
+        }
+        dirs.push(current.to_path_buf());
+        if git_root.as_deref() == Some(current) {
+            break; // the git root is the top of the clone
+        }
+        if git_root.is_none() {
+            break; // no git repository: the project root alone is the clone
+        }
+        match current.parent() {
+            Some(parent) if parent != current => current = parent,
+            _ => break, // the filesystem root
+        }
+    }
+    dirs
+}
+
+/// Every candidate env-injecting file path across the scan set. `Config::load` tests each
+/// for presence.
+fn env_injecting_candidates(project_root: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+    env_injecting_scan_dirs(project_root, home)
+        .into_iter()
+        .flat_map(|dir| ENV_INJECTING_FILES.iter().map(move |name| dir.join(name)))
+        .collect()
 }
 
 impl ConfigPaths {
-    /// Discover both paths. `env` supplies `XDG_CONFIG_HOME` and `HOME`, so a test never
-    /// reads the real home directory.
+    /// Discover both config-file paths, and the candidate env-injecting file paths. `env`
+    /// supplies `XDG_CONFIG_HOME` and `HOME`, so a test never reads the real home directory.
+    ///
+    /// The config-file paths are pure joins. The env-injecting candidate list walks the
+    /// filesystem upward from `bootstrap_root` to the git root, so this function stats `.git`
+    /// along the way. It reads no config file, and it never reads an env-injecting file.
     pub fn discover(env: &dyn EnvLookup, bootstrap_root: &Path) -> ConfigPaths {
         // `XDG_CONFIG_HOME` is the stated override, so it wins. An empty value counts as
         // unset, because an exported-but-empty variable is a common shell accident and
@@ -352,6 +435,14 @@ impl ConfigPaths {
         ConfigPaths {
             global,
             project: Some(bootstrap_root.join(".rho").join("config.toml")),
+            // The upward scan is bounded by the git root and by the home directory, so a
+            // parent `.envrc` inside the clone gates but neither `~/.envrc` nor a file above
+            // the clone does. `HOME` supplies the boundary, not `XDG_CONFIG_HOME`, because it
+            // is the home directory itself that is not a clone.
+            env_injecting_files: env_injecting_candidates(
+                bootstrap_root,
+                non_empty(env.get("HOME")).map(PathBuf::from).as_deref(),
+            ),
         }
     }
 }
@@ -390,6 +481,9 @@ pub struct Sources {
     pub(crate) flags: ConfigLayer,
     /// Whether the project file's powerful keys are trusted.
     pub(crate) project_trust: ProjectTrust,
+    /// Candidate paths of files in the project root that inject environment variables.
+    /// `load` tests their presence to decide the environment gate. See `ConfigPaths`.
+    pub(crate) env_injecting_files: Vec<PathBuf>,
 }
 
 impl Sources {
@@ -404,6 +498,7 @@ impl Sources {
             env: Vec::new(),
             flags: ConfigLayer::default(),
             project_trust: ProjectTrust::default(),
+            env_injecting_files: paths.env_injecting_files,
         }
     }
 
@@ -1097,18 +1192,36 @@ impl Config {
             merged = merged.merge(profile);
         }
         // The environment is the wider door, but only for a cloned project that configures
-        // rho. A `.devcontainer` file, a CI `env:` block, and a `.envrc` arrive with a clone,
-        // so a powerful variable then needs the same trust as a powerful key in the project
-        // file beside it. The signal for that case is a project config file that was really
-        // read: `project_file_read`. Without one, rho runs in the user's own directory, and a
-        // variable the user exported in their own shell is not a clone, so it is honored
-        // exactly as the user's own global file is. The old code gated the environment
-        // whenever trust was `Untrusted`, which is the default in every directory, so
-        // `RHO_BASE_URL` and its siblings never worked anywhere without `--trust-project`. A
-        // display key needs no trust either way, because it grants nothing. See
+        // rho. The signal for that is a file that ships in the clone and injects the
+        // environment. Two such signals exist, and either is enough:
+        //
+        //   1. A project config file that was really read: `project_file_read`. A
+        //      `.rho/config.toml` in the clone can point `RHO_*` at attacker values through
+        //      the same door.
+        //   2. A file that injects environment variables, anywhere from the project root up
+        //      to the git root: `.envrc` for direnv, `.env` for dotenv loaders, or
+        //      `.devcontainer/devcontainer.json`. None needs a `.rho/config.toml` beside it,
+        //      yet each can set a powerful `RHO_*` variable when the clone is opened. direnv
+        //      loads a parent `.envrc`, so a hostile clone injects the environment in every
+        //      subdirectory, and the scan follows that reality up to the git root, the honest
+        //      top of the clone. With no git repository the project root alone is scanned, and
+        //      a home directory is never scanned. `discover` builds the candidate list;
+        //      `load` tests presence here and never reads or runs the file, because running a
+        //      `.envrc` is arbitrary shell and would be a worse defect.
+        //
+        // Without either signal, rho runs in the user's own directory, and a variable the
+        // user exported in their own shell is not a clone, so it is honored exactly as the
+        // user's own global file is. The old code gated the environment whenever trust was
+        // `Untrusted`, which is the default in every directory, so `RHO_BASE_URL` and its
+        // siblings never worked anywhere without `--trust-project`. `--trust-project` remains
+        // the escape hatch for a developer who keeps a legitimate `.envrc` in their own
+        // project. A display key needs no trust either way, because it grants nothing. See
         // `D-trust-is-provenance-not-a-field-list` and C2.
         let mut env_layer = ConfigLayer::from_env(&sources.env);
-        if sources.project_trust == ProjectTrust::Untrusted && project_file_read {
+        let ships_env_injecting_file = sources.env_injecting_files.iter().any(|path| path.exists());
+        if sources.project_trust == ProjectTrust::Untrusted
+            && (project_file_read || ships_env_injecting_file)
+        {
             let stripped = env_layer.strip_powerful_keys();
             for name in &stripped.cleared {
                 dropped_keys.push(format!("{name} (from the environment)"));

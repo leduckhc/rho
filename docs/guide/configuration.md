@@ -32,14 +32,30 @@ A CLI flag beats every file value.
 An environment variable beats every file value and every profile value.
 
 Five keys are powerful: `base-url`, `skill-paths`, `mcp-config`, `session-root`, and
-`session-file`. rho drops these five from the environment under one condition. The project must
-be untrusted, and rho must have read a project config file. A notice then names each key it
-dropped. In a plain directory with no project config file, every environment variable works.
-Pass `--trust-project` to use them in a project you trust.
+`session-file`. rho drops these five from the environment when the project is untrusted and one
+of two signals is present. A notice then names each key it dropped. Pass `--trust-project` to use
+them in a project you trust.
+
+The first signal is a project config file that rho really read. The second signal is a file that
+injects environment variables: `.envrc`, `.env`, or `.devcontainer/devcontainer.json`. A clone can
+ship any of these, and each can set a powerful `RHO_*` variable. rho tests only whether the file
+exists. rho never reads it and never runs it.
+
+rho looks for those files from the project directory up to the git root. direnv also loads a
+parent `.envrc`, so a clone injects the environment in every subdirectory. The git root is the top
+of the clone, so the search stops there. rho never searches your home directory. With no git
+repository, rho searches the project directory alone.
+
+In a plain directory with none of those files, every environment variable works.
 
 `RHO_SESSION_ROOT` is stricter. It needs `--trust-project` in every directory, because it selects
-which project config file rho reads. rho makes that choice before it reads any file, so the
-"a project file was read" test is not available yet.
+which project config file rho reads. rho makes that choice before it reads any file, so neither
+signal above is available yet.
+
+Three cases stay open. A directory shipped without a `.git`, with `.envrc` in a parent, does not
+gate, because there is no clone boundary to find. Running rho at that directory's own root still
+gates. A `.envrc` below your home directory gates, though `~/.envrc` itself does not. A shell rc
+file, a `Makefile`, and a `docker-compose.yml` are not detected.
 
 ## Keys
 

@@ -21,3 +21,16 @@ crates/rho-session-import-pi/src/lib.rs::import_pi_session  A library for an imp
 crates/rho-provider-openrouter/src/lib.rs::with_base_url  Only this crate's test harness calls it, to point at a mock of OpenRouter's own path. The CLI uses with_openai_host. Delete it when the harness can use with_openai_host instead.
 crates/rho-tui/src/motion.rs::sweep_frame  SPEC-tui-experience section 8 requires the renderer to write cell styles directly for zero-allocation motion, so it must not call sweep_frame. This is the allocating pure-function form the frame_bench isolated measurement and the motion unit tests use.
 crates/rho-tui/src/paste.rs::units  Test-only inspection accessor. Its only callers are this crate's composer tests, which assert the paste-chip-is-one-unit invariant. Production submits through model_text, not the unit list. Delete it when those tests can assert the invariant through chip_count.
+
+# The large-paste path is built and tested, and no production code enters it. `RoutedInput::Paste`
+# is constructed and never consumed, `LARGE_PASTE_CHARS` is never read outside its own module, and
+# no key handler calls `Composer::paste`. So a big paste is not collapsed into a chip for a real
+# user. The fixed dead-surface guard found this; the old one counted `mod paste;` as a caller.
+# This is one wiring lane, not three reasons, and it needs its own spec before a line of TUI code
+# changes. Do not allowlist the siblings one at a time.
+crates/rho-tui/src/paste.rs::paste  The large-paste lane above. Only rho-tui's composer and paste tests call it.
+
+# A retry policy is configurable on both providers and rho-cli never configures one, so no user
+# reaches it. Wire it from the CLI, or delete both, but do it as one decision for both providers.
+crates/rho-provider-openrouter/src/lib.rs::with_retry  Only this crate's test harness calls it. The CLI sets no RetryPolicy.
+crates/rho-provider-azure/src/lib.rs::with_retry  Only this crate's test harness calls it. The CLI sets no RetryPolicy.

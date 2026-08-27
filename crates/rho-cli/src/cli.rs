@@ -344,7 +344,7 @@ async fn build_session(
     // otherwise saw only the credential error and never learned the base-url was ignored. The
     // notice is the security-relevant half, so it must not be lost to an unrelated failure.
     // See D6.
-    let wiring_notices = wiring_notices(loaded);
+    let wiring_notices = wiring_notices(loaded, &name);
     let provider = match provider::build_provider(&name, loaded.base_url.as_deref()) {
         Ok(provider) => provider,
         Err(error) => {
@@ -928,7 +928,33 @@ fn load_config_from(
         } else {
             rho_config::ProjectTrust::Untrusted
         });
-    Ok(rho_config::Config::load(&sources)?)
+    rho_config::Config::load(&sources).map_err(explain_config_error)
+}
+
+/// Turn a config load failure into a user-facing error.
+///
+/// A base-url refusal carries a `BaseUrlRejection`, which separates a refusal that protects
+/// the credential (a user or password in the url, or plain http to a remote host) from one
+/// that corrects a typo (not a url, a query or fragment, an unknown scheme). rho-cli words
+/// the two apart: a safety block says rho blocked the value to protect the key, and a typo
+/// says the value is malformed. Without this, both read as one flat "is not valid" message
+/// and a user cannot tell a deliberate block from a mistake. This is the one production
+/// caller of `BaseUrlRejection::is_safety_block`; the config crate keeps the distinction, and
+/// the caller is where it reaches the user. See comment 2.
+fn explain_config_error(error: rho_config::ConfigError) -> anyhow::Error {
+    match error {
+        rho_config::ConfigError::BaseUrl { value, reason } if reason.is_safety_block() => {
+            anyhow::anyhow!(
+                "rho blocked the base-url value \"{value}\" to protect your credential: \
+                 {reason}. Unset base-url, or use an endpoint rho can trust."
+            )
+        }
+        rho_config::ConfigError::BaseUrl { value, reason } => anyhow::anyhow!(
+            "the base-url value \"{value}\" is malformed: {reason}. Fix it, or unset base-url \
+             to use the default endpoint."
+        ),
+        other => anyhow::Error::new(other),
+    }
 }
 
 /// Whether the TUI captures the mouse.
@@ -1028,17 +1054,24 @@ fn fail(error: anyhow::Error) -> i32 {
 /// A base url redirects the credential, so rho says where the key is going. A silent
 /// redirect is the defect. See `D-a-provider-base-url-is-a-config-key`. Agent discovery
 /// says so too, because a missing `spawn_agent` otherwise reads as a broken feature.
-fn wiring_notices(loaded: &rho_config::Config) -> Vec<String> {
+fn wiring_notices(loaded: &rho_config::Config, provider_name: &str) -> Vec<String> {
     let mut notices = Vec::new();
     if let Some(url) = &loaded.base_url {
-        let host = url::Url::parse(url)
-            .ok()
-            .and_then(|parsed| parsed.host_str().map(str::to_string))
-            .unwrap_or_else(|| url.clone());
-        notices.push(format!(
-            "base-url is set, so {} goes to {host}. Unset base-url to use the default endpoint.",
-            provider::OPENROUTER_KEY_ENV
-        ));
+        // A base url redirects the credential only for a provider that accepts one. Bedrock
+        // and azure refuse a base url (`provider::refuse_base_url`), so the key never travels
+        // and a notice naming a key would name the wrong secret. A security notice that names
+        // a key that stays home teaches the user to distrust the notices. So this notice, and
+        // the key it names, fire only for the OpenAI-compatible provider. See comment 1.
+        if provider::accepts_base_url(provider_name) {
+            let host = url::Url::parse(url)
+                .ok()
+                .and_then(|parsed| parsed.host_str().map(str::to_string))
+                .unwrap_or_else(|| url.clone());
+            notices.push(format!(
+                "base-url is set, so {} goes to {host}. Unset base-url to use the default endpoint.",
+                provider::OPENROUTER_KEY_ENV
+            ));
+        }
     }
     if !loaded.dropped_keys.is_empty() {
         notices.push(format!(
@@ -1558,10 +1591,45 @@ mod tests {
             base_url: Some("https://models.example.com/v1".to_string()),
             ..Default::default()
         });
-        let notices = wiring_notices(&loaded);
+        let notices = wiring_notices(&loaded, "openrouter");
         assert_eq!(notices.len(), 1, "one notice: {notices:?}");
         assert!(notices[0].contains("models.example.com"), "{}", notices[0]);
         assert!(notices[0].contains("OPENROUTER_API_KEY"), "{}", notices[0]);
+    }
+
+    #[test]
+    fn the_base_url_notice_matches_the_resolved_provider() {
+        // Comment 1. `wiring_notices` named OPENROUTER_API_KEY for every provider. But
+        // base-url is a hard error for bedrock and azure (`provider::refuse_base_url`), so the
+        // credential never travels there. A security notice that names the wrong secret
+        // teaches the user to distrust the notices. So the base-url notice fires only for the
+        // OpenAI-compatible provider that accepts a base url, and names that provider's key.
+        let loaded = resolved_with(rho_config::ConfigLayer {
+            base_url: Some("https://models.example.com/v1".to_string()),
+            ..Default::default()
+        });
+
+        let openrouter = wiring_notices(&loaded, "openrouter");
+        assert!(
+            openrouter
+                .iter()
+                .any(|line| line.contains("OPENROUTER_API_KEY")
+                    && line.contains("models.example.com")),
+            "the openai-compatible provider names its own key and the host: {openrouter:?}"
+        );
+
+        let bedrock = wiring_notices(&loaded, "bedrock");
+        assert!(
+            !bedrock
+                .iter()
+                .any(|line| line.contains("OPENROUTER_API_KEY")),
+            "bedrock refuses base-url, so the credential never travels; do not name it: \
+             {bedrock:?}"
+        );
+        assert!(
+            !bedrock.iter().any(|line| line.contains("goes to")),
+            "no base-url redirect notice for a provider that refuses base-url: {bedrock:?}"
+        );
     }
 
     #[test]
@@ -1578,7 +1646,7 @@ mod tests {
             no_agents: Some(true),
             ..Default::default()
         });
-        let notices = wiring_notices(&loaded);
+        let notices = wiring_notices(&loaded, "openrouter");
         assert!(
             notices.iter().any(|line| line.contains("no-agents")),
             "the notice names the switch: {notices:?}"
@@ -1592,31 +1660,107 @@ mod tests {
     #[test]
     fn no_switch_means_no_wiring_notice() {
         // A notice a user did not ask for is noise, so the quiet path stays quiet.
-        assert!(wiring_notices(&resolved_with(rho_config::ConfigLayer::default())).is_empty());
+        assert!(
+            wiring_notices(
+                &resolved_with(rho_config::ConfigLayer::default()),
+                "openrouter"
+            )
+            .is_empty()
+        );
     }
 
     #[tokio::test]
     async fn a_wiring_notice_survives_a_provider_build_failure() {
         // D6. `wiring_notices` used to run after `build_provider`, so a user whose provider
-        // build failed never learned that rho had dropped or redirected a switch. The notice
-        // must reach the user even on the failure path. This drives the real failure with a
-        // base-url conflict, which `build_provider` refuses with no credential and no
-        // network, so the test is deterministic. The notice must ride along with the error.
-        let loaded = resolved_with(rho_config::ConfigLayer {
-            provider: Some("bedrock".to_string()),
-            base_url: Some("https://models.example.com/v1".to_string()),
-            ..Default::default()
-        });
+        // build failed never learned that rho had dropped a switch. The notice must reach
+        // the user even on the failure path.
+        //
+        // The deterministic failure is a base-url conflict: bedrock refuses a base url with
+        // no credential and no network. The base-url flag is trusted, so it survives to
+        // `build_provider` and triggers the conflict. An untrusted project file also sets a
+        // powerful `skill-paths` key, which the strip drops. The dropped-key notice is the
+        // security-relevant half D6 protects, so it must ride along with the fatal error, not
+        // be lost to it.
+        //
+        // This also pins comment 1: the surviving notice must not name OPENROUTER_API_KEY,
+        // because bedrock refuses the base url and the openrouter key never travels.
+        let root = tempfile::tempdir().unwrap();
+        write_project(root.path(), "skill-paths = [\"/tmp/evil\"]\n");
+        let cli = Cli::try_parse_from([
+            "rho",
+            "--provider",
+            "bedrock",
+            "--base-url",
+            "https://models.example.com/v1",
+            "--model",
+            "m",
+        ])
+        .unwrap();
+        let loaded = try_load_in(&cli, &[], &[], root.path()).unwrap();
+        assert!(
+            loaded
+                .dropped_keys
+                .iter()
+                .any(|key| key.contains("skill-paths")),
+            "an untrusted powerful key must be recorded as dropped: {:?}",
+            loaded.dropped_keys
+        );
         let config = build_config(&loaded).expect("bedrock has a default model");
-        let cli = Cli::try_parse_from(["rho"]).unwrap();
         let error = match build_session(&cli, &loaded, config).await {
             Ok(_) => panic!("a base url with bedrock is a conflict"),
             Err(error) => error.to_string(),
         };
         assert!(
-            error.contains("OPENROUTER_API_KEY") && error.contains("goes to"),
-            "the base-url wiring notice, not just the provider error, must reach the user on a \
-             build failure: {error}"
+            error.contains("not trusted") && error.contains("skill-paths"),
+            "the dropped-key wiring notice, not just the provider error, must reach the user on \
+             a build failure: {error}"
+        );
+        assert!(
+            !error.contains("OPENROUTER_API_KEY"),
+            "bedrock refuses base-url, so the surviving notice must not name the openrouter \
+             key: {error}"
+        );
+    }
+
+    /// Load a config whose only fault is a refused base-url flag, and return the user-facing
+    /// error text. The base-url flag is trusted, so it survives to validation. A temp root
+    /// keeps the filesystem isolated.
+    fn base_url_error(url: &str) -> String {
+        let root = tempfile::tempdir().unwrap();
+        let cli = Cli::try_parse_from(["rho", "--base-url", url, "--model", "m"]).unwrap();
+        match try_load_in(&cli, &[], &[], root.path()) {
+            Ok(_) => panic!("the base url {url} must be refused"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_base_url_safety_block_reads_differently_from_a_typo() {
+        // Comment 2. `ConfigError::BaseUrl` carries a `BaseUrlRejection` that separates a
+        // refusal which protects the credential (a user or password in the url, plain http to
+        // a remote host) from one that corrects a typo (not a url, a query or fragment, an
+        // unknown scheme). rho-cli must word the two apart: a safety block says rho blocked
+        // the value to protect the key, and a typo says the value is malformed. Asserting
+        // only that both mention "base-url" is the weak assertion a prior round criticised, so
+        // this pins the distinct framing and that a typo never borrows the safety wording.
+        let safety = base_url_error("http://user:pass@evil.example/v1");
+        let typo = base_url_error("ftp://models.example.com/v1");
+
+        assert!(
+            safety.contains("to protect your credential"),
+            "a safety block must say rho blocked it to protect the credential: {safety}"
+        );
+        assert!(
+            typo.contains("malformed"),
+            "a typo must say the value is malformed: {typo}"
+        );
+        assert!(
+            !typo.contains("to protect your credential"),
+            "a typo must not claim a safety block: {typo}"
+        );
+        assert_ne!(
+            safety, typo,
+            "a safety block and a typo must read differently"
         );
     }
 
@@ -1640,7 +1784,7 @@ mod tests {
             !loaded.dropped_keys.is_empty(),
             "an untrusted powerful key must be recorded as dropped"
         );
-        let notices = wiring_notices(&loaded);
+        let notices = wiring_notices(&loaded, "openrouter");
         assert!(
             notices
                 .iter()

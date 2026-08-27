@@ -187,6 +187,19 @@ fn refuse_base_url(name: &str, base_url: Option<&str>) -> Result<(), ProviderErr
     Ok(())
 }
 
+/// True when the provider is the OpenAI-compatible one that reads a base url and sends its
+/// key there. Only such a provider redirects the credential, so only it earns the base-url
+/// wiring notice. Bedrock and azure refuse a base url (`refuse_base_url`), so the key never
+/// travels and a notice naming a key would name a secret that stays home.
+///
+/// This mirrors the per-provider answer in `build_provider`: OpenRouter uses a base url and
+/// the others refuse it. A new OpenAI-compatible provider adds its name here, the same edit
+/// it already makes to `build_provider`. The clean end state is a `Provider` trait method, as
+/// `refuse_base_url` notes, and that lives in `rho-core`, which this agent does not own.
+pub fn accepts_base_url(name: &str) -> bool {
+    matches!(name, "openrouter")
+}
+
 #[cfg(feature = "openrouter")]
 fn build_openrouter(base_url: Option<&str>) -> Result<Arc<dyn Provider>, ProviderError> {
     let key = std::env::var(OPENROUTER_KEY_ENV).unwrap_or_default();

@@ -1,8 +1,12 @@
 //! Config file discovery, and the one constructor that carries every source.
 //!
-//! Discovery is pure. It returns a path whether or not the file exists, because
-//! `Config::read_file` already answers `Ok(None)` for an absent file. So a test never
+//! Config-file path discovery is pure. It returns a path whether or not the file exists,
+//! because `Config::read_file` already answers `Ok(None)` for an absent file. So a test never
 //! touches the real home directory, and CI can unset `HOME` without a panic.
+//!
+//! The env-injecting candidate list is the one part that stats the filesystem: it walks
+//! upward from the bootstrap root to the git root, testing `.git`. It still reads no config
+//! file, and it never reads an env-injecting file. See `project_trust.rs` for that behaviour.
 //!
 //! See `SPEC-config-call-site` section 2 and section 4.
 
@@ -132,6 +136,7 @@ fn from_paths_maps_the_two_paths() {
     let sources = Sources::from_paths(ConfigPaths {
         global: Some(global),
         project: Some(project),
+        ..Default::default()
     });
 
     let config = Config::load(&sources).expect("both files load");
@@ -157,6 +162,7 @@ fn the_builder_carries_env_profile_and_flags() {
     let sources = Sources::from_paths(ConfigPaths {
         global: None,
         project: Some(project),
+        ..Default::default()
     })
     .with_env(env_vars(&[("RHO_SESSION_FILE", "/tmp/from-env.jsonl")]))
     // It states trust, because `session-file` is a path an untrusted source may not set.

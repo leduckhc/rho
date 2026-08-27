@@ -10,7 +10,8 @@
 
 mod common;
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use common::{env_map, temp_dir, write_file};
 use rho_config::{Config, ConfigPaths, CredentialSource, ProjectTrust, Sources};
@@ -34,6 +35,7 @@ fn load_project(contents: &str, trust: ProjectTrust) -> (Config, PathBuf, TempDi
     let sources = Sources::from_paths(ConfigPaths {
         global: None,
         project: Some(project.clone()),
+        ..Default::default()
     })
     .with_project_trust(trust);
     let config = Config::load(&sources).expect("the file itself is valid TOML");
@@ -80,6 +82,7 @@ fn an_untrusted_project_command_never_runs_the_command() {
     let sources = Sources::from_paths(ConfigPaths {
         global: None,
         project: Some(project),
+        ..Default::default()
     })
     .with_project_trust(ProjectTrust::Untrusted);
     let config = Config::load(&sources).expect("the file is valid TOML");
@@ -98,6 +101,7 @@ fn an_untrusted_project_command_never_runs_the_command() {
     let trusted = Sources::from_paths(ConfigPaths {
         global: None,
         project: Some(project),
+        ..Default::default()
     })
     .with_project_trust(ProjectTrust::Trusted);
     let config = Config::load(&trusted).expect("the file is valid TOML");
@@ -136,6 +140,7 @@ fn a_global_command_credential_needs_no_trust() {
     let sources = Sources::from_paths(ConfigPaths {
         global: Some(global),
         project: None,
+        ..Default::default()
     })
     .with_project_trust(ProjectTrust::Untrusted);
     let config = Config::load(&sources).expect("the global file loads");
@@ -239,6 +244,7 @@ fn load_project_profile(contents: &str, trust: ProjectTrust) -> Config {
     let sources = Sources::from_paths(ConfigPaths {
         global: None,
         project: Some(project),
+        ..Default::default()
     })
     .with_project_trust(trust)
     .with_profile(Some("work".to_string()));
@@ -307,6 +313,7 @@ fn load_env(vars: &[(&str, &str)], trust: ProjectTrust) -> Config {
     let sources = Sources::from_paths(ConfigPaths {
         global: None,
         project: Some(project),
+        ..Default::default()
     })
     .with_project_trust(trust)
     .with_env(common::env_vars(vars));
@@ -377,6 +384,7 @@ fn an_untrusted_run_with_no_project_file_keeps_a_powerful_environment_variable()
     let sources = Sources::from_paths(ConfigPaths {
         global: None,
         project: Some(missing),
+        ..Default::default()
     })
     .with_project_trust(ProjectTrust::Untrusted)
     .with_env(common::env_vars(&[
@@ -487,6 +495,7 @@ fn every_field_is_classified_as_powerful_or_harmless() {
     let sources = Sources::from_paths(ConfigPaths {
         global: None,
         project: Some(path),
+        ..Default::default()
     })
     .with_project_trust(ProjectTrust::Untrusted);
     let config = Config::load(&sources).expect("valid");
@@ -553,6 +562,7 @@ fn two_profiles_reusing_one_credential_name_are_both_refused() {
     let sources = Sources::from_paths(ConfigPaths {
         global: None,
         project: Some(path),
+        ..Default::default()
     })
     .with_project_trust(ProjectTrust::Untrusted)
     .with_profile(Some("a".to_string()));
@@ -623,5 +633,353 @@ fn a_trusted_project_drops_nothing_and_says_nothing() {
         config.dropped_keys.is_empty(),
         "a trusted run has nothing to report: {:?}",
         config.dropped_keys
+    );
+}
+
+// ---- An env-injecting file is a project config for the environment gate. --
+//
+// The named threat is a file that ships in the clone and injects environment variables:
+// `.envrc` for direnv, `.devcontainer/devcontainer.json`, and `.env`. None of those needs a
+// `.rho/config.toml` beside it, so a gate that keys only on a project config file being read
+// leaves the exact threat open. A reviewer proved rho dialled an attacker host from a
+// directory holding only a `.envrc`. So the environment gate keys on the wider signal: an
+// untrusted project either read a config file, **or** ships a file that can inject the
+// environment. Presence is the signal; rho never reads or runs the file, because running a
+// `.envrc` is arbitrary shell and would be a far worse defect. See
+// `D-trust-is-provenance-not-a-field-list`.
+
+/// An `EnvLookup` with no `HOME` or `XDG_CONFIG_HOME`, so discovery finds no global file and
+/// a test never reads the real home directory.
+fn no_home() -> BTreeMap<String, String> {
+    BTreeMap::new()
+}
+
+/// Build sources by discovering from a real `root`, so the env-injecting file probe runs
+/// against the temp directory rather than a hand-built path list.
+fn discover_sources(root: &Path, trust: ProjectTrust, env: &[(&str, &str)]) -> Sources {
+    discover_sources_with_home(root, None, trust, env)
+}
+
+/// The same, with a stated home directory, so a test can pin the home boundary of the
+/// upward scan without reading the real home directory.
+fn discover_sources_with_home(
+    root: &Path,
+    home: Option<&Path>,
+    trust: ProjectTrust,
+    env: &[(&str, &str)],
+) -> Sources {
+    let mut lookup = no_home();
+    if let Some(home) = home {
+        lookup.insert("HOME".to_string(), home.to_string_lossy().into_owned());
+    }
+    let paths = ConfigPaths::discover(&lookup, root);
+    Sources::from_paths(paths)
+        .with_project_trust(trust)
+        .with_env(common::env_vars(env))
+}
+
+/// Mark `dir` as a git repository root, the honest boundary of a clone. rho finds the root
+/// by the presence of `.git`, so a directory is enough and no git binary runs.
+fn make_git_root(dir: &Path) {
+    std::fs::create_dir_all(dir.join(".git")).expect("make the .git marker");
+}
+
+/// Write an env-injecting file at `path`, making its parents first.
+fn write_env_injecting_file(path: &Path) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("make the parent directory");
+    }
+    std::fs::write(path, "export RHO_BASE_URL=whatever\n").expect("write the env-injecting file");
+}
+
+const POWERFUL_ENV: &[(&str, &str)] = &[
+    ("RHO_SKILL_PATHS", "/tmp/attacker-skills"),
+    ("RHO_MCP_CONFIG", "/tmp/attacker-mcp.json"),
+    ("RHO_BASE_URL", "https://evil.example/v1"),
+];
+
+#[test]
+fn an_env_injecting_file_gates_the_environment_with_no_project_config() {
+    // The reviewer's case, reproduced: an untrusted directory with **no** `.rho/config.toml`,
+    // a powerful `RHO_*` variable, and a `.envrc` present. The old gate keyed on a project
+    // config file being read, which this directory has none of, so rho obeyed the attacker's
+    // `RHO_BASE_URL` and dialled the attacker host. The env-injecting file must gate it.
+    let dir = temp_dir();
+    std::fs::write(dir.path().join(".envrc"), "export RHO_BASE_URL=whatever\n")
+        .expect("write the .envrc");
+    let missing = dir.path().join(".rho").join("config.toml");
+    assert!(!missing.exists(), "there must be no project config file");
+
+    let sources = discover_sources(dir.path(), ProjectTrust::Untrusted, POWERFUL_ENV);
+    let config = Config::load(&sources).expect("the environment resolves");
+
+    assert_eq!(
+        config.base_url, None,
+        "a .envrc injects the environment, so an untrusted RHO_BASE_URL is dropped"
+    );
+    assert_eq!(config.mcp_config, None, "nor an attacker MCP config");
+    assert!(
+        config.skill_paths.is_empty(),
+        "nor an attacker skill path, got {:?}",
+        config.skill_paths
+    );
+    let named = config.dropped_keys.join(", ");
+    assert!(
+        named.contains("base-url") && named.contains("the environment"),
+        "the user is told which key was dropped and why: {named}"
+    );
+}
+
+#[test]
+fn each_env_injecting_file_gates_the_environment() {
+    // All three named files carry the same threat, so each one alone must gate the
+    // environment. A gate that fired for `.envrc` but not `.env` would leave two of the three
+    // named holes open.
+    for relative in [".envrc", ".env", ".devcontainer/devcontainer.json"] {
+        let dir = temp_dir();
+        let file = dir.path().join(relative);
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent).expect("make the parent directory");
+        }
+        std::fs::write(&file, "{}\n").expect("write the env-injecting file");
+
+        let sources = discover_sources(
+            dir.path(),
+            ProjectTrust::Untrusted,
+            &[("RHO_BASE_URL", "https://evil.example/v1")],
+        );
+        let config = Config::load(&sources).expect("the environment resolves");
+        assert_eq!(
+            config.base_url, None,
+            "a {relative} injects the environment, so an untrusted RHO_BASE_URL is dropped"
+        );
+    }
+}
+
+#[test]
+fn a_plain_directory_with_no_env_injecting_file_keeps_the_variable() {
+    // C2, pinned through the discovery path. With no project config file and no
+    // env-injecting file, rho runs in the user's own directory. A variable the user exported
+    // in their own shell is not a clone, so it is honored. This is the regression the
+    // `project_file_read` fix landed, and option 1 must not undo it: an empty directory is
+    // still an empty directory.
+    let dir = temp_dir();
+    let sources = discover_sources(dir.path(), ProjectTrust::Untrusted, POWERFUL_ENV);
+    let config = Config::load(&sources).expect("the environment resolves");
+
+    assert_eq!(
+        config.base_url.as_deref(),
+        Some("https://evil.example/v1"),
+        "a plain directory ships no injecting file, so the user's own RHO_BASE_URL is honored"
+    );
+    assert_eq!(
+        config.skill_paths,
+        vec![PathBuf::from("/tmp/attacker-skills")],
+        "and RHO_SKILL_PATHS"
+    );
+    assert_eq!(
+        config.mcp_config,
+        Some(PathBuf::from("/tmp/attacker-mcp.json")),
+        "and RHO_MCP_CONFIG"
+    );
+    assert!(
+        config.dropped_keys.is_empty(),
+        "nothing was gated, so nothing is reported: {:?}",
+        config.dropped_keys
+    );
+}
+
+#[test]
+fn a_trusted_directory_with_an_env_injecting_file_keeps_the_variable() {
+    // The gate is a gate, not a wall. `--trust-project` is the escape hatch for the developer
+    // who keeps a legitimate `.envrc` in their own project and exports `RHO_BASE_URL` in
+    // their own shell.
+    let dir = temp_dir();
+    std::fs::write(dir.path().join(".envrc"), "export RHO_BASE_URL=whatever\n")
+        .expect("write the .envrc");
+    let sources = discover_sources(
+        dir.path(),
+        ProjectTrust::Trusted,
+        &[("RHO_BASE_URL", "https://models.example.com/v1")],
+    );
+    let config = Config::load(&sources).expect("the environment resolves");
+    assert_eq!(
+        config.base_url.as_deref(),
+        Some("https://models.example.com/v1"),
+        "with trust the variable is obeyed even beside an env-injecting file"
+    );
+}
+
+#[test]
+fn the_env_injecting_file_signal_is_presence_not_content() {
+    // rho must never read or run the `.envrc`, because it is arbitrary shell and running it
+    // would be a worse defect than the one this fixes. The signal is the file's presence. A
+    // `.envrc` whose body would create a marker file proves the point: the marker never
+    // appears, so rho only stats the path.
+    let dir = temp_dir();
+    let marker = dir.path().join("envrc-was-run");
+    let body = format!("touch {}\n", marker.display());
+    std::fs::write(dir.path().join(".envrc"), body).expect("write the .envrc");
+
+    let sources = discover_sources(
+        dir.path(),
+        ProjectTrust::Untrusted,
+        &[("RHO_BASE_URL", "https://evil.example/v1")],
+    );
+    let config = Config::load(&sources).expect("the environment resolves");
+    assert_eq!(
+        config.base_url, None,
+        "the file's presence gates the variable"
+    );
+    assert!(
+        !marker.exists(),
+        "rho must only stat the .envrc, never run it: {} exists",
+        marker.display()
+    );
+}
+
+#[test]
+fn an_env_injecting_file_in_an_ancestor_within_the_git_repo_gates() {
+    // Case D, the reviewer's live bypass. direnv loads a `.envrc` from a parent directory, so
+    // a hostile clone with `.envrc` at its root injects `RHO_*` into every subdirectory. rho
+    // is run from a nested package, not the clone root. The clone is a git repository, so its
+    // root is the honest top of the clone. rho must scan upward to the git root and gate.
+    let clone = temp_dir();
+    make_git_root(clone.path());
+    write_env_injecting_file(&clone.path().join(".envrc"));
+    let nested = clone.path().join("packages").join("app");
+    std::fs::create_dir_all(&nested).expect("make the nested run directory");
+
+    let sources = discover_sources(&nested, ProjectTrust::Untrusted, POWERFUL_ENV);
+    let config = Config::load(&sources).expect("the environment resolves");
+    assert_eq!(
+        config.base_url, None,
+        "a .envrc at the git root injects every subdirectory, so it gates a nested run too"
+    );
+    assert_eq!(config.mcp_config, None, "nor an attacker MCP config");
+    assert!(config.skill_paths.is_empty(), "nor an attacker skill path");
+}
+
+#[test]
+fn an_env_injecting_file_between_the_run_dir_and_the_git_root_gates() {
+    // The file need not sit at the git root. An intermediate directory inside the clone can
+    // hold it, and direnv loads it just the same. So every directory from the run directory up
+    // to and including the git root is scanned.
+    let clone = temp_dir();
+    make_git_root(clone.path());
+    let middle = clone.path().join("packages");
+    let nested = middle.join("app");
+    std::fs::create_dir_all(&nested).expect("make the nested run directory");
+    write_env_injecting_file(&middle.join(".env"));
+
+    let sources = discover_sources(
+        &nested,
+        ProjectTrust::Untrusted,
+        &[("RHO_BASE_URL", "https://evil.example/v1")],
+    );
+    let config = Config::load(&sources).expect("the environment resolves");
+    assert_eq!(
+        config.base_url, None,
+        "a .env in an intermediate directory of the clone gates a nested run"
+    );
+}
+
+#[test]
+fn an_env_injecting_file_above_the_git_root_does_not_gate() {
+    // The upper bound, replacing the old `an_env_injecting_file_above_the_root_does_not_gate`.
+    // That test asserted the project root was the only scanned directory, which this change
+    // deliberately overturns: a nested run now scans up to the git root. The bound is the git
+    // root, because that is what a clone ships. A `.envrc` **above** the git root is not part
+    // of the clone, so it does not gate.
+    let outer = temp_dir();
+    write_env_injecting_file(&outer.path().join(".envrc"));
+    let clone = outer.path().join("clone");
+    make_git_root(&clone);
+    let nested = clone.join("sub");
+    std::fs::create_dir_all(&nested).expect("make the nested run directory");
+    // A home directory that is not on this path, so only the git-root bound is under test.
+    let home = outer.path().join("home");
+    std::fs::create_dir_all(&home).expect("make the home directory");
+
+    let sources = discover_sources_with_home(
+        &nested,
+        Some(&home),
+        ProjectTrust::Untrusted,
+        &[("RHO_BASE_URL", "https://models.example.com/v1")],
+    );
+    let config = Config::load(&sources).expect("the environment resolves");
+    assert_eq!(
+        config.base_url.as_deref(),
+        Some("https://models.example.com/v1"),
+        "a .envrc above the git root is not in the clone, so it does not gate"
+    );
+}
+
+#[test]
+fn no_git_repository_falls_back_to_the_project_root_only() {
+    // The no-git case. A plain downloaded directory has no git root, so there is no honest
+    // clone boundary above the project root. Walking to the home directory or the filesystem
+    // root would gate every project under any stray `.envrc`, so rho falls back to the
+    // project root alone. A `.envrc` in a parent of a no-git run directory does **not** gate.
+    // This is a stated residual, documented in the report.
+    let base = temp_dir();
+    let home = base.path().join("home");
+    std::fs::create_dir_all(&home).expect("make the home directory");
+    let parent = base.path().join("a");
+    let nested = parent.join("b");
+    std::fs::create_dir_all(&nested).expect("make the nested run directory");
+    write_env_injecting_file(&parent.join(".envrc"));
+
+    let sources = discover_sources_with_home(
+        &nested,
+        Some(&home),
+        ProjectTrust::Untrusted,
+        &[("RHO_BASE_URL", "https://models.example.com/v1")],
+    );
+    let config = Config::load(&sources).expect("the environment resolves");
+    assert_eq!(
+        config.base_url.as_deref(),
+        Some("https://models.example.com/v1"),
+        "with no git repository, a parent .envrc is not scanned; the project root alone is"
+    );
+
+    // The project root itself is always scanned, git or not. A `.envrc` beside the run
+    // directory still gates, so the fallback is a bound, not a hole in the front door.
+    write_env_injecting_file(&nested.join(".envrc"));
+    let sources = discover_sources_with_home(
+        &nested,
+        Some(&home),
+        ProjectTrust::Untrusted,
+        &[("RHO_BASE_URL", "https://evil.example/v1")],
+    );
+    let config = Config::load(&sources).expect("the environment resolves");
+    assert_eq!(
+        config.base_url, None,
+        "a .envrc at the project root gates even with no git repository"
+    );
+}
+
+#[test]
+fn a_home_directory_is_never_scanned() {
+    // A home directory is not a clone. A user who keeps `~/.envrc`, or dotfiles in a git
+    // repository rooted at home, must not have every project gated forever. The upward scan
+    // stops before the home directory, even when the git root is the home directory itself.
+    let home = temp_dir();
+    make_git_root(home.path());
+    write_env_injecting_file(&home.path().join(".envrc"));
+    let project = home.path().join("config").join("nvim");
+    std::fs::create_dir_all(&project).expect("make the project directory");
+
+    let sources = discover_sources_with_home(
+        &project,
+        Some(home.path()),
+        ProjectTrust::Untrusted,
+        &[("RHO_BASE_URL", "https://models.example.com/v1")],
+    );
+    let config = Config::load(&sources).expect("the environment resolves");
+    assert_eq!(
+        config.base_url.as_deref(),
+        Some("https://models.example.com/v1"),
+        "a ~/.envrc must not gate a project below the home directory"
     );
 }
