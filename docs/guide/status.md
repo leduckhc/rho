@@ -34,7 +34,7 @@ This page describes rho as of 2026-08-23.
 |---|---|
 | `approval = "ask"` parses in the config. | rho refuses it with an error message. Use `--read-only` to block writes, or omit the flag to allow all. |
 | `session-file` and `ephemeral` parse and merge correctly. | Neither value reaches the agent loop. No session file is written. Silence: rho starts without error and records nothing. |
-| The `[subagents]` table parses in the config. | No value from it reaches the agent. Pass the limits as flags: `--max-children-per-parent`, `--max-live-agents`, `--child-timeout-secs`, `--max-queued-per-parent`, `--max-queued-total`, `--agent-grace-turns`, `--max-agent-tool-calls`. |
+| The `[subagents]` table parses in the config. | No value from it reaches the agent. Pass the limits as flags: `--max-children-per-parent`, `--max-live-agents`, `--child-timeout-secs`, `--max-queued-per-parent`, `--max-queued-total`, `--queue-wait-secs`, `--max-agent-steer-bytes`, `--agent-grace-turns`, `--max-agent-tool-calls`. |
 | `--no-skills` stops the skill search, as its help says. | It also stops subagent discovery, and warns about neither. rho then offers no `spawn_agent`. Drop the flag to keep subagents. |
 | A subagent can be steered while it runs, with `steer_agent`. | You cannot steer your own turn. The terminal interface wires no queue for your session. A message you type mid-run never reaches the running turn, and Enter starts a new turn instead. |
 | A background task reports progress, and rho summarises it. | The terminal interface never draws the summary. The task row ignores the field, so a long build shows no percentage. |

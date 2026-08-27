@@ -92,11 +92,15 @@ A build without it prints: `this build has no terminal UI. Use "rho run <prompt>
 | `--child-timeout-secs <N>` | 600 | Seconds before rho cancels a child. |
 | `--max-queued-per-parent <N>` | 16 | How many children one parent may queue for a slot. |
 | `--max-queued-total <N>` | 128 | How many children may wait across the whole process. |
+| `--queue-wait-secs <N>` | the child timeout | Seconds a child may wait for a slot. `0` refuses any child that must wait. |
+| `--max-agent-steer-bytes <N>` | 16384 | The largest steering message a subagent queue accepts, in bytes. |
 | `--agent-grace-turns <N>` | 5 | Turns of warning before a child hits its turn cap. `0` turns off the warning. |
 | `--max-agent-tool-calls <N>` | 64 | How many tool calls one child may make. |
 
 When a child hits `--max-children-per-parent`, rho queues it.
 When the queue hits `--max-queued-per-parent`, rho refuses with an error that names the flag.
+A queued child waits for `--queue-wait-secs` at most.
+Then rho refuses it, and your turn comes back.
 
 > **Not built yet.** There is no `--max-depth` flag. A subagent cannot spawn
 > a grandchild. rho sets depth to 1 in code and offers no way to change it.

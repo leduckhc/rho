@@ -139,10 +139,25 @@ Start rho with flags to change the defaults:
 | `--child-timeout-secs` | 600 | Seconds before rho cancels a child. |
 | `--max-queued-per-parent` | 16 | Children one parent may queue for a slot. |
 | `--max-queued-total` | 128 | Children waiting across the whole process. |
+| `--queue-wait-secs` | the child timeout | Seconds one child may wait for a slot. |
+| `--max-agent-steer-bytes` | 16384 | Bytes in one steering message to a child. |
 | `--agent-grace-turns` | 5 | Turns of warning before a child's turn cap. |
 | `--max-agent-tool-calls` | 64 | Tool calls one child may make in total. |
 
 When rho refuses a spawn, it names the flag to raise.
+
+A queued child does not wait for ever. It waits for `--queue-wait-secs`, which is the child
+timeout by default. Then rho refuses that one task and the others go on. So one wide fan-out
+cannot hold your turn for the whole wait line. Use `background: true` when you want the id at
+once and no wait at all.
+
+A steering message to a child is capped at `--max-agent-steer-bytes`. A larger message is
+refused, and the refusal states the size and the limit. Write a long body to a file, and steer
+with the file name.
+
+Raising that cap raises the memory ceiling with it. The ceiling is the cap, times 32 messages,
+times the waiting and live child limits. At the defaults it is 80 MiB. rho does not clamp the
+value, because you own the machine.
 
 Grace turns exist because a child cannot ask for more turns.
 When a child is this many turns from its cap, rho tells it to write its summary early.

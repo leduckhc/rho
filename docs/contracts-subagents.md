@@ -288,6 +288,7 @@ pub enum Admission {
 
 pub enum Dequeued {
     Cancelled,
+    WaitedTooLong { limit: Duration },
     ProcessWideFull { limit: usize },
 }
 
@@ -346,6 +347,8 @@ pub struct SubagentLimits {
     pub max_tool_calls: u32,
     pub max_queued_per_parent: usize,
     pub max_queued_total: usize,
+    pub queue_wait: Duration,
+    pub max_steer_message_bytes: usize,
     pub grace_turns: u32,
 }
 ```
@@ -359,6 +362,8 @@ pub struct SubagentLimits {
 | `max_tool_calls` | 64 | `--max-agent-tool-calls` | yes |
 | `max_queued_per_parent` | 16 | `--max-queued-per-parent` | yes, through `spawn_agents` |
 | `max_queued_total` | 128 | `--max-queued-total` | across sessions in one process |
+| `queue_wait` | the child timeout | `--queue-wait-secs` | yes, and zero means no waiting |
+| `max_steer_message_bytes` | 16 KiB | `--max-agent-steer-bytes` | yes, for every child queue |
 | `grace_turns` | 5 for a child, 0 for a plain session | `--agent-grace-turns` | yes |
 
 The CLI depth is 1 and has no flag, because a command-line child receives no spawn tool and no
@@ -376,10 +381,17 @@ trips, so `max_tool_calls` exists to bound a single turn that asks for forty too
 **A queued child spends none of its timeout while it waits.** The clock lives in
 `collect_report`, which runs only after `started` resolves.
 
-**A blocking spawn now waits, and the wait has a stated cost.** One tool call can hold a
-parent's turn for `ceil(max_queued_per_parent / max_children_per_parent) x child_timeout`, about
-forty minutes at the defaults. rho does not bound that separately today. A caller that cannot
-afford the wait passes `background: true` and gets an id at once.
+**A blocking spawn waits, and the wait is bounded.** One waiter waits at most `queue_wait`,
+which is the child timeout by default. Then `started` resolves `Dequeued::WaitedTooLong` and the
+parent gets its turn back. So one tool call costs at most `queue_wait + child_timeout`. That cost
+no longer grows with the wait line. Before this bound it was
+`ceil(max_queued_per_parent / max_children_per_parent) x child_timeout`, about forty minutes at
+the defaults. See decision D-a-waiter-has-a-deadline.
+
+**The deadline applies to a background waiter too.** A background spawn returns an id at once, so
+it holds no turn. But its queued entry holds a cancel token and a queue, and the deadline bounds
+how long it holds them. A background waiter that runs out of patience records a report, so a
+parent that polls learns why the child never ran.
 
 ## 5. The task, and the gate that verifies it
 
@@ -533,11 +545,17 @@ session with that queue.
 
 ```rust
 pub const STEER_QUEUE_CAPACITY: usize = 32;
+pub const MAX_STEER_MESSAGE_BYTES: usize = 64 * 1024;
+pub const BLOCK_OVERHEAD_BYTES: usize = 64;
+pub const JSON_NODE_MIN_BYTES: usize = 4;
+pub const MAX_COUNTED_JSON_DEPTH: usize = 64;
 
 pub struct MessageQueue { /* a clone shares one queue */ }
 impl MessageQueue {
     pub fn new() -> Self;
     pub fn with_capacity(capacity: usize) -> Self;
+    pub fn with_limits(capacity: usize, max_message_bytes: usize) -> Self;
+    pub fn max_message_bytes(&self) -> usize;
     pub fn push(&self, message: Vec<ContentBlock>) -> Result<usize, QueueError>;
     pub fn drain(&self) -> Vec<Vec<ContentBlock>>;
     pub fn clear(&self);
@@ -547,6 +565,9 @@ impl MessageQueue {
     pub fn unobserve(&self);
 }
 
+/// The bytes one message holds, counted the way `push` counts them.
+pub fn message_bytes(message: &[ContentBlock]) -> usize;
+
 impl Session {
     pub fn steer(&self, message: Vec<ContentBlock>) -> Result<usize, QueueError>;
     pub fn queue(&self) -> MessageQueue;
@@ -554,14 +575,22 @@ impl Session {
 }
 ```
 
-Four rules bind every side:
+Five rules bind every side:
 
 - **One delivery point.** The driver drains the queue after the current tool calls finish and
   before it builds the next request. A message never lands inside a provider request.
 - **Append only.** Delivery adds a user turn through `Context::append` and edits no earlier
   turn, so the stable prefix stays byte-identical and the provider cache stays warm.
-- **Bounded, and never a silent drop.** A full queue returns `QueueError::Full` and keeps every
-  earlier message. An unbounded queue is a memory defect, and this project shipped one before.
+- **Bounded in messages, and never a silent drop.** A full queue returns `QueueError::Full` and
+  keeps every earlier message. An unbounded queue is a memory defect, and this project shipped
+  one before.
+- **Bounded in bytes too.** A message over the queue's byte cap returns `QueueError::TooLarge`,
+  which names the size and the limit. A count cap alone bounds nothing, because one message can
+  be any size. A session queue allows `MAX_STEER_MESSAGE_BYTES`, and a child queue allows
+  `SubagentLimits::max_steer_message_bytes`. The cap sits in `push`, the one door into the
+  queue. The count charges for each block and each JSON node, counts every object key, and
+  refuses anything nested past `MAX_COUNTED_JSON_DEPTH`. See decision
+  D-a-steering-message-is-bounded-by-bytes.
 - **A cancel keeps the queue.** Dropping user input as a side effect is the worse failure, so
   only an explicit `clear` empties it.
 
@@ -682,6 +711,7 @@ pub enum QueueScope {
 
 pub enum QueueError {
     Full { capacity: usize },
+    TooLarge { limit: usize, size: usize },
 }
 ```
 
@@ -691,7 +721,8 @@ section 3.
 `TooManyChildren` stays in the set, because `spawn_child` still refuses. `admit_child` never
 returns it, because that cap queues. `TooManyLiveAgents` refuses twice: at admission, and again
 at the start through `Dequeued::ProcessWideFull`, because a waiter holds no process-wide permit
-while it waits.
+while it waits. `Dequeued::WaitedTooLong` is the third way a waiter ends, and it names
+`--queue-wait-secs`.
 
 **A refusal must teach something true.** The depth message once named a flag that did not
 exist, so it sent the reader after a fix that could not work.

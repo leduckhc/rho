@@ -137,6 +137,26 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "SECONDS")]
     pub child_timeout_secs: Option<u64>,
 
+    /// How long a child may wait for a slot before rho refuses it.
+    ///
+    /// It defaults to the child timeout, so a waiter gets one whole sibling run of
+    /// patience. `0` refuses any child that has to wait. There is no off switch, because
+    /// one blocking spawn used to hold a turn for about forty minutes. A very large value
+    /// comes close to one, and that choice belongs to the host.
+    #[arg(long, global = true, value_name = "SECONDS")]
+    pub queue_wait_secs: Option<u64>,
+
+    /// The largest steering message a subagent queue accepts, in bytes. Defaults to 16384.
+    ///
+    /// A message count is not a memory bound, because one message can be any size. A
+    /// model writes a steer to a child, and 160 child queues may exist at once.
+    ///
+    /// **Raising this raises the memory ceiling with it.** The ceiling is this value times
+    /// 32 messages, times `--max-queued-total` plus `--max-live-agents`. At the defaults
+    /// that is 80 MiB. rho does not clamp the value, because the host owns the machine.
+    #[arg(long, global = true, value_name = "BYTES")]
+    pub max_agent_steer_bytes: Option<usize>,
+
     /// How many children one parent may queue for a slot. Defaults to 16.
     ///
     /// Over the per-parent child cap, rho queues a child instead of refusing it. This
@@ -938,6 +958,10 @@ fn fail(error: anyhow::Error) -> i32 {
 /// live run caught that after the unit tests passed.
 fn subagent_limits(cli: &Cli) -> rho_core::SubagentLimits {
     let stated = rho_core::SubagentLimits::new();
+    let child_timeout = cli
+        .child_timeout_secs
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(stated.child_timeout);
     rho_core::SubagentLimits {
         max_depth: 1,
         max_children_per_parent: cli
@@ -950,10 +974,16 @@ fn subagent_limits(cli: &Cli) -> rho_core::SubagentLimits {
             .max_queued_per_parent
             .unwrap_or(stated.max_queued_per_parent),
         max_queued_total: cli.max_queued_total.unwrap_or(stated.max_queued_total),
-        child_timeout: cli
-            .child_timeout_secs
+        // An unset deadline follows the child timeout, so a waiter gets one whole sibling
+        // run of patience. A fixed default would time out every waiter of a longer child.
+        queue_wait: cli
+            .queue_wait_secs
             .map(std::time::Duration::from_secs)
-            .unwrap_or(stated.child_timeout),
+            .unwrap_or(child_timeout),
+        max_steer_message_bytes: cli
+            .max_agent_steer_bytes
+            .unwrap_or(stated.max_steer_message_bytes),
+        child_timeout,
     }
 }
 
@@ -1190,6 +1220,44 @@ mod tests {
             subagent_limits(&cli).grace_turns,
             rho_core::DEFAULT_SUBAGENT_GRACE_TURNS,
             "a child is warned by default, because it has nobody to ask for more turns"
+        );
+    }
+
+    #[test]
+    fn the_queue_wait_flag_reaches_the_limits() {
+        // A refusal names this flag, so the flag has to change the deadline.
+        let cli = Cli::parse_from(["rho", "--queue-wait-secs", "30"]);
+        assert_eq!(
+            subagent_limits(&cli).queue_wait,
+            std::time::Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn an_unset_queue_wait_follows_the_child_timeout() {
+        // A waiter gets one whole sibling run of patience. So a host that lengthens a
+        // child run lengthens the patience with it. See decision D-a-waiter-has-a-deadline.
+        let cli = Cli::parse_from(["rho", "--child-timeout-secs", "900"]);
+        let limits = subagent_limits(&cli);
+        assert_eq!(
+            limits.queue_wait,
+            std::time::Duration::from_secs(900),
+            "an unset deadline follows the child timeout, and never the stated default"
+        );
+        let plain = subagent_limits(&Cli::parse_from(["rho"]));
+        assert_eq!(plain.queue_wait, plain.child_timeout);
+    }
+
+    #[test]
+    fn the_agent_steer_byte_flag_reaches_the_limits() {
+        // A cap only the default constructor applied would make this flag dead surface.
+        let cli = Cli::parse_from(["rho", "--max-agent-steer-bytes", "4096"]);
+        assert_eq!(subagent_limits(&cli).max_steer_message_bytes, 4096);
+        let plain = subagent_limits(&Cli::parse_from(["rho"]));
+        assert_eq!(
+            plain.max_steer_message_bytes,
+            rho_core::SubagentLimits::new().max_steer_message_bytes,
+            "the default stays where SubagentLimits states it"
         );
     }
 

@@ -20,6 +20,8 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-a-session-file-is-private](20260824-223010-D-a-session-file-is-private.md) | 20260824 | The session store carries the transcript's mode bits |
 | [D-a-session-id-sorts-by-time](20260824-221846-D-a-session-id-sorts-by-time.md) | 20260824 | A session id is a stamp and four hex characters, so a list sorts with no read |
 | [D-a-session-title-costs-nothing](20260824-221851-D-a-session-title-costs-nothing.md) | 20260824 | A title comes from the first prompt or a name record, and never from a model |
+| [D-a-steering-message-is-bounded-by-bytes](20260826-184207-D-a-steering-message-is-bounded-by-bytes.md) | 20260826 | The steering queue counts bytes, not only messages |
+| [D-a-waiter-has-a-deadline](20260826-184208-D-a-waiter-has-a-deadline.md) | 20260826 | A queued child stops waiting, and the parent's turn returns |
 | [D-a-stale-result-handle-expires-on-resume](20260824-221855-D-a-stale-result-handle-expires-on-resume.md) | 20260824 | A stale result handle expires on resume, and the model is told |
 | [D-acp-cancelled-spelling](20260817-171334-D-acp-cancelled-spelling.md) | 20260817 | The ACP cancelled stop reason needs an explicit serde rename |
 | [D-acp-is-real-acp](20260817-164906-D-acp-is-real-acp.md) | 20260817 | The headless frontend is ACP, and it is the real ACP |
