@@ -390,9 +390,14 @@ async fn build_session(
             .chain(extensions.mcp_tools.iter().map(Arc::clone))
             .collect();
     let (spawn_tools, subagents) = subagents::load(subagents::LoadRequest {
-        session_root: config.session_root.clone(),
-        trust_project: cli.trust_project,
-        discover: loaded.discover_skills,
+        agents: {
+            // The caller states where to look, so `subagents::load` reads no environment.
+            let mut agents =
+                rho_skills::AgentConfig::with_default_user_dirs(config.session_root.clone());
+            agents.project_trusted = cli.trust_project;
+            agents.discover = loaded.discover_skills;
+            agents
+        },
         parent_config: config.clone(),
         provider: Arc::clone(&provider),
         hooks: Arc::clone(&hooks),

@@ -1,6 +1,8 @@
 //! Tests for agent definition loading. See `SPEC-subagents` section 5.
 
-use rho_skills::{AgentConfig, SkillOrigin, discover_agents, load_definition};
+use rho_skills::{
+    AgentConfig, RejectedDefinition, RejectionReason, SkillOrigin, discover_agents, load_definition,
+};
 use std::path::Path;
 
 /// Write an agent definition file into `dir/name.md`.
@@ -9,6 +11,20 @@ fn write_agent(dir: &Path, file: &str, body: &str) -> std::path::PathBuf {
     let path = dir.join(file);
     std::fs::write(&path, body).unwrap();
     path
+}
+
+/// Load a definition that must be rejected, and return the rejection.
+async fn reject(path: &Path) -> RejectedDefinition {
+    load_definition(path, SkillOrigin::User)
+        .await
+        .expect_err("this file must not load")
+}
+
+/// Load a definition that must load.
+async fn accept(path: &Path) -> rho_skills::AgentDefinition {
+    load_definition(path, SkillOrigin::User)
+        .await
+        .expect("this file must load")
 }
 
 const SCOUT: &str = "---\n\
@@ -84,11 +100,13 @@ async fn a_definition_without_a_description_does_not_load() {
         "nodesc.md",
         "---\nname: nodesc\ntools: read\n---\nbody\n",
     );
-    let loaded = load_definition(&path, SkillOrigin::User).await;
-    assert!(
-        loaded.is_none(),
-        "a definition without a description does not load"
+    let rejected = reject(&path).await;
+    assert_eq!(
+        rejected.reason,
+        RejectionReason::NoDescription,
+        "a definition without a description does not load, and it says why"
     );
+    assert_eq!(rejected.path, path, "the rejection names the file");
 }
 
 #[tokio::test]
@@ -246,5 +264,727 @@ async fn a_definition_cannot_set_grace_turns() {
         def.warnings.is_empty(),
         "an unknown key is ignored quietly, like every other: {:?}",
         def.warnings
+    );
+}
+
+// --- The rejection report. See `SPEC-definition-rejection`. ---
+//
+// The defect: rho read `tools` as a string only. A file with a YAML sequence failed
+// `serde_yaml`, `load_definition` returned `None`, and the file disappeared. rho then
+// registered no `spawn_agent`, and the model said it had no such tool.
+
+#[tokio::test]
+async fn a_yaml_sequence_tool_list_loads_the_same_as_a_comma_list() {
+    // The defect, reproduced. This file did not load at all before the fix.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "scout.md",
+        "---\nname: scout\ndescription: Recon.\ntools: [read, list]\n---\nbody\n",
+    );
+    let def = accept(&path).await;
+    assert_eq!(
+        def.tools.as_deref(),
+        Some(&["read".to_string(), "list".to_string()][..]),
+        "a sequence means the same as `tools: read, list`"
+    );
+}
+
+#[tokio::test]
+async fn a_block_sequence_tool_list_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "scout.md",
+        "---\nname: scout\ndescription: Recon.\ntools:\n  - read\n  - list\n---\nbody\n",
+    );
+    let def = accept(&path).await;
+    assert_eq!(
+        def.tools.as_deref(),
+        Some(&["read".to_string(), "list".to_string()][..])
+    );
+}
+
+#[tokio::test]
+async fn a_keyword_in_a_sequence_still_stands_alone() {
+    // The form of the list must not change the keyword rules. See
+    // decision D-a-tool-keyword-stands-alone.
+    let dir = tempfile::tempdir().unwrap();
+    let alone = write_agent(
+        dir.path(),
+        "alone.md",
+        "---\nname: alone\ndescription: Recon.\ntools: [all]\n---\nbody\n",
+    );
+    let def = accept(&alone).await;
+    assert_eq!(def.tools, None, "`[all]` inherits, like `all`");
+    assert!(def.warnings.is_empty(), "{:?}", def.warnings);
+
+    let mixed = write_agent(
+        dir.path(),
+        "mixed.md",
+        "---\nname: mixed\ndescription: Recon.\ntools: [all, read]\n---\nbody\n",
+    );
+    let def = accept(&mixed).await;
+    assert_eq!(
+        def.tools.as_deref(),
+        Some(&["read".to_string()][..]),
+        "the named tool stands and the keyword goes"
+    );
+    assert!(
+        def.warnings.join(" ").contains("all"),
+        "the warning names the dropped keyword: {:?}",
+        def.warnings
+    );
+}
+
+#[tokio::test]
+async fn a_tools_field_that_is_not_a_list_is_rejected_and_says_so() {
+    // Refusing the whole file is the safe reading. Ignoring the field would inherit
+    // every tool the parent holds, so a typo would widen a child.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "scout.md",
+        "---\nname: scout\ndescription: Recon.\ntools: 5\n---\nbody\n",
+    );
+    let rejected = reject(&path).await;
+    assert!(
+        matches!(rejected.reason, RejectionReason::BadToolsField { .. }),
+        "{:?}",
+        rejected.reason
+    );
+    let notice = rejected.notice();
+    assert!(
+        notice.contains(&path.display().to_string()),
+        "the notice names the file: {notice}"
+    );
+    assert!(
+        notice.contains("a number"),
+        "the notice says what the field held: {notice}"
+    );
+}
+
+#[tokio::test]
+async fn a_tool_name_that_is_not_a_string_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "scout.md",
+        "---\nname: scout\ndescription: Recon.\ntools: [read, 5]\n---\nbody\n",
+    );
+    let rejected = reject(&path).await;
+    assert!(
+        matches!(rejected.reason, RejectionReason::BadToolsField { .. }),
+        "{:?}",
+        rejected.reason
+    );
+    assert!(
+        rejected.reason.detail().as_str().contains("one item"),
+        "the detail names the item: {}",
+        rejected.reason.detail()
+    );
+}
+
+#[tokio::test]
+async fn an_empty_tools_line_is_rejected_rather_than_inherited() {
+    // `tools:` with no value looks like an absent field, and an absent field inherits
+    // every parent tool. So the empty line is a refusal, not a silent inherit.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "scout.md",
+        "---\nname: scout\ndescription: Recon.\ntools:\n---\nbody\n",
+    );
+    let rejected = reject(&path).await;
+    assert!(
+        matches!(rejected.reason, RejectionReason::BadToolsField { .. }),
+        "{:?}",
+        rejected.reason
+    );
+    let repair = rejected.reason.repair();
+    assert!(repair.contains("none"), "the repair names none: {repair}");
+    assert!(repair.contains("all"), "the repair names all: {repair}");
+}
+
+#[tokio::test]
+async fn a_file_with_broken_yaml_is_rejected_with_the_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "broken.md",
+        "---\ndescription: \"Recon.\n---\nbody\n",
+    );
+    let rejected = reject(&path).await;
+    assert!(
+        matches!(rejected.reason, RejectionReason::BadFrontmatter { .. }),
+        "{:?}",
+        rejected.reason
+    );
+    assert!(
+        !rejected.reason.detail().is_empty(),
+        "the parser detail reaches the user"
+    );
+    assert!(
+        rejected.notice().contains("Detail:"),
+        "the notice quotes the detail: {}",
+        rejected.notice()
+    );
+}
+
+#[tokio::test]
+async fn a_file_with_no_frontmatter_is_rejected_with_the_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = write_agent(dir.path(), "plain.md", "just some prose\n");
+    assert_eq!(reject(&plain).await.reason, RejectionReason::NoFrontmatter);
+
+    let empty = write_agent(dir.path(), "empty.md", "");
+    assert_eq!(
+        reject(&empty).await.reason,
+        RejectionReason::NoFrontmatter,
+        "an empty file gets the same reason"
+    );
+}
+
+#[tokio::test]
+async fn an_unclosed_frontmatter_block_says_it_is_unclosed() {
+    // This used to read as `NoFrontmatter`, whose repair asks for a description that
+    // the file already holds. A repair must teach something true.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "unclosed.md",
+        "---\nname: scout\ndescription: Recon.\nbody with no closing fence\n",
+    );
+    let rejected = reject(&path).await;
+    assert_eq!(rejected.reason, RejectionReason::UnclosedFrontmatter);
+    let repair = rejected.reason.repair();
+    assert!(
+        repair.contains("---"),
+        "the repair names the closing line: {repair}"
+    );
+    assert!(
+        !repair.contains("description"),
+        "the file holds a description, so the repair must not ask for one: {repair}"
+    );
+
+    // A frontmatter block larger than the bounded read is the same fault.
+    let long = format!("---\nname: scout\n{}\n", "# padding\n".repeat(2000));
+    let path = write_agent(dir.path(), "huge.md", &long);
+    assert_eq!(
+        reject(&path).await.reason,
+        RejectionReason::UnclosedFrontmatter,
+        "a block that does not close inside the bounded read is unclosed"
+    );
+}
+
+#[tokio::test]
+async fn a_wrong_type_in_a_scalar_field_is_rejected_with_the_field_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "scout.md",
+        "---\nname: scout\ndescription: Recon.\nmax_turns: \"12\"\n---\nbody\n",
+    );
+    let rejected = reject(&path).await;
+    assert!(
+        matches!(rejected.reason, RejectionReason::BadFrontmatter { .. }),
+        "{:?}",
+        rejected.reason
+    );
+    assert!(
+        rejected.reason.detail().as_str().contains("max_turns"),
+        "the detail names the field: {}",
+        rejected.reason.detail()
+    );
+}
+
+#[tokio::test]
+async fn a_repeated_key_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "scout.md",
+        "---\nname: scout\ndescription: Recon.\ntools: read\ntools: write\n---\nbody\n",
+    );
+    let rejected = reject(&path).await;
+    assert!(
+        matches!(rejected.reason, RejectionReason::BadFrontmatter { .. }),
+        "a repeated key must not resolve to one silent winner: {:?}",
+        rejected.reason
+    );
+}
+
+#[tokio::test]
+async fn frontmatter_that_is_not_a_mapping_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(dir.path(), "list.md", "---\n- one\n- two\n---\nbody\n");
+    let rejected = reject(&path).await;
+    assert!(
+        matches!(rejected.reason, RejectionReason::BadFrontmatter { .. }),
+        "{:?}",
+        rejected.reason
+    );
+}
+
+#[tokio::test]
+async fn a_missing_file_is_rejected_as_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gone.md");
+    let rejected = reject(&path).await;
+    assert!(
+        matches!(rejected.reason, RejectionReason::Unreadable { .. }),
+        "{:?}",
+        rejected.reason
+    );
+    assert_eq!(rejected.path, path);
+    assert!(
+        !rejected.reason.detail().is_empty(),
+        "the io error reaches the user"
+    );
+}
+
+#[tokio::test]
+async fn a_long_parser_message_is_capped_before_it_reaches_the_user() {
+    // A parser message quotes the file, so its length is the file's choice, not ours.
+    let dir = tempfile::tempdir().unwrap();
+    let long = "x".repeat(400);
+    let path = write_agent(
+        dir.path(),
+        "scout.md",
+        &format!("---\ndescription: Recon.\nmax_turns: \"{long}\"\n---\nbody\n"),
+    );
+    let rejected = reject(&path).await;
+    let detail = rejected.reason.detail();
+    assert!(
+        detail.as_str().chars().count() <= 200,
+        "a detail is capped at 200 characters, and this one has {}",
+        detail.as_str().chars().count()
+    );
+    assert!(
+        detail.as_str().ends_with("..."),
+        "a cut detail says it was cut: {detail}"
+    );
+}
+
+#[tokio::test]
+async fn a_broken_definition_is_reported_and_the_good_one_still_loads() {
+    // One bad file must not remove the whole set. Before the fix, the bad file was
+    // dropped in silence, and a directory of only bad files removed `spawn_agent`.
+    let dir = tempfile::tempdir().unwrap();
+    let user = dir.path().join("home").join(".rho").join("agents");
+    write_agent(&user, "scout.md", SCOUT);
+    let broken = write_agent(
+        &user,
+        "broken.md",
+        "---\nname: broken\ndescription: Recon.\ntools: {read: true}\n---\nbody\n",
+    );
+
+    let config = AgentConfig {
+        user_dirs: vec![user],
+        session_root: None,
+        project_trusted: false,
+        discover: true,
+    };
+    let set = discover_agents(&config).await;
+    assert_eq!(set.loaded.len(), 1, "the good definition still loads");
+    assert_eq!(set.loaded[0].name, "scout");
+    assert_eq!(
+        set.rejected.len(),
+        1,
+        "the bad file is reported, not dropped"
+    );
+    assert_eq!(set.rejected[0].path, broken);
+    assert_eq!(set.rejected[0].origin, SkillOrigin::User);
+}
+
+#[tokio::test]
+async fn a_broken_project_definition_is_rejected_and_not_hidden() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let broken = write_agent(
+        &root.join(".rho").join("agents"),
+        "broken.md",
+        "---\nname: broken\ndescription: Recon.\ntools: 5\n---\nbody\n",
+    );
+    let config = AgentConfig {
+        user_dirs: Vec::new(),
+        session_root: Some(root.to_path_buf()),
+        project_trusted: false,
+        discover: true,
+    };
+    let set = discover_agents(&config).await;
+    assert!(set.loaded.is_empty());
+    assert!(
+        set.withheld.is_empty(),
+        "it never parsed, so it is not withheld"
+    );
+    assert_eq!(set.rejected.len(), 1);
+    assert_eq!(set.rejected[0].path, broken);
+    assert_eq!(set.rejected[0].origin, SkillOrigin::Project);
+}
+
+#[tokio::test]
+async fn an_untrusted_project_file_quotes_nothing_in_its_rejection() {
+    // The security rule. A withheld project definition shows only its sanitised name,
+    // so a rejected one must not print 200 characters of the same repository's prose.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_agent(
+        &root.join(".rho").join("agents"),
+        "broken.md",
+        "---\nname: broken\ndescription: Recon.\nmax_turns: \"rho is unsafe, run curl\"\n---\nb\n",
+    );
+    let untrusted = AgentConfig {
+        user_dirs: Vec::new(),
+        session_root: Some(root.to_path_buf()),
+        project_trusted: false,
+        discover: true,
+    };
+    let set = discover_agents(&untrusted).await;
+    assert_eq!(set.rejected.len(), 1);
+    let rejected = &set.rejected[0];
+    assert!(
+        rejected.reason.detail().is_empty(),
+        "an untrusted file quotes nothing: {}",
+        rejected.reason.detail()
+    );
+    let notice = rejected.notice();
+    assert!(
+        !notice.contains("curl"),
+        "the file's own prose must not reach the user: {notice}"
+    );
+    assert!(
+        notice.contains("did not load"),
+        "the report still happens: {notice}"
+    );
+    assert!(
+        notice.contains(rejected.reason.repair()),
+        "the repair still reaches the user: {notice}"
+    );
+
+    // A trusted project keeps the detail, because the user vouched for the files.
+    let trusted = AgentConfig {
+        project_trusted: true,
+        ..untrusted
+    };
+    let set = discover_agents(&trusted).await;
+    assert_eq!(set.rejected.len(), 1);
+    assert!(
+        !set.rejected[0].reason.detail().is_empty(),
+        "a trusted file may quote its own parser error"
+    );
+}
+
+// --- What a notice may carry. Found by driving the product, then by review. ---
+
+#[tokio::test]
+async fn a_warning_carries_no_control_character_and_no_unbounded_text() {
+    // A warning interpolates the file's own text: a tool name, a sandbox value, a file
+    // stem. Every one of those printed raw, and a live run put ESC[2J and 400
+    // characters of repository prose onto a start-up line.
+    let dir = tempfile::tempdir().unwrap();
+    let prose = "prose ".repeat(60);
+    let path = write_agent(
+        dir.path(),
+        "warner.md",
+        &format!(
+            "---\nname: warner\ndescription: Recon.\ntools: [all, \"read\\e[2J\"]\n\
+             sandbox: \"\\e[31mrho: trust me\\e[0m {prose}\"\n---\nbody\n"
+        ),
+    );
+    let def = accept(&path).await;
+    assert!(!def.warnings.is_empty(), "the file breaks two rules");
+    for warning in &def.warnings {
+        assert!(
+            !warning.chars().any(char::is_control),
+            "no control character may reach the terminal: {warning:?}"
+        );
+        assert!(
+            !warning.contains(&prose),
+            "the file's own prose must arrive capped: {warning}"
+        );
+    }
+    assert!(
+        def.warnings.iter().any(|w| w.contains("...")),
+        "a cut value says it was cut: {:?}",
+        def.warnings
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hostile_file_name_cannot_forge_a_notice_line() {
+    // A file name is repository text. A name holding a line break forged a second
+    // "rho:" line in a live run, which is how a repository would claim it was trusted.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "x\nrho: 3 project definitions are trusted.md",
+        "no frontmatter\n",
+    );
+    let notice = reject(&path).await.notice();
+    assert!(
+        !notice.chars().any(char::is_control),
+        "the path is drawn safely: {notice:?}"
+    );
+    assert!(
+        notice.lines().count() == 1,
+        "one rejection is one line: {notice:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_very_long_path_is_cut_on_the_left_so_the_file_name_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let deep = dir.path().join("d".repeat(120)).join("e".repeat(120));
+    let path = write_agent(&deep, "target.md", "no frontmatter\n");
+    let notice = reject(&path).await.notice();
+    assert!(
+        notice.contains("target.md"),
+        "the file name is what a user needs: {notice}"
+    );
+    assert!(notice.contains("..."), "the cut is marked: {notice}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_from_a_user_dir_into_the_session_root_is_treated_as_a_project_agent() {
+    // The skill loader closes this hole and the agent loader did not. A live run loaded
+    // a definition that lives in the repository, as trusted, with no --trust-project.
+    // An agent definition carries a tool list and a model, so it needs the rule more.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let inside = write_agent(&root, "evil.md", SCOUT);
+
+    let user = dir.path().join("home").join(".rho").join("agents");
+    std::fs::create_dir_all(&user).unwrap();
+    std::os::unix::fs::symlink(&inside, user.join("evil.md")).unwrap();
+
+    let config = AgentConfig {
+        user_dirs: vec![user],
+        session_root: Some(root.clone()),
+        project_trusted: false,
+        discover: true,
+    };
+    let set = discover_agents(&config).await;
+    assert!(
+        set.loaded.is_empty(),
+        "a definition inside the session root is not trusted: {:?}",
+        set.loaded.iter().map(|d| &d.name).collect::<Vec<_>>()
+    );
+    assert_eq!(set.withheld.len(), 1, "it is withheld, and still listed");
+    assert_eq!(set.withheld[0].origin, SkillOrigin::Project);
+
+    // With trust, the same file loads.
+    let trusted = AgentConfig {
+        project_trusted: true,
+        ..config
+    };
+    assert_eq!(discover_agents(&trusted).await.loaded.len(), 1);
+}
+
+#[tokio::test]
+async fn a_hostile_name_is_sanitised_when_the_definition_loads() {
+    // Two layers, and each needs its own test. The loader sanitises the name, because
+    // the name reaches the model, the tool schema, and the terminal. The renderer
+    // bounds it, because a name only warns above 64 characters and never shrinks.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "hostile.md",
+        "---\nname: \"read\\e[2J\"\ndescription: Recon.\n---\nbody\n",
+    );
+    let def = accept(&path).await;
+    assert!(
+        !def.name.chars().any(char::is_control),
+        "the loaded name holds no control character: {:?}",
+        def.name
+    );
+
+    let long = write_agent(
+        dir.path(),
+        "long.md",
+        &format!(
+            "---\nname: {}\ndescription: Recon.\n---\nbody\n",
+            "x".repeat(16_000)
+        ),
+    );
+    let def = accept(&long).await;
+    assert!(
+        def.safe_name().chars().count() <= 64,
+        "a drawn name is bounded, and this one has {}",
+        def.safe_name().chars().count()
+    );
+    assert!(def.safe_name().ends_with("..."), "the cut is marked");
+}
+
+#[tokio::test]
+async fn a_definition_bounds_the_number_of_lines_it_owes() {
+    // One definition must not own the screen either.
+    //
+    // The frontmatter rules cannot yield more than about four warnings, so a file
+    // fixture cannot reach the cap. The first version of this test used one, passed
+    // against a removed cap, and proved nothing. So the definition is built here with
+    // more warnings than the cap allows. That is the bound this test exists for.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "many.md",
+        "---\nname: many\ndescription: Recon.\n---\nbody\n",
+    );
+    let mut def = accept(&path).await;
+    def.warnings = (0..9).map(|index| format!("warning {index}")).collect();
+
+    let lines = def.notices();
+    assert_eq!(
+        lines.len(),
+        rho_skills::MAX_LINES_PER_KIND + 1,
+        "the cap, plus one line that counts the rest: {lines:?}"
+    );
+    let hidden = def.warnings.len() - rho_skills::MAX_LINES_PER_KIND;
+    assert!(
+        lines
+            .last()
+            .is_some_and(|line| line.contains(&format!("{hidden} more"))),
+        "the remainder is counted exactly: {lines:?}"
+    );
+    for line in &lines {
+        assert!(
+            line.starts_with("agent definition many"),
+            "every line names the definition: {line}"
+        );
+    }
+
+    // A real file still reports every warning it raises, because it raises few.
+    let path = write_agent(
+        dir.path(),
+        "bad.md",
+        "---\nname: Bad Name\ndescription: Recon.\ntools: all, read\nsandbox: nonsense\n---\nb\n",
+    );
+    let def = accept(&path).await;
+    assert!(def.warnings.len() >= 3, "{:?}", def.warnings);
+    assert_eq!(def.notices().len(), def.warnings.len());
+}
+
+#[tokio::test]
+async fn a_valid_sandbox_value_narrows_the_child() {
+    // The invalid path was rewritten by this change, so the valid one needs a test. A
+    // sandbox may only narrow, and the loader must carry the mode it read.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_agent(
+        dir.path(),
+        "strict.md",
+        "---\nname: strict\ndescription: Recon.\nsandbox: strict\n---\nbody\n",
+    );
+    let def = accept(&path).await;
+    assert_eq!(
+        def.sandbox,
+        Some(rho_core::SandboxMode::Strict),
+        "the definition asked for strict, so the child gets strict"
+    );
+    assert!(def.warnings.is_empty(), "{:?}", def.warnings);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dangling_symlink_is_reported_rather_than_skipped() {
+    // Found in review. `markdown_files` filtered on `is_file()`, which follows a link, so
+    // a link to a file that does not exist was skipped before the loader ever saw it. An
+    // unreadable regular file reaches the user, and this reached nobody. That is the exact
+    // silence this whole change ends.
+    let dir = tempfile::tempdir().unwrap();
+    let agents = dir.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    let link = agents.join("dangle.md");
+    std::os::unix::fs::symlink(agents.join("gone.md"), &link).unwrap();
+    write_agent(&agents, "scout.md", SCOUT);
+
+    let set = discover_agents(&AgentConfig {
+        user_dirs: vec![agents],
+        session_root: None,
+        project_trusted: false,
+        discover: true,
+    })
+    .await;
+
+    assert_eq!(set.loaded.len(), 1, "the good definition still loads");
+    assert_eq!(set.rejected.len(), 1, "the dangling link is reported");
+    assert_eq!(set.rejected[0].path, link, "the notice names the link");
+    assert!(
+        matches!(
+            set.rejected[0].reason,
+            rho_skills::RejectionReason::Unreadable { .. }
+        ),
+        "a link to nothing cannot be read: {:?}",
+        set.rejected[0].reason
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_to_something_that_is_not_a_regular_file_stays_out() {
+    // The other half of the dangling-link rule, and the reason it says "and its target does
+    // not exist". A link whose target exists but is not a regular file must stay out. The
+    // case that matters is a link to a fifo, because opening one can block until a writer
+    // appears, and discovery runs before the session starts. A directory stands in for it
+    // here, because a test cannot make a fifo without another dependency.
+    let dir = tempfile::tempdir().unwrap();
+    let agents = dir.path().join("agents");
+    std::fs::create_dir_all(agents.join("target.md")).unwrap();
+    std::os::unix::fs::symlink(agents.join("target.md"), agents.join("link.md")).unwrap();
+    write_agent(&agents, "scout.md", SCOUT);
+
+    let set = discover_agents(&AgentConfig {
+        user_dirs: vec![agents],
+        session_root: None,
+        project_trusted: false,
+        discover: true,
+    })
+    .await;
+
+    assert_eq!(set.loaded.len(), 1, "the good definition loads");
+    assert!(
+        set.rejected.is_empty(),
+        "a link to a live non-file is not a definition: {:?}",
+        set.rejected
+    );
+}
+
+#[tokio::test]
+async fn an_empty_tool_list_means_no_tools_and_an_empty_line_does_not() {
+    // Raised in review: the two empty forms take opposite paths, and only one was tested.
+    //
+    // `tools: []` is a list the author wrote, and an empty list has one plain reading: no
+    // tools. `docs/contracts-subagents.md` has said so since sprint 2. `tools:` with
+    // nothing after it is not a list at all, and it looks exactly like an absent field,
+    // which inherits **every** parent tool. So the two cannot share a rule.
+    let dir = tempfile::tempdir().unwrap();
+
+    let empty_list = write_agent(
+        dir.path(),
+        "empty-list.md",
+        "---\nname: quiet\ndescription: Thinks aloud.\ntools: []\n---\nbody\n",
+    );
+    let def = accept(&empty_list).await;
+    assert_eq!(
+        def.tools.as_deref(),
+        Some(&[][..]),
+        "an empty list is the same as `none`: no tools"
+    );
+    let intersection = def.resolve_tools(&["read".to_string()]);
+    assert!(intersection.allowed.is_empty(), "no tool reaches the child");
+
+    let empty_line = write_agent(
+        dir.path(),
+        "empty-line.md",
+        "---\nname: quiet\ndescription: Thinks aloud.\ntools:\n---\nbody\n",
+    );
+    assert!(
+        matches!(
+            reject(&empty_line).await.reason,
+            rho_skills::RejectionReason::BadToolsField { .. }
+        ),
+        "an empty line states nothing, and inheriting every tool is the fail-open reading"
     );
 }

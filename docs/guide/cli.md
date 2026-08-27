@@ -120,7 +120,7 @@ Then rho refuses it, and your turn comes back.
 > and no session list. Each run starts fresh. Nothing persists between sessions.
 
 > **Partly built.** `--no-skills` also turns off subagent discovery, and it says nothing.
-> rho then registers no `spawn_agent`, so the model cannot delegate, and your agent
-> definitions are ignored. A live run proved it: with `--no-skills` the tool list stopped at
+> rho then registers no `spawn_agent`, so the model cannot delegate, and rho skips agent
+> discovery entirely. A live run proved it: with `--no-skills` the tool list stopped at
 > `read_tool_result`, and without it five subagent tools appeared. There is no flag that
 > keeps subagents while dropping skills.
