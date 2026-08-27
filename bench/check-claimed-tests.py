@@ -29,6 +29,18 @@ def git(*args: str) -> str:
     ).stdout
 
 
+class LedgerError(Exception):
+    """A line in `deleted-tests.txt` does not parse. The guard must fail, not guess."""
+
+
+# A test name in this project: a lowercase identifier. It must be the whole first token, so a
+# stray reason word such as `false` or `project` cannot pass as a name.
+TEST_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
+# A git short or full hash. A commit is the proof of a deliberate removal, so it must be real
+# hex, never the word `HEAD`, which moves and now points at a commit that deleted nothing.
+COMMIT_HASH = re.compile(r"^[0-9a-f]{7,40}$")
+
+
 def default_range() -> str:
     if git("rev-parse", "--verify", "-q", "origin/main").strip():
         return "origin/main..HEAD"
@@ -41,16 +53,30 @@ def deleted_names() -> set[str]:
     A commit that deletes a test names it, and the words alone do not say whether the name was
     added or removed. The guard found that on its first run over the whole branch, against a test
     the owner's ruling had reversed. So a removal is recorded rather than guessed at.
+
+    Each entry is one physical line: `<test_name> <commit-hash> <reason>`. The parser is strict.
+    An earlier version took `line.split()[0]` from every non-comment line, so a wrapped reason
+    turned each of its words into a false exemption. A continuation line that began with a real
+    test name would then exempt that test from the guard forever, which is the very loss this
+    file exists to stop. So a line that does not parse fails loudly.
     """
     path = pathlib.Path(__file__).with_name("deleted-tests.txt")
     if not path.exists():
         return set()
     names = set()
-    for line in path.read_text().splitlines():
-        line = line.strip()
+    for number, raw in enumerate(path.read_text().splitlines(), 1):
+        line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        names.add(line.split()[0])
+        parts = line.split()
+        # First token is a test name, second is a real hex commit, and a reason follows.
+        if len(parts) < 3 or not TEST_NAME.match(parts[0]) or not COMMIT_HASH.match(parts[1]):
+            raise LedgerError(
+                f"bench/deleted-tests.txt:{number}: cannot parse this line. Each entry is one "
+                f"physical line: <test_name> <commit-hash> <reason>. A wrapped reason or a "
+                f"missing hash silently exempts a real test. Offending line: {raw!r}"
+            )
+        names.add(parts[0])
     return names
 
 
@@ -68,7 +94,12 @@ def main() -> int:
         print(f"VIOLATIONS 0 (no commits in {span})")
         return 0
 
-    allowed = deleted_names()
+    try:
+        allowed = deleted_names()
+    except LedgerError as error:
+        print(error)
+        print("VIOLATIONS 1 (bench/deleted-tests.txt does not parse)")
+        return 1
     missing = []
     for name in claimed_names(body):
         if name in allowed:

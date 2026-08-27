@@ -150,7 +150,7 @@ pub enum SessionError {
     Version(u32),
     /// A resume would widen a permission, and the user did not allow it.
     #[error(
-        "a resume would widen {field} from {stored} to {requested}; pass --allow-widen to allow it"
+        "a resume would widen {field} from {stored} to {requested}. The caller must ask for a wider run explicitly."
     )]
     Widen {
         field: &'static str,

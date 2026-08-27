@@ -265,7 +265,11 @@ Named, with the assertion each one proves.
 - `the_session_root_key_does_not_move_the_project_file` — no circular read.
 - `a_global_session_root_does_not_change_which_project_file_is_read` — planned. It is the
   trap the review found, and it needs the stderr report of rule 7.
-- `the_bootstrap_root_reads_the_session_root_variable` — the `RHO_SESSION_ROOT` branch.
+- `a_trusted_session_root_variable_moves_the_project_root` — `RHO_SESSION_ROOT` redirects the root when `--trust-project` is set.
+- `an_untrusted_session_root_variable_does_not_move_the_project_root` — without `--trust-project`, the variable is ignored.
+- `an_untrusted_session_root_variable_cannot_smuggle_a_project_config` — an attacker config at the redirected root does not reach the product.
+
+Note: `bootstrap_root` honours `RHO_SESSION_ROOT` only under `--trust-project`. This differs from the `rho-config` rule for other environment keys. Those keys are gated only when a project file was actually read. `bootstrap_root` runs before config discovery. The signal does not exist yet, because `RHO_SESSION_ROOT` is what decides where to look. Requiring `--trust-project` is the safe fix available now. The better design is to honour the redirect and then treat the found config as untrusted. That needs its own probe and is recorded as a follow-up.
 - `no_clap_env_attribute_remains` — a source guard, because the second precedence is the
   defect `SPEC-config` section 2 forbids.
 - `a_missing_env_credential_is_an_error` — an absent credential stops the run. It replaces

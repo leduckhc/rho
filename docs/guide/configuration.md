@@ -31,6 +31,32 @@ The list runs weakest first, strongest last.
 A CLI flag beats every file value.
 An environment variable beats every file value and every profile value.
 
+Five keys are powerful: `base-url`, `skill-paths`, `mcp-config`, `session-root`, and
+`session-file`. rho drops these five from the environment when the project is untrusted and one
+of two signals is present. A notice then names each key it dropped. Pass `--trust-project` to use
+them in a project you trust.
+
+The first signal is a project config file that rho really read. The second signal is a file that
+injects environment variables: `.envrc`, `.env`, or `.devcontainer/devcontainer.json`. A clone can
+ship any of these, and each can set a powerful `RHO_*` variable. rho tests only whether the file
+exists. rho never reads it and never runs it.
+
+rho looks for those files from the project directory up to the git root. direnv also loads a
+parent `.envrc`, so a clone injects the environment in every subdirectory. The git root is the top
+of the clone, so the search stops there. rho never searches your home directory. With no git
+repository, rho searches the project directory alone.
+
+In a plain directory with none of those files, every environment variable works.
+
+`RHO_SESSION_ROOT` is stricter. It needs `--trust-project` in every directory, because it selects
+which project config file rho reads. rho makes that choice before it reads any file, so neither
+signal above is available yet.
+
+Three cases stay open. A directory shipped without a `.git`, with `.envrc` in a parent, does not
+gate, because there is no clone boundary to find. Running rho at that directory's own root still
+gates. A `.envrc` below your home directory gates, though `~/.envrc` itself does not. A shell rc
+file, a `Makefile`, and a `docker-compose.yml` are not detected.
+
 ## Keys
 
 All keys are kebab-case.
@@ -51,6 +77,9 @@ An unknown key is an error, not a warning.
 | `tui-reasoning` | string | `summary` | `RHO_TUI_REASONING` |
 | `reasoning-effort` | string | unset | `RHO_REASONING_EFFORT` |
 | `mcp-config` | path | unset | `RHO_MCP_CONFIG` |
+| `base-url` | string | unset | `RHO_BASE_URL` |
+| `tui-motion` | bool | `true` | `RHO_TUI_MOTION`, and `RHO_REDUCE_MOTION=1` |
+| `no-agents` | bool | `false` | `RHO_NO_AGENTS` |
 
 `RHO_SKILL_PATHS` uses the OS path separator (`:` on Unix, `;` on Windows).
 
@@ -119,11 +148,51 @@ The table accepts four keys:
 
 > **Partly built.** `ephemeral` parses and no code reads it. The run is silent.
 
+### `base-url`
+
+The provider endpoint. Use it for a local model host.
+
+```toml
+base-url = "http://localhost:11434/v1"
+```
+
+rho appends the standard OpenAI chat path, so a base with or without `/v1` both work. An
+`https` url is allowed anywhere. Plain `http` is allowed only to `localhost`, `127.0.0.0/8`,
+or `[::1]`, because the credential would otherwise travel in clear text. A loopback endpoint
+also bypasses every proxy, so `HTTP_PROXY` cannot capture your key.
+
+A startup notice names the host your key goes to. `base-url` with `bedrock` or `azure` stops
+the run, because each names its endpoint its own way.
+
+### `tui-motion`
+
+False stops the animation that sweeps the working word. `--no-motion` does the same, and so
+does `RHO_REDUCE_MOTION=1`, which wins over `tui-motion` whichever order they arrive in.
+
+### `no-agents`
+
+True stops the agent-definition search, so rho offers no subagent. It is separate from
+`no-skills`, which stops the skill search only.
+
 ## Project file trust
 
 A project file is untrusted by default.
-An untrusted file silently drops `skill-paths` and `mcp-config`.
-It also marks any `!command` credential from that file as refused.
+An untrusted file loses `session-root`, `session-file`, `skill-paths`, `mcp-config`, and
+`base-url`, and it marks any `!command` credential as refused. The same applies inside a
+`[profiles.x]` block, and to `RHO_SKILL_PATHS`, `RHO_MCP_CONFIG`, `RHO_BASE_URL`,
+`RHO_SESSION_ROOT`, and `RHO_SESSION_FILE` from the environment.
+
+`session-root` is on that list because it is the boundary every tool is confined to. A probe
+proved a cloned repository could move it and read a file outside itself.
+
+rho names what it dropped:
+
+```
+rho: this project is not trusted, so rho ignored session-root (from ./.rho/config.toml),
+base-url (from the environment). Pass --trust-project to use them.
+```
+
+A display key such as `model` needs no trust, because it grants nothing.
 
 Pass `--trust-project` to restore those keys.
 

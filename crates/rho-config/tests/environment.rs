@@ -56,7 +56,15 @@ fn from_env_maps_every_scalar_key() {
 fn load_reads_every_scalar_key_from_the_environment() {
     // A full `Config::load` reads each scalar key from the environment layer. This
     // proves the mapping reaches the resolved `Config`, not merely the raw layer.
-    let sources = empty_sources().with_env(every_scalar_env());
+    //
+    // It states trust now. A powerful variable needs the same trust as a powerful key in
+    // a config file, because a `.devcontainer` file arrives with the clone as surely as
+    // the file does. Without trust, `RHO_SKILL_PATHS`, `RHO_MCP_CONFIG`, and `RHO_BASE_URL`
+    // are dropped, and `an_untrusted_project_drops_a_powerful_environment_variable` pins
+    // that half. See `D-trust-is-provenance-not-a-field-list`.
+    let sources = empty_sources()
+        .with_env(every_scalar_env())
+        .with_project_trust(rho_config::ProjectTrust::Trusted);
     let config = Config::load(&sources).expect("the environment layer resolves");
     assert_eq!(config.provider.as_deref(), Some("env-provider"));
     assert_eq!(config.model.as_deref(), Some("env-model"));
@@ -167,4 +175,21 @@ fn from_env_leaves_an_unaccepted_boolean_unset() {
         layer.ephemeral, None,
         "from_env must omit an unaccepted boolean, not read it as false"
     );
+}
+
+#[test]
+fn reduce_motion_wins_over_the_motion_key() {
+    // Both variables write one field, and the winner used to depend on the order they
+    // arrived in. A reduced-motion request is an accessibility signal, so it decides.
+    for pair in [
+        vec![("RHO_TUI_MOTION", "true"), ("RHO_REDUCE_MOTION", "1")],
+        vec![("RHO_REDUCE_MOTION", "1"), ("RHO_TUI_MOTION", "true")],
+    ] {
+        let sources = empty_sources().with_env(env_vars(&pair));
+        let config = Config::load(&sources).expect("the environment resolves");
+        assert!(
+            !config.tui_motion,
+            "reduce-motion wins whichever order they arrive in: {pair:?}"
+        );
+    }
 }

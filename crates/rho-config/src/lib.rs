@@ -7,7 +7,7 @@
 //! The crate fails closed. A malformed file, an unknown key, or an unreadable file
 //! returns a typed error. It never falls back to a default that grants more access.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -39,12 +39,154 @@ pub enum ConfigError {
         value: String,
         message: String,
     },
+    /// A base url is refused, with a named reason. It is separate from `Value` so a caller
+    /// can tell a safety block from a typo, rather than read one stringly-typed message and
+    /// guess. See `BaseUrlRejection` and `D-a-provider-base-url-is-a-config-key`.
+    #[error("the base-url value \"{value}\" is not valid: {reason}")]
+    BaseUrl {
+        value: String,
+        reason: BaseUrlRejection,
+    },
     /// The user asked for a profile that no file defines.
     #[error("the profile \"{name}\" is not defined")]
     UnknownProfile { name: String },
     /// A credential source failed to resolve.
     #[error("cannot resolve the credential \"{name}\": {message}")]
     Credential { name: String, message: String },
+}
+
+/// Why a base url was refused. A caller reads the reason, so it can tell a refusal that
+/// protects the credential from one that corrects a typo, and word its message to match.
+///
+/// All five refusals used to collapse into one `ConfigError::Value` with a free-text
+/// message, so a caller could only echo it. A review named the loss: "blocked for safety"
+/// and "you made a typo" are different messages to a user, and the type must keep them
+/// apart. See `D-a-provider-base-url-is-a-config-key`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaseUrlRejection {
+    /// The value is not a url with a scheme, for example `https://host/v1`. A typo.
+    NotAUrl,
+    /// The url carries a query or a fragment. The endpoint appends a path, so a query would
+    /// land mid-url and the request would go somewhere the user did not name. A mistake.
+    HasQueryOrFragment,
+    /// The url carries a user or a password. The host is then not what it looks like, so the
+    /// credential could travel to an attacker. A safety block.
+    HasUserinfo,
+    /// Plain http to a host that is not loopback. The credential would travel in clear text.
+    /// A safety block.
+    InsecureTransport,
+    /// The scheme is neither https nor http. A typo.
+    UnknownScheme,
+}
+
+impl BaseUrlRejection {
+    /// True when the refusal protects the credential, false when it corrects a typo. A
+    /// caller words a safety block differently from a mistake.
+    pub fn is_safety_block(self) -> bool {
+        matches!(
+            self,
+            BaseUrlRejection::HasUserinfo | BaseUrlRejection::InsecureTransport
+        )
+    }
+
+    /// The human-readable reason. It never names the value, so a caller composes the value
+    /// and the reason itself.
+    fn message(self) -> &'static str {
+        match self {
+            BaseUrlRejection::NotAUrl => {
+                "it is not a url with a scheme, for example https://host/v1"
+            }
+            BaseUrlRejection::HasQueryOrFragment => {
+                "a base url may not carry a query or a fragment"
+            }
+            BaseUrlRejection::HasUserinfo => {
+                "a url with a user or a password is refused, because the host is not what it looks like"
+            }
+            BaseUrlRejection::InsecureTransport => {
+                "plain http is allowed only to localhost, 127.0.0.0/8, or [::1], because the credential would travel in clear text"
+            }
+            BaseUrlRejection::UnknownScheme => "the scheme is not https or http",
+        }
+    }
+}
+
+impl std::fmt::Display for BaseUrlRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+/// What an untrusted layer lost, so the caller can tell the user rather than stay silent.
+///
+/// Silence was the defect a security review named: a user who sets `RHO_SKILL_PATHS` in their
+/// shell profile is locked out in an untrusted checkout with no hint that `--trust-project`
+/// exists. See `D-trust-is-provenance-not-a-field-list`.
+#[derive(Clone, Debug, Default)]
+struct Stripped {
+    /// Every `!command` credential found, by name, so each becomes a refusal.
+    refused: BTreeMap<String, BTreeSet<String>>,
+    /// The keys that held a value and were cleared.
+    cleared: Vec<&'static str>,
+}
+
+/// Deeper than any real config, and shallow enough that no stack is at risk. It bounds the
+/// recursion in `strip_nested`, so a pathologically nested untrusted file cannot drive the
+/// strip without limit. Past the bound the nested layers are cleared wholesale.
+const MAX_PROFILE_DEPTH: usize = 16;
+
+/// A leaf config value a project layer may keep even when untrusted.
+///
+/// This trait is the classification, and the type holds it. It is implemented only for the
+/// harmless scalar shapes, and never for a value that could carry a nested `ConfigLayer`. So
+/// `keep`, which takes a `Leaf`, refuses a `BTreeMap<String, ConfigLayer>` at compile time,
+/// and a new nested table cannot be classified harmless by mistake. That is the rule the
+/// probe defeated when it waved a nested table past the gate with `_`, classified the same
+/// way as `subagents`. See `D-trust-is-provenance-not-a-field-list`.
+trait Leaf {}
+impl Leaf for String {}
+impl Leaf for bool {}
+impl Leaf for SubagentLimitsLayer {}
+
+/// Keep a harmless field untouched. The `Leaf` bound is the gate: the compiler refuses a
+/// value that could carry a nested layer, so naming a field harmless and proving it grants
+/// nothing are one statement.
+fn keep<T: Leaf>(_value: &Option<T>) {}
+
+/// Clear a powerful field, and record its key name when it held a value. `take` reads and
+/// clears in one step, so a field cannot be named and then left set. Naming and clearing are
+/// one inseparable statement.
+fn clear<T>(slot: &mut Option<T>, name: &'static str, cleared: &mut Vec<&'static str>) {
+    if slot.take().is_some() {
+        cleared.push(name);
+    }
+}
+
+/// Strip every nested layer in a map, one level deeper. The recursion is structural: it
+/// descends into any `BTreeMap<String, ConfigLayer>`, so a later nesting level inherits the
+/// rule rather than defeating it. Past `MAX_PROFILE_DEPTH` the nested layers are cleared
+/// wholesale, so nothing deeper can carry a powerful value past the gate. The bound lives
+/// here rather than in the parser, because a guard that leans on a dependency is not a guard.
+fn strip_nested(
+    layers: &mut BTreeMap<String, ConfigLayer>,
+    depth: usize,
+    cleared: &mut Vec<&'static str>,
+    refused: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    for layer in layers.values_mut() {
+        if depth >= MAX_PROFILE_DEPTH {
+            layer.profiles.clear();
+            continue;
+        }
+        let deeper = layer.strip_powerful_keys_to_depth(depth + 1);
+        for (name, values) in deeper.refused {
+            refused.entry(name).or_default().extend(values);
+        }
+        for name in deeper.cleared {
+            if !cleared.contains(&name) {
+                cleared.push(name);
+            }
+        }
+    }
 }
 
 /// One layer of configuration. Every field is optional. A layer states only what
@@ -75,6 +217,14 @@ pub struct ConfigLayer {
     pub reasoning_effort: Option<String>,
     /// A path to the MCP server file. See section 6.
     pub mcp_config: Option<PathBuf>,
+    /// The provider endpoint. Unset means the provider's own default. It is powerful: it
+    /// redirects the credential, so an untrusted source may not set it.
+    pub base_url: Option<String>,
+    /// False stops the terminal's sweep animation.
+    pub tui_motion: Option<bool>,
+    /// True stops the agent-definition search. It is separate from `no_skills`, because a
+    /// skill and a worker are two capabilities.
+    pub no_agents: Option<bool>,
     pub subagents: Option<SubagentLimitsLayer>,
     /// Credential sources, by name. Each value is one string, parsed in section 5.
     pub credentials: Option<BTreeMap<String, String>>,
@@ -180,11 +330,94 @@ pub struct ConfigPaths {
     pub global: Option<PathBuf>,
     /// `<bootstrap_root>/.rho/config.toml`.
     pub project: Option<PathBuf>,
+    /// Candidate paths of files that can inject environment variables: `.envrc` for direnv,
+    /// `.env` for dotenv loaders, and `.devcontainer/devcontainer.json`. `Config::load` tests
+    /// their **presence**; rho never reads or runs them, because running a `.envrc` is
+    /// arbitrary shell and would be a worse defect.
+    ///
+    /// The list spans every directory from the project root **up to the git root**, because
+    /// direnv and its kin load a parent `.envrc`, so a hostile clone injects the environment
+    /// in every subdirectory. The git root is the honest top of the clone. With no git
+    /// repository the project root alone is listed, because there is no clone boundary above
+    /// it. The home directory and every directory above it are never listed, because a home
+    /// directory is not a clone. See `D-trust-is-provenance-not-a-field-list`.
+    pub env_injecting_files: Vec<PathBuf>,
+}
+
+/// The names of the files, in a project directory, that inject environment variables. Each
+/// arrives with a clone: `.envrc` runs under direnv, `.env` is read by dotenv loaders and
+/// docker compose, and `.devcontainer/devcontainer.json` sets `containerEnv` and
+/// `remoteEnv`. The list is the whole rule, so a new such format is one more entry here.
+const ENV_INJECTING_FILES: &[&str] = &[".envrc", ".env", ".devcontainer/devcontainer.json"];
+
+/// The nearest ancestor of `start`, `start` included, that holds a `.git` entry. This is the
+/// git root, the honest top of a clone. The search never goes above the home directory,
+/// because a directory above home is never the clone under edit. It returns `None` when
+/// `start` is in no git repository. A directory `.git`, a git worktree's `.git` file, both
+/// count, because presence is the test and no git binary runs. See
+/// `D-trust-is-provenance-not-a-field-list`.
+fn find_git_root(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    let mut current = start;
+    loop {
+        if current.join(".git").exists() {
+            return Some(current.to_path_buf());
+        }
+        if Some(current) == home {
+            return None;
+        }
+        match current.parent() {
+            Some(parent) if parent != current => current = parent,
+            _ => return None,
+        }
+    }
+}
+
+/// The directories rho examines for a file that injects the environment.
+///
+/// The scan starts at the project root and walks upward to the git root, because direnv
+/// loads a parent `.envrc`, so the whole clone injects every subdirectory. With no git
+/// repository the project root alone is scanned, because there is no honest clone boundary
+/// above it. The home directory and every directory above it are never scanned, because a
+/// home directory is not a clone. The filesystem root is never reached.
+fn env_injecting_scan_dirs(project_root: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+    let git_root = find_git_root(project_root, home);
+    let mut dirs = Vec::new();
+    let mut current = project_root;
+    loop {
+        if Some(current) == home {
+            break; // a home directory is not a clone
+        }
+        dirs.push(current.to_path_buf());
+        if git_root.as_deref() == Some(current) {
+            break; // the git root is the top of the clone
+        }
+        if git_root.is_none() {
+            break; // no git repository: the project root alone is the clone
+        }
+        match current.parent() {
+            Some(parent) if parent != current => current = parent,
+            _ => break, // the filesystem root
+        }
+    }
+    dirs
+}
+
+/// Every candidate env-injecting file path across the scan set. `Config::load` tests each
+/// for presence.
+fn env_injecting_candidates(project_root: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+    env_injecting_scan_dirs(project_root, home)
+        .into_iter()
+        .flat_map(|dir| ENV_INJECTING_FILES.iter().map(move |name| dir.join(name)))
+        .collect()
 }
 
 impl ConfigPaths {
-    /// Discover both paths. `env` supplies `XDG_CONFIG_HOME` and `HOME`, so a test never
-    /// reads the real home directory.
+    /// Discover both config-file paths, and the candidate env-injecting file paths. `env`
+    /// supplies `XDG_CONFIG_HOME` and `HOME`, so a test never reads the real home directory.
+    ///
+    /// The config-file paths are pure joins. The env-injecting candidate list walks the
+    /// filesystem upward from `bootstrap_root` to the git root, so this function stats `.git`
+    /// along the way. It reads no config file, and it never reads an env-injecting file.
     pub fn discover(env: &dyn EnvLookup, bootstrap_root: &Path) -> ConfigPaths {
         // `XDG_CONFIG_HOME` is the stated override, so it wins. An empty value counts as
         // unset, because an exported-but-empty variable is a common shell accident and
@@ -202,6 +435,14 @@ impl ConfigPaths {
         ConfigPaths {
             global,
             project: Some(bootstrap_root.join(".rho").join("config.toml")),
+            // The upward scan is bounded by the git root and by the home directory, so a
+            // parent `.envrc` inside the clone gates but neither `~/.envrc` nor a file above
+            // the clone does. `HOME` supplies the boundary, not `XDG_CONFIG_HOME`, because it
+            // is the home directory itself that is not a clone.
+            env_injecting_files: env_injecting_candidates(
+                bootstrap_root,
+                non_empty(env.get("HOME")).map(PathBuf::from).as_deref(),
+            ),
         }
     }
 }
@@ -240,6 +481,9 @@ pub struct Sources {
     pub(crate) flags: ConfigLayer,
     /// Whether the project file's powerful keys are trusted.
     pub(crate) project_trust: ProjectTrust,
+    /// Candidate paths of files in the project root that inject environment variables.
+    /// `load` tests their presence to decide the environment gate. See `ConfigPaths`.
+    pub(crate) env_injecting_files: Vec<PathBuf>,
 }
 
 impl Sources {
@@ -254,6 +498,7 @@ impl Sources {
             env: Vec::new(),
             flags: ConfigLayer::default(),
             project_trust: ProjectTrust::default(),
+            env_injecting_files: paths.env_injecting_files,
         }
     }
 
@@ -296,6 +541,18 @@ pub struct Config {
     pub approval: Option<ApprovalMode>,
     pub skill_paths: Vec<PathBuf>,
     pub discover_skills: bool,
+    /// Whether rho searches for agent definitions. Separate from `discover_skills`, so one
+    /// switch never removes two capabilities. See `D-skills-and-agents-are-two-switches`.
+    pub discover_agents: bool,
+    /// The provider endpoint, when a user chose one. `None` keeps the provider's default.
+    pub base_url: Option<String>,
+    /// Whether the terminal animates the working word. True by default.
+    pub tui_motion: bool,
+    /// Every powerful key an untrusted source set and lost, named for a notice.
+    ///
+    /// A drop with no message is the shape a security review named: a user who set
+    /// `RHO_SKILL_PATHS` once is locked out in an untrusted checkout and told nothing.
+    pub dropped_keys: Vec<String>,
     /// Whether the TUI captures the mouse. False by default.
     pub tui_mouse: bool,
     /// How the TUI draws reasoning. `Summary` by default.
@@ -325,12 +582,137 @@ impl ConfigLayer {
         self.tui_reasoning = over.tui_reasoning.or(self.tui_reasoning);
         self.reasoning_effort = over.reasoning_effort.or(self.reasoning_effort);
         self.mcp_config = over.mcp_config.or(self.mcp_config);
+        self.base_url = over.base_url.or(self.base_url);
+        self.tui_motion = over.tui_motion.or(self.tui_motion);
+        self.no_agents = over.no_agents.or(self.no_agents);
         self.subagents = over.subagents.or(self.subagents);
-        self.credentials = over.credentials.or(self.credentials);
+        // Merge credentials per name, so a layer that defines one name does not erase the
+        // others. A whole-map `.or()` let a project file redefine the user's credential
+        // names wholesale: one project `[credentials]` table dropped every global name. A
+        // colliding name still goes to `over`, so precedence is unchanged. See C4.
+        self.credentials = match (self.credentials.take(), over.credentials) {
+            (Some(mut base), Some(over)) => {
+                base.extend(over);
+                Some(base)
+            }
+            (base, over) => over.or(base),
+        };
         // A profile is a named block, not a merged value. Keep the union, so a
         // profile defined in either file is reachable by name.
         self.profiles.extend(over.profiles);
         self
+    }
+
+    /// Clear every key an untrusted source may not contribute, at every depth.
+    ///
+    /// The gate used to null two fields on one layer. `merge` carries `profiles` across
+    /// untouched and a profile is applied after the gate, so the same key one level down
+    /// never met it. A live probe put an attacker skill in a project profile and the model
+    /// received it with no `--trust-project`. See `D-trust-is-provenance-not-a-field-list`
+    /// and `docs/verification/profile-trust-bypass.md`.
+    ///
+    /// It returns the `!command` credentials it found, by name, so the caller can refuse
+    /// them rather than drop them. A dropped credential would read as "no such name",
+    /// which teaches the user nothing.
+    fn strip_powerful_keys(&mut self) -> Stripped {
+        self.strip_powerful_keys_to_depth(0)
+    }
+
+    /// The recursion, with its own bound.
+    ///
+    /// A profile may hold profiles, so a config file controls the depth. The `toml` parser
+    /// bounds its own nesting today, and a guard that leans on a dependency's behaviour is
+    /// not a guard: a parser change would remove it in silence. A review named this, so the
+    /// bound lives here.
+    fn strip_powerful_keys_to_depth(&mut self, depth: usize) -> Stripped {
+        // **An exhaustive destructure, with no `..` and no `_`.** Every field is routed to
+        // exactly one of three sinks, and the field's own type decides which the compiler
+        // will accept:
+        //
+        //   * `clear` takes a powerful `Option<T>`. It reads and clears in one step, so a
+        //     field cannot be named here and then left set. Naming and clearing are one
+        //     statement, which closes the drift a review found: the old code named a field
+        //     in the destructure and cleared it in a separate list, so a contributor could
+        //     add the name and forget the `*field = None`.
+        //   * `keep` takes a harmless `Leaf`. The `Leaf` bound is held by the type: a value
+        //     that could carry a nested `ConfigLayer` does not implement it, so a new nested
+        //     table will not compile as harmless. That closes the probe that waved a
+        //     `BTreeMap<String, ConfigLayer>` past the gate with `_`, classified "exactly as
+        //     subagents" — subagents is now `keep`, and `keep` refuses a nested table.
+        //   * `strip_nested` recurses into any `BTreeMap<String, ConfigLayer>`. The recursion
+        //     is structural, not a hand-written arm for `profiles` alone, so a later nesting
+        //     level inherits the rule instead of defeating it.
+        //
+        // A new field fails the build until it is routed. A powerful scalar added as a raw
+        // `Option<String>` can still be mis-kept, which is the residual the report names; a
+        // nested table cannot, and neither can a named-but-uncleared powerful field. The
+        // full compiler-held classification needs field reflection, which is a derive macro
+        // in a new crate, and a new crate edits the workspace manifest outside this crate's
+        // ownership. See `D-trust-is-provenance-not-a-field-list` and
+        // `docs/verification/profile-trust-bypass.md`.
+        let Self {
+            session_root,
+            session_file,
+            skill_paths,
+            mcp_config,
+            base_url,
+            credentials,
+            profiles,
+            provider,
+            model,
+            ephemeral,
+            sandbox,
+            approval,
+            no_skills,
+            no_agents,
+            tui_mouse,
+            tui_motion,
+            tui_reasoning,
+            reasoning_effort,
+            subagents,
+        } = self;
+
+        let mut cleared: Vec<&'static str> = Vec::new();
+        let mut refused: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+
+        // Powerful. Cleared and recorded in one statement each.
+        clear(session_root, "session-root", &mut cleared);
+        clear(session_file, "session-file", &mut cleared);
+        clear(skill_paths, "skill-paths", &mut cleared);
+        clear(mcp_config, "mcp-config", &mut cleared);
+        clear(base_url, "base-url", &mut cleared);
+
+        // Harmless. Each chooses a model, a display, or a limit, and grants nothing. The
+        // `Leaf` bound is the classification, so a nested table cannot join this group.
+        keep(provider);
+        keep(model);
+        keep(ephemeral);
+        keep(sandbox);
+        keep(approval);
+        keep(no_skills);
+        keep(no_agents);
+        keep(tui_mouse);
+        keep(tui_motion);
+        keep(tui_reasoning);
+        keep(reasoning_effort);
+        keep(subagents);
+
+        // A credential is kept as a refusal rather than dropped, so the user meets a message
+        // naming `--trust-project` instead of "no such name". Every `!command` value for a
+        // name is recorded, because two profiles may use one name while the merge keeps only
+        // the winner, and recording one value let the other slip past the check at the call
+        // site.
+        for (name, raw) in credentials.iter().flatten() {
+            if raw.starts_with('!') {
+                refused.entry(name.clone()).or_default().insert(raw.clone());
+            }
+        }
+
+        // Recurse into every nested layer, so a nesting level a later format adds inherits
+        // the rule instead of defeating it.
+        strip_nested(profiles, depth, &mut cleared, &mut refused);
+
+        Stripped { refused, cleared }
     }
 
     /// Build a layer from the `RHO_*` variables. This maps every scalar config key,
@@ -357,10 +739,76 @@ impl ConfigLayer {
                 "RHO_TUI_REASONING" => layer.tui_reasoning = Some(value.clone()),
                 "RHO_REASONING_EFFORT" => layer.reasoning_effort = Some(value.clone()),
                 "RHO_MCP_CONFIG" => layer.mcp_config = Some(PathBuf::from(value)),
+                "RHO_BASE_URL" => layer.base_url = Some(value.clone()),
+                "RHO_TUI_MOTION" => layer.tui_motion = parse_env_bool("tui-motion", value).ok(),
+                "RHO_NO_AGENTS" => layer.no_agents = parse_env_bool("no-agents", value).ok(),
+                // The code already documented this name, so a user who sets it once for
+                // every tool is obeyed. `1` stops the sweep, as the convention expects.
+                "RHO_REDUCE_MOTION"
+                    if parse_env_bool("reduce-motion", value).ok() == Some(true) =>
+                {
+                    layer.tui_motion = Some(false);
+                }
                 _ => {}
             }
         }
+        // `RHO_REDUCE_MOTION` is read after the loop, so it always wins over
+        // `RHO_TUI_MOTION`. Both write one field, and the winner used to depend on the order
+        // the variables arrived in, which an external review caught. A reduced-motion
+        // request is an accessibility signal, so it is the one that decides.
+        for (name, value) in vars {
+            if name == "RHO_REDUCE_MOTION"
+                && parse_env_bool("reduce-motion", value).ok() == Some(true)
+            {
+                layer.tui_motion = Some(false);
+            }
+        }
         layer
+    }
+}
+
+/// A base url must be `https`, or plain `http` to a loopback literal.
+///
+/// A base url redirects the credential. `https` anywhere is allowed, because the transport
+/// is encrypted. Plain `http` puts the key on the wire in clear text, so it is allowed only
+/// where the traffic never leaves the machine.
+///
+/// The host is read from a parser, never from the string. `http://127.0.0.1@evil.example` has
+/// host `evil.example`, and a substring check would send the key there.
+///
+/// An encoded address is **decoded by the parser and then judged on the result**, which an
+/// earlier version of this comment denied. `http://2130706433` is 127.0.0.1, so it is allowed,
+/// and `http://3627734734` is not loopback, so it is refused. A live probe found the comment
+/// wrong while the behaviour was right. A name is never resolved, because a DNS lookup here
+/// would be a TOCTOU of its own, so only `localhost` is accepted by name.
+fn check_base_url(value: &str) -> Result<(), ConfigError> {
+    let refuse = |reason: BaseUrlRejection| {
+        Err(ConfigError::BaseUrl {
+            value: value.to_string(),
+            reason,
+        })
+    };
+    let Ok(url) = url::Url::parse(value) else {
+        return refuse(BaseUrlRejection::NotAUrl);
+    };
+    // The endpoint is built by appending a path, so a query or a fragment would land in the
+    // middle of the url and the request would go somewhere the user did not name. A review
+    // printed `https://host/v1?token=leak/v1/chat/completions`.
+    if url.query().is_some() || url.fragment().is_some() {
+        return refuse(BaseUrlRejection::HasQueryOrFragment);
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return refuse(BaseUrlRejection::HasUserinfo);
+    }
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" => match url.host() {
+            Some(url::Host::Ipv4(address)) if address.is_loopback() => Ok(()),
+            Some(url::Host::Ipv6(address)) if address.is_loopback() => Ok(()),
+            Some(url::Host::Domain("localhost")) => Ok(()),
+            _ => refuse(BaseUrlRejection::InsecureTransport),
+        },
+        _ => refuse(BaseUrlRejection::UnknownScheme),
     }
 }
 
@@ -392,6 +840,15 @@ fn validate_env_booleans(vars: &[(String, String)]) -> Result<(), ConfigError> {
             }
             "RHO_NO_SKILLS" => {
                 parse_env_bool("no-skills", value)?;
+            }
+            "RHO_NO_AGENTS" => {
+                parse_env_bool("no-agents", value)?;
+            }
+            "RHO_TUI_MOTION" => {
+                parse_env_bool("tui-motion", value)?;
+            }
+            "RHO_REDUCE_MOTION" => {
+                parse_env_bool("reduce-motion", value)?;
             }
             _ => {}
         }
@@ -698,25 +1155,28 @@ impl Config {
             }
         } // The project file arrives with a clone, so three keys need `--trust-project`.
         // See SPEC-config-call-site section 5, and the probe that proved the command path.
-        let mut refused_commands: Option<(PathBuf, BTreeMap<String, String>)> = None;
+        let mut refused_commands: Option<(PathBuf, BTreeMap<String, BTreeSet<String>>)> = None;
+        // Every powerful key an untrusted source lost. The caller names them, because a
+        // silent drop leaves a user with no hint that `--trust-project` exists.
+        let mut dropped_keys: Vec<String> = Vec::new();
+        // Whether a project file was actually read. The environment gate keys off this, not
+        // off trust alone: without a project file there is no cloned project to distrust.
+        let mut project_file_read = false;
         if let Some(path) = &sources.project_file
             && let Some(mut layer) = Config::read_file(path)?
         {
+            project_file_read = true;
             if sources.project_trust == ProjectTrust::Untrusted {
                 // `skill-paths` would load attacker skills, and that walks around
                 // `D-project-skill-needs-trust`, a gate this repository already ships.
-                // `mcp-config` would launch attacker server processes at startup.
-                layer.skill_paths = None;
-                layer.mcp_config = None;
-                let commands = layer
-                    .credentials
-                    .iter()
-                    .flatten()
-                    .filter(|(_, raw)| raw.starts_with('!'))
-                    .map(|(name, raw)| (name.clone(), raw.clone()))
-                    .collect::<BTreeMap<_, _>>();
-                if !commands.is_empty() {
-                    refused_commands = Some((path.clone(), commands));
+                // `mcp-config` would launch attacker server processes at startup, and
+                // `base-url` would point the credential at a host the file chose.
+                let stripped = layer.strip_powerful_keys();
+                for name in &stripped.cleared {
+                    dropped_keys.push(format!("{name} (from {})", path.display()));
+                }
+                if !stripped.refused.is_empty() {
+                    refused_commands = Some((path.clone(), stripped.refused));
                 }
             }
             merged = merged.merge(layer);
@@ -731,12 +1191,54 @@ impl Config {
                 .ok_or_else(|| ConfigError::UnknownProfile { name: name.clone() })?;
             merged = merged.merge(profile);
         }
-        merged = merged.merge(ConfigLayer::from_env(&sources.env));
+        // The environment is the wider door, but only for a cloned project that configures
+        // rho. The signal for that is a file that ships in the clone and injects the
+        // environment. Two such signals exist, and either is enough:
+        //
+        //   1. A project config file that was really read: `project_file_read`. A
+        //      `.rho/config.toml` in the clone can point `RHO_*` at attacker values through
+        //      the same door.
+        //   2. A file that injects environment variables, anywhere from the project root up
+        //      to the git root: `.envrc` for direnv, `.env` for dotenv loaders, or
+        //      `.devcontainer/devcontainer.json`. None needs a `.rho/config.toml` beside it,
+        //      yet each can set a powerful `RHO_*` variable when the clone is opened. direnv
+        //      loads a parent `.envrc`, so a hostile clone injects the environment in every
+        //      subdirectory, and the scan follows that reality up to the git root, the honest
+        //      top of the clone. With no git repository the project root alone is scanned, and
+        //      a home directory is never scanned. `discover` builds the candidate list;
+        //      `load` tests presence here and never reads or runs the file, because running a
+        //      `.envrc` is arbitrary shell and would be a worse defect.
+        //
+        // Without either signal, rho runs in the user's own directory, and a variable the
+        // user exported in their own shell is not a clone, so it is honored exactly as the
+        // user's own global file is. The old code gated the environment whenever trust was
+        // `Untrusted`, which is the default in every directory, so `RHO_BASE_URL` and its
+        // siblings never worked anywhere without `--trust-project`. `--trust-project` remains
+        // the escape hatch for a developer who keeps a legitimate `.envrc` in their own
+        // project. A display key needs no trust either way, because it grants nothing. See
+        // `D-trust-is-provenance-not-a-field-list` and C2.
+        let mut env_layer = ConfigLayer::from_env(&sources.env);
+        let ships_env_injecting_file = sources.env_injecting_files.iter().any(|path| path.exists());
+        if sources.project_trust == ProjectTrust::Untrusted
+            && (project_file_read || ships_env_injecting_file)
+        {
+            let stripped = env_layer.strip_powerful_keys();
+            for name in &stripped.cleared {
+                dropped_keys.push(format!("{name} (from the environment)"));
+            }
+            if !stripped.refused.is_empty() && refused_commands.is_none() {
+                refused_commands = Some((PathBuf::from("the environment"), stripped.refused));
+            }
+        }
+        merged = merged.merge(env_layer);
         merged = merged.merge(sources.flags.clone());
 
         // The environment layer fails closed on an unaccepted boolean, before use.
         validate_env_booleans(&sources.env)?;
 
+        if let Some(url) = &merged.base_url {
+            check_base_url(url)?;
+        }
         let sandbox = parse_sandbox(&merged)?;
         let approval = parse_approval(&merged)?;
         let reasoning = parse_reasoning(&merged)?;
@@ -750,7 +1252,9 @@ impl Config {
                 // A later layer, such as a profile, may have replaced it, and that value
                 // is not the one the gate refused.
                 if let Some((path, commands)) = &refused_commands
-                    && commands.get(&name) == Some(&raw)
+                    && commands
+                        .get(&name)
+                        .is_some_and(|values| values.contains(&raw))
                 {
                     return (
                         name,
@@ -772,6 +1276,10 @@ impl Config {
             skill_paths: merged.skill_paths.unwrap_or_default(),
             // `no-skills = true` disables discovery. The default is discovery on.
             discover_skills: !merged.no_skills.unwrap_or(false),
+            discover_agents: !merged.no_agents.unwrap_or(false),
+            base_url: merged.base_url.clone(),
+            tui_motion: merged.tui_motion.unwrap_or(true),
+            dropped_keys,
             // On by default. rho owns the alternate screen, which has no scrollback, so with
             // capture off the wheel does nothing at all. The default flipped with
             // `D-the-wheel-needs-capture`, and this merge adopts it, because that renderer won.
@@ -798,5 +1306,90 @@ impl Config {
                 message: "no credential source is defined by that name".to_string(),
             })?;
         source.resolve(name, env)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the parts of the trust gate that no integration test can reach: the
+    //! recursion depth bound, and the structural recursion into a nested layer. These need
+    //! the private `strip_powerful_keys` and `MAX_PROFILE_DEPTH`, so they live here.
+    use super::*;
+
+    /// A chain of profiles named `p`, `depth` levels deep, with a powerful `skill-paths` key
+    /// at the deepest level.
+    fn nested_chain(depth: usize) -> ConfigLayer {
+        let mut layer = ConfigLayer {
+            skill_paths: Some(vec![PathBuf::from("/deep/attacker-skills")]),
+            ..ConfigLayer::default()
+        };
+        for _ in 0..depth {
+            let mut parent = ConfigLayer::default();
+            parent.profiles.insert("p".to_string(), layer);
+            layer = parent;
+        }
+        layer
+    }
+
+    #[test]
+    fn the_depth_bound_truncates_profiles_deeper_than_the_maximum() {
+        // C8. `MAX_PROFILE_DEPTH` bounds the recursion, so a pathologically nested untrusted
+        // file cannot drive it without limit. Past the bound the nested profiles are cleared
+        // wholesale, so nothing deeper can carry a powerful value past the gate. The bound
+        // had no test, so raising it to a huge number passed the suite. This pins it.
+        //
+        // The value is pinned directly, because it is part of the safety contract: raising it
+        // is a deliberate change that must be seen. The depths below are concrete, not derived
+        // from the constant, so a raised bound leaves a deep profile in place and fails the
+        // truncation assertion cleanly even if the value pin is removed.
+        assert_eq!(
+            MAX_PROFILE_DEPTH, 16,
+            "the recursion bound is part of the safety contract; changing it must be deliberate"
+        );
+
+        // A chain deeper than the bound. The recursion truncates the child's sub-profiles, so
+        // the deepest surviving level is one past the bound: level 17 exists but is childless,
+        // and levels 18 and deeper are gone.
+        let mut layer = nested_chain(20);
+        layer.strip_powerful_keys();
+
+        let mut cursor = &layer;
+        for _ in 0..16 {
+            cursor = cursor
+                .profiles
+                .get("p")
+                .expect("levels up to the bound remain");
+        }
+        assert!(
+            !cursor.profiles.is_empty(),
+            "the level at the bound still holds its child"
+        );
+        let past_bound = cursor
+            .profiles
+            .get("p")
+            .expect("the level past the bound exists");
+        assert!(
+            past_bound.profiles.is_empty(),
+            "the bound must truncate profiles deeper than MAX_PROFILE_DEPTH, so nothing \
+             deeper can smuggle a powerful key"
+        );
+    }
+
+    #[test]
+    fn a_nested_powerful_key_within_the_bound_is_cleared() {
+        // The structural recursion descends into a nested layer, so a powerful key shallower
+        // than the bound is cleared rather than merely truncated. This is the property that
+        // makes a nested table safe by construction rather than by a hand-written arm.
+        let mut layer = nested_chain(3);
+        layer.strip_powerful_keys();
+        let mut cursor = &layer;
+        for _ in 0..3 {
+            cursor = cursor.profiles.get("p").expect("levels remain");
+        }
+        assert!(
+            cursor.skill_paths.is_none(),
+            "a nested powerful key is cleared within the bound, got {:?}",
+            cursor.skill_paths
+        );
     }
 }

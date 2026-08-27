@@ -60,6 +60,7 @@ fn load_merges_and_resolves_end_to_end() {
     let sources = Sources::from_paths(ConfigPaths {
         global: Some(global),
         project: Some(project),
+        ..Default::default()
     })
     .with_profile(Some("fast".to_string()))
     .with_env(env_vars(&[("RHO_PROVIDER", "env-provider")]))

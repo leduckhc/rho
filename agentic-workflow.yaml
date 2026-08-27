@@ -63,6 +63,7 @@ gates:
   minimal-build: cargo build -p rho-cli --no-default-features --features minimal
   minimal-test-build: cargo test -p rho-cli --no-default-features --features minimal --no-run
   ids: python3 bench/check-ids.py
+  flag-names: python3 bench/check-flag-names.py
   claimed-tests: python3 bench/check-claimed-tests.py
   prose: python3 bench/check-prose.py $(find docs -name '*.md')
   workflow: python3 bench/check-agentic-workflow.py
@@ -72,7 +73,7 @@ gates:
 gate_sets:
   # `full` is the ship gate, and it is `AGENTS.md` `## Gate`, command for command.
   # `bench/check-agentic-workflow.py` compares the two, so they cannot drift again.
-  full: [fmt, clippy, test, minimal-build, minimal-test-build, ids, claimed-tests, prose, workflow, spec-tests]
+  full: [fmt, clippy, test, minimal-build, minimal-test-build, ids, claimed-tests, flag-names, prose, workflow, spec-tests]
   rust: [fmt, clippy, test]                         # a code stage, mid-track
   docs: [prose, ids, workflow, spec-tests]          # a docs or spec stage
   surface: [stubs, ids]                             # the sweep stage

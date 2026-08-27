@@ -30,6 +30,9 @@ tui-mouse = true\n\
 tui-reasoning = \"summary\"\n\
 reasoning-effort = \"high\"\n\
 mcp-config = \"/tmp/mcp.json\"\n\
+base-url = \"https://models.example.com/v1\"\n\
+tui-motion = false\n\
+no-agents = true\n\
 [subagents]\n\
 max-depth = 3\n\
 max-children-per-parent = 4\n\

@@ -8,10 +8,18 @@ use rho_tui::{
 /// The word that the sweep animates in the footer.
 const WORD: &str = "working";
 
+/// The inputs under which the sweep animates: motion on and a terminal stdout.
+fn animating() -> MotionInputs {
+    MotionInputs {
+        tui_motion: true,
+        stdout_is_terminal: true,
+    }
+}
+
 #[test]
 fn motion_is_a_function_of_a_tick() {
     // The same tick must produce the same frame, twice, with no clock involved.
-    let inputs = MotionInputs::animating();
+    let inputs = animating();
     let first = sweep_frame(WORD, 7, &inputs);
     let second = sweep_frame(WORD, 7, &inputs);
     assert_eq!(first, second, "the same tick produced two different frames");
@@ -74,7 +82,7 @@ fn motion_off_when_tui_motion_false() {
     // `tui.motion = false` renders the word plain, at every tick.
     let inputs = MotionInputs {
         tui_motion: false,
-        ..MotionInputs::animating()
+        ..animating()
     };
     assert_still_and_plain(&inputs);
 }
@@ -83,8 +91,8 @@ fn motion_off_when_tui_motion_false() {
 fn motion_off_when_no_motion_flag() {
     // `--no-motion` renders the word plain, at every tick.
     let inputs = MotionInputs {
-        no_motion_flag: true,
-        ..MotionInputs::animating()
+        tui_motion: false,
+        ..animating()
     };
     assert_still_and_plain(&inputs);
 }
@@ -94,27 +102,7 @@ fn motion_off_when_stdout_not_a_terminal() {
     // A non-terminal stdout renders the word plain, at every tick.
     let inputs = MotionInputs {
         stdout_is_terminal: false,
-        ..MotionInputs::animating()
-    };
-    assert_still_and_plain(&inputs);
-}
-
-#[test]
-fn motion_off_when_reduce_motion_setting() {
-    // `tui.reduce_motion = true` renders the word plain, at every tick.
-    let inputs = MotionInputs {
-        reduce_motion_setting: true,
-        ..MotionInputs::animating()
-    };
-    assert_still_and_plain(&inputs);
-}
-
-#[test]
-fn motion_off_when_reduce_motion_env() {
-    // `RHO_REDUCE_MOTION=1` renders the word plain, at every tick.
-    let inputs = MotionInputs {
-        reduce_motion_env: true,
-        ..MotionInputs::animating()
+        ..animating()
     };
     assert_still_and_plain(&inputs);
 }
@@ -123,7 +111,7 @@ fn motion_off_when_reduce_motion_env() {
 fn render_never_reads_a_clock() {
     // The frame is a pure function of state. With every input fixed, the frame
     // never varies, so no ambient clock feeds it. The only time source is the tick.
-    let inputs = MotionInputs::animating();
+    let inputs = animating();
     let once = sweep_frame(WORD, 4, &inputs);
     let twice = sweep_frame(WORD, 4, &inputs);
     assert_eq!(

@@ -138,9 +138,8 @@ rho --no-skills
 This stops the directory search.
 An explicit `--skill` still loads.
 
-> **Partly built.** `--no-skills` also stops subagent discovery, and it warns you about
-> neither. rho then registers no `spawn_agent` and skips agent discovery entirely. If you
-> want subagents without skills, no flag does that today. See [subagents](subagents.md).
+`--no-skills` stops the skill search only. It leaves subagents alone, and `--no-agents` stops
+those. See [subagents](subagents.md).
 
 ## Other files beside SKILL.md
 

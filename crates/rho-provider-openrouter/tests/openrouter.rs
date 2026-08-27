@@ -6,14 +6,16 @@
 mod common;
 
 use common::{
-    sse_midstream_error, sse_parallel_tool_calls, sse_text, sse_tool_call, sse_usage,
-    sse_usage_after_finish, sse_usage_with_cache_and_cost, stream_body,
+    CHAT_PATH, sample_request, sse_midstream_error, sse_parallel_tool_calls, sse_text,
+    sse_tool_call, sse_usage, sse_usage_after_finish, sse_usage_with_cache_and_cost, stream_body,
 };
 use futures::StreamExt;
-use rho_core::{StopReason, StreamEvent};
-use rho_provider_openrouter::{OpenRouterConfig, RetryPolicy, Secret};
+use rho_core::{CancelToken, Provider, StopReason, StreamEvent};
+use rho_provider_openrouter::{OpenRouterConfig, OpenRouterProvider, RetryPolicy, Secret};
 use std::time::Duration;
 use tokio::time::timeout;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Read every event, with a bounded wait per event.
 async fn drain(
@@ -436,4 +438,119 @@ fn every_level_maps_to_its_own_wire_value() {
             ),
         }
     }
+}
+
+// --- The HTTP client policy, from a security review ------------------------
+//
+// The bearer token must never leave the named host, and a loopback request must
+// never go through a proxy. `wire.rs` tests the pure `bypasses_proxy` predicate
+// beside the seam; these two tests drive the built client, so a revert of the
+// redirect policy or the `no_proxy` call is caught. See TODO items B1 and B3.
+
+/// A redirect must not be followed, so the bearer token never reaches a second origin.
+#[tokio::test]
+async fn a_redirect_is_not_followed_so_the_token_stays_on_the_named_host() {
+    // The origin the token must never reach.
+    let attacker = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(CHAT_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse_text(), "text/event-stream"))
+        .mount(&attacker)
+        .await;
+
+    // The named endpoint answers 307 to the attacker origin. A 307 preserves the
+    // POST method and body, so a followed hop would resend the whole request.
+    let named = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(CHAT_PATH))
+        .respond_with(
+            ResponseTemplate::new(307)
+                .append_header("location", format!("{}{CHAT_PATH}", attacker.uri())),
+        )
+        .mount(&named)
+        .await;
+
+    let config = OpenRouterConfig::new(Secret::new("sk-secret"))
+        .with_base_url(named.uri())
+        .with_retry(RetryPolicy::none());
+    let provider = OpenRouterProvider::new(config);
+    let result = provider.stream(sample_request(), CancelToken::new()).await;
+
+    assert!(
+        result.is_err(),
+        "a 3xx redirect must surface as an error, not a followed hop"
+    );
+    let hits = attacker.received_requests().await.unwrap_or_default();
+    assert!(
+        hits.is_empty(),
+        "the bearer token must never reach the redirect target; saw {} request(s)",
+        hits.len()
+    );
+}
+
+/// Serialises the proxy tests, because a proxy variable is process-global.
+static PROXY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A loopback request must bypass a proxy variable, so the token never reaches it.
+#[tokio::test]
+async fn a_loopback_request_bypasses_a_proxy_variable() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(CHAT_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse_text(), "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    // Build the client inside a synchronous critical section that owns the process-global
+    // proxy variables. `reqwest` reads the variables when the client is built, and the
+    // client build is synchronous, so the guard never crosses an `.await`. That keeps the
+    // proxy tests deterministic without holding a lock across a suspension point.
+    let provider = {
+        let _guard = PROXY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        // A dead proxy. If the client honoured it, the loopback request would route
+        // there and fail.
+        const PROXY_VARS: [&str; 3] = ["HTTP_PROXY", "http_proxy", "ALL_PROXY"];
+        let prior: Vec<(&str, Option<String>)> = PROXY_VARS
+            .iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect();
+        for key in PROXY_VARS {
+            // SAFETY: the guard serialises the proxy tests, and every other client this
+            // crate builds targets a loopback host and so calls `no_proxy`, which makes it
+            // immune to this variable. The variable is restored before the guard drops.
+            unsafe { std::env::set_var(key, "http://127.0.0.1:1") };
+        }
+
+        let config = OpenRouterConfig::new(Secret::new("sk-secret"))
+            .with_base_url(server.uri())
+            .with_retry(RetryPolicy::none());
+        let provider = OpenRouterProvider::new(config);
+
+        for (key, value) in prior {
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+        provider
+    };
+
+    let result = provider
+        .stream(sample_request(), CancelToken::new())
+        .await
+        .map(|_| ());
+    assert!(
+        result.is_ok(),
+        "a loopback request must bypass the proxy, got {:?}",
+        result.err()
+    );
+    let hits = server.received_requests().await.unwrap_or_default();
+    assert_eq!(
+        hits.len(),
+        1,
+        "the loopback server must receive the request directly"
+    );
 }

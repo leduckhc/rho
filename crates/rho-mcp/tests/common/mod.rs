@@ -23,7 +23,12 @@ pub const STUB: &str = env!("CARGO_BIN_EXE_rho_stub_mcp_server");
 pub fn test_limits() -> McpLimits {
     McpLimits {
         call_timeout_ms: 800,
-        connect_timeout_ms: 2000,
+        // A connect spawns a real stub process and completes a handshake. Two seconds was not
+        // enough under a loaded machine, and `a_live_connection_replaces_the_cached_entry` failed
+        // about one run in five during a full `cargo test --workspace`. No test asserts a connect
+        // timeout, so this bound only guards a hang. It matches the production default.
+        // `call_timeout_ms` stays short, because a call timeout is under test.
+        connect_timeout_ms: 10_000,
         max_line_bytes: 1_000_000,
         max_output_bytes: 1_000_000,
         max_schema_bytes: 100_000,
@@ -63,6 +68,59 @@ impl TransportFactory for FakeFactory {
             guard: Box::new(()),
         })
     }
+}
+
+/// A fake transport factory that lists exactly one tool. A test that must prove the writer's
+/// cache key equals the reader's key needs a non-empty tool list, because an absent entry
+/// and an entry with no tools both read back as an empty slice. See A7.
+pub struct OneToolFactory;
+
+#[async_trait]
+impl TransportFactory for OneToolFactory {
+    async fn open(
+        &self,
+        _config: &McpServerConfig,
+        _limits: &McpLimits,
+    ) -> Result<TransportPair, McpError> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        Ok(TransportPair {
+            reader: Box::new(FakeReader { rx }),
+            writer: Arc::new(OneToolWriter { tx }),
+            guard: Box::new(()),
+        })
+    }
+}
+
+struct OneToolWriter {
+    tx: mpsc::UnboundedSender<String>,
+}
+
+#[async_trait]
+impl TransportWriter for OneToolWriter {
+    async fn send_line(&self, line: &str) -> Result<(), McpError> {
+        let message: serde_json::Value = serde_json::from_str(line).unwrap();
+        let Some(id) = message.get("id").cloned() else {
+            return Ok(());
+        };
+        let result = match message["method"].as_str().unwrap_or("") {
+            "initialize" => serde_json::json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "serverInfo": { "name": "fake", "version": "0.1.0" }
+            }),
+            "tools/list" => serde_json::json!({ "tools": [{
+                "name": "probe_tool",
+                "description": "a probe tool",
+                "inputSchema": { "type": "object" }
+            }] }),
+            _ => serde_json::json!({ "content": [], "isError": false }),
+        };
+        let response = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+        let _ = self.tx.send(response.to_string());
+        Ok(())
+    }
+
+    async fn close(&self) {}
 }
 
 struct FakeReader {
