@@ -173,7 +173,7 @@ after `settled` is accepted. The conversation then carries both turns.
 === case errors result: PASS
 ```
 
-## 6. A dialog that times out with the default
+## 6. A dialog that times out, and the timeout denies
 
 `RHO_APPROVAL=ask` turns the approval gate on. Before this frontend, `ask` had no answer in
 any headless build, and rho refused to start with it.

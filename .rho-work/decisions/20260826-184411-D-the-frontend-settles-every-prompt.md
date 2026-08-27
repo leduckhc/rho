@@ -29,8 +29,17 @@ and the code cannot keep it.
 ## The decision
 
 `rho-jsonl` owns the pairing. It emits exactly one `Settled` for every accepted `Prompt`,
-whatever the event stream does. When the stream ends with no `AgentEnd`, `rho-jsonl` writes
-a `Fault` event and then `Settled`.
+whatever the event stream does.
+
+**The trigger is the error, not the end of the stream.** When `rho-jsonl` reads an `Err`, it
+writes a `Fault` and then `Settled`, and it stops reading that run. Waiting for the stream to
+close instead would hang, because the same early return that skips `AgentEnd` also skips
+`queue.unobserve()`, so a live sender clone holds the channel open for ever. See
+`D-an-error-on-the-event-stream-ends-the-run`, which was written after this one and records
+the hang.
+
+A stream that ends with no `AgentEnd` and no error is the remaining case. That one settles on
+closure, with `FaultKind::Incomplete`.
 
 `Settled` needs a reason for that case, and `AgentStopReason` has no variant for it. So
 `rho-jsonl` declares one local wire enum, `SettleReason`. It mirrors `AgentStopReason`

@@ -8,9 +8,10 @@ F-jsonl-abort, F-jsonl-session-commands, F-jsonl-dialog-sub-protocol.
 
 ## 0. What changed from the draft
 
-This spec was a draft, written before the crate existed. Executing it found nine
-places where the contract disagreed with `rho-core`. Each one is now a decision
-file, and the contract below is the corrected one.
+This spec was a draft, written before the crate existed. Executing it found eleven places
+where the contract disagreed with `rho-core`. Each one is now a decision file, and the
+contract below is the corrected one. The last two rows were found by the implementation and
+by a live run, and not by reading.
 
 | What the draft said | What the code proved | Decision |
 |---|---|---|
@@ -669,8 +670,13 @@ uses, so a config file reaches a JSONL session exactly as it reaches a headless 
 ## 10. Test cases
 
 Every test uses a scripted fake provider in `tests/support/mod.rs`. No test uses the
-network. No test uses `sleep`. The timeout tests use `tokio::time` pause and advance. Each
-session root is a `tempfile::TempDir`, so no test reads the real `~/.rho`.
+network. Each session root is a `tempfile::TempDir`, so no test reads the real `~/.rho`.
+
+The timeout tests use `tokio::time` pause and advance, with **one exception**.
+`a_client_that_answers_no_dialog_denies_the_tool_and_the_run_continues` waits on a real 50
+millisecond clock. That timeout lives inside a task the agent loop spawns, and
+`tokio::time::advance` cannot reach it from the test. The same rule is also pinned with no
+clock at all by `dialog_approval_denies_on_a_timeout`.
 
 The live transcripts are in `docs/verification/jsonl-frontend.md`.
 

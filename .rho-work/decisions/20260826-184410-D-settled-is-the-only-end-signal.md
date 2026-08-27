@@ -15,9 +15,13 @@ stream. `rho_provider_openrouter::OpenRouterConfig` and `rho_provider_azure::Azu
 each hold a `RetryPolicy`, and each provider retries inside its own `stream` call. The
 agent loop never sees a retry, so it emits no event for one.
 
-`rho_core::AgentEvent` has one end variant, `AgentEnd`. The loop emits it once per run.
-So `RunEnd` would always carry `will_retry: false`, and it would always sit one line before
-`Settled` with the same reason.
+`rho_core::AgentEvent` has one end variant, `AgentEnd`. The loop emits it once per run that
+reaches its end **normally**. A run that fails at the provider emits none at all, which is
+what `D-the-frontend-settles-every-prompt` is about.
+
+So for a normal run, `RunEnd` would always carry `will_retry: false` and would always sit one
+line before `Settled` with the same reason. For a failed run it would carry no reason worth
+having. Neither case earns a second event.
 
 ## The decision
 

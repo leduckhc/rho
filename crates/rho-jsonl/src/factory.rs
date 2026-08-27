@@ -64,11 +64,10 @@ pub enum FactoryError {
 /// edits no shared code and adds no enum variant.
 ///
 /// It has exactly one method. An earlier draft also had `providers`, so `get_state`
-/// could list the provider names a build has. It came out again: `rho-cli` cannot
-/// answer it without a second copy of its provider list, and a copied list is the
-/// drift this crate already refused once. See
-/// D-the-wire-reuses-the-core-stop-reason. A client discovers a provider by trying
-/// `set_model` and reading the named error, which is how it discovers a command too.
+/// could list the provider names a build has. It came out again, because `rho-cli` owns
+/// the only list of provider names and this crate must not keep a second copy of it. A
+/// client discovers a provider by trying `set_model` and reading the named error, which
+/// is how it discovers a command too.
 #[async_trait]
 pub trait SessionFactory: Send + Sync {
     /// Build a session for this provider and model.

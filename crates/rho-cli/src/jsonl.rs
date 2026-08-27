@@ -71,6 +71,8 @@ impl SessionFactory for CliFactory {
             for_build.approval = Some(rho_config::ApprovalMode::AllowAll);
         }
 
+        // Notices go to stderr below, beside the session's own. Collecting them and
+        // dropping them would hide a choice rho made on the user's behalf.
         let mut notices = Vec::new();
         let mut config = build_config_with_notices(&for_build, &mut notices).map_err(|error| {
             // A missing model for a provider with no default lands here, and it is a
@@ -95,7 +97,7 @@ impl SessionFactory for CliFactory {
 
         // Notices go to stderr. stdout carries the protocol, so a notice there would be
         // a line the client cannot parse.
-        for notice in &extras.notices {
+        for notice in notices.iter().chain(extras.notices.iter()) {
             eprintln!("rho: {notice}");
         }
         *self.held.lock().await = Some(Held { tasks, extras });
@@ -134,9 +136,15 @@ fn classify_build(provider_name: &str, error: anyhow::Error) -> FactoryError {
 }
 
 /// The first token that looks like an environment variable name.
+///
+/// It needs a letter as well as an underscore. Length and an underscore alone let a run
+/// such as `___12` through, and the reply then told the user to set a variable that does
+/// not exist.
 fn shouting_token(text: &str) -> Option<String> {
     text.split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
-        .find(|token| token.len() >= 5 && token.contains('_'))
+        .find(|token| {
+            token.len() >= 5 && token.contains('_') && token.chars().any(|c| c.is_ascii_uppercase())
+        })
         .map(str::to_string)
 }
 
