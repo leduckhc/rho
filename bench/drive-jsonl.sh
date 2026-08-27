@@ -121,7 +121,20 @@ case "$CASE" in
     # Let some text arrive, so the abort really lands mid-run.
     await '"type":"text_delta"' || rc=1
     send '{"type":"abort","req_id":"a1"}'
-    await '"stop_reason":"cancelled"' || rc=1
+    # Wait for the settled event itself, and only then check the reason.
+    #
+    # Matching '"stop_reason":"cancelled"' alone was fragile: turn_end carries a
+    # stop_reason field too, so the case could pass on a turn end and close stdin while
+    # the run was still draining. It happened to work only because turn_end spells the
+    # word with one l and settled spells it with two.
+    await '"type":"settled"' || rc=1
+    case "$LAST_LINE" in
+      *'"type":"settled"'*'"stop_reason":"cancelled"'*)
+        echo "    (settled as cancelled)" ;;
+      *)
+        echo "!!! the run settled, but not as cancelled: $LAST_LINE"
+        rc=1 ;;
+    esac
     ;;
 
   twice)

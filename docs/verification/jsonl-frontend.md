@@ -1,6 +1,9 @@
 # Verification: the JSONL frontend
 
-Step 11 of AGENTS.md. Every command and every line of output below is real. The client is
+Step 11 of AGENTS.md. Every command and every line of output below is real. Nothing is
+paraphrased. One filter is applied, and only one: the `rho:` skill notices that rho writes
+to stderr at startup are removed, because they repeat in every run and say nothing about the
+protocol. Where a section shows fewer lines than the run produced, it says so. The client is
 `bench/drive-jsonl.sh`, a plain shell script. It writes one JSON command per line to rho's
 stdin. It reads one line at a time from rho's stdout. It uses two named pipes, and no bash
 feature newer than version 3.2.
@@ -176,26 +179,64 @@ after `settled` is accepted. The conversation then carries both turns.
 any headless build, and rho refused to start with it.
 
 This client answers nothing at all. The agent side owns the timeout. After 30 seconds the
-dialog resolves as `cancelled`, which denies the tool. The run then continues and settles,
-and the model says in plain words that it could not write the file.
+dialog resolves as `cancelled`, which denies the tool. The run then continues and settles.
 
-The transcript below is one whole run, with the `rho:` skill notices on stderr removed. An
-earlier exploratory run of the same case asked about two tools, `write` and then `bash`,
-because the model tried a second route after the first denial. This run asked about one.
-How many tools a model tries is the model's choice, so the count is not a property this
-case can assert. The repeated-failure evidence is elsewhere: section 5 sends the same bad
-provider twice, section 4 sends the same prompt twice, and
+The transcript is one whole run. Only the `rho:` skill notices on stderr are removed, and
+nothing else is cut, so the prompt reply and the streamed answer are both here. This run
+asked about 2 tool(s) and reported 2 tool end(s). How many tools a model tries after a
+denial is the model's own choice, so the count is not a property this case asserts. The
+repeated-failure evidence is elsewhere: section 5 sends the same bad provider twice, section
+4 sends the same prompt twice, and
 `a_client_that_answers_no_dialog_denies_the_tool_and_the_run_continues` pins the behaviour
-without a model in the loop.
+with no model in the loop.
 
 ```text
 === case: dialog   provider: bedrock   model: global.anthropic.claude-haiku-4-5-20251001-v1:0
 === approval: ask
 === binary: ./target/release/rho
 --> {"type":"prompt","req_id":"p1","message":"Create a file called note.txt containing the word hello. Use your tools."}
+<-- {"req_id":"p1","command":"prompt","success":true}
+<-- {"type":"turn_start"}
+<-- {"type":"turn_end","stop_reason":"tool_use"}
 <-- {"type":"dialog","method":"confirm","id":"d0","title":"Allow the tool write?","message":"The agent wants to run write, which is a file edit operation.","timeout_ms":30000}
     (answering nothing on purpose: the agent-side timeout must decide)
-<-- {"type":"tool_end","id":"tooluse_TLriJlJzdpHd3wI6ByDRqx","ok":false}
+<-- {"type":"tool_end","id":"tooluse_BUL40vQniICFrp1IUgE23T","ok":false}
+<-- {"type":"turn_start"}
+<-- {"type":"text_delta","index":0,"delta":"I can't"}
+<-- {"type":"text_delta","index":0,"delta":" write"}
+<-- {"type":"text_delta","index":0,"delta":" files"}
+<-- {"type":"text_delta","index":0,"delta":" directly"}
+<-- {"type":"text_delta","index":0,"delta":" due"}
+<-- {"type":"text_delta","index":0,"delta":" to the current"}
+<-- {"type":"text_delta","index":0,"delta":" approval policy. However, I can show"}
+<-- {"type":"text_delta","index":0,"delta":" you how to create the file using the"}
+<-- {"type":"text_delta","index":0,"delta":" bash"}
+<-- {"type":"text_delta","index":0,"delta":" tool:"}
+<-- {"type":"turn_end","stop_reason":"tool_use"}
+<-- {"type":"dialog","method":"confirm","id":"d1","title":"Allow the tool bash?","message":"The agent wants to run bash, which is a command operation.","timeout_ms":30000}
+<-- {"type":"tool_end","id":"tooluse_GMCjACYKZD74FE4IUOMl5p","ok":false}
+<-- {"type":"turn_start"}
+<-- {"type":"text_delta","index":0,"delta":"The current"}
+<-- {"type":"text_delta","index":0,"delta":" approval policy prevents me from writing"}
+<-- {"type":"text_delta","index":0,"delta":" files or"}
+<-- {"type":"text_delta","index":0,"delta":" running"}
+<-- {"type":"text_delta","index":0,"delta":" bash"}
+<-- {"type":"text_delta","index":0,"delta":" commands. To"}
+<-- {"type":"text_delta","index":0,"delta":" create the file, you"}
+<-- {"type":"text_delta","index":0,"delta":"'ll"}
+<-- {"type":"text_delta","index":0,"delta":" need to either"}
+<-- {"type":"text_delta","index":0,"delta":":\n\n1."}
+<-- {"type":"text_delta","index":0,"delta":" Adjust"}
+<-- {"type":"text_delta","index":0,"delta":" the approval policy to allow the"}
+<-- {"type":"text_delta","index":0,"delta":" `"}
+<-- {"type":"text_delta","index":0,"delta":"write` or"}
+<-- {"type":"text_delta","index":0,"delta":" `bash"}
+<-- {"type":"text_delta","index":0,"delta":"` tools"}
+<-- {"type":"text_delta","index":0,"delta":"\n2. Create"}
+<-- {"type":"text_delta","index":0,"delta":" the file manually with"}
+<-- {"type":"text_delta","index":0,"delta":":"}
+<-- {"type":"text_delta","index":0,"delta":" `echo hello > note.txt`"}
+<-- {"type":"turn_end","stop_reason":"end_turn"}
 <-- {"type":"settled","stop_reason":"end_turn"}
 === rho exit code: 0
 === stderr:
@@ -204,19 +245,32 @@ without a model in the loop.
 
 ## 7. The same dialog, answered
 
-The client echoes the id rho minted. The tool then runs.
+The client reads the id rho minted and echoes it back. The tool then runs. This transcript
+is whole on the same terms as section 6.
 
 ```text
 === case: dialog-yes   provider: bedrock   model: global.anthropic.claude-haiku-4-5-20251001-v1:0
 === approval: ask
 === binary: ./target/release/rho
 --> {"type":"prompt","req_id":"p1","message":"Use the bash tool to run: echo approved"}
-<-- {"type":"dialog","method":"confirm","id":"d0","title":"Allow the tool bash?","message":"The agent wants to run bash, which is a command operation.","timeout_ms":30000}
---> {"type":"dialog_response","id":"d0","answer":{"confirmed":true}}
+<-- {"req_id":"p1","command":"prompt","success":true}
+<-- {"type":"turn_start"}
 <-- {"type":"turn_end","stop_reason":"tool_use"}
-<-- {"type":"tool_start","id":"tooluse_tDRpnaAEHRIIDaT5C5V5Q2","name":"bash","kind":"execute"}
-<-- {"type":"tool_update","id":"tooluse_tDRpnaAEHRIIDaT5C5V5Q2","output":"approved"}
-<-- {"type":"tool_end","id":"tooluse_tDRpnaAEHRIIDaT5C5V5Q2","ok":true}
+<-- {"type":"dialog","method":"confirm","id":"d0","title":"Allow the tool bash?","message":"The agent wants to run bash, which is a command operation.","timeout_ms":30000}
+    (dialog id: d0)
+--> {"type":"dialog_response","id":"d0","answer":{"confirmed":true}}
+<-- {"command":"dialog_response","success":true,"data":{"delivered":true}}
+<-- {"type":"tool_start","id":"tooluse_cSSkLeOTXmoCnTIlnHgQzF","name":"bash","kind":"execute"}
+<-- {"type":"tool_update","id":"tooluse_cSSkLeOTXmoCnTIlnHgQzF","output":"approved"}
+<-- {"type":"tool_end","id":"tooluse_cSSkLeOTXmoCnTIlnHgQzF","ok":true}
+<-- {"type":"turn_start"}
+<-- {"type":"text_delta","index":0,"delta":"Done"}
+<-- {"type":"text_delta","index":0,"delta":"."}
+<-- {"type":"text_delta","index":0,"delta":" Output"}
+<-- {"type":"text_delta","index":0,"delta":":"}
+<-- {"type":"text_delta","index":0,"delta":" `"}
+<-- {"type":"text_delta","index":0,"delta":"approved`"}
+<-- {"type":"turn_end","stop_reason":"end_turn"}
 <-- {"type":"settled","stop_reason":"end_turn"}
 === rho exit code: 0
 === stderr:

@@ -73,10 +73,7 @@ where
                         "unknown",
                         None,
                         ReplyError::LineTooLong,
-                        format!(
-                            "a command line passed the {} byte cap after {bytes} bytes",
-                            crate::frame::MAX_COMMAND_LINE_BYTES
-                        ),
+                        too_long_message(bytes),
                     ))
                     .await?;
                 }
@@ -88,18 +85,10 @@ where
             }
         };
 
-        let command = match serde_json::from_slice::<Command>(&bytes) {
+        let command = match parse_command(&bytes) {
             Ok(command) => command,
-            Err(error) => {
-                // An unknown `type` is its own case, so a client can probe for a
-                // command instead of guessing from a version number. Every other
-                // shape failure is a parse error.
-                let case = if error.to_string().starts_with("unknown variant") {
-                    ReplyError::UnknownCommand
-                } else {
-                    ReplyError::ParseError
-                };
-                out.reply(&Reply::err("unknown", None, case, error.to_string()))
+            Err((case, message)) => {
+                out.reply(&Reply::err("unknown", None, case, message))
                     .await?;
                 continue;
             }
@@ -297,7 +286,7 @@ where
                                 "unknown",
                                 None,
                                 ReplyError::LineTooLong,
-                                format!("a command line passed the cap after {bytes} bytes"),
+                                too_long_message(bytes),
                             ))
                             .await?;
                         }
@@ -326,17 +315,10 @@ async fn serve_during_run<W>(
 where
     W: AsyncWrite + Unpin + Send + Sync + 'static,
 {
-    let command = match serde_json::from_slice::<Command>(bytes) {
+    let command = match parse_command(bytes) {
         Ok(command) => command,
-        Err(error) => {
-            let case = if error.to_string().starts_with("unknown variant") {
-                ReplyError::UnknownCommand
-            } else {
-                ReplyError::ParseError
-            };
-            return out
-                .reply(&Reply::err("unknown", None, case, error.to_string()))
-                .await;
+        Err((case, message)) => {
+            return out.reply(&Reply::err("unknown", None, case, message)).await;
         }
     };
 
@@ -435,6 +417,35 @@ where
                 .await
         }
     }
+}
+
+/// Read one command line, or say which named case refused it.
+///
+/// Both read paths use this, so a client cannot get two different answers for the same
+/// bad line depending on whether a run was going.
+///
+/// An unknown `type` is its own case, so a client can probe for a command instead of
+/// guessing from a version number. Every other shape failure is a parse error.
+fn parse_command(bytes: &[u8]) -> Result<Command, (ReplyError, String)> {
+    serde_json::from_slice::<Command>(bytes).map_err(|error| {
+        let case = if error.to_string().starts_with("unknown variant") {
+            ReplyError::UnknownCommand
+        } else {
+            ReplyError::ParseError
+        };
+        (case, error.to_string())
+    })
+}
+
+/// The one message for a line that passed the byte cap.
+///
+/// Both read paths use this. The in-run path used to leave the cap out, so a client saw
+/// a different message for the same failure depending on timing.
+fn too_long_message(bytes: usize) -> String {
+    format!(
+        "a command line passed the {} byte cap after {bytes} bytes",
+        crate::frame::MAX_COMMAND_LINE_BYTES
+    )
 }
 
 /// The payload of a `get_state` reply.

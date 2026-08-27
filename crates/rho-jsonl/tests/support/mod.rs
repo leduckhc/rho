@@ -32,15 +32,12 @@ pub enum Turn {
 /// A provider that replays a script. Turn one uses script entry one, and so on.
 pub struct ScriptedProvider {
     turns: Mutex<std::collections::VecDeque<Turn>>,
-    /// How many turns the model was asked for. A test asserts it.
-    pub calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ScriptedProvider {
     pub fn new(turns: Vec<Turn>) -> Self {
         Self {
             turns: Mutex::new(turns.into()),
-            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 }
@@ -56,7 +53,6 @@ impl Provider for ScriptedProvider {
         _request: CompletionRequest,
         _cancel: CancelToken,
     ) -> Result<ProviderStream, ProviderError> {
-        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let turn = self
             .turns
             .lock()
@@ -175,8 +171,10 @@ pub struct ScriptedFactory {
     pub root: tempfile::TempDir,
     /// When set, every session uses an approval policy built from the asker.
     pub ask_for_approval: bool,
-    /// How many sessions the factory built. A test asserts it, because
-    /// `new_session` must build a fresh one.
+    /// How many sessions the factory built.
+    ///
+    /// `new_session_builds_a_fresh_session` asserts it. Without that assertion this
+    /// counter was a comment describing coverage that did not exist.
     pub builds: Arc<std::sync::atomic::AtomicUsize>,
     /// How many times the `touch` tool really ran. A denial must leave it at zero.
     pub tool_ran: Arc<std::sync::atomic::AtomicUsize>,

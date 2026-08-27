@@ -147,6 +147,17 @@ impl<W: AsyncWrite + Unpin + Send + Sync + 'static> Asker for DialogHost<W> {
                 .open
                 .lock()
                 .expect("the dialog map is poisoned");
+            // Refuse a duplicate id rather than overwrite the first sender.
+            //
+            // The id comes from the request, and a host builds its own requests, so two
+            // open dialogs can carry one id. An overwrite stranded the pair: the first
+            // `ask` resolved as cancelled, its guard then removed the entry by id, and
+            // that deleted the second dialog's sender. A `Select` with no timeout could
+            // then never resolve at all. `DialogApproval` mints its ids with
+            // `next_dialog_id`, so only a hand-built request reaches this.
+            if open.contains_key(&id) {
+                return DialogAnswer::Cancelled;
+            }
             open.insert(id.clone(), tx);
         }
 

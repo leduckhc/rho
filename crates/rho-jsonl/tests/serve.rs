@@ -1000,3 +1000,78 @@ async fn get_state_during_a_run_reports_the_model() {
     client.settled().await;
     client.finish().await;
 }
+
+#[tokio::test]
+async fn new_session_builds_a_fresh_session() {
+    // `new_session` must ask the factory for a new session, not clear the old one in
+    // place. The count is the only way to see the difference from outside.
+    let factory = ScriptedFactory::new(vec![Turn::Text("a".to_string())]);
+    let builds = Arc::clone(&factory.builds);
+    let mut client = Client::start(factory);
+    // One build for the first session.
+    client.send(r#"{"type":"get_state"}"#).await;
+    client.reply().await;
+    assert_eq!(builds.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    client.send(r#"{"type":"new_session","req_id":"n1"}"#).await;
+    let reply = client.reply().await;
+    assert!(matches!(replies(&reply)[0], Reply::Ok(_)));
+    assert_eq!(
+        builds.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "new_session must build a second session"
+    );
+
+    // And a model switch builds another.
+    client
+        .send(r#"{"type":"set_model","provider":"other","model_id":"big"}"#)
+        .await;
+    client.reply().await;
+    assert_eq!(builds.load(std::sync::atomic::Ordering::SeqCst), 3);
+    client.finish().await;
+}
+
+#[tokio::test]
+async fn a_duplicate_dialog_id_does_not_strand_a_dialog() {
+    // `Asker::ask` is public, and a host builds its own requests, so two open dialogs can
+    // carry one id. Overwriting the first sender stranded the pair: the first ask resolved
+    // as cancelled, its guard removed the entry by id, and that deleted the second
+    // dialog's sender. A request with no timeout could then never resolve.
+    use rho_jsonl::{Asker, DialogAnswer, DialogHost, DialogRequest, Writer};
+
+    let sink = Sink(Arc::new(std::sync::Mutex::new(Vec::new())));
+    let host = DialogHost::new(Writer::new(sink));
+    let request = || DialogRequest::Input {
+        id: "same".to_string(),
+        title: "name".to_string(),
+        placeholder: None,
+        timeout_ms: None,
+    };
+
+    let first = tokio::spawn({
+        let host = host.clone();
+        async move { host.ask(request()).await }
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(host.open_count(), 1);
+
+    // The second ask reuses the id. It must be refused, not swap the sender out.
+    let second = host.ask(request()).await;
+    assert_eq!(
+        second,
+        DialogAnswer::Cancelled,
+        "a duplicate id must be refused, and refusing denies"
+    );
+    assert_eq!(
+        host.open_count(),
+        1,
+        "the first dialog is still the only one"
+    );
+
+    // The first dialog is still answerable, which is the whole point.
+    assert!(host.answer("same", DialogAnswer::Value("kept".to_string())));
+    assert_eq!(
+        first.await.expect("no panic"),
+        DialogAnswer::Value("kept".to_string())
+    );
+}

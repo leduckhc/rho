@@ -358,4 +358,20 @@ fn the_event_map_drops_only_what_the_spec_lists() {
         }),
         None
     );
+    assert_eq!(
+        map_event(&AgentEvent::AgentFinished {
+            id: agent,
+            report: rho_core::AgentReport {
+                agent: "scout".to_string(),
+                outcome: rho_core::AgentOutcome::Done,
+                summary: "done".to_string(),
+                usage: Default::default(),
+                turns: 1,
+                gate: Default::default(),
+                claims: Default::default(),
+                transcript: None,
+            },
+        }),
+        None
+    );
 }

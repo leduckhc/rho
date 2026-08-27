@@ -283,7 +283,7 @@ pub enum Event {
     },
     /// A streamed line of tool output. Maps from AgentEvent::ToolUpdate.
     ToolUpdate { id: String, output: String },
-    /// A tool call finished. `success` is the inverse of ToolOutput::is_error.
+    /// A tool call finished. `ok` is the inverse of ToolOutput::is_error.
     /// Maps from AgentEvent::ToolEnd.
     ///
     /// The field is `ok`, and not `success`. Only a reply may carry `success`, because
@@ -715,6 +715,7 @@ The live transcripts are in `docs/verification/jsonl-frontend.md`.
 | `every_public_reply_type_is_constructed_and_pinned` | Each public reply type is built by hand and its wire shape pinned. `True` and `False` each refuse the wrong literal. |
 | `every_reply_error_case_has_a_distinct_wire_value` | All nine error cases have distinct wire values, so no two collapse into one. |
 | `every_fault_kind_has_a_distinct_wire_value` | All four fault kinds have distinct wire values. |
+| `a_cancelled_false_answer_is_refused` | `{"cancelled":false}` is refused, so it cannot deny a tool the user never refused. |
 
 ### The event pump, in `tests/pump.rs`
 
@@ -743,6 +744,7 @@ The live transcripts are in `docs/verification/jsonl-frontend.md`.
 | `dialog_approval_denies_on_a_timeout` | A silent client never gets a tool approved. |
 | `the_approval_dialog_carries_no_tool_arguments` | A secret in a tool argument never reaches the dialog. |
 | `the_approval_dialog_always_carries_a_timeout` | The approval gate cannot hang, because its dialog always has a timeout. |
+| `a_dropped_ask_frees_its_dialog_slot` | A cancelled ask frees its map entry, so an aborting client cannot leak one per abort. |
 | `every_tool_kind_gets_a_plain_word` | Every tool kind reads as a word a human can understand. |
 
 ### The serve loop, in `tests/serve.rs`
@@ -779,3 +781,7 @@ The live transcripts are in `docs/verification/jsonl-frontend.md`.
 | `a_dialog_reaches_the_client_and_its_answer_runs_the_tool` | The whole dialog round trip over the wire, and the tool then runs. |
 | `a_denied_dialog_stops_the_tool` | An explicit no leaves the tool unrun. |
 | `a_client_that_answers_no_dialog_denies_the_tool_and_the_run_continues` | A client with no dialog support cannot hang rho, and gets no tool approved. |
+| `two_over_long_lines_get_two_replies` | Each over-long line gets its own reply, and one enormous line still gets one. |
+| `get_state_during_a_run_reports_the_model` | State during a run reports the provider and model, not only the running flag. |
+| `new_session_builds_a_fresh_session` | `new_session` and `set_model` each ask the factory for a new session. |
+| `a_duplicate_dialog_id_does_not_strand_a_dialog` | A repeated dialog id is refused, so it cannot delete another dialog's answer channel. |

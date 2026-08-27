@@ -115,8 +115,14 @@ impl SessionFactory for CliFactory {
 /// branch here ever reads a credential value.
 fn classify_build(provider_name: &str, error: anyhow::Error) -> FactoryError {
     let text = error.to_string();
-    let looks_like_a_credential =
-        text.contains("credential") || text.contains("key") || text.contains("Set ");
+    // A bare `key` matched far too much: a tool schema failure, a config key error, or a
+    // model id holding the word all reported a missing credential, and the client then
+    // told the user to set something that was already set.
+    let lowered = text.to_ascii_lowercase();
+    let looks_like_a_credential = lowered.contains("credential")
+        || lowered.contains("api key")
+        || lowered.contains("api_key")
+        || text.contains("Set ");
     if looks_like_a_credential {
         eprintln!("rho: {text}");
         return FactoryError::MissingCredential {
