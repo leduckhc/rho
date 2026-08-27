@@ -537,3 +537,21 @@ fn every_fault_kind_has_a_distinct_wire_value() {
         );
     }
 }
+
+#[test]
+fn a_cancelled_false_answer_is_refused() {
+    // `{"cancelled":false}` means "I did not cancel". Reading it as a cancellation would
+    // deny a tool call the user never refused, so the one-value type refuses the literal
+    // and the client hears about its own mistake.
+    let error = serde_json::from_str::<DialogAnswer>(r#"{"cancelled":false}"#)
+        .expect_err("cancelled:false must not read as a cancellation");
+    assert!(
+        error.to_string().contains("literal true"),
+        "the message must say which literal was expected: {error}"
+    );
+    // The true form still works, and it is what a dismissal sends.
+    assert_eq!(
+        serde_json::from_str::<DialogAnswer>(r#"{"cancelled":true}"#).expect("true is valid"),
+        DialogAnswer::Cancelled
+    );
+}

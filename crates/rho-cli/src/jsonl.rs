@@ -106,15 +106,19 @@ impl SessionFactory for CliFactory {
 /// Turn a session-build failure into the named wire case.
 ///
 /// A missing credential is the common one. The provider's own message already names the
-/// variable to set, so this lifts that name out of it rather than keeping a second table
-/// of provider variables. It is a heuristic: it looks for one shouting token, such as
-/// `OPENROUTER_API_KEY`. When it finds none, the structured field says so and the message
-/// still carries the provider's own words. No branch here ever reads a credential value.
+/// variable to set, so this lifts that name out of it rather than keeping a second table of
+/// provider variables. It is a heuristic: it looks for one shouting token, such as
+/// `OPENROUTER_API_KEY`. When it finds none, the structured field says `unnamed`.
+///
+/// The provider's message goes to stderr before the reply, because `FactoryError`'s own
+/// display text replaces it and a dropped diagnostic is the hardest kind to debug. No
+/// branch here ever reads a credential value.
 fn classify_build(provider_name: &str, error: anyhow::Error) -> FactoryError {
     let text = error.to_string();
     let looks_like_a_credential =
         text.contains("credential") || text.contains("key") || text.contains("Set ");
     if looks_like_a_credential {
+        eprintln!("rho: {text}");
         return FactoryError::MissingCredential {
             provider: provider_name.to_string(),
             variable: shouting_token(&text).unwrap_or_else(|| "unnamed".to_string()),
@@ -150,11 +154,25 @@ pub async fn run_jsonl(cli: &Cli) -> i32 {
             return 1;
         }
     };
-    let model = loaded
+    // Refuse an unresolved model. `unwrap_or_default` here sent an empty model id to the
+    // provider, which then failed with a message about the request rather than about the
+    // missing setting. `rho run` refuses this case, and so must this frontend. Azure has
+    // no default model, so it is the common way to reach this.
+    let model = match loaded
         .model
         .clone()
         .or_else(|| provider::default_model(&provider_name).map(str::to_string))
-        .unwrap_or_default();
+    {
+        Some(model) => model,
+        None => {
+            eprintln!(
+                "rho: no model was chosen, and {provider_name} has no default. \
+                 Set --model or the RHO_MODEL variable. For azure, the value is your \
+                 deployment name."
+            );
+            return 1;
+        }
+    };
 
     let factory: Arc<dyn SessionFactory> = Arc::new(CliFactory {
         cli: cli.clone(),

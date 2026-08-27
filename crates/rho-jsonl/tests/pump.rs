@@ -304,7 +304,8 @@ fn the_event_map_drops_only_what_the_spec_lists() {
         Some(Event::MessageDelivered { count: 5 })
     );
 
-    // Dropped on purpose, and each one is named in the spec's out-of-scope list.
+    // Dropped on purpose. Each one is named in the spec's out-of-scope list, and the
+    // test name promises the list is complete, so every one of them is asserted.
     assert_eq!(
         map_event(&AgentEvent::Stream(StreamEvent::ThinkingDelta {
             index: 0,
@@ -314,6 +315,47 @@ fn the_event_map_drops_only_what_the_spec_lists() {
     );
     assert_eq!(
         map_event(&AgentEvent::Stream(StreamEvent::Usage(Default::default()))),
+        None
+    );
+    let task = rho_core::TaskId("t1".to_string());
+    assert_eq!(
+        map_event(&AgentEvent::TaskStart {
+            id: task.clone(),
+            command: "sleep 1".to_string(),
+            reason: rho_core::BackgroundReason::ModelRequested,
+        }),
+        None
+    );
+    assert_eq!(
+        map_event(&AgentEvent::TaskProgressed {
+            id: task.clone(),
+            progress: rho_core::TaskProgress::default(),
+        }),
+        None
+    );
+    assert_eq!(
+        map_event(&AgentEvent::TaskEnd {
+            id: task,
+            state: rho_core::TaskState::Exited { code: 0 },
+            output_tail: String::new(),
+        }),
+        None
+    );
+    let agent = rho_core::AgentId(1);
+    assert_eq!(
+        map_event(&AgentEvent::AgentSpawned {
+            id: agent,
+            agent: "scout".to_string(),
+            depth: 1,
+        }),
+        None
+    );
+    assert_eq!(
+        map_event(&AgentEvent::AgentProgressed {
+            id: agent,
+            turns: 2,
+            usage: Default::default(),
+        }),
         None
     );
 }

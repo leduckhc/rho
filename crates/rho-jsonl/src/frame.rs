@@ -37,9 +37,13 @@ pub enum Line {
     ///
     /// One enormous line yields this more than once, once per cap-sized run. That is
     /// deliberate. `next_line` must always return, because a peer that opens the pipe
-    /// and never writes a newline would otherwise hang the reader for ever. A caller
-    /// that replies to the client collapses a run of these into one reply.
-    TooLong { bytes: usize },
+    /// and never writes a newline would otherwise hang the reader for ever.
+    ///
+    /// `terminated` says whether this refusal ended on a newline. A caller replies once
+    /// per command line, so it collapses a run of unterminated refusals into one reply
+    /// and starts a fresh one after each newline. Without this flag, two over-long lines
+    /// in a row produced one reply, and the protocol promises one reply per line.
+    TooLong { bytes: usize, terminated: bool },
 }
 
 /// A reader that yields one JSONL record at a time, with a byte cap per line.
@@ -97,8 +101,21 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
             // returns instead of looping.
             match self.skip_to_newline().await? {
                 Skip::Eof => return Ok(None),
-                Skip::StillTooLong { bytes } => return Ok(Some(Line::TooLong { bytes })),
-                Skip::Found => self.discarding = false,
+                Skip::StillTooLong { bytes } => {
+                    return Ok(Some(Line::TooLong {
+                        bytes,
+                        terminated: false,
+                    }));
+                }
+                Skip::Found { bytes } => {
+                    self.discarding = false;
+                    // The newline that ended the refused line has been eaten. Report it,
+                    // so the caller can close that line off and reply fresh for the next.
+                    return Ok(Some(Line::TooLong {
+                        bytes,
+                        terminated: true,
+                    }));
+                }
             }
         }
 
@@ -127,7 +144,10 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
                         let bytes = self.consumed;
                         self.partial = Vec::new();
                         self.consumed = 0;
-                        return Ok(Some(Line::TooLong { bytes }));
+                        return Ok(Some(Line::TooLong {
+                            bytes,
+                            terminated: true,
+                        }));
                     }
                     self.partial.extend_from_slice(&line);
                     return Ok(Some(Line::Record(self.take_partial())));
@@ -145,7 +165,10 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
                         let bytes = self.consumed;
                         self.partial = Vec::new();
                         self.consumed = 0;
-                        return Ok(Some(Line::TooLong { bytes }));
+                        return Ok(Some(Line::TooLong {
+                            bytes,
+                            terminated: false,
+                        }));
                     }
                 }
             }
@@ -169,7 +192,9 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
             match available.iter().position(|byte| *byte == b'\n') {
                 Some(at) => {
                     self.inner.consume(at + 1);
-                    return Ok(Skip::Found);
+                    return Ok(Skip::Found {
+                        bytes: skipped + at + 1,
+                    });
                 }
                 None => {
                     let taken = available.len();
@@ -187,7 +212,7 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
 /// The outcome of throwing away the tail of an over-long line.
 enum Skip {
     /// The newline arrived. The next record starts after it.
-    Found,
+    Found { bytes: usize },
     /// One cap of bytes went by with no newline.
     StillTooLong { bytes: usize },
     /// The input ended inside the over-long line.

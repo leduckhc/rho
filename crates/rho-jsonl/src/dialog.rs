@@ -50,6 +50,26 @@ struct Pending {
     next: AtomicU64,
 }
 
+/// Frees one open dialog slot on every exit path, including a dropped future.
+///
+/// The explicit cleanup on the timeout path was not enough. A run can be aborted while a
+/// dialog is open, and then the whole `ask` future is dropped between the insert and the
+/// answer. Without this guard that slot stayed in the map for the life of the process, so
+/// a client that aborted often leaked one entry per abort.
+struct Slot {
+    pending: Arc<Pending>,
+    id: String,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        // A poisoned lock must not panic inside a drop, so this ignores that case.
+        if let Ok(mut open) = self.pending.open.lock() {
+            open.remove(&self.id);
+        }
+    }
+}
+
 /// The client-facing side of the dialog sub-protocol.
 pub struct DialogHost<W> {
     pending: Arc<Pending>,
@@ -130,10 +150,15 @@ impl<W: AsyncWrite + Unpin + Send + Sync + 'static> Asker for DialogHost<W> {
             open.insert(id.clone(), tx);
         }
 
+        // From here on every return, and every drop of this future, frees the slot.
+        let _slot = Slot {
+            pending: Arc::clone(&self.pending),
+            id,
+        };
+
         if self.out.event(&Event::Dialog(request)).await.is_err() {
             // The client is gone. Fail closed rather than wait for an answer that
             // cannot arrive.
-            self.forget(&id);
             return DialogAnswer::Cancelled;
         }
 
@@ -141,21 +166,15 @@ impl<W: AsyncWrite + Unpin + Send + Sync + 'static> Asker for DialogHost<W> {
             Some(ms) => {
                 match tokio::time::timeout(std::time::Duration::from_millis(ms), rx).await {
                     Ok(Ok(answer)) => answer,
-                    // The timeout expired, or the sender was dropped. Both resolve as
-                    // a denial. Drop the slot, so a late answer finds no dialog and
-                    // the map does not grow.
-                    _ => {
-                        self.forget(&id);
-                        DialogAnswer::Cancelled
-                    }
+                    // The timeout expired, or the sender was dropped. Both resolve as a
+                    // denial, and the guard frees the slot so a late answer finds no
+                    // dialog and the map cannot grow.
+                    _ => DialogAnswer::Cancelled,
                 }
             }
             None => match rx.await {
                 Ok(answer) => answer,
-                Err(_) => {
-                    self.forget(&id);
-                    DialogAnswer::Cancelled
-                }
+                Err(_) => DialogAnswer::Cancelled,
             },
         }
     }
@@ -171,18 +190,6 @@ impl<W: AsyncWrite + Unpin + Send + Sync + 'static> Asker for DialogHost<W> {
     fn next_dialog_id(&self) -> String {
         let n = self.pending.next.fetch_add(1, Ordering::Relaxed);
         format!("d{n}")
-    }
-}
-
-impl<W> DialogHost<W> {
-    /// Drop an open dialog slot. It runs after a timeout, so the map cannot grow.
-    fn forget(&self, id: &str) {
-        let mut open = self
-            .pending
-            .open
-            .lock()
-            .expect("the dialog map is poisoned");
-        open.remove(id);
     }
 }
 

@@ -175,9 +175,18 @@ after `settled` is accepted. The conversation then carries both turns.
 `RHO_APPROVAL=ask` turns the approval gate on. Before this frontend, `ask` had no answer in
 any headless build, and rho refused to start with it.
 
-This client answers nothing at all. The agent side owns the timeout. After 30 seconds each
-dialog resolves as `cancelled`, which denies the tool. The run then continues and settles.
-Two tools were asked about, so this is also the same thing happening twice.
+This client answers nothing at all. The agent side owns the timeout. After 30 seconds the
+dialog resolves as `cancelled`, which denies the tool. The run then continues and settles,
+and the model says in plain words that it could not write the file.
+
+The transcript below is one whole run, with the `rho:` skill notices on stderr removed. An
+earlier exploratory run of the same case asked about two tools, `write` and then `bash`,
+because the model tried a second route after the first denial. This run asked about one.
+How many tools a model tries is the model's choice, so the count is not a property this
+case can assert. The repeated-failure evidence is elsewhere: section 5 sends the same bad
+provider twice, section 4 sends the same prompt twice, and
+`a_client_that_answers_no_dialog_denies_the_tool_and_the_run_continues` pins the behaviour
+without a model in the loop.
 
 ```text
 === case: dialog   provider: bedrock   model: global.anthropic.claude-haiku-4-5-20251001-v1:0

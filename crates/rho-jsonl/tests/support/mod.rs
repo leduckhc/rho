@@ -67,8 +67,7 @@ impl Provider for ScriptedProvider {
             .unwrap_or(Turn::Text("done".to_string()));
 
         match turn {
-            Turn::Fail(message) => Err(ProviderError::Server { status: 503 })
-                .map_err(|_: ProviderError| ProviderError::Transport(message)),
+            Turn::Fail(message) => Err(ProviderError::Transport(message)),
             Turn::NoDone => Ok(Box::pin(stream::iter(vec![
                 Ok(StreamEvent::MessageStart {
                     role: Role::Assistant,

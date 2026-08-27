@@ -42,7 +42,7 @@ where
         Err(error) => {
             // The first session could not be built, so there is nothing to serve.
             // Say why on the stream, then stop. A silent exit would look like a crash.
-            let (case, _) = classify(&error);
+            let case = classify(&error);
             out.reply(&Reply::err("start", None, case, error.to_string()))
                 .await?;
             return Ok(());
@@ -67,9 +67,8 @@ where
                 refused_line = false;
                 bytes
             }
-            Line::TooLong { bytes } => {
+            Line::TooLong { bytes, terminated } => {
                 if !refused_line {
-                    refused_line = true;
                     out.reply(&Reply::err(
                         "unknown",
                         None,
@@ -81,6 +80,10 @@ where
                     ))
                     .await?;
                 }
+                // One reply per command line. A newline closes this line off, so the next
+                // over-long line gets its own reply. An unterminated run stays collapsed,
+                // because it is still one line.
+                refused_line = !terminated;
                 continue;
             }
         };
@@ -112,7 +115,16 @@ where
                     session.prompt(vec![ContentBlock::Text { text: message }], cancel.clone());
                 // Reply before any event of this run, so a client can correlate.
                 out.reply(&Reply::ok(name, req_id)).await?;
-                drain_run(&mut reader, &out, &dialogs, &session, events, cancel).await?;
+                drain_run(
+                    &mut reader,
+                    &out,
+                    &dialogs,
+                    &session,
+                    &current,
+                    events,
+                    cancel,
+                )
+                .await?;
             }
             Command::Steer { message, .. } => {
                 match session.steer(vec![ContentBlock::Text { text: message }]) {
@@ -170,7 +182,7 @@ where
                     }
                     Err(error) => {
                         // The old session is untouched, so the client can carry on.
-                        let (case, _) = classify(&error);
+                        let case = classify(&error);
                         out.reply(&Reply::err(name, req_id, case, error.to_string()))
                             .await?;
                     }
@@ -182,7 +194,7 @@ where
                     out.reply(&Reply::ok(name, req_id)).await?;
                 }
                 Err(error) => {
-                    let (case, _) = classify(&error);
+                    let case = classify(&error);
                     out.reply(&Reply::err(name, req_id, case, error.to_string()))
                         .await?;
                 }
@@ -242,6 +254,7 @@ async fn drain_run<R, W>(
     out: &Writer<W>,
     dialogs: &DialogHost<W>,
     session: &Session,
+    current: &SessionRequest,
     events: rho_core::AgentEvents,
     cancel: CancelToken,
 ) -> std::io::Result<()>
@@ -250,6 +263,9 @@ where
     W: AsyncWrite + Unpin + Send + Sync + 'static,
 {
     let mut events = events;
+    // True once an over-long line was refused during this run, so one line yields one
+    // reply here too.
+    let mut refused_during_run = false;
     // The pump owns the one-`Settled` promise, so it runs as a future here and the
     // loop below only feeds it commands.
     let pump = pump_run(&mut events, out);
@@ -272,17 +288,25 @@ where
                         (&mut pump).await?;
                         return Ok(());
                     }
-                    Some(Line::TooLong { bytes }) => {
-                        out.reply(&Reply::err(
-                            "unknown",
-                            None,
-                            ReplyError::LineTooLong,
-                            format!("a command line passed the cap after {bytes} bytes"),
-                        ))
-                        .await?;
+                    Some(Line::TooLong { bytes, terminated }) => {
+                        // A run is going, so this path sees far fewer lines. It replies
+                        // for the first refusal of each line, on the same rule as the
+                        // main loop.
+                        if !refused_during_run {
+                            out.reply(&Reply::err(
+                                "unknown",
+                                None,
+                                ReplyError::LineTooLong,
+                                format!("a command line passed the cap after {bytes} bytes"),
+                            ))
+                            .await?;
+                        }
+                        refused_during_run = !terminated;
                     }
                     Some(Line::Record(bytes)) => {
-                        serve_during_run(&bytes, out, dialogs, session, &cancel).await?;
+                        refused_during_run = false;
+                        serve_during_run(&bytes, out, dialogs, session, current, &cancel)
+                            .await?;
                     }
                 }
             }
@@ -296,6 +320,7 @@ async fn serve_during_run<W>(
     out: &Writer<W>,
     dialogs: &DialogHost<W>,
     session: &Session,
+    current: &SessionRequest,
     cancel: &CancelToken,
 ) -> std::io::Result<()>
 where
@@ -403,12 +428,11 @@ where
             .await
         }
         Command::GetState { .. } => {
-            out.reply(&Reply::ok_with(
-                name,
-                req_id,
-                serde_json::json!({ "running": true }),
-            ))
-            .await
+            // The same fields as the idle path, with `running` true. Reporting only the
+            // flag here made a client that polls during a run lose the model it is
+            // talking to.
+            out.reply(&Reply::ok_with(name, req_id, state(current, true)))
+                .await
         }
     }
 }
@@ -426,13 +450,11 @@ fn state(current: &SessionRequest, running: bool) -> serde_json::Value {
 ///
 /// The match has no wildcard arm, so a new `FactoryError` variant is a compile error
 /// rather than a silent `internal`.
-fn classify(error: &FactoryError) -> (ReplyError, &'static str) {
+fn classify(error: &FactoryError) -> ReplyError {
     match error {
-        FactoryError::UnknownProvider { .. } => (ReplyError::UnknownProvider, "unknown provider"),
-        FactoryError::MissingCredential { .. } => {
-            (ReplyError::MissingCredential, "missing credential")
-        }
-        FactoryError::RefusedModel { .. } => (ReplyError::InvalidArgument, "refused model"),
-        FactoryError::Internal(_) => (ReplyError::Internal, "internal"),
+        FactoryError::UnknownProvider { .. } => ReplyError::UnknownProvider,
+        FactoryError::MissingCredential { .. } => ReplyError::MissingCredential,
+        FactoryError::RefusedModel { .. } => ReplyError::InvalidArgument,
+        FactoryError::Internal(_) => ReplyError::Internal,
     }
 }

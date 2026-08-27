@@ -13,8 +13,12 @@
 #   steer    a prompt, a steer during the run, then wait for the delivery and settled
 #   abort    a prompt, an abort, then check the run settles as cancelled
 #   dialog   a prompt that needs tool approval, answered by nobody, so the timeout decides
+#   dialog-yes  the same approval gate, answered yes, so the tool really runs
 #   errors   an unknown command, a malformed line, and an unknown provider
 #   twice    the same prompt twice down one session
+#
+# AWAIT_TIMEOUT bounds one read, in seconds. It defaults to 120, which clears a slow
+# model and an approval dialog's own 30 second timeout.
 set -uo pipefail
 
 CASE="${1:?a case name}"
@@ -48,15 +52,19 @@ send() {
   echo "--> $1"
 }
 
-# Read lines until one contains the pattern. The budget is a line count, not a clock:
-# a hang then shows up as a missing line rather than as a pass.
+# Read lines until one contains the pattern.
+#
+# Two bounds, because they catch different failures. The line budget catches a flood of
+# the wrong lines. The read timeout catches silence: without it a hung rho blocked this
+# script for ever, the budget never counted down, and the outer harness had to kill it.
+# A hang must fail loudly, not look like a slow pass.
 await() {
   pattern="$1"; budget="${2:-500}"
   LAST_LINE=""
   while [ "$budget" -gt 0 ]; do
     budget=$((budget - 1))
-    if ! IFS= read -r line <&4; then
-      echo "!!! rho closed stdout while waiting for: $pattern"
+    if ! IFS= read -r -t "${AWAIT_TIMEOUT:-120}" line <&4; then
+      echo "!!! rho wrote nothing for ${AWAIT_TIMEOUT:-120}s, or closed stdout, while waiting for: $pattern"
       return 1
     fi
     # Trim a very long delta so the transcript stays readable.

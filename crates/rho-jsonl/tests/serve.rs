@@ -947,3 +947,56 @@ async fn a_client_that_answers_no_dialog_denies_the_tool_and_the_run_continues()
     );
     client.finish().await;
 }
+
+#[tokio::test]
+async fn two_over_long_lines_get_two_replies() {
+    // The protocol promises one reply per command line. Collapsing a run of refusals is
+    // right for one unterminated line, but two whole over-long lines are two lines, and
+    // each needs its own reply. Before this, the second was silently unanswered.
+    let long = "x".repeat(rho_jsonl::MAX_COMMAND_LINE_BYTES + 512);
+    let script = format!("{long}\n{long}\n{{\"type\":\"get_state\"}}\n");
+    let out = drive(ScriptedFactory::new(vec![]), &script).await;
+    let replies = replies(&out);
+    let refused = replies
+        .iter()
+        .filter(|reply| error_case(reply) == Some(ReplyError::LineTooLong))
+        .count();
+    assert_eq!(
+        refused, 2,
+        "each over-long line needs its own reply: {out:?}"
+    );
+    assert!(
+        matches!(replies.last(), Some(Reply::Ok(_))),
+        "the good command after them still works"
+    );
+}
+
+#[tokio::test]
+async fn get_state_during_a_run_reports_the_model() {
+    // A client that polls state while the agent works must not lose the model it is
+    // talking to. The in-run path used to report only the running flag.
+    let mut client = Client::start(ScriptedFactory::new(vec![
+        Turn::Text("a".to_string()),
+        Turn::Text("b".to_string()),
+    ]));
+    client
+        .send(r#"{"type":"prompt","req_id":"p1","message":"go"}"#)
+        .await;
+    client.send(r#"{"type":"get_state","req_id":"s1"}"#).await;
+    let seen = client
+        .read_until(|item| match item {
+            Out::Reply(reply) => matches!(reply, Reply::Ok(ok) if ok.command == "get_state"),
+            Out::Event(_) => false,
+        })
+        .await;
+    let state = replies(&seen)
+        .into_iter()
+        .find(|reply| matches!(reply, Reply::Ok(ok) if ok.command == "get_state"))
+        .expect("a get_state reply");
+    let payload = data(state);
+    assert_eq!(payload["running"], true, "a run is going");
+    assert_eq!(payload["provider"], "scripted");
+    assert_eq!(payload["model_id"], "scripted-model");
+    client.settled().await;
+    client.finish().await;
+}

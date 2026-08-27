@@ -22,7 +22,9 @@ async fn records(input: &str, cap: usize) -> Vec<Line> {
 fn text(line: &Line) -> String {
     match line {
         Line::Record(bytes) => String::from_utf8(bytes.clone()).expect("valid utf8"),
-        Line::TooLong { bytes } => panic!("expected a record, got TooLong after {bytes} bytes"),
+        Line::TooLong { bytes, .. } => {
+            panic!("expected a record, got TooLong after {bytes} bytes")
+        }
     }
 }
 
@@ -78,7 +80,8 @@ async fn an_over_long_line_is_refused_and_bounded() {
         "the line after the refused one must be a whole record"
     );
     match &lines[0] {
-        Line::TooLong { bytes } => {
+        Line::TooLong { bytes, terminated } => {
+            assert!(*terminated, "this line ended on a newline");
             // Assert the bytes read, not the bytes kept. A memory-cap test here once
             // passed against the very bug it was written for, because it measured
             // what was kept while the buffer still grew. See D-bash-line-cap.
@@ -149,10 +152,13 @@ async fn an_unterminated_line_cannot_grow_without_limit() {
         .expect("the reader must not fail")
         .expect("an endless stream is not end of file");
     match first {
-        Line::TooLong { bytes } => assert!(
-            bytes > cap && bytes <= cap + SLACK,
-            "the reader consumed {bytes} bytes for a {cap} byte cap"
-        ),
+        Line::TooLong { bytes, terminated } => {
+            assert!(!terminated, "an endless line never reaches a newline");
+            assert!(
+                bytes > cap && bytes <= cap + SLACK,
+                "the reader consumed {bytes} bytes for a {cap} byte cap"
+            );
+        }
         Line::Record(_) => panic!("an unterminated line must never arrive as a record"),
     }
 

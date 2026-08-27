@@ -470,8 +470,13 @@ struct WireAnswer {
     value: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     confirmed: Option<bool>,
+    /// It is `Option<True>` and not `Option<bool>`.
+    ///
+    /// `{"cancelled":false}` reads as "I did not cancel", and an `Option<bool>` would
+    /// have read it as a cancellation, which denies a tool call. The one-value type
+    /// refuses the literal instead, so the client hears about its own mistake.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    cancelled: Option<bool>,
+    cancelled: Option<True>,
 }
 
 impl From<DialogAnswer> for WireAnswer {
@@ -479,7 +484,7 @@ impl From<DialogAnswer> for WireAnswer {
         let (value, confirmed, cancelled) = match answer {
             DialogAnswer::Value(value) => (Some(value), None, None),
             DialogAnswer::Confirmed(confirmed) => (None, Some(confirmed), None),
-            DialogAnswer::Cancelled => (None, None, Some(true)),
+            DialogAnswer::Cancelled => (None, None, Some(True)),
         };
         Self {
             value,

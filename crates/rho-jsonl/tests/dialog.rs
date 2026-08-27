@@ -344,13 +344,51 @@ async fn every_tool_kind_gets_a_plain_word() {
         let request = last.lock().expect("lock").clone().expect("one request");
         match request {
             DialogRequest::Confirm { message, .. } => {
+                // Two independent checks. Joining them with `or` let either one pass
+                // for the other, so the empty-word case could slip through.
                 assert!(
-                    !message.contains("operation.") || !message.contains("a  "),
+                    !message.contains("a  "),
                     "{kind:?} produced an empty word: {message}"
+                );
+                assert!(
+                    message.contains("operation."),
+                    "{kind:?} lost the sentence shape: {message}"
                 );
                 assert!(message.len() > 30, "{kind:?} produced {message}");
             }
             other => panic!("the approval gate must use a confirm, got {other:?}"),
         }
     }
+}
+
+#[tokio::test]
+async fn a_dropped_ask_frees_its_dialog_slot() {
+    // A run can be aborted while a dialog is open, and the whole `ask` future is then
+    // dropped between the insert and the answer. The explicit cleanup on the timeout path
+    // did not cover that, so the slot stayed in the map for the life of the process and a
+    // client that aborted often leaked one entry per abort. A drop guard frees it.
+    let (host, _shared) = host();
+    {
+        let asking = host.ask(DialogRequest::Confirm {
+            id: "d-dropped".to_string(),
+            title: "sure?".to_string(),
+            message: "it deletes a file".to_string(),
+            timeout_ms: None,
+        });
+        let mut asking = Box::pin(asking);
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        // One poll registers the dialog and writes the event, then waits.
+        assert!(
+            std::future::Future::poll(asking.as_mut(), &mut cx).is_pending(),
+            "the ask must wait for an answer"
+        );
+        assert_eq!(host.open_count(), 1, "the dialog must be registered");
+        // Drop it, exactly as an aborted run does.
+    }
+    assert_eq!(
+        host.open_count(),
+        0,
+        "a dropped ask must free its slot, or the map grows for ever"
+    );
 }

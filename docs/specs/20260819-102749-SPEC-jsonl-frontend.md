@@ -285,7 +285,11 @@ pub enum Event {
     ToolUpdate { id: String, output: String },
     /// A tool call finished. `success` is the inverse of ToolOutput::is_error.
     /// Maps from AgentEvent::ToolEnd.
-    ToolEnd { id: String, success: bool },
+    ///
+    /// The field is `ok`, and not `success`. Only a reply may carry `success`, because
+    /// that is how a client tells a reply from an event. See
+    /// D-no-event-carries-the-success-key.
+    ToolEnd { id: String, ok: bool },
     /// A steered message was queued. `position` counts from one.
     /// Maps from AgentEvent::MessageQueued.
     MessageQueued { position: usize },
@@ -449,6 +453,10 @@ pub enum DialogRequest {
 /// refused. An untagged reader would take the first match in silence, and a
 /// dialog answer decides whether a tool runs. See
 /// D-a-dialog-answer-holds-exactly-one-value.
+///
+/// `cancelled` takes only the literal `true`. `{"cancelled":false}` means "I did not
+/// cancel", and reading that as a cancellation would deny a tool the user never
+/// refused. So the reader refuses the literal instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "WireAnswer", into = "WireAnswer")]
 pub enum DialogAnswer {

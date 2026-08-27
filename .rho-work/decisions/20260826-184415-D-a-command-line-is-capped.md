@@ -29,6 +29,14 @@ the mistake `D-bash-line-cap` records.
 An over-long line arrives as a reply with `success: false` and `error: "line_too_long"`. The
 reader then discards bytes up to the next `\n` and carries on. The session stays open.
 
+**The discard is bounded too, and every call returns.** A peer that sends no newline at all
+would otherwise move the hang from the buffer into the loop: memory stays flat while the
+reader spins for ever. So the reader reports `TooLong` once per cap-sized run, rather than
+waiting for a newline that may never arrive. Each report says whether it ended on a
+newline, so a caller sends one reply per command line and still collapses one enormous
+line into one reply. `an_unterminated_line_cannot_grow_without_limit` asserts both halves:
+each call returns, and the bytes read stay near the cap.
+
 The cap is a constant, not a config key. A config key that nothing reads is dead surface,
 and a cap a caller can raise is a cap a peer can escape. See `D-cap-at-one-choke-point`.
 
