@@ -528,6 +528,15 @@ fn name_warnings(name: &str) -> Vec<String> {
 }
 
 /// Every `.md` file directly inside `dir`, sorted for a stable order.
+///
+/// A regular file counts, and so does a **dangling symlink**: a link whose target does
+/// not exist. `is_file()` follows a link, so a dangling one used to be skipped here and
+/// reached nobody, while an unreadable regular file reached the user as a rejection. That
+/// silence is the defect this module exists to end, so the link goes through the loader
+/// and fails into `Unreadable` with its own path.
+///
+/// A link whose target **does** exist and is not a regular file stays out. A symlink to a
+/// fifo is the case that matters: opening one can block until a writer appears.
 fn markdown_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -535,12 +544,22 @@ fn markdown_files(dir: &Path) -> Vec<PathBuf> {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        if path.is_file() || is_dangling_symlink(&path) {
             files.push(path);
         }
     }
     files.sort();
     files
+}
+
+/// True when the path is a symlink and its target does not exist.
+fn is_dangling_symlink(path: &Path) -> bool {
+    path.symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_symlink())
+        && !path.exists()
 }
 
 /// The user home directory, read from the environment. It never reads the

@@ -197,8 +197,9 @@ A reader that ignores `rejected` loses the report. Two things stop that. `Result
 | `tools: [read, list]` | Two names. A YAML flow sequence. |
 | `tools:` then `  - read` | A YAML block sequence. |
 | `tools: all` or `tools: "*"` | Inherit the parent's whole set. |
-| `tools: none` | No tools. |
-| `tools: []` | No tools. An empty list. |
+| `tools: none` | No tools, stated on purpose. |
+| `tools: []` | No tools. An empty **list** is still a list. |
+| `tools:` with no value | Refused. See below. |
 | field absent | Inherit the parent's whole set. |
 
 The keyword rules of D-a-tool-keyword-stands-alone apply after the form is resolved, so a
@@ -207,8 +208,15 @@ sequence and a line behave the same.
 These reject with `BadToolsField`: an empty `tools:` line, a number, a boolean, a map, a
 sequence that holds a value which is not a string, and a nested sequence.
 
-An empty `tools:` line rejects on purpose. It looks like an absent field, and an absent field
-inherits every parent tool. So the safe reading of an empty line is no reading at all.
+**An empty line and an empty list are different, and the difference is deliberate.**
+
+`tools: []` is a list the author wrote, and an empty list has one plain reading: no tools.
+`docs/contracts-subagents.md` has said so since sprint 2. It narrows the child, so it cannot
+widen anything, and `an_empty_tool_list_means_no_tools_and_an_empty_line_does_not` pins it.
+
+`tools:` with nothing after it is not a list at all. It looks exactly like an absent field,
+and an absent field inherits **every** parent tool. So rho refuses it, because the only other
+reading widens the child. The same test pins that half.
 
 ### Which fault wins
 
@@ -331,6 +339,13 @@ What a line may hold, and how many, in `crates/rho-skills/tests/agents.rs`:
   count.
 - `a_valid_sandbox_value_narrows_the_child` — `sandbox: strict` reaches the definition. This
   change rewrote the invalid path, so the valid one needs a test.
+- `an_empty_tool_list_means_no_tools_and_an_empty_line_does_not` — the two empty forms, and
+  the reason they differ. `tools: []` is a list, so it means no tools. `tools:` with no value
+  is not a list, and it looks like an absent field, which inherits everything.
+- `a_dangling_symlink_is_reported_rather_than_skipped` — a link to a file that does not exist
+  becomes an `Unreadable` rejection, instead of vanishing before the loader sees it.
+- `a_symlink_to_something_that_is_not_a_regular_file_stays_out` — the other half of that rule,
+  so a link to a fifo cannot make discovery block.
 
 The notice, in `crates/rho-cli/src/subagents.rs`:
 
@@ -372,8 +387,10 @@ The notice, in `crates/rho-cli/src/subagents.rs`:
   parent's mode. A child can never widen past its parent, so this cannot escalate. The resume
   path fails closed to `strict` instead, and the two are inconsistent. That is a separate
   decision, and this change only makes the warning visible.
-- **A directory named `x.md`.** `markdown_files` keeps files only, so such a directory is
-  skipped and never reported.
+- **A directory named `x.md`.** `markdown_files` keeps a regular file, so such a directory is
+  skipped and never reported. A **symlink** to a directory, or to any other live thing that is
+  not a regular file, is skipped too. A symlink to a fifo is why: opening one can block until
+  a writer appears, and discovery runs before the session starts.
 
 ## 8. What the review changed
 
@@ -495,5 +512,26 @@ Recorded and not fixed here, each with its reason:
   assembles already live in `rho-skills`, so the move would be small. It waits for a second
   consumer, because no crate may depend on `rho-cli` and no other frontend renders this report
   yet. Moving it now would design an interface for one caller, and AGENTS.md prefers the
-  smaller interface. When the terminal interface renders these lines itself, `AgentSet` grows
-  one method and `notices_for` becomes its caller.
+  smaller interface.
+
+  **The trigger is named.** The pull request review accepted this deferral "while `rho-cli` is
+  the only frontend", and it named the JSONL frontend as the moment to act. So when
+  `SPEC-jsonl-frontend` lands, `AgentSet` grows `notice_lines()`, that method takes the
+  ordering and the caps, and `notices_for` becomes its caller.
+
+## 12. What the pull request review changed
+
+The review at `2829f4a` read every line, ran the gate, and broke the symlink guard on purpose
+to confirm its test catches it. Three findings came back, and two changed the code.
+
+1. **A dangling symlink vanished in silence** — the reviewer's own probe showed
+   `is_file=false` for a link whose target is gone, so `markdown_files` dropped it before the
+   loader saw it. An unreadable regular file reached the user, and this reached nobody, which
+   is the exact failure this spec exists to end. The filter now keeps a dangling link, and the
+   read fails into `Unreadable` with the link's path. A link to a live non-file still stays
+   out.
+2. **The two empty `tools` forms took opposite paths, and only one had a test.** `tools: []`
+   means no tools, and `tools:` with no value is refused. Both readings were right, and
+   section 4 read as one rule. It states two now, and one test pins both.
+3. **The `notices_for` deferral was confirmed rather than missed**, and the reviewer named the
+   trigger. Section 11 records it.

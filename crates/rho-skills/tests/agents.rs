@@ -885,3 +885,106 @@ async fn a_valid_sandbox_value_narrows_the_child() {
     );
     assert!(def.warnings.is_empty(), "{:?}", def.warnings);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dangling_symlink_is_reported_rather_than_skipped() {
+    // Found in review. `markdown_files` filtered on `is_file()`, which follows a link, so
+    // a link to a file that does not exist was skipped before the loader ever saw it. An
+    // unreadable regular file reaches the user, and this reached nobody. That is the exact
+    // silence this whole change ends.
+    let dir = tempfile::tempdir().unwrap();
+    let agents = dir.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    let link = agents.join("dangle.md");
+    std::os::unix::fs::symlink(agents.join("gone.md"), &link).unwrap();
+    write_agent(&agents, "scout.md", SCOUT);
+
+    let set = discover_agents(&AgentConfig {
+        user_dirs: vec![agents],
+        session_root: None,
+        project_trusted: false,
+        discover: true,
+    })
+    .await;
+
+    assert_eq!(set.loaded.len(), 1, "the good definition still loads");
+    assert_eq!(set.rejected.len(), 1, "the dangling link is reported");
+    assert_eq!(set.rejected[0].path, link, "the notice names the link");
+    assert!(
+        matches!(
+            set.rejected[0].reason,
+            rho_skills::RejectionReason::Unreadable { .. }
+        ),
+        "a link to nothing cannot be read: {:?}",
+        set.rejected[0].reason
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_to_something_that_is_not_a_regular_file_stays_out() {
+    // The other half of the dangling-link rule, and the reason it says "and its target does
+    // not exist". A link whose target exists but is not a regular file must stay out. The
+    // case that matters is a link to a fifo, because opening one can block until a writer
+    // appears, and discovery runs before the session starts. A directory stands in for it
+    // here, because a test cannot make a fifo without another dependency.
+    let dir = tempfile::tempdir().unwrap();
+    let agents = dir.path().join("agents");
+    std::fs::create_dir_all(agents.join("target.md")).unwrap();
+    std::os::unix::fs::symlink(agents.join("target.md"), agents.join("link.md")).unwrap();
+    write_agent(&agents, "scout.md", SCOUT);
+
+    let set = discover_agents(&AgentConfig {
+        user_dirs: vec![agents],
+        session_root: None,
+        project_trusted: false,
+        discover: true,
+    })
+    .await;
+
+    assert_eq!(set.loaded.len(), 1, "the good definition loads");
+    assert!(
+        set.rejected.is_empty(),
+        "a link to a live non-file is not a definition: {:?}",
+        set.rejected
+    );
+}
+
+#[tokio::test]
+async fn an_empty_tool_list_means_no_tools_and_an_empty_line_does_not() {
+    // Raised in review: the two empty forms take opposite paths, and only one was tested.
+    //
+    // `tools: []` is a list the author wrote, and an empty list has one plain reading: no
+    // tools. `docs/contracts-subagents.md` has said so since sprint 2. `tools:` with
+    // nothing after it is not a list at all, and it looks exactly like an absent field,
+    // which inherits **every** parent tool. So the two cannot share a rule.
+    let dir = tempfile::tempdir().unwrap();
+
+    let empty_list = write_agent(
+        dir.path(),
+        "empty-list.md",
+        "---\nname: quiet\ndescription: Thinks aloud.\ntools: []\n---\nbody\n",
+    );
+    let def = accept(&empty_list).await;
+    assert_eq!(
+        def.tools.as_deref(),
+        Some(&[][..]),
+        "an empty list is the same as `none`: no tools"
+    );
+    let intersection = def.resolve_tools(&["read".to_string()]);
+    assert!(intersection.allowed.is_empty(), "no tool reaches the child");
+
+    let empty_line = write_agent(
+        dir.path(),
+        "empty-line.md",
+        "---\nname: quiet\ndescription: Thinks aloud.\ntools:\n---\nbody\n",
+    );
+    assert!(
+        matches!(
+            reject(&empty_line).await.reason,
+            rho_skills::RejectionReason::BadToolsField { .. }
+        ),
+        "an empty line states nothing, and inheriting every tool is the fail-open reading"
+    );
+}
