@@ -135,7 +135,10 @@ fn classify(candidate: &Candidate, canonical_root: Option<&Path>) -> SkillOrigin
 ///
 /// Both sides are canonicalised, so a symlink resolves to its target and the
 /// macOS `/var` and `/private/var` pair compares equal.
-fn is_inside(path: &Path, canonical_root: Option<&Path>) -> bool {
+///
+/// The agent loader calls this too. One implementation, because the two loaders drifted
+/// apart once: the skill loader closed the symlink hole and the agent loader did not.
+pub(crate) fn is_inside(path: &Path, canonical_root: Option<&Path>) -> bool {
     let Some(root) = canonical_root else {
         return false;
     };

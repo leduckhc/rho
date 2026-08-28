@@ -137,6 +137,26 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "SECONDS")]
     pub child_timeout_secs: Option<u64>,
 
+    /// How long a child may wait for a slot before rho refuses it.
+    ///
+    /// It defaults to the child timeout, so a waiter gets one whole sibling run of
+    /// patience. `0` refuses any child that has to wait. There is no off switch, because
+    /// one blocking spawn used to hold a turn for about forty minutes. A very large value
+    /// comes close to one, and that choice belongs to the host.
+    #[arg(long, global = true, value_name = "SECONDS")]
+    pub queue_wait_secs: Option<u64>,
+
+    /// The largest steering message a subagent queue accepts, in bytes. Defaults to 16384.
+    ///
+    /// A message count is not a memory bound, because one message can be any size. A
+    /// model writes a steer to a child, and 160 child queues may exist at once.
+    ///
+    /// **Raising this raises the memory ceiling with it.** The ceiling is this value times
+    /// 32 messages, times `--max-queued-total` plus `--max-live-agents`. At the defaults
+    /// that is 80 MiB. rho does not clamp the value, because the host owns the machine.
+    #[arg(long, global = true, value_name = "BYTES")]
+    pub max_agent_steer_bytes: Option<usize>,
+
     /// How many children one parent may queue for a slot. Defaults to 16.
     ///
     /// Over the per-parent child cap, rho queues a child instead of refusing it. This
@@ -167,6 +187,27 @@ pub struct Cli {
     /// Do not search the skill directories. An explicit --skill still loads.
     #[arg(long, global = true, num_args = 0..=1, default_missing_value = "true")]
     pub no_skills: Option<bool>,
+    /// Do not search for agent definitions, so rho offers no subagent.
+    ///
+    /// It is separate from `--no-skills`. One flag used to stop both loaders, and it said
+    /// nothing about either. See decision D-skills-and-agents-are-two-switches.
+    #[arg(long, global = true, num_args = 0..=1, default_missing_value = "true")]
+    pub no_agents: Option<bool>,
+    /// Stop the animation that sweeps the working word.
+    ///
+    /// The footer still names the state in words, so nothing is lost but the movement.
+    ///
+    /// It is `Option<bool>` with `num_args = 0..=1`, the same shape as `--no-skills` and
+    /// `--no-agents`. A bare `bool` could not parse `--no-motion false`, and a global
+    /// `tui-motion = false` could then never be turned back on from the command line. See D9.
+    #[arg(long, global = true, num_args = 0..=1, default_missing_value = "true")]
+    pub no_motion: Option<bool>,
+    /// The provider endpoint. Use it for a local model host, such as Ollama or vLLM.
+    ///
+    /// It redirects the credential, so a project file and the environment need
+    /// `--trust-project` to set it. A remote plain-http url is refused.
+    #[arg(long, global = true, value_name = "URL")]
+    pub base_url: Option<String>,
 
     /// Read MCP servers from this file instead of ~/.rho/mcp.json.
     #[arg(long, global = true, value_name = "PATH")]
@@ -324,7 +365,26 @@ pub(crate) async fn build_session(
     mut config: SessionConfig,
 ) -> anyhow::Result<(Session, Arc<rho_core::TaskRegistry>, SessionExtras)> {
     let name = provider::resolve_provider_name(loaded.provider.as_deref(), None)?;
-    let provider = provider::build_provider(&name)?;
+    // Compute the wiring notices before building the provider, and surface them even when the
+    // build fails. A user whose untrusted `base-url` was dropped, and who has no credential,
+    // otherwise saw only the credential error and never learned the base-url was ignored. The
+    // notice is the security-relevant half, so it must not be lost to an unrelated failure.
+    // See D6.
+    let wiring_notices = wiring_notices(loaded, &name);
+    let provider = match provider::build_provider(&name, loaded.base_url.as_deref()) {
+        Ok(provider) => provider,
+        Err(error) => {
+            // Surface what rho already decided before the failure, so a user whose untrusted
+            // `base-url` was dropped, and who has no credential, learns it instead of seeing
+            // only the credential error. The notice is the security-relevant half, so it
+            // rides along with the fatal error rather than being lost. See D6.
+            let mut message = format!("{error}");
+            for notice in &wiring_notices {
+                message.push_str(&format!("\nrho: {notice}"));
+            }
+            return Err(anyhow::anyhow!(message));
+        }
+    };
     let tasks = Arc::new(rho_core::TaskRegistry::new(rho_core::TaskLimits::default()));
 
     // Skills and MCP are optional. A failure in either degrades one capability and
@@ -376,9 +436,17 @@ pub(crate) async fn build_session(
             .chain(extensions.mcp_tools.iter().map(Arc::clone))
             .collect();
     let (spawn_tools, subagents) = subagents::load(subagents::LoadRequest {
-        session_root: config.session_root.clone(),
-        trust_project: cli.trust_project,
-        discover: loaded.discover_skills,
+        agents: {
+            // The caller states where to look, so `subagents::load` reads no environment.
+            let mut agents =
+                rho_skills::AgentConfig::with_default_user_dirs(config.session_root.clone());
+            agents.project_trusted = cli.trust_project;
+            // An agent definition answers to its own switch. `--no-skills` stops the skill
+            // search only, because it used to remove `spawn_agent` in silence. See
+            // `D-skills-and-agents-are-two-switches`.
+            agents.discover = loaded.discover_agents;
+            agents
+        },
         parent_config: config.clone(),
         provider: Arc::clone(&provider),
         hooks: Arc::clone(&hooks),
@@ -405,9 +473,9 @@ pub(crate) async fn build_session(
         Session::with_config(config, provider, tools, hooks, context),
         tasks,
         SessionExtras {
-            notices: extensions
-                .notices
+            notices: wiring_notices
                 .into_iter()
+                .chain(extensions.notices)
                 .chain(subagents.notices)
                 .chain(result_notices)
                 .collect(),
@@ -578,19 +646,49 @@ async fn run_headless(cli: &Cli, prompt: String) -> i32 {
     for notice in &extras.notices {
         eprintln!("rho: {notice}");
     }
-    let _extras = extras;
 
     let cancel = CancelToken::new();
     let mut events = session.prompt(vec![ContentBlock::Text { text: prompt }], cancel);
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
-    print_run(
+    let code = print_run(
         &mut events,
         &mut stdout,
         &mut stderr,
         reasoning_is_shown(loaded.reasoning),
     )
-    .await
+    .await;
+
+    // Drain the MCP connect tasks before the process exits. A connect writes the schema cache
+    // on a detached task, and a fast `rho run` finished its turn and exited before that task
+    // ran, so the cache was never written and every run told the user the tools arrive next
+    // session, forever. The drain awaits the write, bounded so a stuck server cannot hang the
+    // exit. It runs before `extras` drops, because dropping the pool stops every server. See
+    // A1 and `docs/verification/mcp-live-probe.md`.
+    drain_mcp(&extras).await;
+    code
+}
+
+/// The bound on the MCP connect drain at shutdown.
+///
+/// A connect that has not finished within this window is left detached, and a lapsed timeout
+/// is not an error, so a slow or dead server never hangs the exit. See A1 and
+/// [`rho_mcp::McpPool::drain_connects`].
+const MCP_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Await the outstanding MCP connect tasks, then surface any cache notice.
+///
+/// A cache write happens on a background task, so a caller must await it before exit or the
+/// write races the process end. A write that still failed reaches the user here, because the
+/// handshake already returned and could not report it inline. See A1 and A6. The alternate
+/// screen is closed by the time this runs on the interactive path, so stderr is visible.
+async fn drain_mcp(extras: &SessionExtras) {
+    if let Some(pool) = &extras.mcp_pool {
+        pool.drain_connects(MCP_DRAIN_TIMEOUT).await;
+        for notice in pool.take_cache_notices() {
+            eprintln!("rho: {notice}");
+        }
+    }
 }
 
 /// Print one run onto two streams, and return the exit code.
@@ -745,6 +843,13 @@ fn flag_layer(cli: &Cli) -> rho_config::ConfigLayer {
         tui_reasoning: cli.reasoning.clone(),
         reasoning_effort: cli.reasoning_effort.clone(),
         no_skills: cli.no_skills,
+        no_agents: cli.no_agents,
+        // `--no-motion` is the negation of `tui-motion`, so it flips the value. An unpassed
+        // flag writes nothing, so a file still decides, per `SPEC-config-call-site` rule 6.
+        // `--no-motion=false` turns motion back on, so a global `tui-motion = false` can be
+        // overridden from the command line. See D9.
+        tui_motion: cli.no_motion.map(|off| !off),
+        base_url: cli.base_url.clone(),
         mcp_config: cli.mcp_config.clone(),
         // An empty `--skill` list is no request at all, so it writes nothing.
         skill_paths: if cli.skills.is_empty() {
@@ -756,16 +861,25 @@ fn flag_layer(cli: &Cli) -> rho_config::ConfigLayer {
     }
 }
 
-/// The root that locates the project file: `--root`, then `RHO_SESSION_ROOT`, then the
-/// working directory.
+/// The root that locates the project file: `--root`, then a **trusted** `RHO_SESSION_ROOT`,
+/// then the working directory.
 ///
 /// A `session-root` key inside a file sets the root for tools. It never moves the project
 /// file that was already read, because that would be circular.
+///
+/// `RHO_SESSION_ROOT` chooses which directory's `.rho/config.toml` rho reads, so it is a
+/// discovery input, not only a confinement input. An untrusted environment must not redirect
+/// discovery: a critic set it to a directory holding a hostile `config.toml`, and that file's
+/// `model` reached the provider while the trust notice claimed the key was ignored. The
+/// config crate already clears the confinement effect of an untrusted `session_root`; this
+/// closes the discovery half. So the variable moves the project file only with
+/// `--trust-project`. See D1 and `D-project-skill-needs-trust`.
 fn bootstrap_root(cli: &Cli, env: &[(String, String)]) -> anyhow::Result<PathBuf> {
     if let Some(path) = &cli.root {
         return Ok(path.clone());
     }
-    if let Some((_, value)) = env.iter().find(|(name, _)| name == "RHO_SESSION_ROOT")
+    if cli.trust_project
+        && let Some((_, value)) = env.iter().find(|(name, _)| name == "RHO_SESSION_ROOT")
         && !value.trim().is_empty()
     {
         return Ok(PathBuf::from(value));
@@ -866,7 +980,33 @@ fn load_config_from(
         } else {
             rho_config::ProjectTrust::Untrusted
         });
-    Ok(rho_config::Config::load(&sources)?)
+    rho_config::Config::load(&sources).map_err(explain_config_error)
+}
+
+/// Turn a config load failure into a user-facing error.
+///
+/// A base-url refusal carries a `BaseUrlRejection`, which separates a refusal that protects
+/// the credential (a user or password in the url, or plain http to a remote host) from one
+/// that corrects a typo (not a url, a query or fragment, an unknown scheme). rho-cli words
+/// the two apart: a safety block says rho blocked the value to protect the key, and a typo
+/// says the value is malformed. Without this, both read as one flat "is not valid" message
+/// and a user cannot tell a deliberate block from a mistake. This is the one production
+/// caller of `BaseUrlRejection::is_safety_block`; the config crate keeps the distinction, and
+/// the caller is where it reaches the user. See comment 2.
+fn explain_config_error(error: rho_config::ConfigError) -> anyhow::Error {
+    match error {
+        rho_config::ConfigError::BaseUrl { value, reason } if reason.is_safety_block() => {
+            anyhow::anyhow!(
+                "rho blocked the base-url value \"{value}\" to protect your credential: \
+                 {reason}. Unset base-url, or use an endpoint rho can trust."
+            )
+        }
+        rho_config::ConfigError::BaseUrl { value, reason } => anyhow::anyhow!(
+            "the base-url value \"{value}\" is malformed: {reason}. Fix it, or unset base-url \
+             to use the default endpoint."
+        ),
+        other => anyhow::Error::new(other),
+    }
 }
 
 /// Whether the TUI captures the mouse.
@@ -902,6 +1042,14 @@ async fn run_interactive(cli: &Cli) -> i32 {
     // `SPEC-config-call-site`.
     let mouse = loaded.tui_mouse;
     let reasoning = loaded.reasoning;
+    // A non-terminal stdout is the one condition the interface reads for itself. The flag,
+    // the config key, and `RHO_REDUCE_MOTION` all arrive through the merge as `tui_motion`,
+    // so there is one path and not two. A review found the second path was dead: production
+    // hard-coded its input to false and only a test ever set it.
+    let motion = rho_tui::motion_enabled(rho_tui::MotionInputs {
+        tui_motion: loaded.tui_motion,
+        stdout_is_terminal: std::io::IsTerminal::is_terminal(&std::io::stdout()),
+    });
     // Hold `_tasks` and `_extras` for the whole run. Dropping the task registry kills
     // every background task, and dropping the MCP pool stops every server, so an early
     // drop would end work the model is still waiting on.
@@ -914,7 +1062,6 @@ async fn run_interactive(cli: &Cli) -> i32 {
     // project skill stays unloaded until the user trusts it, which is a security notice.
     // See `D-a-notice-reaches-the-transcript`.
     notices.extend(extras.notices.iter().cloned());
-    let _extras = extras;
 
     // The banner names where this session runs. Without it the banner drew separators
     // around three empty fields, because nothing ever wrote them.
@@ -922,13 +1069,21 @@ async fn run_interactive(cli: &Cli) -> i32 {
     let branch = git_branch();
     let mut app = rho_tui::App::new(session, model)
         .with_mouse(mouse)
+        // The renderer read `state.animate` and nothing ever assigned it, so the sweep
+        // never drew. See `D-motion-answers-to-one-switch`.
+        .with_motion(motion)
         .with_reasoning(reasoning)
         .with_context(cwd, branch, provider_name)
         .with_notices(notices);
-    match app.run().await {
+    let code = match app.run().await {
         Ok(()) => 0,
         Err(error) => fail(anyhow::anyhow!(error)),
-    }
+    };
+    // Drain the MCP connect tasks before the process exits, so the schema cache write is not
+    // lost to a fast exit. The interface has closed the alternate screen by now, so a cache
+    // notice on stderr is visible again. See A1 and `D-a-notice-reaches-the-transcript`.
+    drain_mcp(&extras).await;
+    code
 }
 
 /// The interactive mode needs the `tui` feature. Report a clear error otherwise.
@@ -944,6 +1099,45 @@ async fn run_interactive(_cli: &Cli) -> i32 {
 fn fail(error: anyhow::Error) -> i32 {
     eprintln!("rho: {error}");
     EXIT_FAILURE
+}
+
+/// What rho tells the user about a switch it obeyed.
+///
+/// A base url redirects the credential, so rho says where the key is going. A silent
+/// redirect is the defect. See `D-a-provider-base-url-is-a-config-key`. Agent discovery
+/// says so too, because a missing `spawn_agent` otherwise reads as a broken feature.
+fn wiring_notices(loaded: &rho_config::Config, provider_name: &str) -> Vec<String> {
+    let mut notices = Vec::new();
+    if let Some(url) = &loaded.base_url {
+        // A base url redirects the credential only for a provider that accepts one. Bedrock
+        // and azure refuse a base url (`provider::refuse_base_url`), so the key never travels
+        // and a notice naming a key would name the wrong secret. A security notice that names
+        // a key that stays home teaches the user to distrust the notices. So this notice, and
+        // the key it names, fire only for the OpenAI-compatible provider. See comment 1.
+        if provider::accepts_base_url(provider_name) {
+            let host = url::Url::parse(url)
+                .ok()
+                .and_then(|parsed| parsed.host_str().map(str::to_string))
+                .unwrap_or_else(|| url.clone());
+            notices.push(format!(
+                "base-url is set, so {} goes to {host}. Unset base-url to use the default endpoint.",
+                provider::OPENROUTER_KEY_ENV
+            ));
+        }
+    }
+    if !loaded.dropped_keys.is_empty() {
+        notices.push(format!(
+            "this project is not trusted, so rho ignored {}. Pass --trust-project to use them.",
+            loaded.dropped_keys.join(", ")
+        ));
+    }
+    if !loaded.discover_agents {
+        notices.push(
+            "agent discovery is off, so rho offers no subagent. Unset no-agents to use one."
+                .to_string(),
+        );
+    }
+    notices
 }
 
 /// The subagent limits for this run, from the flags.
@@ -962,6 +1156,10 @@ fn fail(error: anyhow::Error) -> i32 {
 /// live run caught that after the unit tests passed.
 fn subagent_limits(cli: &Cli) -> rho_core::SubagentLimits {
     let stated = rho_core::SubagentLimits::new();
+    let child_timeout = cli
+        .child_timeout_secs
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(stated.child_timeout);
     rho_core::SubagentLimits {
         max_depth: 1,
         max_children_per_parent: cli
@@ -974,10 +1172,16 @@ fn subagent_limits(cli: &Cli) -> rho_core::SubagentLimits {
             .max_queued_per_parent
             .unwrap_or(stated.max_queued_per_parent),
         max_queued_total: cli.max_queued_total.unwrap_or(stated.max_queued_total),
-        child_timeout: cli
-            .child_timeout_secs
+        // An unset deadline follows the child timeout, so a waiter gets one whole sibling
+        // run of patience. A fixed default would time out every waiter of a longer child.
+        queue_wait: cli
+            .queue_wait_secs
             .map(std::time::Duration::from_secs)
-            .unwrap_or(stated.child_timeout),
+            .unwrap_or(child_timeout),
+        max_steer_message_bytes: cli
+            .max_agent_steer_bytes
+            .unwrap_or(stated.max_steer_message_bytes),
+        child_timeout,
     }
 }
 
@@ -1218,6 +1422,44 @@ mod tests {
     }
 
     #[test]
+    fn the_queue_wait_flag_reaches_the_limits() {
+        // A refusal names this flag, so the flag has to change the deadline.
+        let cli = Cli::parse_from(["rho", "--queue-wait-secs", "30"]);
+        assert_eq!(
+            subagent_limits(&cli).queue_wait,
+            std::time::Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn an_unset_queue_wait_follows_the_child_timeout() {
+        // A waiter gets one whole sibling run of patience. So a host that lengthens a
+        // child run lengthens the patience with it. See decision D-a-waiter-has-a-deadline.
+        let cli = Cli::parse_from(["rho", "--child-timeout-secs", "900"]);
+        let limits = subagent_limits(&cli);
+        assert_eq!(
+            limits.queue_wait,
+            std::time::Duration::from_secs(900),
+            "an unset deadline follows the child timeout, and never the stated default"
+        );
+        let plain = subagent_limits(&Cli::parse_from(["rho"]));
+        assert_eq!(plain.queue_wait, plain.child_timeout);
+    }
+
+    #[test]
+    fn the_agent_steer_byte_flag_reaches_the_limits() {
+        // A cap only the default constructor applied would make this flag dead surface.
+        let cli = Cli::parse_from(["rho", "--max-agent-steer-bytes", "4096"]);
+        assert_eq!(subagent_limits(&cli).max_steer_message_bytes, 4096);
+        let plain = subagent_limits(&Cli::parse_from(["rho"]));
+        assert_eq!(
+            plain.max_steer_message_bytes,
+            rho_core::SubagentLimits::new().max_steer_message_bytes,
+            "the default stays where SubagentLimits states it"
+        );
+    }
+
+    #[test]
     fn the_grace_warning_can_be_turned_off_from_the_command_line() {
         let cli = Cli::parse_from(["rho", "--agent-grace-turns", "0"]);
         assert_eq!(subagent_limits(&cli).grace_turns, 0);
@@ -1434,6 +1676,227 @@ mod tests {
         assert_eq!(flag_layer(&cli).sandbox, None);
     }
 
+    /// A resolved config from one flag layer, so a notice test needs no file and no provider.
+    fn resolved_with(flags: rho_config::ConfigLayer) -> rho_config::Config {
+        let sources =
+            rho_config::Sources::from_paths(rho_config::ConfigPaths::default()).with_flags(flags);
+        rho_config::Config::load(&sources).expect("a flag layer resolves")
+    }
+
+    #[test]
+    fn setting_a_base_url_names_the_host_in_a_notice() {
+        // A silent redirect of the credential is the defect. The notice names the host and
+        // the variable, so a user sees where the key is going.
+        let loaded = resolved_with(rho_config::ConfigLayer {
+            base_url: Some("https://models.example.com/v1".to_string()),
+            ..Default::default()
+        });
+        let notices = wiring_notices(&loaded, "openrouter");
+        assert_eq!(notices.len(), 1, "one notice: {notices:?}");
+        assert!(notices[0].contains("models.example.com"), "{}", notices[0]);
+        assert!(notices[0].contains("OPENROUTER_API_KEY"), "{}", notices[0]);
+    }
+
+    #[test]
+    fn the_base_url_notice_matches_the_resolved_provider() {
+        // Comment 1. `wiring_notices` named OPENROUTER_API_KEY for every provider. But
+        // base-url is a hard error for bedrock and azure (`provider::refuse_base_url`), so the
+        // credential never travels there. A security notice that names the wrong secret
+        // teaches the user to distrust the notices. So the base-url notice fires only for the
+        // OpenAI-compatible provider that accepts a base url, and names that provider's key.
+        let loaded = resolved_with(rho_config::ConfigLayer {
+            base_url: Some("https://models.example.com/v1".to_string()),
+            ..Default::default()
+        });
+
+        let openrouter = wiring_notices(&loaded, "openrouter");
+        assert!(
+            openrouter
+                .iter()
+                .any(|line| line.contains("OPENROUTER_API_KEY")
+                    && line.contains("models.example.com")),
+            "the openai-compatible provider names its own key and the host: {openrouter:?}"
+        );
+
+        let bedrock = wiring_notices(&loaded, "bedrock");
+        assert!(
+            !bedrock
+                .iter()
+                .any(|line| line.contains("OPENROUTER_API_KEY")),
+            "bedrock refuses base-url, so the credential never travels; do not name it: \
+             {bedrock:?}"
+        );
+        assert!(
+            !bedrock.iter().any(|line| line.contains("goes to")),
+            "no base-url redirect notice for a provider that refuses base-url: {bedrock:?}"
+        );
+    }
+
+    #[test]
+    fn agent_discovery_off_is_reported() {
+        // Renamed from `a_skipped_definition_is_reported`. That name promised a count of
+        // skipped definitions and named a definition, and this notice does neither: when
+        // `no-agents` is set, `discover_agents` returns before it scans, so there is nothing
+        // to count. The honest promise is that rho says discovery is off and names the
+        // switch, so a missing `spawn_agent` does not read as a broken feature. The count
+        // promise in behaviour rule 6 and the spec is amended to match; see the report and
+        // D7. The switch is named as `no-agents`, matching the base-url notice's phrasing
+        // rather than a `--flag` a config key or `RHO_NO_AGENTS` did not use. See D8.
+        let loaded = resolved_with(rho_config::ConfigLayer {
+            no_agents: Some(true),
+            ..Default::default()
+        });
+        let notices = wiring_notices(&loaded, "openrouter");
+        assert!(
+            notices.iter().any(|line| line.contains("no-agents")),
+            "the notice names the switch: {notices:?}"
+        );
+        assert!(
+            !notices.iter().any(|line| line.contains("--no-agents")),
+            "the switch may be set by a config key or RHO_NO_AGENTS, so do not name a flag: {notices:?}"
+        );
+    }
+
+    #[test]
+    fn no_switch_means_no_wiring_notice() {
+        // A notice a user did not ask for is noise, so the quiet path stays quiet.
+        assert!(
+            wiring_notices(
+                &resolved_with(rho_config::ConfigLayer::default()),
+                "openrouter"
+            )
+            .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wiring_notice_survives_a_provider_build_failure() {
+        // D6. `wiring_notices` used to run after `build_provider`, so a user whose provider
+        // build failed never learned that rho had dropped a switch. The notice must reach
+        // the user even on the failure path.
+        //
+        // The deterministic failure is a base-url conflict: bedrock refuses a base url with
+        // no credential and no network. The base-url flag is trusted, so it survives to
+        // `build_provider` and triggers the conflict. An untrusted project file also sets a
+        // powerful `skill-paths` key, which the strip drops. The dropped-key notice is the
+        // security-relevant half D6 protects, so it must ride along with the fatal error, not
+        // be lost to it.
+        //
+        // This also pins comment 1: the surviving notice must not name OPENROUTER_API_KEY,
+        // because bedrock refuses the base url and the openrouter key never travels.
+        let root = tempfile::tempdir().unwrap();
+        write_project(root.path(), "skill-paths = [\"/tmp/evil\"]\n");
+        let cli = Cli::try_parse_from([
+            "rho",
+            "--provider",
+            "bedrock",
+            "--base-url",
+            "https://models.example.com/v1",
+            "--model",
+            "m",
+        ])
+        .unwrap();
+        let loaded = try_load_in(&cli, &[], &[], root.path()).unwrap();
+        assert!(
+            loaded
+                .dropped_keys
+                .iter()
+                .any(|key| key.contains("skill-paths")),
+            "an untrusted powerful key must be recorded as dropped: {:?}",
+            loaded.dropped_keys
+        );
+        let config = build_config(&loaded).expect("bedrock has a default model");
+        let error = match build_session(&cli, &loaded, config).await {
+            Ok(_) => panic!("a base url with bedrock is a conflict"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("not trusted") && error.contains("skill-paths"),
+            "the dropped-key wiring notice, not just the provider error, must reach the user on \
+             a build failure: {error}"
+        );
+        assert!(
+            !error.contains("OPENROUTER_API_KEY"),
+            "bedrock refuses base-url, so the surviving notice must not name the openrouter \
+             key: {error}"
+        );
+    }
+
+    /// Load a config whose only fault is a refused base-url flag, and return the user-facing
+    /// error text. The base-url flag is trusted, so it survives to validation. A temp root
+    /// keeps the filesystem isolated.
+    fn base_url_error(url: &str) -> String {
+        let root = tempfile::tempdir().unwrap();
+        let cli = Cli::try_parse_from(["rho", "--base-url", url, "--model", "m"]).unwrap();
+        match try_load_in(&cli, &[], &[], root.path()) {
+            Ok(_) => panic!("the base url {url} must be refused"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_base_url_safety_block_reads_differently_from_a_typo() {
+        // Comment 2. `ConfigError::BaseUrl` carries a `BaseUrlRejection` that separates a
+        // refusal which protects the credential (a user or password in the url, plain http to
+        // a remote host) from one that corrects a typo (not a url, a query or fragment, an
+        // unknown scheme). rho-cli must word the two apart: a safety block says rho blocked
+        // the value to protect the key, and a typo says the value is malformed. Asserting
+        // only that both mention "base-url" is the weak assertion a prior round criticised, so
+        // this pins the distinct framing and that a typo never borrows the safety wording.
+        let safety = base_url_error("http://user:pass@evil.example/v1");
+        let typo = base_url_error("ftp://models.example.com/v1");
+
+        assert!(
+            safety.contains("to protect your credential"),
+            "a safety block must say rho blocked it to protect the credential: {safety}"
+        );
+        assert!(
+            typo.contains("malformed"),
+            "a typo must say the value is malformed: {typo}"
+        );
+        assert!(
+            !typo.contains("to protect your credential"),
+            "a typo must not claim a safety block: {typo}"
+        );
+        assert_ne!(
+            safety, typo,
+            "a safety block and a typo must read differently"
+        );
+    }
+
+    #[test]
+    fn an_untrusted_dropped_key_is_named_in_a_notice() {
+        // D5. The three original `wiring_notices` tests all used a flags layer through
+        // `resolved_with`, and a flag is never stripped, so `dropped_keys` was always empty
+        // and this branch had no test at all. A powerful key set by an untrusted project
+        // file is the shape that populates it. rho must name the key it dropped, or a user
+        // who set it once is locked out in an untrusted checkout and told nothing. That is
+        // the shape a security review named. This uses `base-url`, so the dropped-key branch
+        // fires without the base-url-is-set branch firing too.
+        let root = tempfile::tempdir().unwrap();
+        write_project(
+            root.path(),
+            "base-url = \"https://models.example.com/v1\"\n",
+        );
+        let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
+        let loaded = try_load_in(&cli, &[], &[], root.path()).unwrap();
+        assert!(
+            !loaded.dropped_keys.is_empty(),
+            "an untrusted powerful key must be recorded as dropped"
+        );
+        let notices = wiring_notices(&loaded, "openrouter");
+        assert!(
+            notices
+                .iter()
+                .any(|line| line.contains("not trusted") && line.contains("base-url")),
+            "the notice must say why and name the dropped key: {notices:?}"
+        );
+        assert!(
+            !notices.iter().any(|line| line.contains("goes to")),
+            "a dropped base-url must not also fire the base-url-is-set notice: {notices:?}"
+        );
+    }
+
     #[test]
     fn flag_layer_maps_each_passed_flag() {
         // A wrong mapping is otherwise silent, because both fields are `Option<String>`.
@@ -1456,6 +1919,13 @@ mod tests {
             "/tmp/mcp.json",
             "--skill",
             "/tmp/skill-one",
+            // The three flags this sprint added. Without them here, dropping a mapping in
+            // `flag_layer` would leave the flag silently doing nothing, which is the whole
+            // defect class the sprint exists to kill. A test review found the omission.
+            "--no-motion",
+            "--no-agents",
+            "--base-url",
+            "http://localhost:11434/v1",
         ])
         .unwrap();
         let layer = flag_layer(&cli);
@@ -1470,6 +1940,21 @@ mod tests {
         );
         assert_eq!(layer.tui_mouse, Some(true));
         assert_eq!(layer.no_skills, Some(true));
+        assert_eq!(
+            layer.tui_motion,
+            Some(false),
+            "--no-motion maps onto tui-motion"
+        );
+        assert_eq!(
+            layer.no_agents,
+            Some(true),
+            "--no-agents maps onto no-agents"
+        );
+        assert_eq!(
+            layer.base_url.as_deref(),
+            Some("http://localhost:11434/v1"),
+            "--base-url maps onto base-url"
+        );
         assert_eq!(layer.session_root, Some(PathBuf::from("/tmp/root")));
         assert_eq!(layer.mcp_config, Some(PathBuf::from("/tmp/mcp.json")));
         assert_eq!(
@@ -1493,6 +1978,58 @@ mod tests {
         // a file's `skill-paths` and drop every skill in silence.
         let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
         assert_eq!(flag_layer(&cli).skill_paths, None);
+    }
+
+    // ---- D9: --no-motion takes an optional value, like --no-skills and --no-agents ----
+
+    #[test]
+    fn no_motion_bare_turns_motion_off() {
+        let cli = Cli::try_parse_from(["rho", "--model", "m", "--no-motion"]).unwrap();
+        assert_eq!(cli.no_motion, Some(true));
+        assert_eq!(
+            flag_layer(&cli).tui_motion,
+            Some(false),
+            "a bare --no-motion turns the animation off"
+        );
+    }
+
+    #[test]
+    fn no_motion_false_turns_motion_back_on() {
+        // A bare `bool` could not parse this at all, and a global `tui-motion = false` could
+        // then never be turned back on from the command line. See D9.
+        let cli = Cli::try_parse_from(["rho", "--model", "m", "--no-motion", "false"]).unwrap();
+        assert_eq!(cli.no_motion, Some(false));
+        assert_eq!(
+            flag_layer(&cli).tui_motion,
+            Some(true),
+            "--no-motion=false means animate"
+        );
+    }
+
+    #[test]
+    fn an_unpassed_no_motion_flag_writes_nothing() {
+        // Rule 6: an absent flag leaves layer 6 empty, so a file still decides.
+        let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
+        assert_eq!(flag_layer(&cli).tui_motion, None);
+    }
+
+    #[test]
+    fn no_motion_false_overrides_a_file_that_turned_motion_off() {
+        // The whole reason for the shape change: the command line can beat a global
+        // `tui-motion = false`. This was impossible while `--no-motion` was a bare bool.
+        let home = tempfile::tempdir().unwrap();
+        write_global(home.path(), "tui-motion = false\n");
+        let cli = Cli::try_parse_from(["rho", "--model", "m", "--no-motion", "false"]).unwrap();
+        let config = try_load(
+            &cli,
+            &[],
+            &[("XDG_CONFIG_HOME", home.path().to_str().unwrap())],
+        )
+        .unwrap();
+        assert!(
+            config.tui_motion,
+            "the command line must be able to turn motion back on"
+        );
     }
 
     #[test]
@@ -1711,8 +2248,9 @@ mod tests {
     }
 
     #[test]
-    fn the_bootstrap_root_reads_the_session_root_variable() {
-        let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
+    fn a_trusted_session_root_variable_moves_the_project_root() {
+        // With trust, the variable selects which directory's config.toml rho reads.
+        let cli = Cli::try_parse_from(["rho", "--model", "m", "--trust-project"]).unwrap();
         let env = vec![(
             "RHO_SESSION_ROOT".to_string(),
             "/tmp/from-the-var".to_string(),
@@ -1720,6 +2258,60 @@ mod tests {
         assert_eq!(
             bootstrap_root(&cli, &env).unwrap(),
             PathBuf::from("/tmp/from-the-var")
+        );
+    }
+
+    #[test]
+    fn an_untrusted_session_root_variable_does_not_move_the_project_root() {
+        // The D1 fix. `RHO_SESSION_ROOT` chooses which `.rho/config.toml` rho reads, so an
+        // untrusted environment that set it to a hostile directory could smuggle a `model`
+        // and more into the run, while the trust notice claimed the key was ignored. Without
+        // `--trust-project` the variable must not redirect discovery, so the root falls
+        // through to the working directory. See D1 and the claims critic's live probe.
+        let cli = Cli::try_parse_from(["rho", "--model", "m"]).unwrap();
+        let env = vec![(
+            "RHO_SESSION_ROOT".to_string(),
+            "/tmp/attacker-dir".to_string(),
+        )];
+        assert_eq!(
+            bootstrap_root(&cli, &env).unwrap(),
+            std::env::current_dir().unwrap(),
+            "an untrusted session-root variable must not choose the project file"
+        );
+    }
+
+    #[test]
+    fn an_untrusted_session_root_variable_cannot_smuggle_a_project_config() {
+        // The claims critic's live scenario, end to end. An attacker directory holds a
+        // hostile `config.toml`, and `RHO_SESSION_ROOT` points at it. Composing the two
+        // functions `load_config` composes, the attacker's `model` must not reach the
+        // product without `--trust-project`, and it must reach it with the flag, so the fix
+        // is a gate and not a wall. See D1.
+        let attacker = tempfile::tempdir().unwrap();
+        write_project(attacker.path(), "model = \"attacker-chose-this-model\"\n");
+        let env = vec![(
+            "RHO_SESSION_ROOT".to_string(),
+            attacker.path().to_str().unwrap().to_string(),
+        )];
+
+        let untrusted = Cli::try_parse_from(["rho"]).unwrap();
+        let root = bootstrap_root(&untrusted, &env).unwrap();
+        let home: BTreeMap<String, String> = BTreeMap::new();
+        let config =
+            load_config_from(&untrusted, env.clone(), &root, &home).expect("the config loads");
+        assert_ne!(
+            config.model.as_deref(),
+            Some("attacker-chose-this-model"),
+            "an untrusted environment must not select the project config"
+        );
+
+        let trusted = Cli::try_parse_from(["rho", "--trust-project"]).unwrap();
+        let root = bootstrap_root(&trusted, &env).unwrap();
+        let config = load_config_from(&trusted, env, &root, &home).expect("the config loads");
+        assert_eq!(
+            config.model.as_deref(),
+            Some("attacker-chose-this-model"),
+            "with trust the variable does select the project config, so the gate is a gate"
         );
     }
 
@@ -1828,6 +2420,33 @@ mod tests {
             rho_core::ReasoningDisplay::Live,
             "the other file must never be read"
         );
+        // The root itself is not moved, because an untrusted project file may not move the
+        // confinement boundary. That assertion used to read `Some(elsewhere)`, which
+        // enshrined the escape a probe later proved: a cloned repository moved the boundary
+        // and read a file outside itself. A security review named this test as the place the
+        // vulnerability was written down as correct. See
+        // `D-trust-is-provenance-not-a-field-list` and
+        // `docs/verification/profile-trust-bypass.md`.
+        assert_eq!(
+            config.session_root, None,
+            "an untrusted project file must not move the root"
+        );
+    }
+
+    #[test]
+    fn a_trusted_session_root_key_still_moves_the_root() {
+        // The other half, so a break that drops the key unconditionally fails.
+        let root = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        write_project(
+            root.path(),
+            &format!(
+                "session-root = \"{}\"\n",
+                elsewhere.path().to_str().unwrap()
+            ),
+        );
+        let cli = Cli::try_parse_from(["rho", "--model", "m", "--trust-project"]).unwrap();
+        let config = try_load_in(&cli, &[], &[], root.path()).unwrap();
         assert_eq!(config.session_root.as_deref(), Some(elsewhere.path()));
     }
 
@@ -2199,6 +2818,83 @@ mod headless_loop_tests {
             "the error names itself: {err}"
         );
         assert!(out.trim().is_empty(), "no answer on stdout: {out}");
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    //! The MCP connect drain at shutdown, A1's CLI half.
+    //!
+    //! The write happens on a background task inside the pool, so a behavioural test of the
+    //! mechanism lives in `extensions::tests` (a fake handshake, a real drain, a real file).
+    //! What that test cannot see is whether the two run paths actually call the drain before
+    //! the process exits. That is the exact defect A1 names: a fast `rho run` exited and
+    //! killed the write. So this reads the production source with comments stripped and pins
+    //! both call sites. A grep that accepts a call surviving only in a comment is the trap
+    //! two earlier reviews found on this branch, so the comments go first.
+
+    fn production_source() -> String {
+        let whole = include_str!("cli.rs");
+        whole
+            .split("#[cfg(test)]")
+            .next()
+            .expect("a source file has a first part")
+            .lines()
+            .map(|line| match line.split_once("//") {
+                Some((code, _)) => code,
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn both_run_paths_drain_the_mcp_connects_before_exit() {
+        // `run_headless` and `run_interactive` must each drain, or a fast run loses the cache
+        // write. The call is `drain_mcp(&extras)`; the definition reads `drain_mcp(extras:`,
+        // so counting the borrowed call form finds the two call sites and not the definition.
+        let source = production_source();
+        let call_sites = source.matches("drain_mcp(&extras)").count();
+        assert_eq!(
+            call_sites, 2,
+            "both run_headless and run_interactive must call drain_mcp before exit; found {call_sites}"
+        );
+    }
+
+    #[test]
+    fn the_drain_awaits_connects_and_surfaces_cache_notices() {
+        // The drain must both await the background write and surface a write failure, or A1
+        // and A6 are half done. This pins the body of `drain_mcp` against a quiet deletion of
+        // either call.
+        let source = production_source();
+        assert!(
+            source.contains("pool.drain_connects(MCP_DRAIN_TIMEOUT)"),
+            "drain_mcp must await the background connects"
+        );
+        assert!(
+            source.contains("pool.take_cache_notices()"),
+            "drain_mcp must surface a cache write failure the handshake could not report"
+        );
+    }
+
+    #[test]
+    fn build_session_passes_the_agent_discovery_switch_from_the_config() {
+        // D4. `subagents::load` receives `discover`, and a critic hard-coded it to `true`
+        // and watched 108 tests pass, so `--no-agents` could die in silence. The behavioural
+        // half is `subagents::tests::no_agent_discovery_registers_no_spawn_tool`, which
+        // cannot see this call site because it drives `load` directly. So this pins that
+        // `build_session` forwards `loaded.discover_agents`, not a literal. Comments are
+        // stripped first, because a call surviving only in a comment is the trap two earlier
+        // reviews found on this branch.
+        //
+        // The spelling changed when `#5` moved the discovery fields into `AgentConfig`. The
+        // invariant did not: the value comes from `loaded.discover_agents` and never from a
+        // literal. Only the expected text moved with the merge.
+        let source = production_source();
+        assert!(
+            source.contains("agents.discover = loaded.discover_agents"),
+            "build_session must pass the config's discover_agents to subagents::load, not a literal"
+        );
     }
 }
 

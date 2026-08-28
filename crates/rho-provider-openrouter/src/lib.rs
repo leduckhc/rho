@@ -20,6 +20,61 @@ pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai";
 
 /// The chat-completions path on the base URL.
 const CHAT_PATH: &str = "/api/v1/chat/completions";
+/// True when a base url names a loopback host, so no proxy may stand between rho and it.
+///
+/// A proxy variable such as `HTTP_PROXY` can arrive in a `.devcontainer` file or a CI `env:`
+/// block, which travel with a clone. `reqwest` honours those variables, so a request to
+/// `http://127.0.0.1` was routed to the proxy **with the bearer token in clear text**. A live
+/// probe captured `auth=PRESENT: Bearer sk-...` at an attacker's proxy. The rule that allows
+/// plain http to a loopback host rests on the traffic never leaving the machine, so rho must
+/// make that true rather than assume it.
+pub fn bypasses_proxy(base_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(base_url) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        Some(url::Host::Domain(name)) => name == "localhost",
+        None => false,
+    }
+}
+
+/// The HTTP client for a base url. A loopback host gets a client with no proxy at all.
+fn build_client(base_url: &str) -> reqwest::Client {
+    // **No redirect is followed.** The request carries a bearer token. `reqwest` strips the
+    // header across origins, and a same-host `https` to `http` downgrade is not a different
+    // origin, so a redirect could put the credential on the wire in clear text and defeat
+    // `check_base_url`, which exists to prevent exactly that. A security review named it.
+    //
+    // A 3xx therefore becomes an error the user sees, which is the right answer: an endpoint
+    // that redirects a chat request is not the endpoint they named.
+    let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    if bypasses_proxy(base_url) {
+        // A loopback host must not go through a proxy. A live probe captured
+        // `Bearer sk-...` at an attacker's proxy before this.
+        builder = builder.no_proxy();
+    }
+    // Fail loudly, never fall back to an insecure client. `Client::new()` follows up to
+    // ten redirects and honours `HTTP_PROXY`, which are the two behaviours the comment
+    // above forbids, each named by a security review or a live probe. A build error here
+    // is not a per-request condition a caller can handle: it means the TLS backend did
+    // not initialise, which is process-wide and unrecoverable, and no secure fallback
+    // exists. So this panics rather than degrade. `OpenRouterProvider::new` is infallible
+    // and its two callers in `rho-cli` wrap it in `Ok(Arc::new(..))` with no error arm,
+    // so returning a `Result` would only push an unhandleable error up one level. See
+    // the `ToolKind::Other` fail-open defect in AGENTS.md step 8.
+    builder
+        .build()
+        .expect("the reqwest TLS backend failed to initialise")
+}
+
+/// The path every other OpenAI-compatible host serves.
+///
+/// OpenRouter puts its chat endpoint under `/api`. Ollama, vLLM, LiteLLM, and LM Studio do
+/// not. Appending OpenRouter's path to a local host gives a 404, and a live probe caught
+/// exactly that. See `D-a-provider-base-url-is-a-config-key`.
+const OPENAI_CHAT_PATH: &str = "/v1/chat/completions";
 
 // `Secret` and `RetryPolicy` live in `rho-core`. See decision D-secret-in-core.
 //
@@ -43,6 +98,9 @@ pub struct OpenRouterConfig {
     pub api_key: Secret,
     /// The retry policy for the initial request.
     pub retry: RetryPolicy,
+    /// The chat path appended to `base_url`. OpenRouter's own path by default, and the
+    /// standard OpenAI one when a caller set a base url.
+    chat_path: String,
 }
 
 impl OpenRouterConfig {
@@ -50,12 +108,36 @@ impl OpenRouterConfig {
     pub fn new(api_key: Secret) -> Self {
         Self {
             base_url: OPENROUTER_BASE_URL.to_string(),
+            chat_path: CHAT_PATH.to_string(),
             api_key,
             retry: RetryPolicy::default(),
         }
     }
 
     /// Override the base URL. Tests use this to target a mock server.
+    /// The full chat endpoint this config sends to.
+    pub fn chat_url(&self) -> String {
+        format!("{}{}", self.base_url, self.chat_path)
+    }
+
+    /// Point at an OpenAI-compatible host, such as Ollama, vLLM, or LM Studio.
+    ///
+    /// It sets the standard OpenAI chat path, because OpenRouter serves its endpoint under
+    /// `/api` and no other host does. A live probe against a stub that answered any path
+    /// hid this, so a stub must be strict. See `D-a-provider-base-url-is-a-config-key`.
+    ///
+    /// A local host's own documentation usually shows the `/v1` suffix, so both forms work
+    /// and neither doubles the segment.
+    pub fn with_openai_host(mut self, base_url: impl Into<String>) -> Self {
+        let given = base_url.into();
+        let trimmed = given.trim_end_matches('/');
+        let root = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
+        self.base_url = root.to_string();
+        self.chat_path = OPENAI_CHAT_PATH.to_string();
+        self
+    }
+
+    /// Point at another URL that serves OpenRouter's own path. A test uses it for a mock.
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
         self
@@ -78,10 +160,8 @@ pub struct OpenRouterProvider {
 impl OpenRouterProvider {
     /// Build the provider from a configuration.
     pub fn new(config: OpenRouterConfig) -> Self {
-        Self {
-            config,
-            client: reqwest::Client::new(),
-        }
+        let client = build_client(&config.base_url);
+        Self { config, client }
     }
 
     /// The configured base URL.
@@ -106,7 +186,7 @@ impl Provider for OpenRouterProvider {
                 "the OpenRouter API key is empty. Set OPENROUTER_API_KEY.".to_string(),
             ));
         }
-        let url = format!("{}{CHAT_PATH}", self.config.base_url);
+        let url = self.config.chat_url();
         let body = build_request_body(&request);
 
         // Retry only before the first event. Once the response head arrives, a

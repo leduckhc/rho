@@ -230,7 +230,7 @@ spec says `delivered` and then explains that one line is marked planned, so the 
 it and reported green while checking nothing. It now reads only the first word of the status.
 The name count it checks rose from 210 to 318 the moment that was fixed.
 
-## 9. One more defect, outside this change, not fixed here
+## 9. One more defect, outside this change, fixed on a later branch
 
 The first definition file in this session wrote its tool list as a YAML sequence:
 
@@ -238,13 +238,17 @@ The first definition file in this session wrote its tool list as a YAML sequence
 tools: [read, list]
 ```
 
-rho reads `tools` as a string, so `serde_yaml` failed, `load_definition` returned `None`, and the
+rho read `tools` as a string, so `serde_yaml` failed, `load_definition` returned `None`, and the
 whole definition disappeared. No notice, no warning, and `spawn_agent` was never registered. The
 model then answered that it had no such tool, and two runs were wasted before the cause was
 found.
 
 The documented spelling is `tools: read, list`, so this is not a broken contract. It is a
-failure path that teaches nothing, which AGENTS.md forbids. It belongs to `rho-skills` and it
-needs its own contract decision, because `AgentSet` today carries only `loaded` and `withheld`
-and a rejected file has nowhere to go. It is recorded in `.rho-work/progress.md` and it is not
-fixed in this change.
+failure path that teaches nothing, which AGENTS.md forbids. It belongs to `rho-skills`, and it
+needed its own contract decision, because `AgentSet` carried only `loaded` and `withheld`
+and a rejected file had nowhere to go.
+
+**It is fixed now, on the branch `fix/agent-definition-failure-path`.** `AgentSet` carries a
+`rejected` list, the sequence form loads, and every rejected file reaches the user as a
+start-up line. See `SPEC-definition-rejection` and
+`docs/verification/agent-definition-rejection.md`.

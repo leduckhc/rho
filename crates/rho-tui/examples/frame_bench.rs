@@ -12,10 +12,11 @@
 //!    times, with one `Terminal` reused, and divides the allocation count by the
 //!    frame count. A reused terminal is the honest steady state, because a real
 //!    loop draws into the same back buffer every frame.
-//! 3. The motion sweep, measured on its own. The renderer does not call the
-//!    motion yet, because that is the fourth slice of stage U4 and it is not
-//!    landed. So this measures `sweep_frame` in isolation and states that, rather
-//!    than claim a number the integrated renderer does not yet produce.
+//! 3. The motion sweep, measured on its own. The renderer applies the motion in
+//!    `apply_sweep` by writing styles into cells that already exist, so it never
+//!    allocates. It does not call `sweep_frame`, which returns a `Vec`. This section
+//!    measures `sweep_frame` in isolation, as the allocating helper form, so a change
+//!    to the sweep shows here as a micro-benchmark, separate from the whole-frame time.
 //!
 //! Every number is one process. `bench/tui_frame.py` runs the process three
 //! times and takes the median, to match `bench/footprint.sh`.
@@ -76,6 +77,14 @@ static GLOBAL: Counting = Counting;
 /// rows is a common terminal height. See `docs/design/tui-frames/100-idle.txt`.
 const COLS: u16 = 100;
 const ROWS: u16 = 30;
+
+/// The inputs under which the sweep animates: motion on and a terminal stdout.
+fn animating() -> MotionInputs {
+    MotionInputs {
+        tui_motion: true,
+        stdout_is_terminal: true,
+    }
+}
 
 /// Build a transcript that looks like the middle of a streaming turn: a spread of
 /// assistant text, tool rows in each status, and a thinking row. The turn is
@@ -138,7 +147,7 @@ fn main() {
     // real streamed turn. Time each draw.
     let mut samples: Vec<f64> = Vec::with_capacity(frames);
     let mut tick: u64 = 0;
-    let motion = MotionInputs::animating();
+    let motion = animating();
     for _ in 0..frames {
         // Advance the streamed text by one delta, as a turn does.
         if let Some(Row::Assistant { text }) = state
@@ -190,8 +199,9 @@ fn main() {
     let bytes_per_frame = alloc_bytes as f64 / steady_frames as f64;
 
     // ---- The motion sweep, on its own. ------------------------------------
-    // The renderer does not call the motion yet, so measure `sweep_frame`
-    // directly. Time it and count its allocation over the same steady frames.
+    // The renderer applies the motion by writing cell styles directly, and does not
+    // call `sweep_frame`. This measures `sweep_frame` in isolation, as the allocating
+    // helper form, over the same steady frames.
     let mut motion_samples: Vec<f64> = Vec::with_capacity(frames);
     for t in 0..frames as u64 {
         let start = Instant::now();
@@ -224,7 +234,7 @@ fn main() {
             "  \"motion_samples\": {msamples},\n",
             "  \"motion_sweep_us_p50\": {mp50:.4},\n",
             "  \"motion_allocs_per_call\": {mapc:.3},\n",
-            "  \"motion_in_renderer\": false\n",
+            "  \"motion_in_renderer\": true\n",
             "}}"
         ),
         cols = COLS,

@@ -678,33 +678,90 @@ attribution was wrong, and both places are corrected.
    documents carried a change that no longer existed. One `grep` for the type would have caught it at
    the time.
 
-## Open defect, found by driving the slot queue for real
+## Fixed defect, found by driving the slot queue for real
 
-`rho-skills` reads a definition's `tools` field as a string. A file that writes a YAML
-sequence, `tools: [read, list]`, fails `serde_yaml`, and `load_definition` returns `None`.
-The whole definition then disappears with no notice, so `spawn_agent` is never registered
-and the model answers that it has no such tool. Two live runs were wasted before the cause
-was found. See `docs/verification/subagent-slot-queue.md` section 6.
+`rho-skills` read a definition's `tools` field as a string. A file that wrote a YAML
+sequence, `tools: [read, list]`, failed `serde_yaml`, and `load_definition` returned `None`.
+The whole definition then disappeared with no notice, so `spawn_agent` was never registered
+and the model answered that it had no such tool. Two live runs were wasted before the cause
+was found.
 
-The documented spelling is `tools: read, list`, so no contract is broken. The failure path
-is what is wrong: it teaches nothing. The fix needs a contract decision first, because
-`AgentSet` carries only `loaded` and `withheld` and a rejected file has nowhere to go. It is
-not fixed in the slot-queue change.
+**Fixed on the branch `fix/agent-definition-failure-path`.** `load_definition` returns a
+`Result`, `AgentSet` carries a `rejected` list, the sequence form loads, and every rejected
+file prints one start-up line with its path, its reason, and its repair. The contract is
+`SPEC-definition-rejection`, and the decisions are D-a-rejected-definition-is-reported and
+D-a-tool-list-accepts-a-yaml-sequence.
 
-## Open items the slot queue left, both recorded rather than remembered
+Driving it for real found two more silent failures in the same family. `tools: 5` used to
+**load**, because `serde_yaml` reads a plain scalar into a `String`, so the child ran with an
+empty tool set and said nothing. And `AgentDefinition::warnings` was never printed anywhere,
+so a dropped tool keyword narrowed a child in silence. Both are fixed and covered. See
+`docs/verification/agent-definition-rejection.md`.
 
-A local review pass over the queue found two costs. Neither is fixed, and each needs a contract
-decision of its own.
+The two reviews after green found three more, each probed live before the repair. A hostile
+file name forged a `rho:` line, because the notice printed the path verbatim. The new warning
+line carried a raw escape and 400 characters of file prose. And a symlink in `~/.rho/agents`
+smuggled a repository definition into the **trusted** set, because the agent loader never
+resolved a path before classifying it while the skill loader always did. See
+D-an-agent-symlink-cannot-smuggle-trust.
 
-1. **A blocking spawn has no wait deadline.** One `spawn_agents` call can hold a parent's turn for
-   `ceil(max_queued_per_parent / max_children_per_parent) x child_timeout`, about forty minutes at
-   the defaults, and a prompt-injected model picks the fan-out width and the sleeping children. A
-   fix needs a queue-wait deadline separate from `child_timeout`, with its own error case and its
-   own flag. See `SPEC-subagent-slots-handles-grace` section 2.8, which now states the cost.
-2. **A steering message is bounded by count, not by bytes.** `MessageQueue` holds 32 messages, and
-   the queue now exists for 128 waiting children as well as 32 live ones. Each message body is
-   model-written and its size is not capped. This is the shape of the bug that turned 8 MB of
-   `bash` output into 805 MB, so the cap belongs in `MessageQueue::push` with a named error.
+One member of this family is still open. `parse_skill_file` returns a reason and
+`discover` sends it to `tracing::warn!` only, so a **skill** that does not load is quiet for
+any user who did not set `RHO_LOG`. `SkillSet` needs the same `rejected` list.
+
+## A flaky test outside this lane, with its mechanism named
+
+`a_live_connection_replaces_the_cached_entry` in `crates/rho-mcp/tests/cache.rs` failed once
+during a gate run on the branch `fix/agent-definition-failure-path`, with
+`ConnectTimeout { server: "stub" }`. It passes three times out of three on its own, and that
+branch changes no file under `crates/rho-mcp`.
+
+The mechanism is line 78: the test gives a stub server a **two second wall-clock deadline** to
+connect. The failing run shared the machine with a `cargo build --release`, so the deadline
+expired. AGENTS.md step 5 forbids a `sleep` in an async test for this reason, and a wall-clock
+connect deadline is the same defect in another shape. It belongs to whoever owns `rho-mcp`.
+
+## Open items the slot queue left, both now closed
+
+A local review pass over the queue found two costs. Both are fixed, and each has its own
+contract decision. See `docs/verification/subagent-queue-bounds.md` for the live runs.
+
+1. **A blocking spawn had no wait deadline.** One `spawn_agents` call could hold a parent's turn
+   for `ceil(max_queued_per_parent / max_children_per_parent) x child_timeout`, about forty
+   minutes at the defaults, and a prompt-injected model picked the fan-out width and the sleeping
+   children. **Fixed:** `SubagentLimits::queue_wait`, flag `--queue-wait-secs`, and
+   `Dequeued::WaitedTooLong`. One call now costs at most the deadline plus one child run, and it
+   no longer grows with the wait line. Zero refuses any child that must wait, and no value turns
+   the deadline off. See decision D-a-waiter-has-a-deadline.
+2. **A steering message was bounded by count, not by bytes.** `MessageQueue` held 32 messages of
+   any size, and the queue exists for 128 waiting children as well as 32 live ones. **Fixed:**
+   `MessageQueue::push` refuses a message over the queue's byte cap with `QueueError::TooLarge`.
+   A session queue allows 64 KiB, and a child queue allows 16 KiB, flag
+   `--max-agent-steer-bytes`. So the process holds at most 80 MiB of queued messages, where the
+   number was unbounded. See decision D-a-steering-message-is-bounded-by-bytes.
+
+A third defect came out of driving it: `agent_status` printed two full stops, because
+`AgentOutcome::label` ended a phrase that its caller also ended. It is fixed, and
+`a_failed_label_is_a_phrase_and_not_a_sentence` pins it.
+
+## Two items the queue-bound review left, both recorded rather than remembered
+
+A four-lens review and `codex review` found three real defects in the byte cap, and all three
+are fixed. Two findings are open on purpose, and each needs work outside that lane.
+
+1. **A child's failure reason reaches the parent model unsanitised.** `AgentOutcome::label`
+   builds `failed: {reason}`, and `agent_status` puts that string into a tool result the parent
+   reads. A reason can carry a provider's text or a child's text, so it can carry a newline or
+   an escape and forge a line that looks like rho's own. The fix is the pattern `rho-skills`
+   already uses: a newtype whose only constructor sanitises and bounds the value. It needs its
+   own decision, because the questions are where to sanitise, what to cap, and which callers
+   must change. See the security review in `docs/verification/subagent-queue-bounds.md`.
+2. **No flag has an upper bound.** `--max-agent-steer-bytes` near the top of `usize`
+   effectively removes the byte cap, and `--queue-wait-secs` near the top of `u64` effectively
+   removes the deadline. Neither panics, and tokio saturates the sleep. A host owns its own
+   machine, so this is documented rather than clamped: the flag help and
+   `docs/guide/subagents.md` now state the ceiling formula. A clamp would need a decision about
+   what a sane maximum is.
 
 **Config keys for the subagent limits stay unwired, on purpose.** `rho-config` parses a
 `[subagents]` layer that no binary reads, so only a flag changes a limit today. That gap is

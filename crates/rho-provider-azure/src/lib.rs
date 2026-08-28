@@ -22,6 +22,52 @@ pub const AZURE_ENTRA_AUDIENCE: &str = "https://cognitiveservices.azure.com/";
 /// The Responses path on the resource base URL.
 const RESPONSES_PATH: &str = "/openai/v1/responses";
 
+/// True when a base url names a loopback host, so no proxy may stand between rho and it.
+///
+/// Azure's base URL comes from `AZURE_OPENAI_ENDPOINT`, which is not an `RHO_*` key, so the
+/// config trust filter never touches it. A proxy variable such as `HTTP_PROXY` can arrive in
+/// a `.devcontainer` file or a CI `env:` block that travels with a clone. `reqwest` honours
+/// those variables, so a request to a loopback host would be routed to the proxy with the
+/// credential on the wire. The rule that allows plain http to a loopback host rests on the
+/// traffic never leaving the machine, so rho makes that true rather than assume it.
+fn bypasses_proxy(base_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(base_url) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        Some(url::Host::Domain(name)) => name == "localhost",
+        None => false,
+    }
+}
+
+/// The HTTP client for a base url. A loopback host gets a client with no proxy at all.
+///
+/// This mirrors the OpenRouter provider's client, because the redirect and proxy rules are a
+/// property of any client that carries a credential, not of one reviewed provider. The
+/// duplication is deliberate: a shared helper would have to live in a crate both providers
+/// depend on, and `rho-core` must stay free of HTTP dependencies, while a new shared crate
+/// needs the workspace manifest. See TODO item B2 for the centralisation design.
+fn build_client(base_url: &str) -> reqwest::Client {
+    // **No redirect is followed.** The request carries an api-key or a bearer token. A
+    // redirect could put the credential on the wire against a host rho never named, so a 3xx
+    // becomes an error the user sees. `Client::new()` follows up to ten redirects, which is
+    // why it must not be used here.
+    let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    if bypasses_proxy(base_url) {
+        // A loopback host must not go through a proxy.
+        builder = builder.no_proxy();
+    }
+    // Fail loudly, never fall back to an insecure client. A build error means the TLS
+    // backend did not initialise, which is process-wide and unrecoverable, so there is no
+    // secure fallback to choose. `AzureProvider::new` is infallible and its one caller in
+    // `rho-cli` wraps it in `Ok(Arc::new(..))` with no error arm.
+    builder
+        .build()
+        .expect("the reqwest TLS backend failed to initialise")
+}
+
 // `Secret` lives in `rho-core`. See decision D-secret-in-core. This crate once defined its
 // own copy with no `Debug` mask at all, while the OpenRouter copy masked itself.
 // That drift is why the type now has one home.
@@ -96,10 +142,8 @@ pub struct AzureProvider {
 impl AzureProvider {
     /// Build the provider from a configuration.
     pub fn new(config: AzureConfig) -> Self {
-        Self {
-            config,
-            client: reqwest::Client::new(),
-        }
+        let client = build_client(&config.base_url);
+        Self { config, client }
     }
 
     /// The configured base URL.

@@ -230,9 +230,12 @@ A project config can change the model or sandbox without trust. It cannot add sk
 You wrote an agent definition, and the model says it has no way to spawn a subagent. Check
 whether you passed `--no-skills`.
 
-> **Partly built.** `--no-skills` also turns subagent discovery off, and it warns about
-> neither. rho then registers no `spawn_agent` and ignores every definition. Drop the flag to
-> get subagents back. No flag keeps subagents while dropping skills.
+> `--no-skills` stops the skill search only. `--no-agents` stops the agent-definition
+> search, so rho offers no subagent, and `--no-skills` still loads subagents. Pass
+> `--no-agents` to drop subagents without dropping skills.
+
+A definition file that does not load is a different case, and rho names it at start-up. See
+[subagents](subagents.md).
 
 When discovery works, rho says so at startup:
 
@@ -272,18 +275,18 @@ rho skips instruction files that are symlinks, non-regular files, or cannot be r
 ### MCP tools do not appear
 
 ```
-rho: 1 MCP server(s) are configured, and no tool schema is cached yet. Their tools appear in the next session.
+rho: 1 MCP server(s) are configured, and no tool schema is cached yet. rho is connecting now, and their tools are available in the next session.
 ```
 
-This is the most likely MCP problem, and no run fixes it. Starting rho again changes nothing.
+rho writes the schema cache before it exits. The tools are available the next time you run rho.
 
-> **Not built yet.** An MCP tool never reaches the model in this version. rho starts your
-> server and reads its tool list, then advertises tools from a schema cache that nothing ever
-> writes. So the list is always empty. A live probe watched the whole handshake succeed and no
-> tool call follow. See [MCP servers](mcp.md) and
-> `docs/verification/mcp-live-probe.md`.
+If the notice repeats across many runs, the cache write may have failed. rho prints a notice
+when a cache write fails. Check that `~/.rho/` is writable and that no other process holds a
+stale lock file at `~/.rho/mcp-schema-cache.lock`.
 
-There is no workaround. Ask the model to use `bash` for the work instead.
+If a server starts but its tools do not appear, check the tool names. rho rejects empty names,
+names with path separators, names with control characters, names with a leading dot, and schemas
+larger than 100 KB. A rejection is printed at startup.
 
 ### MCP config does not parse
 

@@ -992,3 +992,351 @@ async fn status_says_a_cancelled_queued_child_will_not_start() {
         other => panic!("the entry is still in the map until its waiter drops, got {other:?}"),
     }
 }
+
+// ---- the wait deadline (section 2.8, decision D-a-waiter-has-a-deadline) ----
+
+/// Limits with one child per parent and a stated wait deadline.
+///
+/// The deadline is never the child timeout here. Both defaults are 600 seconds, so a
+/// test at the defaults could not say which number ended a wait. A reviewer named that
+/// as the family of the memory-cap test that passed against its own bug.
+fn one_slot_waiting(queue_wait: Duration) -> SubagentLimits {
+    SubagentLimits {
+        max_children_per_parent: 1,
+        child_timeout: Duration::from_secs(600),
+        queue_wait,
+        ..SubagentLimits::new()
+    }
+}
+
+/// Hold the only slot, then queue one child behind it.
+fn hold_the_slot_and_queue_one(
+    registry: &AgentRegistry,
+    cancel: CancelToken,
+) -> (
+    rho_core::AgentNode,
+    rho_core::ChildSpawn,
+    rho_core::QueuedChild,
+) {
+    let root = registry.new_tree();
+    let live = match root
+        .admit_child("scout", CancelToken::new())
+        .expect("the first child starts")
+    {
+        Admission::Started(spawn) => spawn,
+        Admission::Queued(_) => panic!("a free slot must not queue"),
+    };
+    let queued = match root
+        .admit_child("scout", cancel)
+        .expect("a full parent queues")
+    {
+        Admission::Queued(queued) => queued,
+        Admission::Started(_) => panic!("the cap is one"),
+    };
+    (root, live, queued)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_waiter_refuses_when_its_deadline_passes_and_names_the_flag() {
+    // A blocking spawn used to wait for the whole line, about forty minutes at the
+    // defaults, and a prompt-injected model chose the width and the sleepers.
+    let registry = registry(one_slot_waiting(Duration::from_secs(30)));
+    let (_root, _live, queued) = hold_the_slot_and_queue_one(&registry, CancelToken::new());
+
+    let started_at = tokio::time::Instant::now();
+    let refusal = queued
+        .started()
+        .await
+        .expect_err("no slot ever frees, so the deadline must end the wait");
+    let waited = started_at.elapsed();
+    assert!(
+        waited >= Duration::from_secs(30) && waited < Duration::from_secs(600),
+        "the wait must end at the deadline, and not at the 600 second child timeout: \
+         {waited:?}"
+    );
+    assert_eq!(
+        refusal,
+        Dequeued::WaitedTooLong {
+            limit: Duration::from_secs(30)
+        },
+        "the refusal must name the deadline, not the child timeout"
+    );
+    let text = refusal.to_string();
+    assert!(
+        text.contains("--queue-wait-secs"),
+        "the refusal must name the flag that raises it: {text}"
+    );
+    assert!(
+        text.contains("background"),
+        "and the way to spawn without waiting at all: {text}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_deadline_fires_before_the_worst_case_wait() {
+    // The invariant, not one example. The old worst case for one tool call was
+    // ceil(max_queued_per_parent / max_children_per_parent) x child_timeout. The
+    // deadline must end every wait inside that, whatever the limits are.
+    for (queue_wait, child_timeout, per_parent, queued_cap) in [
+        (Duration::from_secs(30), Duration::from_secs(600), 1, 16),
+        (Duration::from_secs(120), Duration::from_secs(300), 2, 8),
+        (Duration::from_secs(1), Duration::from_secs(60), 1, 4),
+    ] {
+        let limits = SubagentLimits {
+            max_children_per_parent: per_parent,
+            max_queued_per_parent: queued_cap,
+            child_timeout,
+            queue_wait,
+            ..SubagentLimits::new()
+        };
+        let rounds = queued_cap.div_ceil(per_parent) as u32;
+        let worst_case = child_timeout * rounds;
+        assert!(
+            queue_wait < worst_case,
+            "the deadline must be the tighter bound: {queue_wait:?} against {worst_case:?}"
+        );
+
+        let registry = registry(limits);
+        let root = registry.new_tree();
+        let mut _live = Vec::new();
+        for _ in 0..per_parent {
+            match root
+                .admit_child("scout", CancelToken::new())
+                .expect("a free slot admits")
+            {
+                Admission::Started(spawn) => _live.push(spawn),
+                Admission::Queued(_) => panic!("the slots were free"),
+            }
+        }
+        let queued = match root
+            .admit_child("scout", CancelToken::new())
+            .expect("a full parent queues")
+        {
+            Admission::Queued(queued) => queued,
+            Admission::Started(_) => panic!("every slot is held"),
+        };
+
+        let started_at = tokio::time::Instant::now();
+        let refusal = queued.started().await.expect_err("no slot ever frees");
+        let waited = started_at.elapsed();
+
+        assert_eq!(refusal, Dequeued::WaitedTooLong { limit: queue_wait });
+        assert!(
+            waited >= queue_wait,
+            "a waiter must get the patience it was promised: {waited:?}"
+        );
+        assert!(
+            waited < child_timeout,
+            "the deadline must end the wait, and not one child run: {waited:?} against \
+             {child_timeout:?}"
+        );
+        assert!(
+            waited < worst_case,
+            "the wait must end inside the old worst case: {waited:?} against {worst_case:?}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slot_that_frees_before_the_deadline_still_starts_the_child() {
+    // The deadline must break no happy path. The slot frees before the wait begins, so the
+    // permit arm is ready at the first poll and the timer never fires.
+    //
+    // The clock is paused and nothing is timed out here on purpose. An earlier version used
+    // the real clock and a five second timeout, which a loaded machine could miss. A test
+    // that fails on a busy box teaches nobody.
+    //
+    // This one covers a slot that is free before the wait. The wake path, where a slot frees
+    // while a waiter already waits, stays covered by `a_queued_child_starts_when_a_slot_frees`
+    // and by `every_waiter_eventually_starts_when_slots_free_one_at_a_time`.
+    let registry = registry(one_slot_waiting(Duration::from_secs(30)));
+    let (_root, live, queued) = hold_the_slot_and_queue_one(&registry, CancelToken::new());
+    drop(live);
+
+    let started_at = tokio::time::Instant::now();
+    let spawn = queued
+        .started()
+        .await
+        .expect("a freed slot must start the waiter, deadline or not");
+    assert_eq!(spawn.node.depth(), 1);
+    assert_eq!(
+        started_at.elapsed(),
+        Duration::ZERO,
+        "a free slot is taken at once, and no deadline is consulted"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_zero_deadline_refuses_a_waiter_at_once() {
+    // Zero means no waiting, not no deadline. A value that means "wait for ever" would
+    // be a fail-open default in a security relevant number.
+    let registry = registry(one_slot_waiting(Duration::ZERO));
+    let (_root, _live, queued) = hold_the_slot_and_queue_one(&registry, CancelToken::new());
+
+    let started_at = tokio::time::Instant::now();
+    let refusal = queued.started().await.expect_err("zero patience refuses");
+    assert_eq!(
+        refusal,
+        Dequeued::WaitedTooLong {
+            limit: Duration::ZERO
+        }
+    );
+    assert_eq!(
+        started_at.elapsed(),
+        Duration::ZERO,
+        "and it waits not at all"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_timed_out_waiter_leaves_no_queued_entry_behind() {
+    // The `handed_out` flag must still be false on this exit, so the drop guard runs.
+    // An entry that stays answers "queued" for a child that will never run, and that
+    // leak already shipped once on another exit.
+    let registry = registry(one_slot_waiting(Duration::from_secs(30)));
+    let (root, _live, queued) = hold_the_slot_and_queue_one(&registry, CancelToken::new());
+    let id = queued.id();
+
+    queued.started().await.expect_err("the deadline ends it");
+
+    assert!(
+        registry.status(&root, id).is_none(),
+        "a waiter that ran out of patience leaves no entry and no name"
+    );
+    assert!(
+        registry.handle_of(id).is_none(),
+        "and its handle goes with it"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_timed_out_waiter_frees_its_place_in_the_line() {
+    // A waiter that gives up must not hold a place. The child behind it moves up.
+    let registry = registry(one_slot_waiting(Duration::from_secs(30)));
+    let (root, _live, first) = hold_the_slot_and_queue_one(&registry, CancelToken::new());
+    let second = match root
+        .admit_child("scout", CancelToken::new())
+        .expect("a full parent queues")
+    {
+        Admission::Queued(queued) => queued,
+        Admission::Started(_) => panic!("the cap is one"),
+    };
+    assert_eq!(second.position(), 2, "it starts behind the first waiter");
+
+    first
+        .started()
+        .await
+        .expect_err("the deadline ends the first");
+
+    assert_eq!(
+        second.position(),
+        1,
+        "the place is derived, so the child behind moves up"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cancel_beats_the_deadline() {
+    // A cancel is what the parent asked for, so it is the reason the parent hears.
+    //
+    // The deadline is zero here on purpose. That is the only case where the order of the
+    // arms is observable: both the cancel and the timer are ready at the first poll. With
+    // any other deadline the timer is still pending, so a swapped arm would pass. See
+    // decision D-a-waiter-has-a-deadline.
+    let registry = registry(one_slot_waiting(Duration::ZERO));
+    let cancel = CancelToken::new();
+    let (_root, _live, queued) = hold_the_slot_and_queue_one(&registry, cancel.clone());
+    cancel.cancel();
+
+    let refusal = queued
+        .started()
+        .await
+        .expect_err("a cancelled waiter refuses");
+    assert_eq!(
+        refusal,
+        Dequeued::Cancelled,
+        "a cancelled and expired waiter reports the cancel"
+    );
+}
+
+// ---- the child queue byte cap (SPEC-steering section 4) ----
+
+#[tokio::test]
+async fn a_child_queue_carries_the_byte_cap_from_the_limits() {
+    // The flag must reach the queue a child really reads. A cap that only the default
+    // constructor applies would leave `--max-agent-steer-bytes` a dead switch.
+    // The cap counts the block as well as its payload, so the limit is stated that way.
+    let cap = rho_core::BLOCK_OVERHEAD_BYTES + 8;
+    let limits = SubagentLimits {
+        max_steer_message_bytes: cap,
+        ..one_slot()
+    };
+    let registry = registry(limits);
+    let (root, _live, queued) = hold_the_slot_and_queue_one(&registry, CancelToken::new());
+
+    let refusal = registry
+        .steer_descendant(&root, queued.id(), text_of(cap + 1))
+        .expect("the queued child is addressable")
+        .expect_err("a message over the cap is refused");
+    assert_eq!(
+        refusal,
+        rho_core::QueueError::TooLarge {
+            limit: cap,
+            size: cap + 1
+        }
+    );
+    registry
+        .steer_descendant(&root, queued.id(), text_of(cap))
+        .expect("the queued child is addressable")
+        .expect("the cap itself passes");
+}
+
+#[tokio::test]
+async fn a_started_child_queue_carries_the_byte_cap_from_the_limits() {
+    // The arm that starts at once builds its own queue, so it needs the same cap.
+    let cap = rho_core::BLOCK_OVERHEAD_BYTES + 8;
+    let limits = SubagentLimits {
+        max_steer_message_bytes: cap,
+        ..SubagentLimits::new()
+    };
+    let registry = registry(limits);
+    let root = registry.new_tree();
+    let spawn = match root
+        .admit_child("scout", CancelToken::new())
+        .expect("a free slot admits")
+    {
+        Admission::Started(spawn) => spawn,
+        Admission::Queued(_) => panic!("a free slot must not queue"),
+    };
+    let id = spawn.node.id();
+
+    let refusal = registry
+        .steer_descendant(&root, id, text_of(cap + 1))
+        .expect("a live child is addressable")
+        .expect_err("a message over the cap is refused");
+    assert_eq!(
+        refusal,
+        rho_core::QueueError::TooLarge {
+            limit: cap,
+            size: cap + 1
+        }
+    );
+    assert_eq!(
+        spawn.queue().max_message_bytes(),
+        cap,
+        "the queue the child reads holds the cap too"
+    );
+}
+
+/// A message that counts exactly `bytes`, the block overhead included.
+fn text_of(bytes: usize) -> Vec<rho_core::ContentBlock> {
+    let message = vec![rho_core::ContentBlock::Text {
+        text: "x".repeat(bytes - rho_core::BLOCK_OVERHEAD_BYTES),
+    }];
+    assert_eq!(
+        rho_core::message_bytes(&message),
+        bytes,
+        "the helper must count what it claims"
+    );
+    message
+}

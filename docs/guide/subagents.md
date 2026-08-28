@@ -37,7 +37,7 @@ The front matter fields are:
 |---|---|---|
 | `name` | No | How the model names the agent. Lowercase letters, digits, hyphens, 1–64 characters. Leave it out and rho uses the file name, with a warning. |
 | `description` | Yes | What the model reads to choose this agent. A definition with no description does not load. |
-| `tools` | No | A space- or comma-separated list of tool names to allow. Write `all` or `*` to inherit every parent tool. Write `none` to give the child no tools. Omit the field to inherit. |
+| `tools` | No | The tool names to allow. Write them on one line, `tools: read, list`, or as a YAML sequence, `tools: [read, list]`. Write `all` or `*` to inherit every parent tool. Write `none` to give the child no tools. Omit the field to inherit. A value of any other type stops the file loading. |
 | `model` | No | Override the model. Omit to inherit the parent's model. |
 | `max_turns` | No | Cap the child's turns. Omit to use the parent's remaining budget. |
 | `sandbox` | No | `off`, `confined`, or `strict`. Can only narrow; the parent's mode is the floor. |
@@ -45,6 +45,51 @@ The front matter fields are:
 A name that holds uppercase letters, spaces, or non-ASCII characters still loads.
 rho prints a warning and uses it.
 A name longer than 64 characters loads with a warning too.
+
+## When a definition does not load
+
+Some faults stop a file loading. rho then prints one line per file, before the session
+starts. The line names the file, says what is wrong, and says what to change:
+
+```
+rho: agent definition /work/.rho/agents/broken.md did not load. the tools field is not a
+list of names. Detail: the field is a number, and a tool list is a line of words or a
+sequence. Write tools: read, list or tools: [read, list]. Write none for no tools, and all
+to inherit every parent tool.
+```
+
+These faults stop a file:
+
+| Fault | What to do |
+|---|---|
+| rho cannot read the file | Check the path and the permissions. |
+| The file has no `---` frontmatter | Start the file with a `---` line. |
+| The frontmatter never closes | Add the closing `---` line. rho reads the first 16 KiB. |
+| The frontmatter is not valid YAML | Check the YAML. A wrong type or a repeated key stops the file. |
+| There is no `description` | Add one. The model reads only that line to choose an agent. |
+| `tools` is not a list of names | Write a line of words, or a YAML sequence. |
+
+A broken `tools` field stops the whole file on purpose. Ignoring the field would mean
+"inherit every tool the parent holds", so a typo would widen the child instead of
+narrowing it.
+
+rho prints at most five of these lines, then counts the rest. The same cap covers the
+warning lines, and one definition prints at most five of its own. A long name is cut. So a
+repository full of broken files cannot fill your terminal.
+
+A file inside a project you have not trusted is still reported, and rho quotes nothing from
+it.
+
+A warning is different from a fault. A definition with a warning still loads, and rho
+prints the warning with the definition name:
+
+```
+rho: agent definition mixer: a tool keyword must stand alone. "all" was dropped. These
+named tools stand: read.
+```
+
+A definition inside your project is withheld even when a symlink in `~/.rho/agents/` points
+at it. Pass `--trust-project` to load it.
 
 ## Use it
 
@@ -139,10 +184,25 @@ Start rho with flags to change the defaults:
 | `--child-timeout-secs` | 600 | Seconds before rho cancels a child. |
 | `--max-queued-per-parent` | 16 | Children one parent may queue for a slot. |
 | `--max-queued-total` | 128 | Children waiting across the whole process. |
+| `--queue-wait-secs` | the child timeout | Seconds one child may wait for a slot. |
+| `--max-agent-steer-bytes` | 16384 | Bytes in one steering message to a child. |
 | `--agent-grace-turns` | 5 | Turns of warning before a child's turn cap. |
 | `--max-agent-tool-calls` | 64 | Tool calls one child may make in total. |
 
 When rho refuses a spawn, it names the flag to raise.
+
+A queued child does not wait for ever. It waits for `--queue-wait-secs`, which is the child
+timeout by default. Then rho refuses that one task and the others go on. So one wide fan-out
+cannot hold your turn for the whole wait line. Use `background: true` when you want the id at
+once and no wait at all.
+
+A steering message to a child is capped at `--max-agent-steer-bytes`. A larger message is
+refused, and the refusal states the size and the limit. Write a long body to a file, and steer
+with the file name.
+
+Raising that cap raises the memory ceiling with it. The ceiling is the cap, times 32 messages,
+times the waiting and live child limits. At the defaults it is 80 MiB. rho does not clamp the
+value, because you own the machine.
 
 Grace turns exist because a child cannot ask for more turns.
 When a child is this many turns from its cap, rho tells it to write its summary early.
@@ -210,9 +270,9 @@ Rename the file to avoid a silent override.
 > `max_depth` is fixed at 1 in this version.
 > A definition that sets it has no effect.
 
-> **Partly built.** `--no-skills` also turns subagents off, and it says so nowhere. rho then
-> registers no `spawn_agent` and ignores every definition you wrote. Drop the flag to get
-> subagents back. A live run proved both halves.
+`--no-skills` leaves subagents alone. It used to turn them off and say nothing, so a definition
+was ignored and `spawn_agent` disappeared. Use `--no-agents` when you want no subagent, and rho
+says so at startup.
 
 ## See also
 

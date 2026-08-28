@@ -1,5 +1,11 @@
 # MCP, driven for real — the client works and the tools never arrive
 
+> **Fixed on branch `feat/wire-the-dead-switches`.**
+> `drain_connects` now awaits every connect task before the process exits, so the
+> cache write completes on a short run. The notice no longer repeats.
+> See `docs/verification/wiring-sprint.md` for the re-probe.
+> The record below describes the pre-fix state.
+
 Date: 2026-08-23. Binary: `target/release/rho`, version 0.1.0, default features.
 
 `docs/verification/sprint-1.md` had checked one MCP case: a server that does not start does

@@ -112,6 +112,17 @@ impl App {
         self
     }
 
+    /// Set whether the working word animates.
+    ///
+    /// This is the call that was missing. `state.animate` was read by the renderer and
+    /// assigned nowhere, so the sweep never drew. A flag, a config key, and
+    /// `RHO_REDUCE_MOTION` all arrive here through the merge. See
+    /// `D-motion-answers-to-one-switch`.
+    pub fn with_motion(mut self, animates: bool) -> Self {
+        self.state.animate = animates;
+        self
+    }
+
     /// Set how the TUI draws reasoning. Default is `Summary`.
     ///
     /// The mode reaches the renderer through `TuiState`, so a config file, a variable, and a
@@ -141,6 +152,13 @@ impl App {
     /// The transcript rows the user sees. A frontend or a test reads what rho drew.
     pub fn live_rows(&self) -> &[Row] {
         self.state.live_rows()
+    }
+
+    /// The current UI state the renderer draws. A test reads what the builder wired,
+    /// so it can drive the real `with_motion`, `with_reasoning`, or `with_context`
+    /// chain and render the result, instead of hand-building a `TuiState`.
+    pub fn state(&self) -> &TuiState {
+        &self.state
     }
 
     /// The escape sequences this app writes at startup. A test reads the wiring.

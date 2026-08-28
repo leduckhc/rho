@@ -319,8 +319,8 @@ left to right. Nothing else animates: no spinner frames, no idle motion, no 3D s
 - **No colour.** The same three steps as modifiers only: dim, plain, bold.
 
 The sweep stops, and the word renders plain, under any of these: the user sets
-`tui.motion = false` or passes `--no-motion`, stdout is not a terminal, or a
-reduced-motion preference is set via `tui.reduce_motion = true` or `RHO_REDUCE_MOTION=1`.
+`tui-motion = false` or passes `--no-motion`, stdout is not a terminal, or
+`RHO_REDUCE_MOTION=1` is set.
 With motion off the interface loses no information, because the word itself names the
 state and the durations still count.
 

@@ -22,7 +22,7 @@ use crate::bindings::{bindings, filter_slash_commands};
 use crate::concise::RowFold;
 use crate::duration::{duration_slot, format_duration};
 use crate::markdown::{MarkdownKind, has_inline_markup, scan_inline, scan_markdown};
-use crate::motion::{MotionCell, motion_cell, sweep_weight};
+use crate::motion::{MotionCell, MotionInputs, motion_cell, motion_enabled, sweep_weight};
 use crate::sanitize::{sanitize_block, sanitize_line};
 use crate::state::{
     ActivityState, Approval, HistorySearch, Panel, Row, SlashList, ToolRowStatus, TuiState,
@@ -1236,12 +1236,24 @@ fn stop_word(reason: rho_core::AgentStopReason) -> &'static str {
     }
 }
 
-/// Apply the motion sweep to the footer working word, writing styles into the
-/// cells that already hold it. No `Vec` is allocated, so the sweep costs zero
-/// allocations, which is the target the cost budget marks for this stage.
+/// Apply the motion sweep to the footer working word, writing styles into the cells
+/// that already hold it. No `Vec` is allocated, so the sweep costs zero allocations,
+/// which is the target the cost budget marks for this stage. `SPEC-tui-experience`
+/// section 8 states the rule plainly: the renderer writes styles into cells that
+/// already exist, and does not call `sweep_frame`, because `sweep_frame` returns a
+/// `Vec` and would allocate once per frame.
+///
+/// `motion_enabled` is the single motion gate. `state.animate` is the resolved motion
+/// choice from the merge, so a non-terminal stdout is already folded into it, and
+/// `stdout_is_terminal` is true here. This consults the same gate `sweep_frame` uses,
+/// so the two cannot drift on when motion runs. See `D-motion-answers-to-one-switch`.
 fn apply_sweep(state: &TuiState, frame: &mut Frame<'_>, y: usize, word_at: Option<usize>) {
     let Some(start) = word_at else { return };
-    if !state.animate || state.activity != ActivityState::Running {
+    let inputs = MotionInputs {
+        tui_motion: state.animate,
+        stdout_is_terminal: true,
+    };
+    if !motion_enabled(inputs) || state.activity != ActivityState::Running {
         return;
     }
     let area = frame.area();
