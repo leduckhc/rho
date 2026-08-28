@@ -42,6 +42,40 @@ pub fn render_list(rows: &[SessionRow], now_millis: u64, long: bool) -> String {
     out
 }
 
+/// Make one string from a session file safe to write to a terminal.
+///
+/// **A session file is data rho reads back, so every string in it is untrusted.** The write path
+/// already escapes what it records. This read path did not, and the read path is the dangerous one:
+/// a reviewer named a session with `\x1b[2K\rPWNED\x1b]0;owned\x07` and both renderers delivered it
+/// intact, so the escape erased the line, returned the carriage, and set the window title.
+///
+/// Message text takes the same arm, so a prompt-injected model's answer replays whenever anyone
+/// lists or shows the session.
+///
+/// `rho_redact::sanitize_line` drops an escape sequence, replaces any other control character, and
+/// folds a tab and a newline to a space. So the result holds no byte below `0x20`, and it is one
+/// line. Every field a renderer prints goes through here, and
+/// `list_never_writes_a_control_byte_to_the_terminal` pins that.
+fn safe(text: &str) -> String {
+    rho_redact::sanitize_line(text)
+}
+
+/// The same scrub for a block that may be many lines, and with no length cap.
+///
+/// `--full` prints the whole text of a record, so `safe` is wrong there: it caps at
+/// `rho_redact::MAX_LINE_CHARS` and folds every newline to a space. Capping would break the promise
+/// of the flag, and a reader who asked for the whole text would silently get part of it.
+///
+/// So this drops an escape sequence and replaces every other control character, exactly as `safe`
+/// does, and it keeps a newline. A tab becomes a space, because a tab inside a line moves the cursor
+/// and this function exists to stop that. No byte below `0x20` survives inside a line.
+fn safe_block(text: &str) -> String {
+    rho_redact::sanitize_text(text)
+        .chars()
+        .map(|ch| if ch == '\t' { ' ' } else { ch })
+        .collect()
+}
+
 /// Build the header line of the list.
 fn list_header(long: bool) -> String {
     let mut line = join_columns(&[
@@ -73,18 +107,21 @@ fn list_row(row: &SessionRow, now_millis: u64, long: bool) -> String {
                     LIST_ACTIVE_W,
                     false,
                 ),
-                col(&summary.title, LIST_TITLE_W, false),
-                col(&summary.model, LIST_MODEL_W, false),
+                col(&safe(&summary.title), LIST_TITLE_W, false),
+                col(&safe(&summary.model), LIST_MODEL_W, false),
                 col(&tokens, LIST_TOKENS_W, true),
                 col(&cost, LIST_COST_W, true),
             ]);
             if long {
                 line.push_str("  ");
-                line.push_str(&summary.cwd.display().to_string());
+                line.push_str(&safe(&summary.cwd.display().to_string()));
                 line.push_str("  ");
                 match &summary.forked_from {
                     Some(origin) => {
-                        line.push_str(&format!("fork:{}@{}", origin.session_id, origin.record_id));
+                        line.push_str(&safe(&format!(
+                            "fork:{}@{}",
+                            origin.session_id, origin.record_id
+                        )));
                     }
                     None => line.push_str(DASH),
                 }
@@ -93,11 +130,13 @@ fn list_row(row: &SessionRow, now_millis: u64, long: bool) -> String {
         }
         SessionRow::Unreadable { path, reason } => {
             // An unreadable row has only a path, so the id comes from the file stem.
-            let id = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let reason_text = format!("{UNREADABLE_PREFIX}{reason}");
+            let id = safe(
+                &path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            );
+            let reason_text = safe(&format!("{UNREADABLE_PREFIX}{reason}"));
             // The reason spans the title and model columns, so a full reason survives.
             let reason_w = LIST_TITLE_W + 1 + LIST_MODEL_W;
             join_columns(&[
@@ -131,8 +170,9 @@ pub fn render_show(read: &ReadResult, id: &SessionId, full: bool) -> String {
 
 /// Build the one-line header of a show listing.
 fn show_header(read: &ReadResult, id: &SessionId) -> String {
-    let title = show_title(&read.entries);
-    let model = show_model(&read.entries);
+    // Both come from the file, so both are untrusted. See `safe`.
+    let title = safe(&show_title(&read.entries));
+    let model = safe(&show_model(&read.entries));
     let closed = if last_is_closed(&read.entries) {
         "closed"
     } else {
@@ -171,11 +211,20 @@ fn show_row(
         "  ".repeat(depth + 1)
     };
     let (kind, detail) = describe_record(&entry.record, names);
+    // The detail comes from the file: a prompt, an assistant answer, a tool name, a title. All of it
+    // is untrusted, and `--full` must not turn the scrub off. See `safe` and `safe_block`.
+    let detail = if full {
+        safe_block(&detail)
+    } else {
+        safe(&detail)
+    };
     let (h, m, s) = time_of_day(parse_millis(&entry.timestamp));
     let time = format!("{h:02}:{m:02}:{s:02}");
+    // The record id comes from the file too, so a crafted id cannot smuggle an escape into the
+    // column a user copies into `--at`.
     let left = format!(
         "{indent}{}  {time}  {}  ",
-        pad_right(&entry.id.0, 4),
+        pad_right(&safe(&entry.id.0), 4),
         pad_right(&kind, 11)
     );
     if full {

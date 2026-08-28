@@ -22,6 +22,7 @@ rho-plugin = { version = "0.1.0", path = "../rho-plugin", optional = true }
 rho-provider-azure = { version = "0.1.0", path = "../rho-provider-azure", optional = true }
 rho-provider-bedrock = { version = "0.1.0", path = "../rho-provider-bedrock", optional = true }
 rho-provider-openrouter = { version = "0.1.0", path = "../rho-provider-openrouter", optional = true }
+rho-redact.workspace = true
 rho-skills = { version = "0.1.0", path = "../rho-skills" }
 rho-tools = { version = "0.1.0", path = "../rho-tools" }
 rho-tui = { version = "0.1.0", path = "../rho-tui", optional = true }

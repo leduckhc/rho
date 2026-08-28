@@ -2792,6 +2792,7 @@ dependencies = [
  "rho-provider-azure",
  "rho-provider-bedrock",
  "rho-provider-openrouter",
+ "rho-redact",
  "rho-skills",
  "rho-tools",
  "rho-tui",

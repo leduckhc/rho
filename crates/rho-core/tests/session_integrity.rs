@@ -964,6 +964,103 @@ fn a_fork_at_a_leaf_record_leaves_a_usable_head() {
     SessionReader::read(&fork_path).expect("a fork at a leaf must stay readable");
 }
 
+#[test]
+fn a_resume_onto_a_truncated_tail_keeps_every_record_it_accepts() {
+    // **The invariant, and not the example.** After a resume onto a fragment a crash left, every
+    // record the writer accepted must come back from a re-read.
+    //
+    // `append_to` opened the file with `append(true)` and wrote the next record straight onto the
+    // fragment. The two then shared one line, so the reader dropped the line as a truncated tail
+    // and the record went with it. The writer had reported success.
+    //
+    // The lost record is the worst one to lose: on a crash continue the first thing recorded is the
+    // user's new prompt. And after the resume the reader reports `truncated_tail = false`, so
+    // nothing warns at all. A reviewer found it, and this test drives every fragment shape a crash
+    // leaves.
+    let whole_line = message_line("rX", Some("r0"), "a whole record with no newline");
+    let fragments: [&str; 5] = [
+        // A record cut inside its type tag, which is what a torn write leaves.
+        r#"{"id":"rX","parentId":"r0","timestamp":"1756000000009","type":"clos"#,
+        // Cut at the very start of a line.
+        "{",
+        // Cut inside a string value.
+        r#"{"id":"rX","parentId":"r0","timestamp":"1756000000009","type":"message","message":{"role":"user","content":[{"type":"text","text":"half a pro"#,
+        // A whole record with the newline missing, which an unflushed write can leave.
+        &whole_line,
+        // Bytes that are not json at all.
+        "not json at all",
+    ];
+    for (case, fragment) in fragments.iter().enumerate() {
+        for appended in [1usize, 2, 5] {
+            let (_guard, store, root) = temp_store();
+            let session = id(0x1000 + case as u16);
+            let path = session_path(&root, &session);
+            {
+                let mut writer = store
+                    .create(new_session(&session, Path::new("/tmp")))
+                    .expect("a created session");
+                let head = writer.head();
+                writer
+                    .append(message_record("the first prompt"), head)
+                    .expect("appended");
+            }
+            // The crash: a fragment with no trailing newline.
+            {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .expect("the file reopens");
+                file.write_all(fragment.as_bytes()).expect("the fragment");
+            }
+
+            // The resume, exactly as `--continue` makes it.
+            let mut writer = store.append_to(&path).expect("the file reopens");
+            let mut accepted = Vec::new();
+            for n in 0..appended {
+                accepted.push(
+                    writer
+                        .append(message_record(&format!("after the resume {n}")), None)
+                        .expect("the writer accepted the record"),
+                );
+            }
+            drop(writer);
+
+            let read = SessionReader::read(&path).expect("the file must read back");
+            let on_disk: Vec<String> = read
+                .entries
+                .iter()
+                .map(|entry| entry.id.0.clone())
+                .collect();
+            for want in &accepted {
+                assert!(
+                    on_disk.contains(&want.0),
+                    "case {case} with {appended} appended: the writer accepted {want:?} and a \
+                     re-read cannot see it. On disk: {on_disk:?}"
+                );
+            }
+            // The work from before the crash survives too, so the repair costs only the fragment.
+            let texts: Vec<String> = read
+                .entries
+                .iter()
+                .filter_map(|entry| match &entry.record {
+                    Record::Message { message } => {
+                        message.content.iter().find_map(|block| match block {
+                            ContentBlock::Text { text } => Some(text.clone()),
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                texts.iter().any(|t| t == "the first prompt"),
+                "case {case}: the work before the crash must survive, got {texts:?}"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Section 7c. An exclusive create, because a collision truncates.
 // ---------------------------------------------------------------------------
@@ -1143,6 +1240,50 @@ fn a_store_directory_is_0o700_on_unix() {
             level.display()
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_forked_session_file_is_0o600_on_unix() {
+    // A fork copies a whole transcript, so it gets the same care as a create. It was the one create
+    // in the module that opened with no mode and then chmodded, which leaves a window the mode
+    // argument exists to close. A reviewer named it.
+    //
+    // The parent is world writable and the umask is permissive, so a mode that arrived only by a
+    // later chmod would show here as a wider mode at creation.
+    use std::os::unix::fs::PermissionsExt;
+    let (_guard, store, root) = temp_store();
+    let source = id(0x0f01);
+    let path = {
+        let mut writer = store
+            .create(new_session(&source, Path::new("/tmp")))
+            .expect("a created session");
+        let head = writer.head();
+        writer
+            .append(message_record("a prompt"), head)
+            .expect("appended");
+        writer.path().to_path_buf()
+    };
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).expect("the mode");
+    let head = SessionReader::read(&path)
+        .expect("the file reads back")
+        .entries
+        .last()
+        .expect("a record")
+        .id
+        .clone();
+
+    let writer = store.fork(&path, &head, &id(0x0f02)).expect("a fork");
+
+    let mode = std::fs::metadata(writer.path())
+        .expect("the fork")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "a forked session must be owner only, got {mode:o}"
+    );
 }
 
 #[cfg(unix)]

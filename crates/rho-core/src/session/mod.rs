@@ -575,6 +575,30 @@ fn io_error(path: &Path, error: std::io::Error) -> SessionError {
     SessionError::Io(format!("{}: {error}", path.display()))
 }
 
+/// Does this file end with a newline?
+///
+/// Every line `write_entry` produces ends with one, so a file that does not end with one is a file a
+/// crash cut in half. `append_to` closes that line before it appends, or the next record would share
+/// it and the reader would drop both.
+///
+/// An empty file needs no newline. `append_to` never sees one, because a read of an empty file is an
+/// error, and this is written to be true on its own rather than to rely on that.
+fn ends_with_newline(path: &Path) -> Result<bool, SessionError> {
+    use std::io::{Read, Seek, SeekFrom};
+    let length = std::fs::metadata(path)
+        .map_err(|e| io_error(path, e))?
+        .len();
+    if length == 0 {
+        return Ok(true);
+    }
+    let mut file = File::open(path).map_err(|e| io_error(path, e))?;
+    file.seek(SeekFrom::Start(length - 1))
+        .map_err(|e| io_error(path, e))?;
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last).map_err(|e| io_error(path, e))?;
+    Ok(last[0] == b'\n')
+}
+
 /// Make one file readable and writable by its owner alone.
 ///
 /// A session file holds a whole conversation. A default umask makes it `0o644`, and then any
@@ -1372,10 +1396,39 @@ impl SessionStore {
             .map(|entry| entry.id.clone())
             .unwrap_or_else(|| read.header_id.clone());
         // Hold an appending handle for the life of the reopened session.
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .append(true)
             .open(path)
             .map_err(|e| io_error(path, e))?;
+        // **Close an unterminated last line, before anything else is written.**
+        //
+        // A torn write leaves a last line with no newline. An append then landed the next record on
+        // that same line, so the two shared it, the reader dropped the whole line, and the record
+        // went with it. The writer had reported success, and after the resume the reader saw no
+        // truncated tail at all, so nothing warned.
+        //
+        // The record lost is the worst one to lose: on a crash continue the first thing recorded is
+        // the user's new prompt. A crash is the case `--continue` exists for, so this is the path
+        // that had to be right. A reviewer found it.
+        //
+        // **The condition is the last byte, and not `read.truncated_tail`.** The review suggested
+        // the flag, and a test over every fragment shape showed it is not enough: a **whole** record
+        // with its newline missing decodes, so the flag is false, and appending then destroyed a
+        // record that had been readable. Every line rho writes ends with a newline, so a file that
+        // does not is a file a crash cut.
+        //
+        // A newline keeps the user's session and loses at most the fragment, which the reader was
+        // going to drop anyway. Refusing the resume would also be defensible, and it would throw
+        // away work the user can still use.
+        if !ends_with_newline(path)? {
+            file.write_all(b"\n").map_err(|e| io_error(path, e))?;
+            file.flush().map_err(|e| io_error(path, e))?;
+            tracing::warn!(
+                path = %path.display(),
+                "the session file did not end in a newline, so rho closed the line before \
+                 appending. A crash can leave one. Every record after it is kept."
+            );
+        }
         let mut writer = SessionWriter::with_sink(path.to_path_buf(), Box::new(file));
         writer.head = Some(head);
         // Seed the id set from the file itself, inside the store. A caller cannot forget it,
@@ -1668,12 +1721,20 @@ impl SessionStore {
 
         create_private_dir(&self.root)?;
         let new_path = self.session_path(new_id.as_str());
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        // The mode goes on the open call, as it does in `create_file` and in the sidecar open. A
+        // create-then-chmod window is what the mode argument exists to close, and a fork copies a
+        // whole transcript. The store root is `0o700`, so nobody could traverse in today; this is
+        // the one create in the module that still did it the old way. A reviewer named it.
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
             .open(&new_path)
             .map_err(|e| io_error(new_path.as_path(), e))?;
-        set_owner_only(&new_path)?;
         let mut writer = SessionWriter::with_sink(new_path, Box::new(file));
         // Every id the copied branch carries. The writer must not mint one of them, and a
         // count cannot see that, because a branch is not contiguous. See section 7a.

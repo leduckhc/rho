@@ -670,3 +670,123 @@ fn show_full_never_prints_a_tool_message_body_either() {
         "--full must not print a tool message body, got {text}"
     );
 }
+
+/// The payload a review delivered through both renderers. `^[[2K` erases the line, `^M` returns the
+/// carriage, and `^[]0;owned^G` sets the terminal window title.
+/// The tab is deliberate. It moves the cursor like any other control byte, and a mutation showed
+/// that without it the tab fold in `safe_block` had no test.
+const ESCAPES: &str = "A\u{1b}[2K\rPWNED\u{1b}]0;owned\u{7}\u{0}\u{8}\tX";
+
+/// Every byte below `0x20` in one rendered block, ignoring the newlines that separate its lines.
+fn control_bytes(rendered: &str) -> Vec<u8> {
+    rendered
+        .lines()
+        .flat_map(|line| line.bytes())
+        .filter(|byte| *byte < 0x20)
+        .collect()
+}
+
+#[test]
+fn list_never_writes_a_control_byte_to_the_terminal() {
+    // A session file is data rho reads back, so its strings are untrusted. The write path escapes
+    // them and **the read path did not**, and the read path is the dangerous one. A reviewer drove
+    // the real binary and `cat -v` showed `A^[[2K^MPWNED^[]0;owned^G` delivered intact.
+    //
+    // Message text takes the same arm, so a prompt-injected model's answer replays whenever anyone
+    // lists or shows the session.
+    let mut summary = SessionSummary {
+        id: SessionId::parse("20260825-094512-a3f9").unwrap(),
+        path: format!("/store/{ESCAPES}.jsonl").into(),
+        title: ESCAPES.to_string(),
+        title_is_explicit: true,
+        cwd: format!("/work/{ESCAPES}").into(),
+        started_millis: NOW,
+        last_active_millis: NOW,
+        size_bytes: 10,
+        model: format!("m{ESCAPES}"),
+        usage: None,
+        closed: false,
+        forked_from: Some(ForkOrigin {
+            session_id: format!("src{ESCAPES}"),
+            record_id: RecordId(format!("r{ESCAPES}")),
+        }),
+    };
+    summary.usage = None;
+    let rows = vec![
+        SessionRow::Session(Box::new(summary)),
+        SessionRow::Unreadable {
+            path: format!("/store/{ESCAPES}.jsonl").into(),
+            reason: format!("cannot decode {ESCAPES}"),
+        },
+    ];
+
+    for long in [false, true] {
+        let out = render_list(&rows, NOW, long);
+        let found = control_bytes(&out);
+        assert!(
+            found.is_empty(),
+            "list(long={long}) must write no control byte, got {found:?} in\n{out}"
+        );
+        assert!(
+            !out.contains("PWNED") || !out.contains('\u{1b}'),
+            "the escape introducer must be gone"
+        );
+    }
+}
+
+#[test]
+fn show_never_writes_a_control_byte_to_the_terminal() {
+    // The header and every record line. The title, the model, a prompt, an assistant answer, and a
+    // name record all carried the payload through.
+    let read = ReadResult {
+        header: SessionHeader {
+            version: 1,
+            session_id: "20260825-094512-a3f9".to_string(),
+            cwd: format!("/work/{ESCAPES}").into(),
+            approval: "ask".to_string(),
+            sandbox: "confined".to_string(),
+            forked_from: None,
+        },
+        header_id: RecordId("r0".to_string()),
+        entries: vec![
+            entry("r1", Some("r0"), NOW, model_change(&format!("m{ESCAPES}"))),
+            entry("r2", Some("r1"), NOW, user(&format!("a prompt {ESCAPES}"))),
+            entry(
+                "r3",
+                Some("r2"),
+                NOW,
+                assistant(&format!("an answer {ESCAPES}")),
+            ),
+            entry(
+                "r4",
+                Some("r3"),
+                NOW,
+                tool_call(
+                    "c1",
+                    &format!("t{ESCAPES}"),
+                    serde_json::json!({ "p": ESCAPES }),
+                ),
+            ),
+            entry("r5", Some("r4"), NOW, tool_result("c1", ESCAPES)),
+            entry(
+                "r6",
+                Some("r5"),
+                NOW,
+                Record::Name {
+                    title: ESCAPES.to_string(),
+                },
+            ),
+        ],
+        truncated_tail: false,
+        dropped_records: 0,
+    };
+
+    for full in [false, true] {
+        let out = render_show(&read, &id(), full);
+        let found = control_bytes(&out);
+        assert!(
+            found.is_empty(),
+            "show(full={full}) must write no control byte, got {found:?} in\n{out}"
+        );
+    }
+}
