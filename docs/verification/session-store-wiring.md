@@ -969,3 +969,35 @@ file correctly looks like a crash.
 **One correction to the review.** It said `main` now runs `bench/check-dead-surface.py`. `main` ships
 the script and runs it in neither `AGENTS.md`'s gate nor CI, and `main` itself reports 44 violations.
 This tree reports 37, and none of them is in `session`.
+
+## 19. The lock, measured by the review
+
+The review measured what section 6 had only inspected. Three probes, real processes, against this
+branch:
+
+**Contention.** One process holds the lock, a second asks:
+
+```
+PID 56304 TOOK THE LOCK
+PID 56306 REFUSED: session 20260101-000000-aaaa is open in another process. Use another session, or close that one.
+PID 56304 RELEASING
+PID 56314 TOOK THE LOCK          # a third process, after the release
+```
+
+**A killed holder.** `SIGKILL` the holder, then ask again:
+
+```
+PID 56396 TOOK THE LOCK
+Killed: 9
+PID 56403 TOOK THE LOCK          # no stale lock left behind
+```
+
+**Ten at once.** Exactly one winner, nine named refusals, no partial state.
+
+That is the property that matters after a crash, and it holds because the operating system owns an
+`flock` and not a file rho must clean up. It is recorded here so the claim does not have to be
+re-derived.
+
+**And it is why the blocker needed a different repair.** The writer that appends onto a cut line is the
+**same** process that legitimately holds the lock, so there is no second writer to refuse. A lock
+cannot see that defect even in principle, which is why the fix is in `append_to`.
