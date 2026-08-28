@@ -555,3 +555,96 @@ fn a_cancelled_false_answer_is_refused() {
         DialogAnswer::Cancelled
     );
 }
+
+#[test]
+fn an_unknown_event_type_is_skippable_in_rust() {
+    // The spec tells a client to ignore an unknown event type. `Event` alone cannot obey
+    // that rule, because a tagged enum refuses a tag it does not know, so a Rust client
+    // stopped reading the moment rho gained an event while a client in any other language
+    // just skipped the line. `MaybeEvent` makes the rule reachable here too.
+    use rho_jsonl::MaybeEvent;
+
+    // Reading a new type through `Event` fails. This is the trap the envelope removes.
+    let direct = serde_json::from_str::<Event>(r#"{"type":"future_event","x":1}"#);
+    assert!(
+        direct.is_err(),
+        "Event is tagged, so it must refuse an unknown tag"
+    );
+
+    // Reading the same line through the envelope succeeds, and says it is unknown.
+    let wrapped: MaybeEvent = serde_json::from_str(r#"{"type":"future_event","x":1}"#)
+        .expect("the envelope must accept an unknown event type");
+    match wrapped {
+        MaybeEvent::Unknown(value) => {
+            assert_eq!(value["type"], "future_event");
+            assert_eq!(
+                value["x"], 1,
+                "the raw line survives, so a client can log it"
+            );
+        }
+        MaybeEvent::Known(event) => panic!("expected Unknown, got {event:?}"),
+    }
+
+    // A known type still reads as known, including with an added field, which is the
+    // other half of the loose-reader rule.
+    let known: MaybeEvent = serde_json::from_str(r#"{"type":"turn_start"}"#).expect("known");
+    assert_eq!(known, MaybeEvent::Known(Event::TurnStart));
+    let grown: MaybeEvent =
+        serde_json::from_str(r#"{"type":"settled","stop_reason":"end_turn","tokens":7}"#)
+            .expect("a known type with a new field stays known");
+    assert_eq!(
+        grown,
+        MaybeEvent::Known(Event::Settled {
+            stop_reason: SettleReason::EndTurn
+        })
+    );
+}
+
+#[test]
+fn every_event_variant_reads_back_through_the_envelope() {
+    // The envelope must not accidentally classify a known event as unknown. An untagged
+    // reader tries its arms in order, so every real event has to match `Known` first.
+    use rho_jsonl::MaybeEvent;
+    let events = vec![
+        Event::TurnStart,
+        Event::TurnEnd {
+            stop_reason: StopReason::EndTurn,
+        },
+        Event::TextDelta {
+            index: 0,
+            delta: "x".to_string(),
+        },
+        Event::ToolStart {
+            id: "t".to_string(),
+            name: "read".to_string(),
+            kind: ToolKind::Read,
+        },
+        Event::ToolUpdate {
+            id: "t".to_string(),
+            output: "o".to_string(),
+        },
+        Event::ToolEnd {
+            id: "t".to_string(),
+            ok: true,
+        },
+        Event::MessageQueued { position: 1 },
+        Event::MessageDelivered { count: 1 },
+        Event::Fault {
+            kind: FaultKind::Provider,
+            message: "m".to_string(),
+        },
+        Event::Settled {
+            stop_reason: SettleReason::EndTurn,
+        },
+    ];
+    for event in events {
+        let text = line(&event);
+        let back: MaybeEvent = serde_json::from_str(&text)
+            .unwrap_or_else(|error| panic!("{text} did not read back: {error}"));
+        assert_eq!(
+            back,
+            MaybeEvent::Known(event.clone()),
+            "{text} was classified as unknown"
+        );
+    }
+}

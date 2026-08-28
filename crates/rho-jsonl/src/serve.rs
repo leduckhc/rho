@@ -427,14 +427,25 @@ where
 /// An unknown `type` is its own case, so a client can probe for a command instead of
 /// guessing from a version number. Every other shape failure is a parse error.
 fn parse_command(bytes: &[u8]) -> Result<Command, (ReplyError, String)> {
-    serde_json::from_slice::<Command>(bytes).map_err(|error| {
-        let case = if error.to_string().starts_with("unknown variant") {
-            ReplyError::UnknownCommand
-        } else {
-            ReplyError::ParseError
-        };
-        (case, error.to_string())
-    })
+    // First, check the `type` field. If we find one but don't recognize it, it is an
+    // unknown command. If we can't parse the `type` field at all, it is a parse error.
+    #[derive(serde::Deserialize)]
+    struct Tag<'a> {
+        r#type: &'a str,
+    }
+
+    let unknown = serde_json::from_slice::<Tag>(bytes)
+        .map(|tag| !Command::NAMES.contains(&tag.r#type))
+        .unwrap_or(false);
+
+    if unknown {
+        return Err((ReplyError::UnknownCommand, "unknown command type".into()));
+    }
+
+    // Now parse the full command. If the type was known, a parse error here is a shape
+    // issue, not an unknown command.
+    serde_json::from_slice::<Command>(bytes)
+        .map_err(|error| (ReplyError::ParseError, error.to_string()))
 }
 
 /// The one message for a line that passed the byte cap.

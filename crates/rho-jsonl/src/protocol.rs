@@ -307,6 +307,41 @@ pub enum Event {
     Settled { stop_reason: SettleReason },
 }
 
+/// One line from the event stream: an event this build knows, or one it does not.
+///
+/// **Read events through this, not through [`Event`].** The spec tells a client to ignore
+/// an unknown event type, and `Event` alone cannot obey that rule: a tagged enum refuses a
+/// tag it does not know, so a Rust client would stop reading the moment rho gained an
+/// event. A client in any other language just skips the line. That made this crate the
+/// worst-served reader of its own protocol.
+///
+/// It costs the wire nothing. It changes only what a reader accepts.
+///
+/// ```
+/// use rho_jsonl::{Event, MaybeEvent};
+///
+/// // A type this build knows.
+/// let known: MaybeEvent = serde_json::from_str(r#"{"type":"turn_start"}"#).unwrap();
+/// assert!(matches!(known, MaybeEvent::Known(Event::TurnStart)));
+///
+/// // A type from a newer rho. The client skips it and keeps reading.
+/// let newer: MaybeEvent = serde_json::from_str(r#"{"type":"future_event"}"#).unwrap();
+/// assert!(matches!(newer, MaybeEvent::Unknown(_)));
+/// ```
+///
+/// See D-a-command-is-strict-and-an-event-is-loose, which sets the rule for both
+/// directions.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum MaybeEvent {
+    /// An event this build knows. Handle it.
+    Known(Event),
+    /// An event type this build does not know. Skip it, and keep reading the stream.
+    ///
+    /// It carries the raw line, so a client that wants to log or forward it still can.
+    Unknown(serde_json::Value),
+}
+
 /// Why a run settled, on the wire.
 ///
 /// It mirrors `rho_core::AgentStopReason` value for value, and it adds one case
