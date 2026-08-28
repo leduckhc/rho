@@ -7,6 +7,8 @@
 
 mod cli;
 mod extensions;
+#[cfg(feature = "jsonl")]
+mod jsonl;
 mod provider;
 mod recording;
 mod sessions;

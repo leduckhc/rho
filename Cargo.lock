@@ -2788,6 +2788,7 @@ dependencies = [
  "rho-config",
  "rho-core",
  "rho-instructions",
+ "rho-jsonl",
  "rho-mcp",
  "rho-plugin",
  "rho-provider-azure",
@@ -2846,6 +2847,21 @@ name = "rho-instructions"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rho-jsonl"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "rho-core",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
