@@ -11,12 +11,14 @@ description = "The rho command line binary."
 
 [dependencies]
 anyhow = "1.0.104"
+async-trait = "0.1.92"
 clap = { version = "4.6.6", features = ["derive", "env"] }
 futures = "0.3.34"
 rho-acp = { version = "0.1.0", path = "../rho-acp", optional = true }
 rho-config = { version = "0.1.0", path = "../rho-config" }
 rho-core = { version = "0.1.0", path = "../rho-core" }
 rho-instructions = { version = "0.1.0", path = "../rho-instructions" }
+rho-jsonl = { version = "0.1.0", path = "../rho-jsonl", optional = true }
 rho-mcp = { version = "0.1.0", path = "../rho-mcp" }
 rho-plugin = { version = "0.1.0", path = "../rho-plugin", optional = true }
 rho-provider-azure = { version = "0.1.0", path = "../rho-provider-azure", optional = true }
@@ -29,17 +31,18 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tempfile = "3.27.0"
 thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "io-std"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 url = "2.5.8"
 
 [features]
-default = ["tui", "openrouter", "bedrock", "azure", "plugins"]
+default = ["tui", "jsonl", "openrouter", "bedrock", "azure", "plugins"]
 
 # Frontends
 tui = ["dep:rho-tui"]
 acp = ["dep:rho-acp"]
+jsonl = ["dep:rho-jsonl"]
 
 # Providers
 openrouter = ["dep:rho-provider-openrouter"]
@@ -49,8 +52,9 @@ azure = ["dep:rho-provider-azure"]
 # Extensibility
 plugins = ["dep:rho-plugin"]
 
-# Smallest useful build: headless, one provider, no plugins.
-minimal = ["openrouter"]
+# Smallest useful build: headless, one provider, no plugins. It keeps `jsonl`,
+# because a headless build with no headless frontend can only answer one prompt.
+minimal = ["jsonl", "openrouter"]
 
 [[bin]]
 name = "rho"

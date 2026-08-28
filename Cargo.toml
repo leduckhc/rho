@@ -26,6 +26,7 @@ rho-mcp = { path = "crates/rho-mcp", version = "0.1.0" }
 rho-redact = { path = "crates/rho-redact", version = "0.1.0" }
 rho-tui = { path = "crates/rho-tui", version = "0.1.0" }
 rho-acp = { path = "crates/rho-acp", version = "0.1.0" }
+rho-jsonl = { path = "crates/rho-jsonl", version = "0.1.0" }
 
 [profile.release]
 opt-level = 3
