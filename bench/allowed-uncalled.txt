@@ -34,3 +34,9 @@ crates/rho-tui/src/paste.rs::paste  The large-paste lane above. Only rho-tui's c
 # reaches it. Wire it from the CLI, or delete both, but do it as one decision for both providers.
 crates/rho-provider-openrouter/src/lib.rs::with_retry  Only this crate's test harness calls it. The CLI sets no RetryPolicy.
 crates/rho-provider-azure/src/lib.rs::with_retry  Only this crate's test harness calls it. The CLI sets no RetryPolicy.
+
+# The JSONL dialog sub-protocol. `SPEC-jsonl-frontend` section 9 names `Asker` as the
+# extension point a host fills, so some of that surface is reached from outside this tree.
+# Both items below are also the seams this crate's own tests need.
+crates/rho-jsonl/src/dialog.rs::open_count  Only this crate's test harness calls it. It proves a resolved dialog frees its slot, in a_dropped_ask_frees_its_dialog_slot and a_duplicate_dialog_id_does_not_strand_a_dialog. A leak has no other visible symptom.
+crates/rho-jsonl/src/dialog.rs::with_timeout_ms  Only this crate's test harness calls it. rho-cli uses DialogApproval::new with APPROVAL_TIMEOUT_MS, and a host that wants another timeout uses this. SPEC-jsonl-frontend section 9 names the host seam.

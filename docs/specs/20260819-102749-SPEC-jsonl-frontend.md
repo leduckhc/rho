@@ -63,7 +63,7 @@ that confusion.
 
 | Side | Owner | What it must keep |
 |---|---|---|
-| The client | any process, any language | Write one command per line. Ignore an unknown event type. |
+| The client | any process, any language | Write one command per line. Ignore an unknown event type. A Rust client reads through `MaybeEvent`, which is what makes that possible. |
 | The frontend | `rho-jsonl` | Reply to every command once. Settle every accepted prompt once. |
 | The runtime | `rho-core` | The event stream and the steering queue. |
 | The host | `rho-cli`, or an embedder | Implement `SessionFactory`. Own credentials and tools. |
@@ -257,6 +257,25 @@ An event type carries no `deny_unknown_fields`, so an older Rust client reads a
 newer event's known fields and ignores the rest. See
 `D-a-command-is-strict-and-an-event-is-loose`.
 
+**A Rust client reads events through `MaybeEvent`, not through `Event`.** `Event` is a
+tagged enum, so it refuses a tag it does not know, and a client that read through it would
+stop the moment rho gained an event. That made this crate the worst-served reader of its own
+protocol, while a client in any other language just skipped the line.
+
+```rust
+/// One line from the event stream: an event this build knows, or one it does not.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum MaybeEvent {
+    /// An event this build knows. Handle it.
+    Known(Event),
+    /// An event type this build does not know. Skip it, and keep reading.
+    Unknown(serde_json::Value),
+}
+```
+
+It costs the wire nothing. It changes only what a reader accepts.
+
 ```rust
 use rho_core::{AgentStopReason, StopReason, ToolKind};
 
@@ -423,16 +442,15 @@ pub enum DialogRequest {
         id: String,
         title: String,
         options: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        timeout_ms: Option<u64>,
+        /// Not optional. The agent side owns every timeout.
+        timeout_ms: u64,
     },
     /// Yes or no. It blocks the agent until an answer or the timeout.
     Confirm {
         id: String,
         title: String,
         message: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        timeout_ms: Option<u64>,
+        timeout_ms: u64,
     },
     /// Free text input. It blocks the agent until an answer or the timeout.
     Input {
@@ -440,8 +458,7 @@ pub enum DialogRequest {
         title: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         placeholder: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        timeout_ms: Option<u64>,
+        timeout_ms: u64,
     },
     /// Display a message. Fire-and-forget: the client must not reply.
     Notify { id: String, message: String },
@@ -477,6 +494,13 @@ the agent until an answer arrives or the timeout expires.
 `Cancelled` reads as a denial. See `D-a-dialog-timeout-cancels`, which says why
 no other default is safe. The client receives no second event for that dialog id,
 and a late answer for a resolved id is dropped.
+
+**`timeout_ms` is not optional, and an abort ends a wait.** Two rules, because one is
+not enough. The field is mandatory, so no host can ask for a dialog that waits for ever.
+And a blocking dialog also waits on the run's cancel token, so an `abort` resolves it at
+once rather than leaving the run to wait out the timeout. `rho_core` awaits the approval
+gate with no cancel arm of its own, so without the second rule an abort during a dialog
+could not settle the run until the timeout expired.
 
 `rho-jsonl` ships one producer of dialogs, so the sub-protocol is not dead
 surface. `DialogApproval` implements `rho_core::ApprovalPolicy`. It asks the
@@ -721,6 +745,8 @@ The live transcripts are in `docs/verification/jsonl-frontend.md`.
 | `every_public_reply_type_is_constructed_and_pinned` | Each public reply type is built by hand and its wire shape pinned. `True` and `False` each refuse the wrong literal. |
 | `every_reply_error_case_has_a_distinct_wire_value` | All nine error cases have distinct wire values, so no two collapse into one. |
 | `every_fault_kind_has_a_distinct_wire_value` | All four fault kinds have distinct wire values. |
+| `an_unknown_event_type_is_skippable_in_rust` | `MaybeEvent` reads an unknown type as `Unknown`, where `Event` alone refuses it. |
+| `every_event_variant_reads_back_through_the_envelope` | No known event is classified as unknown by the untagged arms. |
 | `a_cancelled_false_answer_is_refused` | `{"cancelled":false}` is refused, so it cannot deny a tool the user never refused. |
 
 ### The event pump, in `tests/pump.rs`
@@ -788,6 +814,8 @@ The live transcripts are in `docs/verification/jsonl-frontend.md`.
 | `a_denied_dialog_stops_the_tool` | An explicit no leaves the tool unrun. |
 | `a_client_that_answers_no_dialog_denies_the_tool_and_the_run_continues` | A client with no dialog support cannot hang rho, and gets no tool approved. |
 | `two_over_long_lines_get_two_replies` | Each over-long line gets its own reply, and one enormous line still gets one. |
+| `the_error_taxonomy_does_not_read_serde_prose` | The `type` tag against `Command::NAMES` tells the two parse cases apart. Five lines pin the boundary. |
+| `an_abort_ends_a_dialog_wait_at_once` | An abort settles a run blocked on a dialog whose timeout is an hour away. |
 | `get_state_during_a_run_reports_the_model` | State during a run reports the provider and model, not only the running flag. |
 | `new_session_builds_a_fresh_session` | `new_session` and `set_model` each ask the factory for a new session. |
 | `a_duplicate_dialog_id_does_not_strand_a_dialog` | A repeated dialog id is refused, so it cannot delete another dialog's answer channel. |

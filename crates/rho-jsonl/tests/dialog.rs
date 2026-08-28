@@ -65,7 +65,7 @@ async fn dialog_timeout_auto_resolves_cancelled() {
         id: "d1".to_string(),
         title: "pick one".to_string(),
         options: vec!["safe".to_string(), "risky".to_string()],
-        timeout_ms: Some(1_000),
+        timeout_ms: 1_000,
     };
     let asking = tokio::spawn({
         let host = host.clone();
@@ -101,7 +101,7 @@ async fn dialog_response_id_matches_request() {
         id: "d7".to_string(),
         title: "sure?".to_string(),
         message: "it writes a file".to_string(),
-        timeout_ms: None,
+        timeout_ms: 60_000,
     };
     let asking = tokio::spawn({
         let host = host.clone();
@@ -132,7 +132,7 @@ async fn a_late_dialog_answer_is_dropped() {
         id: "d8".to_string(),
         title: "name".to_string(),
         placeholder: None,
-        timeout_ms: None,
+        timeout_ms: 60_000,
     };
     let asking = tokio::spawn({
         let host = host.clone();
@@ -373,7 +373,7 @@ async fn a_dropped_ask_frees_its_dialog_slot() {
             id: "d-dropped".to_string(),
             title: "sure?".to_string(),
             message: "it deletes a file".to_string(),
-            timeout_ms: None,
+            timeout_ms: 60_000,
         });
         let mut asking = Box::pin(asking);
         let waker = futures::task::noop_waker();

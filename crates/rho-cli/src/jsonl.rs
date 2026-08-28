@@ -46,10 +46,23 @@ impl SessionFactory for CliFactory {
     ) -> Result<Session, FactoryError> {
         // Refuse an unknown provider by name, before any credential work. A client then
         // learns which of the three failures happened.
-        if provider::build_provider(&request.provider).is_err() {
-            return Err(FactoryError::UnknownProvider {
-                name: request.provider.clone(),
-            });
+        //
+        // The probe passes no base url on purpose. `main` gained one for an
+        // OpenAI-compatible host, and Bedrock and Azure refuse it rather than ignore it, so
+        // passing one here would report an unknown provider for a provider that exists. The
+        // real build below reads the merged value and reports that refusal properly.
+        // A name nobody knows, and a name this build left out, both mean the client cannot
+        // use it. Each keeps its own message, and the wire case is the same.
+        if let Err(error) = provider::build_provider(&request.provider, None) {
+            use provider::ProviderError;
+            if matches!(
+                error,
+                ProviderError::Unknown { .. } | ProviderError::NotCompiled { .. }
+            ) {
+                return Err(FactoryError::UnknownProvider {
+                    name: request.provider.clone(),
+                });
+            }
         }
 
         // Take the merged configuration, then state this request's provider and model.

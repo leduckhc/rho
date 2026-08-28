@@ -191,6 +191,8 @@ pub struct ScriptedFactory {
     pub tool_ran: Arc<std::sync::atomic::AtomicUsize>,
     /// When set, every `touch` call waits on it, so a test can hold a turn open.
     pub release: Option<Arc<tokio::sync::Notify>>,
+    /// The approval timeout every built session uses.
+    pub approval_timeout_ms: u64,
 }
 
 impl ScriptedFactory {
@@ -202,6 +204,7 @@ impl ScriptedFactory {
             builds: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             tool_ran: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             release: None,
+            approval_timeout_ms: 50,
         }
     }
 
@@ -216,6 +219,16 @@ impl ScriptedFactory {
     /// runs. The timeout is short, so a timeout test needs no long wait.
     pub fn asking(mut self) -> Self {
         self.ask_for_approval = true;
+        self
+    }
+
+    /// Ask before a mutating tool, with a stated approval timeout.
+    ///
+    /// A test that proves an abort ends a dialog wait needs a timeout long enough that
+    /// waiting it out is not a way to pass.
+    pub fn asking_with_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.ask_for_approval = true;
+        self.approval_timeout_ms = timeout_ms;
         self
     }
 }
@@ -252,7 +265,10 @@ impl SessionFactory for ScriptedFactory {
             _ => {}
         }
         let approval: Arc<dyn ApprovalPolicy> = if self.ask_for_approval {
-            Arc::new(rho_jsonl::DialogApproval::with_timeout_ms(asker, 50))
+            Arc::new(rho_jsonl::DialogApproval::with_timeout_ms(
+                asker,
+                self.approval_timeout_ms,
+            ))
         } else {
             Arc::new(AllowAllPolicy)
         };

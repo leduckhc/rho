@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncWrite;
 use tokio::sync::oneshot;
 
-use rho_core::{ApprovalDecision, ApprovalPolicy, ToolKind};
+use rho_core::{ApprovalDecision, ApprovalPolicy, CancelToken, ToolKind};
 
 use crate::protocol::{DialogAnswer, DialogRequest, Event};
 use crate::writer::Writer;
@@ -34,6 +34,17 @@ pub trait Asker: Send + Sync {
     async fn ask(&self, request: DialogRequest) -> DialogAnswer;
 
     /// Tell the client something. It expects no answer and blocks nothing.
+    ///
+    /// **Nothing in `crates/*/src` calls this, and that is deliberate.** It is host-only
+    /// extension surface: rho raises no notification of its own today, and a hook or an
+    /// extension that a host writes is the intended caller. `DialogRequest::Notify` has the
+    /// same standing, and this method is the only thing that builds one.
+    ///
+    /// The alternative was to delete it, which is what happened to `FaultKind::BudgetExceeded`
+    /// and to `SessionFactory::providers` when they had no producer. It stays because the
+    /// dialog sub-protocol is a published contract with four methods, and a client that
+    /// implements three of them is not implementing the contract. See
+    /// `SPEC-jsonl-frontend` section 3.4 and `D-dead-surface-is-a-defect-class`.
     async fn notify(&self, message: String);
 
     /// Mint a fresh dialog id. Ids are unique for the life of the process.
@@ -48,6 +59,12 @@ pub trait Asker: Send + Sync {
 struct Pending {
     open: Mutex<HashMap<String, oneshot::Sender<DialogAnswer>>>,
     next: AtomicU64,
+    /// The token of the run that is going, when one is.
+    ///
+    /// A blocking dialog waits on this as well as on its own timeout, so an `abort` ends
+    /// the wait at once. Without it the run could not settle until the timeout expired,
+    /// because `rho_core` awaits the approval gate without a cancel arm of its own.
+    cancel: Mutex<Option<CancelToken>>,
 }
 
 /// Frees one open dialog slot on every exit path, including a dropped future.
@@ -116,6 +133,35 @@ impl<W: AsyncWrite + Unpin> DialogHost<W> {
         }
     }
 
+    /// Tie every later dialog to this run's cancel token, until [`DialogHost::run_ended`].
+    ///
+    /// The serve loop calls this when a run starts. A dialog raised during the run then
+    /// ends as soon as the run is cancelled, rather than waiting out its timeout.
+    pub fn run_started(&self, cancel: CancelToken) {
+        if let Ok(mut slot) = self.pending.cancel.lock() {
+            *slot = Some(cancel);
+        }
+    }
+
+    /// Forget the run's cancel token.
+    ///
+    /// A stale token matters: it is already cancelled, so a dialog raised after the run
+    /// would resolve at once and deny for no reason.
+    pub fn run_ended(&self) {
+        if let Ok(mut slot) = self.pending.cancel.lock() {
+            *slot = None;
+        }
+    }
+
+    /// The current run's cancel token, when a run is going.
+    fn current_cancel(&self) -> Option<CancelToken> {
+        self.pending
+            .cancel
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+    }
+
     /// How many dialogs are open. A test asserts it, so a resolved dialog cannot
     /// leak its slot.
     pub fn open_count(&self) -> usize {
@@ -169,19 +215,31 @@ impl<W: AsyncWrite + Unpin + Send + Sync + 'static> Asker for DialogHost<W> {
             return DialogAnswer::Cancelled;
         }
 
-        match timeout {
-            Some(ms) => {
-                match tokio::time::timeout(std::time::Duration::from_millis(ms), rx).await {
-                    Ok(Ok(answer)) => answer,
-                    // The timeout expired, or the sender was dropped. Both resolve as a
-                    // denial, and the guard frees the slot so a late answer finds no
-                    // dialog and the map cannot grow.
-                    _ => DialogAnswer::Cancelled,
+        // Every blocking method carries a timeout, because the field is not optional. A
+        // `Notify` returned above, so this is always `Some`.
+        let duration = std::time::Duration::from_millis(timeout.unwrap_or(0));
+
+        match self.current_cancel() {
+            // Wait on three things: the answer, the timeout, and the run's cancel token.
+            // The token is what makes an abort end a dialog at once. `rho_core` awaits the
+            // approval gate with no cancel arm of its own, so without this the run could
+            // not settle until the timeout expired.
+            Some(cancel) => {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => DialogAnswer::Cancelled,
+                    outcome = tokio::time::timeout(duration, rx) => match outcome {
+                        Ok(Ok(answer)) => answer,
+                        // The timeout expired, or the sender was dropped. Both deny, and
+                        // the guard frees the slot so a late answer finds no dialog.
+                        _ => DialogAnswer::Cancelled,
+                    },
                 }
             }
-            None => match rx.await {
-                Ok(answer) => answer,
-                Err(_) => DialogAnswer::Cancelled,
+            // No run is going, so there is nothing to cancel. The timeout still bounds it.
+            None => match tokio::time::timeout(duration, rx).await {
+                Ok(Ok(answer)) => answer,
+                _ => DialogAnswer::Cancelled,
             },
         }
     }
@@ -256,7 +314,7 @@ impl ApprovalPolicy for DialogApproval {
                 "The agent wants to run {tool}, which is a {} operation.",
                 kind_word(kind)
             ),
-            timeout_ms: Some(self.timeout_ms),
+            timeout_ms: self.timeout_ms,
         };
         match self.asker.ask(request).await {
             DialogAnswer::Confirmed(true) => ApprovalDecision::Allow,

@@ -381,19 +381,19 @@ fn a_dialog_request_round_trips_under_two_tags() {
             id: "d1".to_string(),
             title: "pick".to_string(),
             options: vec!["a".to_string(), "b".to_string()],
-            timeout_ms: Some(500),
+            timeout_ms: 500,
         },
         DialogRequest::Confirm {
             id: "d2".to_string(),
             title: "sure?".to_string(),
             message: "it deletes a file".to_string(),
-            timeout_ms: None,
+            timeout_ms: 60_000,
         },
         DialogRequest::Input {
             id: "d3".to_string(),
             title: "name".to_string(),
             placeholder: Some("type here".to_string()),
-            timeout_ms: Some(10),
+            timeout_ms: 10,
         },
         DialogRequest::Notify {
             id: "d4".to_string(),

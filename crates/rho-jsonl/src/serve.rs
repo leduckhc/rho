@@ -252,6 +252,9 @@ where
     W: AsyncWrite + Unpin + Send + Sync + 'static,
 {
     let mut events = events;
+    // Tie this run's dialogs to its cancel token, so an `abort` ends a dialog wait at once
+    // instead of leaving the run to wait out the dialog's timeout.
+    dialogs.run_started(cancel.clone());
     // True once an over-long line was refused during this run, so one line yields one
     // reply here too.
     let mut refused_during_run = false;
@@ -267,6 +270,7 @@ where
             // has already ended.
             outcome = &mut pump => {
                 outcome?;
+                dialogs.run_ended();
                 return Ok(());
             }
             line = reader.next_line() => {
@@ -275,6 +279,7 @@ where
                     // accepted prompt always settles.
                     None => {
                         (&mut pump).await?;
+                        dialogs.run_ended();
                         return Ok(());
                     }
                     Some(Line::TooLong { bytes, terminated }) => {

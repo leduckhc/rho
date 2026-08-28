@@ -427,16 +427,28 @@ pub enum DialogRequest {
         id: String,
         title: String,
         options: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        timeout_ms: Option<u64>,
+        /// The agent-side timeout in milliseconds.
+        ///
+        /// It is not optional. The agent side owns every timeout, so a dialog always
+        /// carries one. An optional field let a host opt out of the rule
+        /// `D-a-dialog-timeout-cancels` states, and a dialog with no timeout outlived an
+        /// abort: the abort cancelled the run token while this wait kept going, so the
+        /// prompt could not settle until the client answered.
+        timeout_ms: u64,
     },
     /// Yes or no. It blocks the agent until an answer or the timeout.
     Confirm {
         id: String,
         title: String,
         message: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        timeout_ms: Option<u64>,
+        /// The agent-side timeout in milliseconds.
+        ///
+        /// It is not optional. The agent side owns every timeout, so a dialog always
+        /// carries one. An optional field let a host opt out of the rule
+        /// `D-a-dialog-timeout-cancels` states, and a dialog with no timeout outlived an
+        /// abort: the abort cancelled the run token while this wait kept going, so the
+        /// prompt could not settle until the client answered.
+        timeout_ms: u64,
     },
     /// Free text input. It blocks the agent until an answer or the timeout.
     Input {
@@ -444,10 +456,19 @@ pub enum DialogRequest {
         title: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         placeholder: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        timeout_ms: Option<u64>,
+        /// The agent-side timeout in milliseconds.
+        ///
+        /// It is not optional. The agent side owns every timeout, so a dialog always
+        /// carries one. An optional field let a host opt out of the rule
+        /// `D-a-dialog-timeout-cancels` states, and a dialog with no timeout outlived an
+        /// abort: the abort cancelled the run token while this wait kept going, so the
+        /// prompt could not settle until the client answered.
+        timeout_ms: u64,
     },
     /// Display a message. Fire-and-forget: the client must not answer.
+    ///
+    /// Only [`Asker::notify`] builds one, and nothing in `crates/*/src` calls that. Both are
+    /// host-only extension surface, and the doc comment on `notify` says why they stay.
     Notify { id: String, message: String },
 }
 
@@ -467,12 +488,15 @@ impl DialogRequest {
         !matches!(self, DialogRequest::Notify { .. })
     }
 
-    /// The timeout the agent applies, when this method has one.
+    /// The timeout the agent applies, when this method blocks.
+    ///
+    /// `Notify` blocks nothing, so it has none. Every other method has one, because the
+    /// field is not optional.
     pub fn timeout_ms(&self) -> Option<u64> {
         match self {
             DialogRequest::Select { timeout_ms, .. }
             | DialogRequest::Confirm { timeout_ms, .. }
-            | DialogRequest::Input { timeout_ms, .. } => *timeout_ms,
+            | DialogRequest::Input { timeout_ms, .. } => Some(*timeout_ms),
             DialogRequest::Notify { .. } => None,
         }
     }

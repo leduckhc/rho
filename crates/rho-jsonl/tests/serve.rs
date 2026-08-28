@@ -1079,7 +1079,7 @@ async fn a_duplicate_dialog_id_does_not_strand_a_dialog() {
         id: "same".to_string(),
         title: "name".to_string(),
         placeholder: None,
-        timeout_ms: None,
+        timeout_ms: 60_000,
     };
 
     let first = tokio::spawn({
@@ -1142,4 +1142,50 @@ async fn the_error_taxonomy_does_not_read_serde_prose() {
             "line {line} was classified wrongly"
         );
     }
+}
+
+#[tokio::test]
+async fn an_abort_ends_a_dialog_wait_at_once() {
+    // A dialog blocks the approval gate, and `rho_core` awaits that gate with no cancel arm
+    // of its own. So without help the run could not settle until the dialog's timeout
+    // expired, and with the old optional field a host could ask for no timeout at all and
+    // the run would never settle.
+    //
+    // The timeout here is an hour. If the abort did not end the wait, this test would hang
+    // rather than fail, and that is the point: it cannot pass by waiting.
+    let factory = ScriptedFactory::new(vec![Turn::CallTool, Turn::Text("done".to_string())])
+        .asking_with_timeout_ms(60 * 60 * 1000);
+    let ran = Arc::clone(&factory.tool_ran);
+    let mut client = Client::start(factory);
+
+    client
+        .send(r#"{"type":"prompt","req_id":"p1","message":"touch it"}"#)
+        .await;
+    // Wait until the gate has really asked, so the abort lands during the wait.
+    client
+        .read_until(|item| matches!(item, Out::Event(Event::Dialog(_))))
+        .await;
+
+    client.send(r#"{"type":"abort","req_id":"a1"}"#).await;
+
+    // Bound the read, so a regression fails with a message instead of hanging. A hang
+    // gives no signal at all, and this project has already been bitten by one.
+    let seen = tokio::time::timeout(std::time::Duration::from_secs(10), client.settled())
+        .await
+        .expect(
+            "an abort must end the dialog wait. It did not settle within 10s, so the run is \
+             waiting out the dialog timeout, which is an hour here.",
+        );
+
+    assert_eq!(
+        settled(&seen),
+        1,
+        "an abort during a dialog must still settle the run: {seen:?}"
+    );
+    assert_eq!(
+        ran.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the tool must not run: an unanswered dialog denies"
+    );
+    client.finish().await;
 }
