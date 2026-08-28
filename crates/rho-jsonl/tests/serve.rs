@@ -1109,3 +1109,37 @@ async fn a_duplicate_dialog_id_does_not_strand_a_dialog() {
         DialogAnswer::Value("kept".to_string())
     );
 }
+
+#[tokio::test]
+async fn the_error_taxonomy_does_not_read_serde_prose() {
+    // `unknown_command` and `parse_error` are told apart by reading the `type` tag and
+    // comparing it with `Command::NAMES`, which is this crate's own data. An earlier
+    // version matched serde_json's wording, so a dependency bump that reworded the message
+    // would have collapsed the two cases and a client could no longer probe for a command.
+    //
+    // These four lines pin the boundary from both sides, so neither case can swallow the
+    // other.
+    let cases: Vec<(&str, ReplyError)> = vec![
+        // A type nobody knows. This is the case a client probes with.
+        (r#"{"type":"compact"}"#, ReplyError::UnknownCommand),
+        // A known type with a broken body: a shape failure, not an unknown command.
+        (r#"{"type":"prompt"}"#, ReplyError::ParseError),
+        // No type field at all. There is no command to name.
+        (r#"{"message":"hi"}"#, ReplyError::ParseError),
+        // A type that is not a string.
+        (r#"{"type":7}"#, ReplyError::ParseError),
+        // Not an object at all.
+        ("[1,2,3]", ReplyError::ParseError),
+    ];
+    let script: String = cases.iter().map(|(line, _)| format!("{line}\n")).collect();
+    let out = drive(ScriptedFactory::new(vec![]), &script).await;
+    let got = replies(&out);
+    assert_eq!(got.len(), cases.len(), "one reply per line: {out:?}");
+    for (index, (line, expected)) in cases.iter().enumerate() {
+        assert_eq!(
+            error_case(got[index]),
+            Some(*expected),
+            "line {line} was classified wrongly"
+        );
+    }
+}
