@@ -824,3 +824,148 @@ than wrong. A reader who wants the full set for one break should re-run it with 
 
 That is worth stating, because a method that over-reports is a false claim and a method that
 under-reports is only an incomplete one. This one under-reports.
+
+## 18. The review of PR #9, and a crash during a write
+
+A human review found five things. One was data loss. Each was reproduced against this branch before
+anything changed, and each fix has a mutation proof.
+
+### The blocker: a resume destroyed the record it had just accepted
+
+Reproduced in a scratch crate against this branch, before the fix:
+
+```
+BEFORE truncated_tail=true entries=2
+APPENDED RecordId("r3") RecordId("r4") RecordId("r5")
+AFTER  truncated_tail=false entries=4 texts=["the first prompt", "the-answer"]
+  writer returned RecordId("r3") -> readable? false
+```
+
+`r3` was **the user's new prompt on a crash continue**. The writer reported success and the reader
+could not see it, and `truncated_tail` came back false afterwards, so nothing warned.
+
+After the fix, the same program:
+
+```
+  writer returned RecordId("r3") -> readable? true
+  writer returned RecordId("r4") -> readable? true
+  writer returned RecordId("r5") -> readable? true
+```
+
+**The review's suggested condition was not enough, and the test found that.** It proposed guarding on
+`read.truncated_tail`. A whole record whose newline is missing **decodes**, so the flag is false, and
+appending then destroyed a record that had been readable. The condition is the last byte of the file.
+Every line rho writes ends with a newline, so a file that does not is a file a crash cut.
+
+| Break | Test that failed |
+| --- | --- |
+| no newline is written, as before the fix | `a_resume_onto_a_truncated_tail_keeps_every_record_it_accepts` |
+| the condition is `truncated_tail`, as the review suggested | the same |
+| `ends_with_newline` always says yes | the same |
+
+### A crash **during** a write, which the review asked for
+
+`kill -9` during a streaming answer, eight attempts, with the kill landing between 1.5 and 4 seconds
+into a 900 word essay:
+
+```
+attempt 1: the file ends with a newline, no torn line; trying again
+…
+attempt 8: the file ends with a newline, no torn line; trying again
+  ends with newline: True   whole lines: 19   last line length: 0
+```
+
+**SIGKILL never tore a line, and that is a property rather than luck.** `write_entry` builds one
+record plus its newline and hands it to one `write_all` on an unbuffered file, then flushes. For a
+small record that is a single `write` syscall, and the kernel completes it. A signal cannot land in
+the middle.
+
+So a torn line needs a record large enough that `write_all` loops, or a filesystem failure. A
+`ulimit -f` attempt did not constrain the child process on macOS. **The tear below is injected**, and
+it is the exact byte state a torn write leaves: a half record with no newline. Saying that plainly
+matters more than claiming a crash produced it.
+
+```
+### 2 inject the exact byte state a torn write leaves: a half record, no newline
+  ends with newline: False
+  last 60 bytes: b'N","parentId":"r5","timestamp":"1787900000000","type":"messa'
+
+### 3 the crash continue over that torn line
+WARN the session file did not end in a newline, so rho closed the line before appending.
+     A crash can leave one. Every record after it is kept.
+rho: continuing session 20260828-080213-9823 in /tmp/rho-torn/root (4 messages)
+rho: the session file had a truncated last line, so rho dropped it. A crash can leave one.
+RECOVERED.
+
+### 4 every record rho accepted after the resume, read back through rho
+  r11   08:02:16  user         Say only RECOVERED.
+  r13   08:02:17  assistant    RECOVERED.
+  r15   08:02:17  closed
+
+### 5 twice: tear it again and continue again
+RECOVERED-TWICE.
+  r19   08:02:19  assistant    RECOVERED-TWICE.
+```
+
+Twice, because twice has caught two defects in this project. The user is told, the fragment is the
+only thing lost, and every record after it is readable.
+
+### The major: a session file wrote control bytes to the terminal
+
+Before the fix, with `cat -v`, over a session whose title, model, cwd, prompt and answer each held
+`A\x1b[2K\rPWNED\x1b]0;owned\x07`:
+
+```
+20260827-223425-6236 just now    A^[[2K^MPWNED^[]0;owned^G   mA^[[2K^MPWNED^[]0;o
+session  20260827-223425-6236  "A^[[2K^MPWNED^[]0;own"  mA^[[2K^MPWNED^[]0;owned^G  open
+  r2    01:46:40  user         a prompt A^[[2K^MPWNED^[]0;owned^G
+  r3    01:46:40  assistant    an answer A^[[2K^MPWNED^[]0;owned^G
+```
+
+**Six surfaces**, two more than the review named: the title, the model, the cwd, the unreadable
+reason, the `show` header, and every record detail, which includes a prompt and an assistant answer.
+So a prompt-injected model's answer replayed whenever anyone listed or showed the session.
+
+After the fix, the same commands:
+
+```
+20260827-223425-6236 13 min ago  A?PWNED            mA?PWNED             -     -
+session  20260827-223425-6236  "A?PWNED"  mA?PWNED  open
+  r2    01:46:40  user         a prompt A?PWNED
+  r3    01:46:40  assistant    an answer A?PWNED
+```
+
+No `^[`, no `^M`, no `^G`. `cat -v` shows no byte below `0x20`.
+
+`--full` needed a second scrubber. `rho_redact::sanitize_line` caps at 4096 characters, and `--full`
+promises the whole text, so capping there would break the flag quietly. `safe_block` scrubs without
+capping and keeps a newline.
+
+| Break | Tests that failed |
+| --- | --- |
+| the title is not scrubbed | `list_never_writes_a_control_byte_to_the_terminal` |
+| the model is not scrubbed | the same |
+| the cwd is not scrubbed | the same |
+| the unreadable reason is not scrubbed | the same |
+| the `show` header is not scrubbed | `show_never_writes_a_control_byte_to_the_terminal` |
+| the record detail is not scrubbed | the same |
+| `--full` turns the scrub off | the same |
+| the scrub keeps a tab in a full block | the same |
+
+The last row is a test fix as well. The payload held no tab, so the tab fold had no observable. It
+holds one now.
+
+### The nit, and the two minors
+
+`fork` opened the new file with no mode and then chmodded it. It was the one create in the module
+still doing that, and a fork copies a whole transcript. Break: the mode leaves the open call. Failed:
+`a_forked_session_file_is_0o600_on_unix`.
+
+`newest_open` and `record_cancel` are unwired public surface, and each now takes a line in
+`bench/allowed-uncalled.txt` naming its lane. `F-session-cancel-without-close` says the pairing
+repair is library-only, because rho installs no signal handler, so a Ctrl-C kills the process and the
+file correctly looks like a crash.
+
+**One correction to the review.** It said `main` now runs `bench/check-dead-surface.py`. `main` ships
+the script and runs it in neither `AGENTS.md`'s gate nor CI, and `main` itself reports 44 violations.
+This tree reports 37, and none of them is in `session`.
