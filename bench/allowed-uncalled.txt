@@ -7,8 +7,8 @@
 # See D-dead-surface-is-a-defect-class and D-the-dead-surface-allowlist-names-its-lane.
 
 # Landed ahead of its wiring lane. Each names the spec that consumes it.
-crates/rho-core/src/session/key.rs::default_store_root  SPEC-session-store-wiring consumes it. The wiring lane is a draft.
-crates/rho-core/src/session/mod.rs::check_resume_permission  SPEC-session-store-wiring consumes it, in the same lane as default_store_root. The resume command calls it, and the spec names a_resume_that_would_widen_is_refused_on_the_command_line.
+crates/rho-core/src/session/mod.rs::newest_open  SPEC-session-store-wiring: the crash offer. --continue takes newest_resumable, per D-continue-takes-the-newest-session-closed-or-not, and F-session-crash-continue stays partial until rho offers a crashed session unasked.
+crates/rho-core/src/session/mod.rs::record_cancel  SPEC-session-store-wiring: it completes a half-written tool pairing on an interrupt, and no frontend has an interrupt path. rho installs no signal handler, so a Ctrl-C kills the process and the file correctly looks like a crash. F-session-cancel-without-close says the pairing repair is library-only.
 crates/rho-core/src/subagent/tree.rs::spawn_child  SPEC-subagent-slots-handles-grace keeps it as the immediate queue-bypass extension point. The spec says no tool calls it, and admit_child is the queueing form the tools use.
 crates/rho-core/src/usage.rs::cache_hit_ratio  SPEC-core-runtime section 1 holds the append-only-cache claim it measures, and docs/benchmarks.md reports it through the live_sessions harness. The usage summary that shows it to a user is not wired.
 crates/rho-tools/src/lib.rs::builtin_registry  SPEC-core-runtime section 7 defines the registry. Production registers through builtin_registry_with_tasks_and_sandbox, which always has a task registry and a sandbox. Delete this no-tasks constructor when the rho-cli examples move to that builder.

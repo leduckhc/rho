@@ -650,3 +650,72 @@ pinned a function that no longer exists.
 A reviewer named it, and it is still true. The number is the cost of building the frame, through
 `TestBackend`. Nothing is drawn to a real terminal, so no write, no flush, and no terminal-side
 cost is in it.
+
+## The session list
+
+`SPEC-session-store-wiring` section 8e sets a budget: a list of 500 sessions completes under 100
+milliseconds. A full typed decode cannot meet it. `ADR-jsonl-codec` measured one 1848-record
+session at 2.01 milliseconds, so 500 of those cost about a second.
+
+So a row comes from two bounded reads: the first `ROW_HEAD_LINES` lines, and the last
+`ROW_TAIL_BYTES` bytes.
+
+```sh
+cargo test -p rho-core --test session_rows -- --nocapture a_list_of_five
+```
+
+Three runs, on one machine, after the review changes to the row builder:
+
+| sessions | wall clock |
+| --- | --- |
+| 500 | 21.88 ms |
+| 500 | 19.43 ms |
+| 500 | 20.13 ms |
+
+**Three runs, and not one.** A single number invites a reader to reproduce it exactly, and this one
+varies by about two milliseconds per run. The budget is 100 milliseconds, so it holds with room to
+spare and the cache in `D-no-list-cache-until-a-budget-fails` does not ship.
+
+**The number asserts nothing.** A shared runner makes a 100 millisecond assertion flaky, and a
+fast machine would pass a full decode of small files. See `D-a-budget-is-measured-not-asserted`.
+The assertion that proves the bound is a sentinel row: one of the 500 files carries a `Name`
+record past both windows, so a full decode reports an explicit title and a bounded read does not.
+See `D-the-budget-test-needs-an-observable-difference`.
+
+The 500 files are small, and one is 128 kB. So this measures the per-file cost of opening,
+seeking, and decoding a bounded window, and not the cost of a large store on a slow disk.
+
+## Reading one whole session
+
+`rho sessions list` never reads a whole file. **A resume does.** `SessionReader::read` holds every
+record of the branch in memory, because `branch_messages` walks parent links and a walk needs the
+set. A security review asked what bounds that, and the answer is the file: the read is linear, and
+there is no cap on the record count. So the cost is worth a number.
+
+The harness is a scratch binary that depends on `rho-core`. It writes a session of N one-line user
+turns, reads it whole, and reports the change in resident memory:
+
+```rust
+let read = rho_core::SessionReader::read(&path).expect("the file reads back");
+// rss measured with `ps -o rss= -p <pid>` before and after
+```
+
+```sh
+cargo run --release -- 20000
+cargo run --release -- 100000
+```
+
+| records | file | read | resident memory | per record |
+| --- | --- | --- | --- | --- |
+| 20,000 | 4.2 MiB | 27.8 ms | 12.9 MiB | 675 bytes |
+| 100,000 | 21.2 MiB | 102.9 ms | 60.8 MiB | 637 bytes |
+
+**About 640 bytes per record, and about three times the file size in memory.** It is linear in both,
+so a session has to reach millions of turns before the read is the problem. A real session of a
+thousand turns costs under a megabyte.
+
+Two caps already bound the read: `MAX_LINE_BYTES` per line, and `MAX_DROPPED_RECORDS` for lines that
+do not decode. **No cap bounds the record count**, and that is stated rather than fixed here.
+Capping it means deciding which end of a conversation to lose, and losing the front breaks its
+beginning. That decision belongs with `F-context-compaction`, which `SPEC-session-store-wiring`
+section 10 keeps out of this lane.

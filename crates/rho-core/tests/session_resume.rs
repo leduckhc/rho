@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rho_core::{
-    ContentBlock, Entry, MAX_LINE_BYTES, Message, Record, RecordId, Role, SessionError,
-    SessionReader, SessionStore, StoredApproval, StoredSandbox, branch_messages,
+    ContentBlock, Entry, MAX_LINE_BYTES, Message, NewSession, Record, RecordId, Role, SessionError,
+    SessionId, SessionReader, SessionStore, StoredApproval, StoredSandbox, branch_messages,
     check_resume_permission,
 };
 use tempfile::tempdir;
@@ -100,18 +100,48 @@ fn message_line(id: &str, parent: Option<&str>, text: &str) -> String {
 
 // --- resume ----------------------------------------------------------------
 
+/// A stable session id. Minting takes a time and a suffix, so no test sleeps.
+fn sid(suffix: u16) -> SessionId {
+    SessionId::mint(1_756_000_000_000, suffix)
+}
+
+/// The create request these tests use.
+///
+/// `SessionStore::create` takes one struct, because a four-argument constructor already hid a
+/// fake model id and an approve-all policy in this project. See
+/// `D-no-four-argument-session-new`. It writes the header and one `ModelChange` record, so
+/// every created file starts with two lines.
+fn new_session<'a>(
+    id: &'a SessionId,
+    cwd: &'a std::path::Path,
+    approval: &'a str,
+    sandbox: &'a str,
+) -> NewSession<'a> {
+    NewSession {
+        id,
+        cwd,
+        approval,
+        sandbox,
+        provider: "testkit",
+        model: "test-model",
+        forked_from: None,
+    }
+}
+
 #[test]
 fn resume_reads_every_whole_record() {
     let (_dir, store) = temp_store();
     let mut writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     let a = writer.append(message_record("one"), None).expect("a");
     writer.append(message_record("two"), Some(a)).expect("b");
     let read = SessionReader::read(writer.path()).expect("read");
+    // Three: the `ModelChange` record `create` writes, and the two appends. The header is
+    // not an entry, because `read_from` consumes the first line before its loop.
     assert_eq!(
         read.entries.len(),
-        2,
+        3,
         "a clean file loads every appended record"
     );
     assert!(!read.truncated_tail, "a clean file is not truncated");
@@ -130,7 +160,12 @@ fn resume_rebuilds_the_messages_in_file_order() {
         ],
     );
     let read = SessionReader::read(&path).expect("read");
-    let messages = branch_messages(&read.entries, &RecordId("m2".to_string()));
+    let messages = branch_messages(
+        &read.entries,
+        &RecordId("m2".to_string()),
+        Some(&read.header_id),
+    )
+    .expect("a whole chain rebuilds");
     let texts: Vec<String> = messages
         .iter()
         .flat_map(|m| m.content.iter())
@@ -195,7 +230,7 @@ fn resume_after_a_model_change_appends_a_model_change_record() {
     // A new model adds a record and keeps the old ones.
     let (_dir, store) = temp_store();
     let mut writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     let a = writer.append(message_record("before"), None).expect("a");
     let reopened = SessionReader::read(writer.path()).expect("read");
@@ -236,7 +271,7 @@ fn resume_reopens_the_file_with_append_to() {
     let (_dir, store) = temp_store();
     let path = {
         let mut writer = store
-            .create("s", Path::new("/work"), "read-only", "off")
+            .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
             .expect("create");
         writer.append(message_record("first"), None).expect("a");
         writer.path().to_path_buf()
@@ -246,9 +281,10 @@ fn resume_reopens_the_file_with_append_to() {
         .append(message_record("later"), None)
         .expect("append after reopen");
     let read = SessionReader::read(&path).expect("read");
+    // Three: the `ModelChange` record, the first append, and the append after the reopen.
     assert_eq!(
         read.entries.len(),
-        2,
+        3,
         "a later append lands after the earlier records"
     );
     let last = read.entries.last().expect("a record");
@@ -334,7 +370,7 @@ fn resume_does_not_widen_a_read_only_session() {
     // that nobody chose. The check is a comparison of two stored names, per SPEC-sessions 8a.
     let (_dir, store) = temp_store();
     let mut writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     writer.append(message_record("x"), None).expect("append");
     let read = SessionReader::read(writer.path()).expect("read");
@@ -362,7 +398,7 @@ fn resume_allows_a_narrower_mode() {
     // A run that keeps or narrows both modes needs no flag.
     let (_dir, store) = temp_store();
     let writer = store
-        .create("s", Path::new("/work"), "ask", "confined")
+        .create(new_session(&sid(1), Path::new("/work"), "ask", "confined"))
         .expect("create");
     let read = SessionReader::read(writer.path()).expect("read");
 
@@ -391,7 +427,12 @@ fn allow_widen_permits_a_wider_resume() {
     // The override is the one way to widen, and it must be explicit.
     let (_dir, store) = temp_store();
     let writer = store
-        .create("s", Path::new("/work"), "read-only", "strict")
+        .create(new_session(
+            &sid(1),
+            Path::new("/work"),
+            "read-only",
+            "strict",
+        ))
         .expect("create");
     let read = SessionReader::read(writer.path()).expect("read");
 
@@ -417,7 +458,12 @@ fn sandbox_widen_is_refused() {
     // security boundary.
     let (_dir, store) = temp_store();
     let writer = store
-        .create("s", Path::new("/work"), "read-only", "strict")
+        .create(new_session(
+            &sid(1),
+            Path::new("/work"),
+            "read-only",
+            "strict",
+        ))
         .expect("create");
     let read = SessionReader::read(writer.path()).expect("read");
 
@@ -476,7 +522,12 @@ fn resume_repairs_an_unmatched_tool_call_after_a_crash() {
     .unwrap();
     write_lines(&path, &[header_line(1, "read-only", "off"), call_line]);
     let read = SessionReader::read(&path).expect("read");
-    let messages = branch_messages(&read.entries, &RecordId("m1".to_string()));
+    let messages = branch_messages(
+        &read.entries,
+        &RecordId("m1".to_string()),
+        Some(&read.header_id),
+    )
+    .expect("a whole chain rebuilds");
     assert!(
         pairing_is_complete(&messages),
         "a resume repairs a trailing ToolCall with a synthetic error ToolResult"
@@ -526,7 +577,7 @@ fn a_branch_keeps_the_original_records() {
     // names an earlier record as its parent.
     let (_dir, store) = temp_store();
     let mut writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     let a = writer.append(message_record("root"), None).expect("a");
     let b = writer
@@ -556,7 +607,7 @@ fn a_branch_keeps_the_original_records() {
 fn a_branch_links_the_new_record_to_its_parent() {
     let (_dir, store) = temp_store();
     let mut writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     let a = writer.append(message_record("root"), None).expect("a");
     let c = writer
@@ -591,7 +642,12 @@ fn branch_messages_walks_one_branch_only() {
         ],
     );
     let read = SessionReader::read(&path).expect("read");
-    let messages = branch_messages(&read.entries, &RecordId("leaf-a".to_string()));
+    let messages = branch_messages(
+        &read.entries,
+        &RecordId("leaf-a".to_string()),
+        Some(&read.header_id),
+    )
+    .expect("a whole chain rebuilds");
     let texts: Vec<String> = messages
         .iter()
         .flat_map(|m| m.content.iter())

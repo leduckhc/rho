@@ -8,8 +8,8 @@ use std::fs;
 use std::path::Path;
 
 use rho_core::{
-    AgentStopReason, ContentBlock, MAX_RECORD_BYTES, Message, Record, RecordId, Role, SessionError,
-    SessionReader, SessionStore, Usage, decode, encode,
+    AgentStopReason, ContentBlock, MAX_RECORD_BYTES, Message, NewSession, Record, RecordId, Role,
+    SessionError, SessionId, SessionReader, SessionStore, Usage, decode, encode,
 };
 use tempfile::tempdir;
 
@@ -42,6 +42,8 @@ fn every_record_variant() -> Vec<Record> {
             cwd: Path::new("/work").to_path_buf(),
             approval: "read-only".to_string(),
             sandbox: "off".to_string(),
+            session_id: Some("20260824-000000-0001".to_string()),
+            forked_from: None,
         },
         Record::ModelChange {
             provider: "openrouter".to_string(),
@@ -91,14 +93,43 @@ fn a_sidecar_holds(dir: &Path, session_file: &Path, needle: &str) -> bool {
 
 // --- storage ---------------------------------------------------------------
 
+/// A stable session id. Minting takes a time and a suffix, so no test sleeps.
+fn sid(suffix: u16) -> SessionId {
+    SessionId::mint(1_756_000_000_000, suffix)
+}
+
+/// The create request these tests use.
+///
+/// `SessionStore::create` takes one struct, because a four-argument constructor already hid a
+/// fake model id and an approve-all policy in this project. See
+/// `D-no-four-argument-session-new`. It writes the header and one `ModelChange` record, so
+/// every created file starts with two lines.
+fn new_session<'a>(
+    id: &'a SessionId,
+    cwd: &'a std::path::Path,
+    approval: &'a str,
+    sandbox: &'a str,
+) -> NewSession<'a> {
+    NewSession {
+        id,
+        cwd,
+        approval,
+        sandbox,
+        provider: "testkit",
+        model: "test-model",
+        forked_from: None,
+    }
+}
+
 #[test]
 fn n_appends_yield_exactly_n_lines() {
-    // The invariant, not one example. For any N, N appends add exactly N lines to the
-    // header line the writer starts with.
+    // The invariant, not one example. For any N, N appends add exactly N lines to the two
+    // lines `create` writes: the header, then the `ModelChange` record that states the model
+    // on the second line. See `SPEC-session-store-wiring` section 7.
     for n in [0usize, 1, 2, 5, 50] {
         let (_dir, store) = temp_store();
         let mut writer = store
-            .create("s", Path::new("/work"), "read-only", "off")
+            .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
             .expect("create");
         let mut parent = writer.head();
         for i in 0..n {
@@ -109,7 +140,11 @@ fn n_appends_yield_exactly_n_lines() {
             );
         }
         let lines = line_count(writer.path());
-        assert_eq!(lines, n + 1, "one header line plus exactly {n} appends");
+        assert_eq!(
+            lines,
+            n + 2,
+            "a header line, a model line, and exactly {n} appends"
+        );
     }
 }
 
@@ -117,7 +152,7 @@ fn n_appends_yield_exactly_n_lines() {
 fn append_returns_a_new_id_each_time() {
     let (_dir, store) = temp_store();
     let mut writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     let a = writer.append(message_record("a"), None).expect("append a");
     let b = writer
@@ -130,7 +165,7 @@ fn append_returns_a_new_id_each_time() {
 fn head_reports_the_last_written_id() {
     let (_dir, store) = temp_store();
     let mut writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     let a = writer.append(message_record("a"), None).expect("append a");
     assert_eq!(writer.head(), Some(a.clone()), "head is the last append");
@@ -144,7 +179,7 @@ fn head_reports_the_last_written_id() {
 fn path_returns_the_open_file_path() {
     let (dir, store) = temp_store();
     let writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     assert!(
         writer.path().starts_with(dir.path()),
@@ -157,7 +192,7 @@ fn the_append_path_never_rewrites_an_earlier_byte() {
     // The append-only proof. The bytes before a new record are byte-identical after it.
     let (_dir, store) = temp_store();
     let mut writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     let a = writer
         .append(message_record("first"), None)
@@ -182,7 +217,7 @@ fn no_written_record_of_any_kind_exceeds_the_cap() {
     let big = "A".repeat(4 * MAX_RECORD_BYTES);
     let (dir, store) = temp_store();
     let mut writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     let oversize = vec![
         message_record(&big),
@@ -226,6 +261,9 @@ fn no_written_record_of_any_kind_exceeds_the_cap() {
             decode(line).expect("a capped line must still decode as an Entry");
         match entry.record {
             Record::Session { .. } => {}
+            // `create` writes this on the second line, so a row reads the model with no full
+            // read. It carries no payload, so there is nothing to cap.
+            Record::ModelChange { .. } => {}
             Record::Message { message } => {
                 assert!(
                     !message.content.is_empty(),
@@ -264,7 +302,7 @@ fn an_oversize_record_of_every_kind_stays_under_the_cap() {
     let big = "B".repeat(4 * MAX_RECORD_BYTES);
     let (dir, store) = temp_store();
     let mut writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     let call = Record::Message {
         message: Message {
@@ -313,7 +351,7 @@ fn a_non_tool_result_record_over_the_cap_is_capped() {
     let big = "C".repeat(4 * MAX_RECORD_BYTES);
     let (dir, store) = temp_store();
     let mut writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     let id = writer.append(message_record(&big), None).expect("append");
     let text = fs::read_to_string(writer.path()).expect("read");

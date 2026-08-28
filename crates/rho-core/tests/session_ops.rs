@@ -12,9 +12,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rho_core::{
-    AgentEvent, AgentStopReason, ContentBlock, Message, Record, RecordId, Role, SessionLog,
-    SessionReader, SessionRecorder, SessionStore, SessionWriter, StreamEvent, ToolOutput, Usage,
-    branch_messages, decode, encode,
+    AgentEvent, AgentStopReason, ContentBlock, Message, NewSession, Record, RecordId, Role,
+    SessionId, SessionLog, SessionReader, SessionRecorder, SessionStore, SessionWriter,
+    StreamEvent, ToolOutput, Usage, branch_messages, decode, encode,
 };
 use tempfile::tempdir;
 
@@ -139,6 +139,34 @@ fn file_pairing_is_complete(path: &Path) -> bool {
 
 // --- ephemeral and degrade -------------------------------------------------
 
+/// A stable session id. Minting takes a time and a suffix, so no test sleeps.
+fn sid(suffix: u16) -> SessionId {
+    SessionId::mint(1_756_000_000_000, suffix)
+}
+
+/// The create request these tests use.
+///
+/// `SessionStore::create` takes one struct, because a four-argument constructor already hid a
+/// fake model id and an approve-all policy in this project. See
+/// `D-no-four-argument-session-new`. It writes the header and one `ModelChange` record, so
+/// every created file starts with two lines.
+fn new_session<'a>(
+    id: &'a SessionId,
+    cwd: &'a std::path::Path,
+    approval: &'a str,
+    sandbox: &'a str,
+) -> NewSession<'a> {
+    NewSession {
+        id,
+        cwd,
+        approval,
+        sandbox,
+        provider: "testkit",
+        model: "test-model",
+        forked_from: None,
+    }
+}
+
 #[test]
 fn ephemeral_mode_writes_no_file() {
     let dir = tempdir().expect("temp dir");
@@ -228,7 +256,7 @@ fn recorder_is_ephemeral_follows_its_log() {
 
     let (_dir, store) = temp_store();
     let writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     let recorder = SessionRecorder::new(SessionLog::File(writer));
     assert!(
@@ -243,7 +271,7 @@ fn recorder_is_ephemeral_follows_its_log() {
 fn close_writes_a_closed_record() {
     let (_dir, store) = temp_store();
     let mut writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     writer.append(message_record("x"), None).expect("append");
     writer.close().expect("close");
@@ -260,7 +288,7 @@ fn close_writes_a_closed_record() {
 fn close_is_idempotent() {
     let (_dir, store) = temp_store();
     let mut writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     writer.append(message_record("x"), None).expect("append");
     writer.close().expect("first close");
@@ -276,7 +304,7 @@ fn cancel_keeps_the_session_open() {
     // still records a following prompt.
     let (_dir, store) = temp_store();
     let writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     let mut recorder = SessionRecorder::new(SessionLog::File(writer));
     recorder.record_cancel();
@@ -293,7 +321,7 @@ fn cancel_keeps_the_session_open() {
 fn cancel_writes_a_stop_record() {
     let (_dir, store) = temp_store();
     let writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     let path = writer.path().to_path_buf();
     let mut recorder = SessionRecorder::new(SessionLog::File(writer));
@@ -319,7 +347,7 @@ fn cancel_leaves_no_half_written_tool_pairing() {
     // Path 1: a cancel during an open tool call.
     let (_dir, store) = temp_store();
     let writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     let path = writer.path().to_path_buf();
     let mut recorder = SessionRecorder::new(SessionLog::File(writer));
@@ -358,7 +386,12 @@ fn cancel_leaves_no_half_written_tool_pairing() {
     .unwrap();
     fs::write(&crash, format!("{header}\n{call}")).expect("write crash fixture");
     let read = SessionReader::read(&crash).expect("read");
-    let messages = branch_messages(&read.entries, &RecordId("m1".to_string()));
+    let messages = branch_messages(
+        &read.entries,
+        &RecordId("m1".to_string()),
+        Some(&read.header_id),
+    )
+    .expect("a whole chain rebuilds");
     assert!(
         messages_contain_tool_call(&messages, "call-2"),
         "the unmatched call must be present before the pairing check, or it is vacuous"
@@ -381,7 +414,12 @@ fn cancel_leaves_no_half_written_tool_pairing() {
     let half = &result[..result.len() / 2];
     fs::write(&trunc, format!("{header}\n{call}\n{half}")).expect("write trunc fixture");
     let read = SessionReader::read(&trunc).expect("read");
-    let messages = branch_messages(&read.entries, &RecordId("m1".to_string()));
+    let messages = branch_messages(
+        &read.entries,
+        &RecordId("m1".to_string()),
+        Some(&read.header_id),
+    )
+    .expect("a whole chain rebuilds");
     assert!(
         messages_contain_tool_call(&messages, "call-2"),
         "the unmatched call must be present before the pairing check, or it is vacuous"
@@ -438,45 +476,11 @@ fn a_usage_record_round_trips() {
 }
 
 #[test]
-fn list_reads_only_the_first_line() {
-    // list on many files reads one line each. The summary comes from the header record.
-    let (_dir, store) = temp_store();
-    for i in 0..5 {
-        let mut writer = store
-            .create(&format!("s{i}"), Path::new("/work"), "read-only", "off")
-            .expect("create");
-        writer.append(message_record("body"), None).expect("append");
-    }
-    let summaries = store.list().expect("list");
-    assert_eq!(summaries.len(), 5, "list finds every session file");
-    let ids: std::collections::HashSet<String> =
-        summaries.iter().map(|s| s.session_id.clone()).collect();
-    for i in 0..5 {
-        assert!(
-            ids.contains(&format!("s{i}")),
-            "the summary carries the session id s{i}"
-        );
-    }
-    for summary in &summaries {
-        assert_eq!(
-            summary.cwd,
-            Path::new("/work"),
-            "the summary comes from the header"
-        );
-        assert!(summary.size_bytes > 0, "the summary carries file metadata");
-        assert!(
-            summary.path.exists(),
-            "the summary path points at a real session file, not an empty default"
-        );
-    }
-}
-
-#[test]
 fn delete_removes_the_file_and_its_branches() {
     let (_dir, store) = temp_store();
     let path = {
         let mut writer = store
-            .create("s", Path::new("/work"), "read-only", "off")
+            .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
             .expect("create");
         let a = writer.append(message_record("root"), None).expect("a");
         writer
@@ -484,7 +488,7 @@ fn delete_removes_the_file_and_its_branches() {
             .expect("branch");
         writer.path().to_path_buf()
     };
-    store.delete("s").expect("delete");
+    store.delete(&sid(1)).expect("delete");
     assert!(!path.exists(), "the file and every branch in it are gone");
 }
 
@@ -494,16 +498,16 @@ fn delete_does_not_touch_a_fork() {
     let (_dir, store) = temp_store();
     let (parent_path, from_id) = {
         let mut writer = store
-            .create("s", Path::new("/work"), "read-only", "off")
+            .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
             .expect("create");
         let a = writer.append(message_record("root"), None).expect("a");
         (writer.path().to_path_buf(), a)
     };
     let fork_path = {
-        let fork = store.fork(&parent_path, &from_id, "forked").expect("fork");
+        let fork = store.fork(&parent_path, &from_id, &sid(2)).expect("fork");
         fork.path().to_path_buf()
     };
-    store.delete("s").expect("delete parent");
+    store.delete(&sid(1)).expect("delete parent");
     assert!(fork_path.exists(), "a fork survives a delete of its parent");
 }
 
@@ -512,14 +516,14 @@ fn fork_copies_the_branch_and_keeps_the_original() {
     let (_dir, store) = temp_store();
     let (parent_path, from_id) = {
         let mut writer = store
-            .create("s", Path::new("/work"), "read-only", "off")
+            .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
             .expect("create");
         let a = writer.append(message_record("root"), None).expect("a");
         (writer.path().to_path_buf(), a)
     };
     let original_bytes = fs::read(&parent_path).expect("read original");
     let fork_path = {
-        let fork = store.fork(&parent_path, &from_id, "forked").expect("fork");
+        let fork = store.fork(&parent_path, &from_id, &sid(2)).expect("fork");
         fork.path().to_path_buf()
     };
     let after = fs::read(&parent_path).expect("read original again");
@@ -542,7 +546,7 @@ fn no_credential_reaches_the_file() {
     // value never appears in the file.
     let (_dir, store) = temp_store();
     let writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     let path = writer.path().to_path_buf();
     let mut recorder = SessionRecorder::new(SessionLog::File(writer));
@@ -584,7 +588,7 @@ fn a_redacted_tool_argument_is_masked_on_the_way_in() {
     // written.
     let (_dir, store) = temp_store();
     let writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     let path = writer.path().to_path_buf();
     let mut recorder = SessionRecorder::new(SessionLog::File(writer));
@@ -686,7 +690,7 @@ fn a_session_file_holds_one_timestamp_format() {
     // in one file. Assert every line's timestamp, over every record kind, parses as u64.
     let (_dir, store) = temp_store();
     let mut writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create"); // Session header
     let a = writer
         .append(
@@ -732,7 +736,9 @@ fn a_session_file_holds_one_timestamp_format() {
             "the timestamp {timestamp:?} must be epoch milliseconds, one format per file"
         );
     }
-    assert_eq!(lines, 6, "the fixture covers every record kind");
+    // Seven, not six. `create` writes the `ModelChange` record itself now, so a row reads the
+    // model from a bounded head read. See `SPEC-session-store-wiring` section 7.
+    assert_eq!(lines, 7, "the fixture covers every record kind");
 }
 
 // --- what a real drive of the operations found -------------------------------
@@ -749,7 +755,7 @@ fn append_to_a_closed_session_reopens_it_and_keeps_closed_last() {
     // either refuse, or state that the session reopened. It states it.
     let (_dir, store) = temp_store();
     let mut writer = store
-        .create("s", Path::new("/work"), "read-only", "off")
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
         .expect("create");
     writer
         .append(message_record("before"), None)

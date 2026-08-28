@@ -141,12 +141,18 @@ The table accepts four keys:
 
 ### `session-file`
 
-> **Partly built.** `session-file` parses and no code reads it. The run is silent.
-> rho records no session file today.
+One exact file for the session of this run. It overrides the store under
+`~/.rho/sessions/<project-key>/`, so every run with this key set appends to the same file.
+
+`rho run` reads it. The terminal records nothing yet. See
+[sessions.md](sessions.md).
 
 ### `ephemeral`
 
-> **Partly built.** `ephemeral` parses and no code reads it. The run is silent.
+`true` writes no session file at all. The default is `false`, so `rho run` records.
+
+`--ephemeral` on the command line does the same thing, and it wins. `--ephemeral` with
+`--continue` is refused, because there would be nothing to continue.
 
 ### `base-url`
 
@@ -256,10 +262,10 @@ model = "anthropic/claude-haiku-4.5"
 # The boundary for every tool. rho refuses a path outside it. No ~ expansion.
 session-root = "/home/you/code/my-project"
 
-# session-file: partly built — do not set; it has no effect today.
-# session-file = "my-session.json"
+# One exact session file. It overrides the store under ~/.rho/sessions.
+# session-file = "/home/you/notes/my-session.jsonl"
 
-# ephemeral: partly built — do not set; it has no effect today.
+# Write no session file at all. The default is false, so `rho run` records.
 # ephemeral = false
 
 # Sandbox mode: off, confined, or strict.
@@ -325,5 +331,4 @@ approval = "read-only"
 |---|---|
 | `[credentials]` table | Parses, and nothing resolves an entry. No provider asks for one. Use an environment variable. |
 | `[subagents]` table | Parses silently, no effect. Use CLI flags. |
-| `session-file` | Parses silently, no effect. |
-| `ephemeral` | Parses silently, no effect. |
+

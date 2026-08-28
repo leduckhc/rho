@@ -5,7 +5,7 @@
 //!
 //! Stage T4 defined the public surface. Stage T5 made every body real.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -17,7 +17,11 @@ use serde::{Deserialize, Serialize};
 use crate::{AgentEvent, AgentStopReason, ContentBlock, Message, Role, StreamEvent, Usage};
 
 mod key;
-pub use key::{GIT_ENTRY_MAX_BYTES, ProjectKey, SessionId, default_store_root};
+mod lock;
+mod row;
+pub use key::{GIT_ENTRY_MAX_BYTES, PrefixMatch, ProjectKey, SessionId, default_store_root};
+pub use lock::{SessionLock, classify_lock_failure};
+pub use row::{ROW_HEAD_LINES, ROW_TAIL_BYTES, RowMeta, SessionRow, SessionSummary, row_from};
 
 // ---------------------------------------------------------------------------
 // Section 2. The record set.
@@ -26,6 +30,28 @@ pub use key::{GIT_ENTRY_MAX_BYTES, ProjectKey, SessionId, default_store_root};
 /// A record id. A short, unique string, minted per record.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RecordId(pub String);
+
+/// A record id prints as its own text, so an error message can name one.
+///
+/// Two error messages in section 7e of `SPEC-session-store-wiring` need this. A cold
+/// compile of the contract in a scratch crate found the gap.
+impl std::fmt::Display for RecordId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The origin of a forked session. It is shown, and it is never trusted.
+///
+/// It opens no file and grants nothing. A forged origin is therefore harmless. See
+/// `SPEC-session-store-wiring` section 9.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ForkOrigin {
+    /// The id of the session this file was forked from.
+    pub session_id: String,
+    /// The record the fork started at, in that session.
+    pub record_id: RecordId,
+}
 
 /// One line of the session file. The shared fields sit beside the tagged body, so
 /// the on-disk shape is `{ "type": ..., "id": ..., "parentId": ..., "timestamp": ..., ... }`.
@@ -54,6 +80,15 @@ pub enum Record {
         cwd: PathBuf,
         approval: String,
         sandbox: String,
+        /// The session id. It was implicit in the file name before.
+        ///
+        /// A rename of the file then changed the id a reader saw, and a copy of a file
+        /// carried no id at all.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        /// Set when this file came from a fork.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forked_from: Option<ForkOrigin>,
     },
     /// The provider or the model changed.
     ModelChange { provider: String, model: String },
@@ -76,6 +111,28 @@ pub enum Record {
     /// record a reader would find `Closed` in the middle of a file, and it could not tell
     /// a closed session from one that kept talking. See `SPEC-sessions` section 8.
     Reopened,
+    /// An explicit session title. **A leaf record.** It is never a parent.
+    ///
+    /// The newest `Name` record wins. See `D-a-session-title-costs-nothing`.
+    Name { title: String },
+}
+
+/// Is this record a leaf, which is never a parent?
+///
+/// The match has no wildcard on purpose. A new record forces a reader to decide its class,
+/// instead of inheriting a fail-open default. See `D-chain-records-are-frozen` and
+/// `D-plugin-does-not-classify-itself`.
+fn is_leaf_record(record: &Record) -> bool {
+    match record {
+        Record::Name { .. } => true,
+        Record::Session { .. }
+        | Record::ModelChange { .. }
+        | Record::Message { .. }
+        | Record::Usage { .. }
+        | Record::Stop { .. }
+        | Record::Closed
+        | Record::Reopened => false,
+    }
 }
 
 /// The largest single record written to the file, in bytes.
@@ -123,6 +180,8 @@ pub struct SessionHeader {
     pub approval: String,
     /// The resolved sandbox mode name. One of `off`, `confined`, `strict`.
     pub sandbox: String,
+    /// Set when this file came from a fork. It is shown, and never trusted.
+    pub forked_from: Option<ForkOrigin>,
 }
 
 /// The largest single line a reader accepts, in bytes. A longer line is a decode
@@ -149,14 +208,79 @@ pub enum SessionError {
     #[error("unsupported session version {0}")]
     Version(u32),
     /// A resume would widen a permission, and the user did not allow it.
+    ///
+    /// **The message names the flag again, because this lane created it.** `main` had removed the
+    /// name, and rightly: it told a user to pass `--allow-widen`, and no such flag existed. That is
+    /// the shape `bench/check-flag-names.py` exists to catch. `rho run` now defines the flag, so the
+    /// refusal can say what to do, and the guard passes because the name is real.
     #[error(
-        "a resume would widen {field} from {stored} to {requested}. The caller must ask for a wider run explicitly."
+        "a resume would widen {field} from {stored} to {requested}; pass --allow-widen to allow it"
     )]
     Widen {
         field: &'static str,
         stored: String,
         requested: String,
     },
+    /// A record names a parent the reader does not hold, so the chain has a hole.
+    ///
+    /// The check runs from the child side, because a tagged reader cannot tell an unknown
+    /// leaf from an unknown chain record. Both fail to decode into the same dropped count,
+    /// and the id of a line that did not decode is inside that line. So the class is derived
+    /// from the data instead of declared by a writer. See
+    /// `SPEC-session-store-wiring` section 6a.
+    #[error("record {child} names parent {parent}, which this build could not read")]
+    Orphan { child: RecordId, parent: RecordId },
+    /// A record names a leaf record as its parent. A leaf is never a parent.
+    #[error("record {child} names parent {parent}, which is a leaf record and never a parent")]
+    LeafParent { child: RecordId, parent: RecordId },
+    /// Two records in one file share an id.
+    #[error("record id {id} appears twice in the file")]
+    DuplicateId { id: RecordId },
+    /// The parent links form a cycle, so a walk would never end.
+    ///
+    /// Referential integrity alone does not catch this: a cycle resolves every parent, and no
+    /// record on it is a leaf. A reviewer found the hole, and this project already guards the same
+    /// class for subagents in `check_no_cycle`.
+    #[error("the parent links of record {at} form a cycle, so this file cannot be read")]
+    CyclicChain { at: RecordId },
+    /// A walk asked for a record the file does not hold.
+    ///
+    /// A user typing `--at r99` reaches this, so the message names the id.
+    #[error("the session holds no record {id}")]
+    NoSuchRecord { id: RecordId },
+    /// A prefix matched more than one session. The message lists every match.
+    #[error("the id prefix {prefix} matches {} sessions: {}", matches.len(), matches.join(", "))]
+    AmbiguousPrefix {
+        prefix: String,
+        matches: Vec<String>,
+    },
+    /// A prefix matched no session in this project.
+    #[error("no session in this project starts with {prefix}")]
+    NoSuchSession { prefix: String },
+    /// `--continue` found no session to continue.
+    #[error("no session to continue in {project}; start one without --continue")]
+    NoSessionToContinue { project: String },
+    /// A session title was empty or blank.
+    ///
+    /// It had no name at first, so the refusal arrived as a decode error and read like file
+    /// corruption. A live drive showed `cannot decode a record: a session title cannot be
+    /// empty`. Every error case gets a name.
+    #[error("a session title cannot be empty")]
+    EmptyTitle,
+    /// A create could not find a free id after `MINT_ATTEMPTS` tries.
+    #[error("could not mint a free session id after {attempts} tries; the store may be full")]
+    MintExhausted { attempts: usize },
+    /// Another process holds this session.
+    #[error("session {id} is open in another process. Use another session, or close that one.")]
+    Busy { id: String },
+    /// The filesystem cannot hold an advisory lock.
+    ///
+    /// The message calls `path.display()`, because `PathBuf` does not implement `Display`.
+    #[error(
+        "the filesystem at {} cannot lock a session. Set a store on a local disk.",
+        path.display()
+    )]
+    LockUnsupported { path: PathBuf },
 }
 
 /// The approval modes, ordered from strict to permissive.
@@ -273,6 +397,17 @@ pub struct SessionWriter {
     head: Option<RecordId>,
     next_id: u64,
     closed: bool,
+    /// Every record id the file already holds.
+    ///
+    /// A count is not enough. `append_to` used `entries.len() + 2`, and the reader drops a
+    /// record it cannot decode, so two drops made the count mint an id the file held. A fork
+    /// added one per copied record, and a branch is not contiguous, so a copied chain of
+    /// `r1`, `r2`, `r4` made a second `r4`.
+    ///
+    /// So the writer mints against the **set**, and never against a count. It seeds itself
+    /// inside `append_to` and inside `fork`, so no caller can forget it and no caller can
+    /// seed the wrong ids. See `D-a-record-id-is-minted-against-the-set` and section 7a.
+    known_ids: HashSet<String>,
 }
 
 impl SessionWriter {
@@ -286,14 +421,34 @@ impl SessionWriter {
             head: None,
             next_id: 0,
             closed: false,
+            known_ids: HashSet::new(),
+        }
+    }
+
+    /// Seed the id set from a file the writer is about to append to.
+    ///
+    /// It is private, so no caller can seed the wrong ids and force a collision. A first
+    /// draft of the contract offered a public `seed_ids`, and then forbade every test from
+    /// calling it. A public method a spec forbids is a hazard.
+    fn seed_ids(&mut self, header_id: &RecordId, entries: &[Entry]) {
+        self.known_ids.insert(header_id.0.clone());
+        for entry in entries {
+            self.known_ids.insert(entry.id.0.clone());
         }
     }
 
     /// Mint the next record id. The ids are unique within one file.
+    ///
+    /// It skips every id the file already holds, so a dropped record, a copied branch, and an
+    /// imported file all mint a free id.
     fn mint_id(&mut self) -> RecordId {
-        let id = RecordId(format!("r{}", self.next_id));
-        self.next_id += 1;
-        id
+        loop {
+            let id = RecordId(format!("r{}", self.next_id));
+            self.next_id += 1;
+            if self.known_ids.insert(id.0.clone()) {
+                return id;
+            }
+        }
     }
 
     /// The sidecar path for one record, next to the session file.
@@ -354,15 +509,36 @@ impl SessionWriter {
         } else {
             entry
         };
+        // **A leaf record never becomes the head.** A leaf is never a parent, so a later record
+        // that linked to it would name a leaf as its parent and the whole file would be refused
+        // at read time. A live drive met exactly that after `rho sessions name`:
+        //
+        //     record r24 names parent r23, which is a leaf record and never a parent
+        //
+        // So the chain skips a leaf, and the next record links to the last chain record.
+        let is_leaf = is_leaf_record(&entry.record);
         self.write_entry(&entry)?;
-        self.head = Some(id.clone());
+        if !is_leaf {
+            self.head = Some(id.clone());
+        }
         Ok(id)
     }
 
     /// Write the spilled payloads for one record to a sidecar file.
     fn spill_to_sidecar(&self, id: &RecordId, spills: &[String]) -> Result<(), SessionError> {
         let path = self.sidecar_path(id);
-        let mut file = File::create(&path).map_err(|e| io_error(path.as_path(), e))?;
+        // The mode goes on the open call, for the same reason `create_file` does it. A spill holds
+        // whatever a tool read. See `D-a-session-file-is-private`.
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&path)
+            .map_err(|e| io_error(path.as_path(), e))?;
         for spill in spills {
             file.write_all(spill.as_bytes())
                 .map_err(|e| io_error(path.as_path(), e))?;
@@ -402,6 +578,74 @@ impl SessionWriter {
 /// as `ConfigError::Read` does.
 fn io_error(path: &Path, error: std::io::Error) -> SessionError {
     SessionError::Io(format!("{}: {error}", path.display()))
+}
+
+/// Does this file end with a newline?
+///
+/// Every line `write_entry` produces ends with one, so a file that does not end with one is a file a
+/// crash cut in half. `append_to` closes that line before it appends, or the next record would share
+/// it and the reader would drop both.
+///
+/// An empty file needs no newline. `append_to` never sees one, because a read of an empty file is an
+/// error, and this is written to be true on its own rather than to rely on that.
+fn ends_with_newline(path: &Path) -> Result<bool, SessionError> {
+    use std::io::{Read, Seek, SeekFrom};
+    let length = std::fs::metadata(path)
+        .map_err(|e| io_error(path, e))?
+        .len();
+    if length == 0 {
+        return Ok(true);
+    }
+    let mut file = File::open(path).map_err(|e| io_error(path, e))?;
+    file.seek(SeekFrom::Start(length - 1))
+        .map_err(|e| io_error(path, e))?;
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last).map_err(|e| io_error(path, e))?;
+    Ok(last[0] == b'\n')
+}
+
+/// Make one file readable and writable by its owner alone.
+///
+/// A session file holds a whole conversation. A default umask makes it `0o644`, and then any
+/// local user or a synced backup folder reads it. `transcript.rs` already solved this, and
+/// this follows it. See `D-a-session-file-is-private`.
+fn set_owner_only(path: &Path) -> Result<(), SessionError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| io_error(path, e))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Create a directory and every missing parent, and make each one rho creates owner only.
+///
+/// It sets the mode on the directories it creates, and never on one that already existed. So
+/// a user's own `~` keeps its mode, and every directory under the store root is `0o700`.
+fn create_private_dir(dir: &Path) -> Result<(), SessionError> {
+    // The deepest existing ancestor marks where rho's own directories begin.
+    let mut ours: Vec<&Path> = Vec::new();
+    let mut cursor = Some(dir);
+    while let Some(current) = cursor {
+        if current.exists() {
+            break;
+        }
+        ours.push(current);
+        cursor = current.parent();
+    }
+    std::fs::create_dir_all(dir).map_err(|e| io_error(dir, e))?;
+    #[cfg(unix)]
+    for created in ours {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(created, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| io_error(created, e))?;
+    }
+    #[cfg(not(unix))]
+    let _ = ours;
+    Ok(())
 }
 
 /// The session format version this build reads and writes.
@@ -678,6 +922,13 @@ fn cap_record(record: Record, spills: &mut Vec<String>) -> Record {
 #[derive(Clone, Debug)]
 pub struct ReadResult {
     pub header: SessionHeader,
+    /// The record id of the header line.
+    ///
+    /// The header itself is not in `entries`, because `read_from` consumes the first line
+    /// before its loop. So a caller that re-parents a record, or that seeds an id set, needs
+    /// the header id from here. Without it a fork re-parents onto a guess, and
+    /// `D-a-record-id-is-minted-against-the-set` cannot hold.
+    pub header_id: RecordId,
     pub entries: Vec<Entry>,
     /// True when the last line was partial and dropped. Resume warns on this.
     pub truncated_tail: bool,
@@ -688,15 +939,6 @@ pub struct ReadResult {
     /// record in the middle is now skipped and counted, and the tail rule is unchanged.
     /// See `D-a-bad-middle-record-is-skipped-and-counted`.
     pub dropped_records: usize,
-}
-
-/// A cheap summary for a list. It reads only the first line of a file.
-#[derive(Clone, Debug)]
-pub struct SessionSummary {
-    pub session_id: String,
-    pub path: PathBuf,
-    pub cwd: PathBuf,
-    pub size_bytes: u64,
 }
 
 /// Reads a session file into records.
@@ -740,30 +982,90 @@ fn read_capped_line<R: BufRead>(source: &mut R, buf: &mut Vec<u8>) -> Result<boo
 }
 
 /// The header fields and the entries parsed from one source.
-fn parse_header(line: &str) -> Result<SessionHeader, SessionError> {
+fn parse_header(line: &str) -> Result<(RecordId, SessionHeader), SessionError> {
     let entry: Entry = decode(line)?;
+    let header_id = entry.id.clone();
     match entry.record {
         Record::Session {
             version,
             cwd,
             approval,
             sandbox,
+            session_id,
+            forked_from,
         } => {
             if version != SESSION_FORMAT_VERSION {
                 return Err(SessionError::Version(version));
             }
-            Ok(SessionHeader {
-                version,
-                session_id: String::new(),
-                cwd,
-                approval,
-                sandbox,
-            })
+            Ok((
+                header_id,
+                SessionHeader {
+                    version,
+                    // A file written before this field existed states no id. The reader then
+                    // falls back to the file stem, in `SessionReader::read`.
+                    session_id: session_id.unwrap_or_default(),
+                    cwd,
+                    approval,
+                    sandbox,
+                    forked_from,
+                },
+            ))
         }
         _ => Err(SessionError::Decode(
             "the first record is not a session header".to_string(),
         )),
     }
+}
+
+/// Refuse a file whose record ids are ambiguous, or whose chain has a hole.
+///
+/// Two checks, and both run before any caller walks a parent link.
+///
+/// 1. No id appears twice. A duplicate makes a walk ambiguous, so a resume could rebuild
+///    either of two conversations.
+/// 2. Every non-root `parent_id` resolves to a record the reader holds, and that record is
+///    not a leaf.
+///
+/// Check 2 is the version rule of section 6a. A tagged reader cannot tell an unknown leaf
+/// from an unknown chain record, so the class is derived from the data: a skipped chain
+/// record shows up as a child that points at nothing, and nothing ever points at a leaf.
+fn check_integrity(header_id: &RecordId, entries: &[Entry]) -> Result<(), SessionError> {
+    let mut known: HashMap<&str, bool> = HashMap::with_capacity(entries.len() + 1);
+    known.insert(header_id.0.as_str(), false);
+    for entry in entries {
+        if known
+            .insert(entry.id.0.as_str(), is_leaf_record(&entry.record))
+            .is_some()
+        {
+            return Err(SessionError::DuplicateId {
+                id: entry.id.clone(),
+            });
+        }
+    }
+    // A cycle resolves every parent, so the referential check below cannot see one. Without this
+    // pass a crafted file made every walk loop for ever, and each iteration cloned an entry.
+    check_no_cycle(header_id, entries)?;
+    for entry in entries {
+        let Some(parent) = &entry.parent_id else {
+            continue;
+        };
+        match known.get(parent.0.as_str()) {
+            None => {
+                return Err(SessionError::Orphan {
+                    child: entry.id.clone(),
+                    parent: parent.clone(),
+                });
+            }
+            Some(true) => {
+                return Err(SessionError::LeafParent {
+                    child: entry.id.clone(),
+                    parent: parent.clone(),
+                });
+            }
+            Some(false) => {}
+        }
+    }
+    Ok(())
 }
 
 impl SessionReader {
@@ -773,7 +1075,11 @@ impl SessionReader {
     pub fn read(path: &Path) -> Result<ReadResult, SessionError> {
         let file = File::open(path).map_err(|e| io_error(path, e))?;
         let mut result = Self::read_from(BufReader::new(file))?;
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        // A file written before the header carried its own id states none. The stem is then
+        // the id, because the stem is where the id used to live.
+        if result.header.session_id.is_empty()
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+        {
             result.header.session_id = stem.to_string();
         }
         Ok(result)
@@ -792,7 +1098,7 @@ impl SessionReader {
             ));
         }
         let first = String::from_utf8_lossy(&buf);
-        let header = parse_header(first.trim_end_matches(['\n', '\r']))?;
+        let (header_id, header) = parse_header(first.trim_end_matches(['\n', '\r']))?;
 
         let mut entries = Vec::new();
         let mut truncated_tail = false;
@@ -885,13 +1191,55 @@ impl SessionReader {
             // D-truncated-tail-warns and D-write-failure-degrades.
             tracing::warn!("the session file had a truncated last line; it was dropped");
         }
+        // The refusal runs here, before any caller walks a parent link. See section 6a.
+        check_integrity(&header_id, &entries)?;
         Ok(ReadResult {
             header,
+            header_id,
             entries,
             truncated_tail,
             dropped_records,
         })
     }
+}
+
+/// How many times a create re-mints an id before it gives up.
+///
+/// The id is a one second stamp plus four hex characters, which is 65536 values. For N
+/// sessions minting in one second the collision chance is about `N * (N - 1) / 2 / 65536`.
+/// At 50 concurrent sessions that is 1.87 percent. So a retry is needed, and it is bounded
+/// so a full store cannot spin. See section 7c.
+pub const MINT_ATTEMPTS: usize = 8;
+
+/// What a new session needs. One struct, so a later field breaks no caller.
+///
+/// A four-argument constructor already hid a fake model id and an approve-all policy in this
+/// project. See `D-no-four-argument-session-new`.
+#[derive(Clone, Debug)]
+pub struct NewSession<'a> {
+    pub id: &'a SessionId,
+    pub cwd: &'a Path,
+    pub approval: &'a str,
+    pub sandbox: &'a str,
+    /// The provider and the model this session starts with.
+    pub provider: &'a str,
+    pub model: &'a str,
+    /// Set only by a fork.
+    pub forked_from: Option<ForkOrigin>,
+}
+
+/// What a new session needs, when the caller has no id yet.
+///
+/// The id cannot be a field here, because a retry mints a second one. See section 7 and
+/// `SessionStore::create_minted`.
+#[derive(Clone, Debug)]
+pub struct NewSessionWithoutId<'a> {
+    pub cwd: &'a Path,
+    pub approval: &'a str,
+    pub sandbox: &'a str,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub forked_from: Option<ForkOrigin>,
 }
 
 /// The set of session files under one directory.
@@ -910,47 +1258,187 @@ impl SessionStore {
         self.root.join(format!("{session_id}.jsonl"))
     }
 
-    /// Create a new session file. Write the header. Return a writer. This is the
-    /// open path and the new path. `approval` and `sandbox` name the resolved
-    /// modes, and go into the header record.
-    pub fn create(
-        &self,
-        session_id: &str,
-        cwd: &Path,
-        approval: &str,
-        sandbox: &str,
-    ) -> Result<SessionWriter, SessionError> {
-        std::fs::create_dir_all(&self.root).map_err(|e| io_error(self.root.as_path(), e))?;
-        let path = self.session_path(session_id);
-        // Create or truncate, so a new session starts with a clean file. The writer
-        // holds this handle for the life of the session. See SPEC-sessions section 3.
-        let file = File::create(&path).map_err(|e| io_error(path.as_path(), e))?;
-        let mut writer = SessionWriter::with_sink(path, Box::new(file));
+    /// The file one session id lives in.
+    ///
+    /// A caller that holds an id from `rows` or `resolve_prefix` needs the path to read or to
+    /// reopen it. Without this a caller would rebuild the naming rule, and two spellings of one
+    /// rule drift.
+    pub fn path_of(&self, id: &SessionId) -> PathBuf {
+        self.session_path(id.as_str())
+    }
+
+    /// Create a session file. Write the header, then one `ModelChange` record.
+    ///
+    /// The model record is written here, not by a caller. So every file states its model on
+    /// the second line, and a row reads it from the head. Nothing can forget it.
+    ///
+    /// **The file is created exclusively.** An existing path is an error, never a
+    /// truncation. The old body called `File::create`, which truncates, so about one run in
+    /// 53 at 50 concurrent sessions would have erased another session in silence. See
+    /// section 7c.
+    ///
+    /// The file is created `0o600`, and every directory rho creates under the store root
+    /// `0o700`. See `D-a-session-file-is-private`.
+    pub fn create(&self, new: NewSession<'_>) -> Result<SessionWriter, SessionError> {
+        let path = self.session_path(new.id.as_str());
+        Self::create_file(&path, new)
+    }
+
+    /// Create a session at one exact path, with the same rules `create` applies.
+    ///
+    /// `create` calls this, so the store path and this path are the same code. It exists for
+    /// the `session-file` config key, which names one exact file and overrides the store. See
+    /// `D-session-store-layout`.
+    pub fn create_file(path: &Path, new: NewSession<'_>) -> Result<SessionWriter, SessionError> {
+        if let Some(parent) = path.parent() {
+            create_private_dir(parent)?;
+        }
+        // **The mode goes on the open call.** A `create_new` followed by a `set_permissions` leaves
+        // the file at the umask mode for a moment, and a `session-file` key can name a file in a
+        // directory the store's `0o700` does not cover. A security review found that window.
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        // **One mechanism, not two.** A `set_permissions` after this would be redundant: the final
+        // mode is the same, so deleting either changed nothing a test could see. This project met
+        // that trap in `record_fits` and in the tail read of `row_from`, and the answer is the
+        // same. The mode on `open` is the one that also closes the window, so it is the one kept.
+        let file = options.open(path).map_err(|e| io_error(path, e))?;
+        let mut writer = SessionWriter::with_sink(path.to_path_buf(), Box::new(file));
         let header = Record::Session {
             version: SESSION_FORMAT_VERSION,
-            cwd: cwd.to_path_buf(),
-            approval: approval.to_string(),
-            sandbox: sandbox.to_string(),
+            cwd: new.cwd.to_path_buf(),
+            approval: new.approval.to_string(),
+            sandbox: new.sandbox.to_string(),
+            session_id: Some(new.id.as_str().to_string()),
+            forked_from: new.forked_from,
         };
-        writer.append(header, None)?;
+        let header_id = writer.append(header, None)?;
+        // The second line always states the model, so a bounded head read finds it.
+        writer.append(
+            Record::ModelChange {
+                provider: new.provider.to_string(),
+                model: new.model.to_string(),
+            },
+            Some(header_id),
+        )?;
         Ok(writer)
+    }
+
+    /// Create a session, and mint a fresh id when the first one is taken.
+    ///
+    /// This is what a run calls. It returns the id it used, because a retry replaces the
+    /// first one and a caller cannot recompute it.
+    pub fn create_minted(
+        &self,
+        now_millis: u64,
+        new: NewSessionWithoutId<'_>,
+    ) -> Result<(SessionId, SessionWriter), SessionError> {
+        self.create_minted_from(now_millis, random_suffixes(), new)
+    }
+
+    /// Create a session, taking each id suffix from `suffixes`.
+    ///
+    /// **The retry needs this seam, or its test is theatre.** `create_minted` draws its own
+    /// suffix, so two calls in one millisecond get two ids and no collision ever happens. A
+    /// test could then never reach the retry. So the suffix source is a parameter here,
+    /// exactly as `SessionReader::read_from` and `ProjectKey::resolve_from` take their input.
+    ///
+    /// `create_minted` calls this, so the store path and the tested path are the same code.
+    pub fn create_minted_from<I: Iterator<Item = u16>>(
+        &self,
+        now_millis: u64,
+        suffixes: I,
+        new: NewSessionWithoutId<'_>,
+    ) -> Result<(SessionId, SessionWriter), SessionError> {
+        let mut last = None;
+        for suffix in suffixes.take(MINT_ATTEMPTS) {
+            let id = SessionId::mint(now_millis, suffix);
+            let request = NewSession {
+                id: &id,
+                cwd: new.cwd,
+                approval: new.approval,
+                sandbox: new.sandbox,
+                provider: new.provider,
+                model: new.model,
+                forked_from: new.forked_from.clone(),
+            };
+            match self.create(request) {
+                Ok(writer) => return Ok((id, writer)),
+                // A taken path costs one more mint. Any other failure is real, and it stops
+                // here rather than being retried eight times.
+                Err(SessionError::Io(message)) if is_already_exists(&message) => {
+                    last = Some(message);
+                }
+                Err(other) => return Err(other),
+            }
+        }
+        tracing::warn!(
+            attempts = MINT_ATTEMPTS,
+            last = ?last,
+            "every minted session id was taken"
+        );
+        Err(SessionError::MintExhausted {
+            attempts: MINT_ATTEMPTS,
+        })
     }
 
     /// Open an existing file to append more records. Used by resume and fork.
     pub fn append_to(&self, path: &Path) -> Result<SessionWriter, SessionError> {
         let read = SessionReader::read(path)?;
-        let head = read.entries.last().map(|e| e.id.clone());
-        // Seed the id counter past every id already in the file, so a later append
-        // never mints an id that collides with an earlier record.
-        let next_id = read.entries.len() as u64 + 2;
+        // The head is the last **chain** record, and never a leaf. A leaf is never a parent, so a
+        // reopen that took a trailing `Name` record as the head would make the next append name a
+        // leaf and the file would be refused. A live drive met that after `rho sessions name`.
+        let head = read
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| !is_leaf_record(&entry.record))
+            .map(|entry| entry.id.clone())
+            .unwrap_or_else(|| read.header_id.clone());
         // Hold an appending handle for the life of the reopened session.
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .append(true)
             .open(path)
             .map_err(|e| io_error(path, e))?;
+        // **Close an unterminated last line, before anything else is written.**
+        //
+        // A torn write leaves a last line with no newline. An append then landed the next record on
+        // that same line, so the two shared it, the reader dropped the whole line, and the record
+        // went with it. The writer had reported success, and after the resume the reader saw no
+        // truncated tail at all, so nothing warned.
+        //
+        // The record lost is the worst one to lose: on a crash continue the first thing recorded is
+        // the user's new prompt. A crash is the case `--continue` exists for, so this is the path
+        // that had to be right. A reviewer found it.
+        //
+        // **The condition is the last byte, and not `read.truncated_tail`.** The review suggested
+        // the flag, and a test over every fragment shape showed it is not enough: a **whole** record
+        // with its newline missing decodes, so the flag is false, and appending then destroyed a
+        // record that had been readable. Every line rho writes ends with a newline, so a file that
+        // does not is a file a crash cut.
+        //
+        // A newline keeps the user's session and loses at most the fragment, which the reader was
+        // going to drop anyway. Refusing the resume would also be defensible, and it would throw
+        // away work the user can still use.
+        if !ends_with_newline(path)? {
+            file.write_all(b"\n").map_err(|e| io_error(path, e))?;
+            file.flush().map_err(|e| io_error(path, e))?;
+            tracing::warn!(
+                path = %path.display(),
+                "the session file did not end in a newline, so rho closed the line before \
+                 appending. A crash can leave one. Every record after it is kept."
+            );
+        }
         let mut writer = SessionWriter::with_sink(path.to_path_buf(), Box::new(file));
-        writer.head = head;
-        writer.next_id = next_id;
+        writer.head = Some(head);
+        // Seed the id set from the file itself, inside the store. A caller cannot forget it,
+        // and a caller cannot seed the wrong ids. See section 7a.
+        writer.seed_ids(&read.header_id, &read.entries);
         // A closed file ends with `Closed`. State the reopen on disk, so a reader never
         // finds `Closed` in the middle of a file with no explanation.
         let was_closed = matches!(
@@ -964,50 +1452,194 @@ impl SessionStore {
         Ok(writer)
     }
 
-    /// List sessions with a cheap summary. Read only the first line of each file.
-    /// The first line obeys the same `MAX_LINE_BYTES` cap as `read`.
-    pub fn list(&self) -> Result<Vec<SessionSummary>, SessionError> {
-        let mut out = Vec::new();
-        let dir = match std::fs::read_dir(&self.root) {
-            Ok(dir) => dir,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-            Err(e) => return Err(SessionError::Io(e.to_string())),
-        };
-        for entry in dir {
-            let path = entry.map_err(|e| io_error(self.root.as_path(), e))?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let file = File::open(&path).map_err(|e| io_error(path.as_path(), e))?;
-            let mut reader = BufReader::new(file);
-            let mut buf = Vec::new();
-            if !read_capped_line(&mut reader, &mut buf)? {
-                continue;
-            }
-            let line = String::from_utf8_lossy(&buf);
-            let header = parse_header(line.trim_end_matches(['\n', '\r']))?;
-            let session_id = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-                .to_string();
-            let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            out.push(SessionSummary {
-                session_id,
-                path,
-                cwd: header.cwd,
-                size_bytes,
-            });
+    /// Every session in the store, newest first. A file rho cannot read is one row.
+    ///
+    /// It reads `ROW_HEAD_LINES` lines and `ROW_TAIL_BYTES` bytes per file, through `row_from`.
+    /// So the store path and the tested path are the same code, and no file is fully decoded.
+    ///
+    /// It replaces `list`, which returned four fields no picker wants and failed the whole list
+    /// on one unreadable file. Two methods for one job would leave dead surface.
+    pub fn rows(&self) -> Result<Vec<SessionRow>, SessionError> {
+        let mut paths = self.session_files()?;
+        // The id sorts by time, so a name sort gives newest first and opens no file. See
+        // `D-a-session-id-sorts-by-time`.
+        paths.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+        let mut out = Vec::with_capacity(paths.len());
+        for path in paths {
+            out.push(self.row_for(&path));
         }
         Ok(out)
     }
 
+    /// One row for one file. Every failure becomes a row, never an error.
+    fn row_for(&self, path: &Path) -> SessionRow {
+        let meta = match std::fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(error) => return row::unreadable_row(path.to_path_buf(), &io_error(path, error)),
+        };
+        let last_active_millis = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|since| since.as_millis() as u64)
+            .unwrap_or(0);
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) => return row::unreadable_row(path.to_path_buf(), &io_error(path, error)),
+        };
+        row_from(
+            BufReader::new(file),
+            RowMeta {
+                display_path: path.to_path_buf(),
+                size_bytes: meta.len(),
+                last_active_millis,
+            },
+        )
+    }
+
+    /// Every `.jsonl` file directly under the store root.
+    ///
+    /// A missing root is an empty store, not an error. A user with no sessions yet runs
+    /// `rho sessions list` and reads "no sessions", never a stack of io text.
+    fn session_files(&self) -> Result<Vec<PathBuf>, SessionError> {
+        let dir = match std::fs::read_dir(&self.root) {
+            Ok(dir) => dir,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(io_error(self.root.as_path(), e)),
+        };
+        let mut out = Vec::new();
+        for entry in dir {
+            let path = entry.map_err(|e| io_error(self.root.as_path(), e))?.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                out.push(path);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Resolve a prefix to one id, to none, or to every match.
+    ///
+    /// A prefix never picks one of several. An ambiguous prefix returns every match, so the
+    /// caller can list them all. See `D-a-session-id-sorts-by-time`.
+    ///
+    /// It reads no file. Every id is in a file name.
+    pub fn resolve_prefix(&self, prefix: &str) -> Result<PrefixMatch, SessionError> {
+        let mut matches: Vec<SessionId> = self
+            .session_files()?
+            .iter()
+            .filter_map(|path| path.file_stem().and_then(|stem| stem.to_str()))
+            .filter(|stem| stem.starts_with(prefix))
+            .filter_map(|stem| SessionId::parse(stem).ok())
+            .collect();
+        matches.sort();
+        match matches.len() {
+            0 => Ok(PrefixMatch::None),
+            1 => Ok(PrefixMatch::One(matches.remove(0))),
+            _ => Ok(PrefixMatch::Many(matches)),
+        }
+    }
+
+    /// The newest session in this store that holds no `Closed` record.
+    ///
+    /// **This is the crash offer, and it is not what `--continue` takes.** A run that ends on
+    /// its own writes a `Closed` record, so this skips it. The first version of the contract
+    /// used one method for both questions, and then bare `--continue` answered "no session to
+    /// continue" right after a successful run. A live drive found it, and every unit test had
+    /// passed. See `D-continue-takes-the-newest-session-closed-or-not`.
+    ///
+    /// It skips a session another process holds. See section 7d.
+    pub fn newest_open(&self) -> Result<Option<SessionId>, SessionError> {
+        self.newest_matching(|summary| !summary.closed)
+    }
+
+    /// The newest session `--continue` takes, closed or not.
+    ///
+    /// A closed file reopens, and `append_to` states the reopen on disk. So continuing a
+    /// conversation a user closed is normal, and it is the common case.
+    ///
+    /// It skips a session another process holds, and it skips a file rho cannot read.
+    pub fn newest_resumable(&self) -> Result<Option<SessionId>, SessionError> {
+        self.newest_matching(|_| true)
+    }
+
+    /// The newest readable, unlocked session that passes `wanted`.
+    ///
+    /// One walk for both questions above, so the lock skip and the unreadable skip cannot drift
+    /// between them.
+    fn newest_matching(
+        &self,
+        wanted: impl Fn(&SessionSummary) -> bool,
+    ) -> Result<Option<SessionId>, SessionError> {
+        for row in self.rows()? {
+            let SessionRow::Session(summary) = row else {
+                // An unreadable file cannot be resumed. It can be deleted, so a user can clean
+                // the store. See `D-a-bad-session-file-is-one-row`.
+                continue;
+            };
+            if !wanted(&summary) {
+                continue;
+            }
+            if lock::is_locked_elsewhere(&self.lock_path(&summary.id), summary.id.as_str()) {
+                tracing::debug!(
+                    id = summary.id.as_str(),
+                    "a session is open in another process; the search moved past it"
+                );
+                continue;
+            }
+            // **A row is not a promise that the file reads.** A row comes from two bounded reads and
+            // it never walks a parent link, so a file with a broken or cyclic chain still builds a
+            // readable-looking row. Without this check `--continue` chose such a file and then
+            // failed on the full read, for ever, and a user had to find it by hand.
+            //
+            // It costs one read of one candidate, which the resume then does anyway. A live drive
+            // found the trap.
+            if let Err(error) = SessionReader::read(&summary.path) {
+                tracing::debug!(
+                    id = summary.id.as_str(),
+                    %error,
+                    "a session cannot be read whole; the search moved past it"
+                );
+                continue;
+            }
+            return Ok(Some(summary.id));
+        }
+        Ok(None)
+    }
+
+    /// The lock file for one session.
+    fn lock_path(&self, id: &SessionId) -> PathBuf {
+        lock_path_for(&self.path_of(id))
+    }
+
+    /// Take the advisory lock for one session.
+    ///
+    /// `SessionError::Busy` names the session when another process holds it.
+    /// `SessionError::LockUnsupported` names the path when the filesystem cannot lock, and then
+    /// the run stops. A warning that continued would fail open.
+    ///
+    /// Every write path takes this: a create, a resume, and a fork of the target it writes. A
+    /// read-only path takes no lock, so `list` and `show` always work.
+    pub fn lock(&self, id: &SessionId) -> Result<SessionLock, SessionError> {
+        Self::lock_file(&self.path_of(id))
+    }
+
     /// Delete one session file. Every branch in the file goes with it.
-    pub fn delete(&self, session_id: &str) -> Result<(), SessionError> {
-        let path = self.session_path(session_id);
+    ///
+    /// It removes the file and every `<id>.*.sidecar` beside it. It does not overwrite the
+    /// bytes, so a recovery tool may still find them. It does not remove a session forked
+    /// from this one, because a fork is its own file.
+    pub fn delete(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        // **A delete takes the lock.** It unlinks the lock file, and `flock` binds to an inode, so
+        // a delete while a session is live would let the next writer lock a **new** inode and two
+        // writers would then both believe they hold the session. A review found that race.
+        //
+        // A busy session refuses the delete, which is right on its own: a user does not mean to
+        // delete the session another rho is writing.
+        let _lock = self.lock(session_id)?;
+        let path = self.session_path(session_id.as_str());
         std::fs::remove_file(&path).map_err(|e| io_error(path.as_path(), e))?;
         // Remove any sidecar files that belong to this session too.
-        let prefix = format!("{session_id}.");
+        let prefix = format!("{}.", session_id.as_str());
         if let Ok(dir) = std::fs::read_dir(&self.root) {
             for entry in dir.flatten() {
                 let sidecar = entry.path();
@@ -1017,7 +1649,11 @@ impl SessionStore {
                     .and_then(|n| n.to_str())
                     .map(|n| n.starts_with(&prefix))
                     .unwrap_or(false);
-                if is_sidecar && matches {
+                // The lock file goes too. `flock` dies with the process, so the file left behind
+                // holds nothing, and a delete that left it would leave a name in the store for a
+                // session that no longer exists. A live drive showed the leftover after a crash.
+                let is_lock = sidecar.extension().and_then(|e| e.to_str()) == Some("lock");
+                if (is_sidecar || is_lock) && matches {
                     let _ = std::fs::remove_file(&sidecar);
                 }
             }
@@ -1025,41 +1661,102 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Fork a session, and mint a free id for the new file.
+    ///
+    /// A caller that minted its own id would rebuild the retry of `create_minted`, and two
+    /// spellings of one rule drift. A review found exactly that second loop in `rho-cli`, with an
+    /// untested give-up branch of its own.
+    pub fn fork_minted(
+        &self,
+        from_path: &Path,
+        from: &RecordId,
+        now_millis: u64,
+    ) -> Result<(SessionId, SessionWriter), SessionError> {
+        self.fork_minted_from(from_path, from, now_millis, random_suffixes())
+    }
+
+    /// Fork a session, taking each id suffix from `suffixes`.
+    ///
+    /// The seam `fork_minted` calls, for the same reason `create_minted_from` exists: a test
+    /// cannot force a collision when the suffix comes from the clock.
+    pub fn fork_minted_from<I: Iterator<Item = u16>>(
+        &self,
+        from_path: &Path,
+        from: &RecordId,
+        now_millis: u64,
+        suffixes: I,
+    ) -> Result<(SessionId, SessionWriter), SessionError> {
+        let mut last = None;
+        for suffix in suffixes.take(MINT_ATTEMPTS) {
+            let id = SessionId::mint(now_millis, suffix);
+            match self.fork(from_path, from, &id) {
+                Ok(writer) => return Ok((id, writer)),
+                Err(SessionError::Io(message)) if is_already_exists(&message) => {
+                    last = Some(message);
+                }
+                Err(other) => return Err(other),
+            }
+        }
+        tracing::warn!(
+            attempts = MINT_ATTEMPTS,
+            last = ?last,
+            "every minted fork id was taken"
+        );
+        Err(SessionError::MintExhausted {
+            attempts: MINT_ATTEMPTS,
+        })
+    }
+
     /// Fork a session at `from`. Copy the branch that ends at `from` into a new
     /// file with `new_id`. The original file is not changed. Return a writer on
     /// the new file.
+    ///
+    /// The first copied record is **re-parented** onto the new header id. It kept its old
+    /// parent before, which resolved only because a native header happens to be minted as
+    /// `r0`. An imported file has a hex header id, and then the copied record pointed at an
+    /// id the new file does not hold. See section 7b.
     pub fn fork(
         &self,
         from_path: &Path,
         from: &RecordId,
-        new_id: &str,
+        new_id: &SessionId,
     ) -> Result<SessionWriter, SessionError> {
         let read = SessionReader::read(from_path)?;
-        // Walk parent links from `from` to the root, then reverse to file order.
-        let map: HashMap<&RecordId, &Entry> = read.entries.iter().map(|e| (&e.id, e)).collect();
-        let mut chain = Vec::new();
-        let mut cursor = Some(from.clone());
-        while let Some(id) = cursor {
-            match map.get(&id) {
-                Some(entry) => {
-                    chain.push((*entry).clone());
-                    cursor = entry.parent_id.clone();
-                }
-                None => break,
-            }
-        }
-        chain.reverse();
+        let chain = walk_chain(&read.entries, from, Some(&read.header_id))?;
 
-        std::fs::create_dir_all(&self.root).map_err(|e| io_error(self.root.as_path(), e))?;
-        let new_path = self.session_path(new_id);
-        let file = File::create(&new_path).map_err(|e| io_error(new_path.as_path(), e))?;
+        create_private_dir(&self.root)?;
+        let new_path = self.session_path(new_id.as_str());
+        // The mode goes on the open call, as it does in `create_file` and in the sidecar open. A
+        // create-then-chmod window is what the mode argument exists to close, and a fork copies a
+        // whole transcript. The store root is `0o700`, so nobody could traverse in today; this is
+        // the one create in the module that still did it the old way. A reviewer named it.
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&new_path)
+            .map_err(|e| io_error(new_path.as_path(), e))?;
         let mut writer = SessionWriter::with_sink(new_path, Box::new(file));
+        // Every id the copied branch carries. The writer must not mint one of them, and a
+        // count cannot see that, because a branch is not contiguous. See section 7a.
+        for entry in &chain {
+            writer.known_ids.insert(entry.id.0.clone());
+        }
         // Write a fresh header for the new file, then copy the branch verbatim.
         let header = Record::Session {
             version: read.header.version,
             cwd: read.header.cwd,
             approval: read.header.approval,
             sandbox: read.header.sandbox,
+            session_id: Some(new_id.as_str().to_string()),
+            forked_from: Some(ForkOrigin {
+                session_id: read.header.session_id.clone(),
+                record_id: from.clone(),
+            }),
         };
         let header_id = writer.mint_id();
         writer.write_entry(&Entry {
@@ -1068,14 +1765,188 @@ impl SessionStore {
             timestamp: now_timestamp(),
             record: header,
         })?;
-        writer.head = Some(header_id);
-        for entry in chain {
+        writer.head = Some(header_id.clone());
+        for (index, entry) in chain.into_iter().enumerate() {
+            let entry = if index == 0 {
+                // Re-parent onto the new header. The rule does not depend on any id being
+                // `r0`, so an imported file forks as well as a native one.
+                Entry {
+                    parent_id: Some(header_id.clone()),
+                    ..entry
+                }
+            } else {
+                entry
+            };
+            // A leaf never becomes the head, here as well as in `append`. A branch can end at a
+            // `Name` record, and a returned writer whose head is a leaf makes the next append name
+            // a leaf as its parent. `SessionWriter::append` already knew that, and this second
+            // spelling of the rule did not.
+            let is_leaf = is_leaf_record(&entry.record);
             writer.write_entry(&entry)?;
-            writer.head = Some(entry.id.clone());
-            writer.next_id += 1;
+            if !is_leaf {
+                writer.head = Some(entry.id.clone());
+            }
         }
         Ok(writer)
     }
+
+    /// Take the advisory lock beside one exact file.
+    ///
+    /// `lock` calls this, so a session in the store and a file the `session-file` key names are
+    /// locked by the same code. A named file had no lock at all, so two runs with that key set
+    /// would have interleaved their records into one file.
+    pub fn lock_file(path: &Path) -> Result<SessionLock, SessionError> {
+        let lock_path = lock_path_for(path);
+        if let Some(parent) = lock_path.parent() {
+            // A store that cannot even hold its directory cannot hold a lock, so the refusal names
+            // the lock path rather than leaking a create error.
+            create_private_dir(parent).map_err(|_| SessionError::LockUnsupported {
+                path: lock_path.clone(),
+            })?;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("the session");
+        lock::take_lock(&lock_path, name)
+    }
+}
+
+/// The lock file that sits beside one session file.
+fn lock_path_for(path: &Path) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "session".to_string());
+    path.with_file_name(format!("{stem}.lock"))
+}
+
+/// Refuse a set of entries whose parent links form a cycle.
+///
+/// It walks from every record and stops at a record it has already settled, so the whole pass is
+/// linear in the number of records however deep the chains are.
+///
+/// A missing parent is **not** an error here. The referential check reports that, with both ids,
+/// and reporting it twice with two messages would confuse a reader.
+fn check_no_cycle(header_id: &RecordId, entries: &[Entry]) -> Result<(), SessionError> {
+    let parents: HashMap<&str, Option<&str>> = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.id.0.as_str(),
+                entry.parent_id.as_ref().map(|id| id.0.as_str()),
+            )
+        })
+        .collect();
+    // Every record already known to reach a root without a cycle.
+    let mut settled: HashSet<&str> = HashSet::with_capacity(entries.len() + 1);
+    settled.insert(header_id.0.as_str());
+    for entry in entries {
+        let mut path: Vec<&str> = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut cursor = entry.id.0.as_str();
+        loop {
+            if settled.contains(cursor) {
+                break;
+            }
+            if !seen.insert(cursor) {
+                return Err(SessionError::CyclicChain {
+                    at: RecordId(cursor.to_string()),
+                });
+            }
+            path.push(cursor);
+            match parents.get(cursor) {
+                // A missing parent, or a root. Either way this chain ends here, and the
+                // referential check names a hole with both of its ids.
+                Some(Some(parent)) => cursor = parent,
+                Some(None) | None => break,
+            }
+        }
+        settled.extend(path);
+    }
+    Ok(())
+}
+
+/// Walk parent links from `head` to the root, and return the chain in file order.
+///
+/// A missing parent is an error, never a short list. A short list would drop the end of a
+/// conversation, and the provider request would still look valid. `branch_messages` and
+/// `fork` both had `None => break` here. See section 6b.
+fn walk_chain(
+    entries: &[Entry],
+    head: &RecordId,
+    root: Option<&RecordId>,
+) -> Result<Vec<Entry>, SessionError> {
+    let map: HashMap<&RecordId, &Entry> = entries.iter().map(|e| (&e.id, e)).collect();
+    let mut chain = Vec::new();
+    // Defence in depth. `read_from` refuses a cyclic file, and a caller that builds entries by
+    // hand reaches this walker directly. One guard on one path is how `confine` stayed unproven.
+    let mut seen: HashSet<RecordId> = HashSet::new();
+    let mut cursor = head.clone();
+    loop {
+        // The header is not in `entries`, because `read_from` consumes the first line before
+        // its loop. So a caller that read a file names the header id here, and a chain that
+        // reaches it has reached the root. A caller with hand-built entries passes `None`,
+        // and then every parent must resolve inside `entries`.
+        if root == Some(&cursor) {
+            break;
+        }
+        let Some(entry) = map.get(&cursor) else {
+            // The first lookup is the requested head, so a caller that asked for a record
+            // the file does not hold gets a different error from a chain with a hole.
+            return Err(match chain.last() {
+                None => SessionError::NoSuchRecord { id: cursor },
+                Some(child) => SessionError::Orphan {
+                    child: (*child as &Entry).id.clone(),
+                    parent: cursor,
+                },
+            });
+        };
+        if !seen.insert(entry.id.clone()) {
+            return Err(SessionError::CyclicChain {
+                at: entry.id.clone(),
+            });
+        }
+        chain.push(*entry);
+        match &entry.parent_id {
+            // The header is not in `entries`, so the walk ends at a record with no parent.
+            None => break,
+            Some(parent) => cursor = parent.clone(),
+        }
+    }
+    chain.reverse();
+    Ok(chain.into_iter().cloned().collect())
+}
+
+/// Does this io message say the path already exists?
+///
+/// `SessionError::Io` carries a string, so the kind is gone by the time a caller sees it.
+/// `create_minted` needs to tell a taken id from a real failure, and it must not retry a
+/// permission error eight times.
+fn is_already_exists(message: &str) -> bool {
+    message.contains("File exists")
+        || message.contains("already exists")
+        || message.contains("AlreadyExists")
+}
+
+/// Four hex characters per attempt, drawn from the clock and the process id.
+///
+/// `rho-core` has no random dependency, and this is not a secret. The suffix only has to keep
+/// two sessions in one second apart, and the exclusive create in section 7c catches the rest.
+/// See section 9, which says the suffix is not an access control.
+fn random_suffixes() -> impl Iterator<Item = u16> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let mut state = nanos ^ (u64::from(std::process::id()) << 17) ^ 0x9e37_79b9_7f4a_7c15;
+    std::iter::repeat_with(move || {
+        // xorshift64. Enough for a collision suffix, and it needs no crate.
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 24) as u16
+    })
 }
 
 /// Rebuild the message list along the branch that ends at `head`. Walk parent
@@ -1084,20 +1955,20 @@ impl SessionStore {
 /// A trailing `ToolCall` with no matching `ToolResult` is repaired with a synthetic
 /// error result, so the rebuilt list holds a complete pairing and the next provider
 /// request is valid. See section 8a.
-pub fn branch_messages(entries: &[Entry], head: &RecordId) -> Vec<Message> {
-    let map: HashMap<&RecordId, &Entry> = entries.iter().map(|e| (&e.id, e)).collect();
-    let mut chain = Vec::new();
-    let mut cursor = Some(head.clone());
-    while let Some(id) = cursor {
-        match map.get(&id) {
-            Some(entry) => {
-                chain.push(*entry);
-                cursor = entry.parent_id.clone();
-            }
-            None => break,
-        }
-    }
-    chain.reverse();
+///
+/// **A missing parent is an error, never a short list.** The old body broke out of the walk,
+/// so a hole in the chain dropped the end of a conversation and the provider request still
+/// looked valid. See section 6b.
+///
+/// `root` names the header record id, which is not in `entries`. A caller that read a file
+/// passes `Some(&read.header_id)`. A caller with hand-built entries passes `None`, and then
+/// every parent must resolve inside `entries`.
+pub fn branch_messages(
+    entries: &[Entry],
+    head: &RecordId,
+    root: Option<&RecordId>,
+) -> Result<Vec<Message>, SessionError> {
+    let chain = walk_chain(entries, head, root)?;
 
     let mut messages: Vec<Message> = chain
         .iter()
@@ -1129,7 +2000,148 @@ pub fn branch_messages(entries: &[Entry], head: &RecordId) -> Vec<Message> {
             ));
         }
     }
-    messages
+    Ok(messages)
+}
+
+/// Rewrite every stale result-handle preview in a rebuilt context.
+///
+/// A resumed context holds text like `<tool_result_preview handle="r-0001">`. The store behind
+/// that handle died with the earlier run, and the per-session nonce enforces that on purpose.
+/// So the model would call `read_tool_result`, get an error, and spend a turn learning that the
+/// evidence is gone.
+///
+/// The rewrite says the evidence expired and keeps the byte count. The model then re-runs the
+/// command instead. **The file on disk does not change**, because the file is append-only. Only
+/// the rebuilt context does. See `D-a-stale-result-handle-expires-on-resume`.
+pub fn expire_stale_result_handles(messages: &mut [Message]) {
+    for message in messages {
+        for block in &mut message.content {
+            expire_in_block(block);
+        }
+    }
+}
+
+/// The marker a stored result preview opens with.
+const PREVIEW_OPEN: &str = "<tool_result_preview";
+
+/// The marker it closes with.
+const PREVIEW_CLOSE: &str = "</tool_result_preview>";
+
+/// The promise a stored preview makes, which must not survive the expiry.
+const PROMISE: &str = "read_tool_result";
+
+/// Rewrite one block, and every block nested inside a tool result.
+///
+/// **Every block that carries readable text is rewritten**, and not only a `Text` block. A preview
+/// hidden in a reasoning block kept a live handle through a resume, and a security review found it.
+/// The match has no wildcard for a text-carrying block, so a new one cannot slip past in silence.
+fn expire_in_block(block: &mut ContentBlock) {
+    match block {
+        ContentBlock::Text { text }
+        | ContentBlock::ReasoningTrace { text }
+        | ContentBlock::ReasoningReplay { text, .. }
+            if text.contains(PREVIEW_OPEN) =>
+        {
+            *text = expired_previews(text);
+        }
+        ContentBlock::ToolResult { content, .. } => {
+            for nested in content {
+                expire_in_block(nested);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The replacement text for **every** preview in one string.
+///
+/// A first version rewrote one, so a second preview in the same block survived. It also kept the
+/// head of the tag it rewrote, and a nested preview left a live-looking handle inside that head.
+/// So the rewrite runs over every occurrence, and the head it keeps is scrubbed the same way.
+fn expired_previews(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(PREVIEW_OPEN) {
+        out.push_str(&rest[..start]);
+        let block = &rest[start..];
+        let end = match block.find(PREVIEW_CLOSE) {
+            Some(at) => at + PREVIEW_CLOSE.len(),
+            // An unterminated tag. Everything after it is part of the same claim, so all of it
+            // goes. Keeping the tail would keep the promise the tag makes.
+            None => block.len(),
+        };
+        out.push_str(&expired_preview(&block[..end]));
+        rest = &block[end..];
+        // The promise that follows a preview is part of the same claim, so it goes with it.
+        if let Some(after) = rest.strip_prefix('\n') {
+            rest = after;
+        }
+        if let Some(line_end) = rest.find('\n') {
+            if rest[..line_end].contains(PROMISE) {
+                rest = &rest[line_end + 1..];
+            }
+        } else if rest.contains(PROMISE) {
+            rest = "";
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The replacement text for one stale preview.
+///
+/// It keeps the preview head the record already holds, because that is real evidence the model read
+/// once. It removes only the promise that the handle still works, and it scrubs any nested tag out
+/// of the head it keeps.
+fn expired_preview(text: &str) -> String {
+    let stored_bytes = attribute(text, "stored_bytes").unwrap_or_else(|| "an unknown".to_string());
+    let head = between_tags(text);
+    // A nested tag inside the head would leave a live-looking handle behind, so the whole nested
+    // tag goes, and not only its opening marker. A security review found that a scrub of the marker
+    // alone left `handle="r-live"` in place.
+    let head = strip_tags(&head);
+    format!(
+        "{head}\n[rho stored {stored_bytes} bytes of this result in an earlier run. The evidence \
+         expired when that run ended, so no handle can read it. Run the command again if you \
+         need the rest.]"
+    )
+}
+
+/// Remove every angle-bracket tag from a kept head.
+///
+/// The head is evidence a model already read, and it is text. A tag inside it is not evidence: it is
+/// a claim about a handle, and the handle is dead. So every tag goes, with its attributes.
+fn strip_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut inside = false;
+    for ch in text.chars() {
+        match ch {
+            '<' => inside = true,
+            '>' if inside => inside = false,
+            _ if inside => {}
+            _ => out.push(ch),
+        }
+    }
+    out.trim().to_string()
+}
+
+/// One attribute value from the preview tag.
+fn attribute(text: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=\"");
+    let start = text.find(&needle)? + needle.len();
+    let rest = &text[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// The text between the preview tags, which is the head the model already read.
+fn between_tags(text: &str) -> String {
+    let Some(open_end) = text.find('>') else {
+        return String::new();
+    };
+    let rest = &text[open_end + 1..];
+    let end = rest.find(PREVIEW_CLOSE).unwrap_or(rest.len());
+    rest[..end].trim().to_string()
 }
 
 /// A tool message that carries one synthetic error result for a call id.
@@ -1189,10 +2201,88 @@ impl SessionLog {
 }
 
 /// Folds the agent event stream into session records.
+///
+/// **It folds the stream. It does not record it.** The file holds messages, so a resume needs
+/// no second fold. See `D-recorder-consumes-events`.
 pub struct SessionRecorder {
     log: SessionLog,
-    /// The tool calls opened in the current turn that have no result yet.
-    open_calls: Vec<(String, String)>,
+    /// The blocks of the assistant turn now streaming, keyed by the provider block index.
+    ///
+    /// The index orders them, so a replay sends the blocks back in the order the provider
+    /// produced them. Without this the recorder wrote no assistant message at all, and a
+    /// resume replayed a `ToolResult` that matched no `ToolCall`. See
+    /// `D-a-recorder-writes-the-assistant-turn`.
+    turn: BTreeMap<u32, TurnBlock>,
+    /// Calls whose `ToolCall` block is on disk and whose result is not.
+    ///
+    /// A cancel completes each one with a synthetic error result, so the file never holds half
+    /// a pairing. See `D-cancel-keeps-the-session-open`.
+    awaiting_result: Vec<(String, String)>,
+    /// Calls a `ToolStart` announced with no `ToolCall` block on disk.
+    ///
+    /// A provider that emits no tool-call stream event lands here, and so does a caller that
+    /// drives `ToolStart` directly. A cancel then writes the call with an empty argument
+    /// object, because nothing better is known.
+    unwritten_calls: Vec<(String, String)>,
+}
+
+/// One block of the assistant turn being folded.
+enum TurnBlock {
+    Text(String),
+    /// Reasoning text, and the provider payload that replays it.
+    Thinking {
+        text: String,
+        state: Option<crate::ProviderState>,
+    },
+    Call {
+        id: String,
+        name: String,
+        /// `None` until `ToolCallEnd` states the parsed arguments.
+        arguments: Option<serde_json::Value>,
+        state: Option<crate::ProviderState>,
+    },
+}
+
+impl TurnBlock {
+    /// The name of this block kind, for a warning that names what it dropped.
+    fn kind(&self) -> &'static str {
+        match self {
+            TurnBlock::Text(_) => "text",
+            TurnBlock::Thinking { .. } => "thinking",
+            TurnBlock::Call { .. } => "tool_call",
+        }
+    }
+
+    /// The content block this turn block becomes on disk, or `None` when it holds nothing.
+    fn into_content(self) -> Option<ContentBlock> {
+        match self {
+            TurnBlock::Text(text) if text.is_empty() => None,
+            TurnBlock::Text(text) => Some(ContentBlock::Text { text }),
+            // A payload means the provider needs the reasoning echoed back, so the block must
+            // be able to travel. With no payload it is history for the reader alone.
+            TurnBlock::Thinking { text, state } => match state {
+                Some(state) => Some(ContentBlock::ReasoningReplay {
+                    text,
+                    state: Some(state),
+                }),
+                None if text.is_empty() => None,
+                None => Some(ContentBlock::ReasoningTrace { text }),
+            },
+            TurnBlock::Call {
+                id,
+                name,
+                arguments,
+                state,
+            } => Some(ContentBlock::ToolCall {
+                id,
+                name,
+                // An empty object stands in only when the provider never completed the call.
+                // A guessed argument set would be replayed as if the model had sent it.
+                arguments: arguments.unwrap_or_else(|| serde_json::json!({})),
+                state,
+            }),
+        }
+    }
 }
 
 /// Redact every credential-shaped tool argument inside one content block. A message
@@ -1240,7 +2330,9 @@ impl SessionRecorder {
     pub fn new(log: SessionLog) -> Self {
         Self {
             log,
-            open_calls: Vec::new(),
+            turn: BTreeMap::new(),
+            awaiting_result: Vec::new(),
+            unwritten_calls: Vec::new(),
         }
     }
 
@@ -1254,25 +2346,150 @@ impl SessionRecorder {
         self.log.record(Record::Message { message }, None)
     }
 
-    /// Fold one agent event. Write an assistant message at a turn end, a tool
-    /// result at a tool end, a usage record on a usage event, and a stop record at
-    /// the agent end. Redact every tool argument first. Return an id when it writes.
+    /// Fold one agent event.
+    ///
+    /// The recorder holds the parts of the current assistant turn. `TextDelta` appends text.
+    /// `ThinkingEnd` closes a reasoning block with its replay payload. `ToolCallEnd` completes
+    /// a call with its parsed arguments. `TurnEnd` writes **one** `Message` record with role
+    /// `Assistant`, in provider block order. An empty turn writes nothing.
+    ///
+    /// So the file order is always the call, then its result, and a `ToolCall` on disk with no
+    /// `ToolResult` is impossible on the run path. See section 6d.
+    ///
+    /// Redaction runs on every block before it reaches the file. Return an id when it writes.
     pub fn observe(&mut self, event: &AgentEvent) -> Option<RecordId> {
         match event {
             AgentEvent::TurnStart => {
-                self.open_calls.clear();
+                self.turn.clear();
                 None
             }
+            // A provider may begin the assistant message after the turn started. The blocks of
+            // the previous turn are already written, so this only guards a provider that emits
+            // no `TurnStart`.
+            AgentEvent::Stream(StreamEvent::MessageStart { .. }) => {
+                self.turn.clear();
+                None
+            }
+            AgentEvent::Stream(StreamEvent::TextStart { index }) => {
+                self.turn.insert(*index, TurnBlock::Text(String::new()));
+                None
+            }
+            AgentEvent::Stream(StreamEvent::TextDelta { index, delta }) => {
+                match self
+                    .turn
+                    .entry(*index)
+                    .or_insert_with(|| TurnBlock::Text(String::new()))
+                {
+                    TurnBlock::Text(text) => text.push_str(delta),
+                    // A provider that reuses an index for two kinds is a provider defect, and
+                    // dropping the delta is better than corrupting the other block.
+                    other => tracing::warn!(
+                        index = *index,
+                        kind = other.kind(),
+                        "a text delta arrived for a block of another kind; it was dropped"
+                    ),
+                }
+                None
+            }
+            AgentEvent::Stream(StreamEvent::ThinkingStart { index }) => {
+                self.turn.insert(
+                    *index,
+                    TurnBlock::Thinking {
+                        text: String::new(),
+                        state: None,
+                    },
+                );
+                None
+            }
+            AgentEvent::Stream(StreamEvent::ThinkingDelta { index, delta }) => {
+                match self
+                    .turn
+                    .entry(*index)
+                    .or_insert_with(|| TurnBlock::Thinking {
+                        text: String::new(),
+                        state: None,
+                    }) {
+                    TurnBlock::Thinking { text, .. } => text.push_str(delta),
+                    other => tracing::warn!(
+                        index = *index,
+                        kind = other.kind(),
+                        "a thinking delta arrived for a block of another kind; it was dropped"
+                    ),
+                }
+                None
+            }
+            AgentEvent::Stream(StreamEvent::ThinkingEnd { index, state }) => {
+                if let Some(TurnBlock::Thinking { state: slot, .. }) = self.turn.get_mut(index) {
+                    // Verbatim. A rewritten payload cannot replay, so rule 9 keeps it whole.
+                    *slot = state.clone();
+                }
+                None
+            }
+            AgentEvent::Stream(StreamEvent::ToolCallStart { index, id, name }) => {
+                self.turn.insert(
+                    *index,
+                    TurnBlock::Call {
+                        id: id.clone(),
+                        name: name.clone(),
+                        arguments: None,
+                        state: None,
+                    },
+                );
+                None
+            }
+            AgentEvent::Stream(StreamEvent::ToolCallEnd {
+                index,
+                arguments,
+                state,
+            }) => {
+                if let Some(TurnBlock::Call {
+                    arguments: slot,
+                    state: payload,
+                    ..
+                }) = self.turn.get_mut(index)
+                {
+                    *slot = Some(arguments.clone());
+                    *payload = state.clone();
+                }
+                None
+            }
+            AgentEvent::TurnEnd { .. } => self.flush_turn(),
             AgentEvent::ToolStart { id, name, .. } => {
-                self.open_calls.push((id.clone(), name.clone()));
+                // The call is already on disk when the stream announced it. Only a provider
+                // that emits no tool-call event, or a caller driving this directly, lands here.
+                let known = self.awaiting_result.iter().any(|(open, _)| open == id);
+                if !known {
+                    self.unwritten_calls.push((id.clone(), name.clone()));
+                }
                 None
             }
             AgentEvent::ToolEnd { id, output } => {
-                self.open_calls.retain(|(open, _)| open != id);
-                let content = output.content.iter().map(redact_block).collect();
+                // **A result is never written without its call.** A provider that emits no
+                // tool-call stream event still reaches `ToolStart` and `ToolEnd`, and the first
+                // version dropped the pending call here and wrote only the result. The file then
+                // held a `ToolResult` matching no `ToolCall`, which every provider refuses on a
+                // resume. `branch_messages` can invent a missing result, and it cannot invent a
+                // missing call, because the arguments are gone.
+                if let Some(position) = self.unwritten_calls.iter().position(|(open, _)| open == id)
+                {
+                    let (call_id, name) = self.unwritten_calls.remove(position);
+                    self.write_bare_calls(vec![(call_id, name)]);
+                }
+                self.awaiting_result.retain(|(open, _)| open != id);
+                self.unwritten_calls.retain(|(open, _)| open != id);
+                // **The result is wrapped in a `ToolResult` block, and it names its call.**
+                // The old body wrote the raw output blocks, so the record carried no
+                // `tool_call_id`. The live context wraps it, in `Agent::finish_tool`, so the
+                // recorded conversation had a different shape from the one the model saw. A
+                // resume then sent a tool message a provider cannot match to any call, and
+                // `branch_messages` invented a synthetic error result beside the real one.
                 let message = Message {
                     role: Role::Tool,
-                    content,
+                    content: vec![redact_block(&ContentBlock::ToolResult {
+                        tool_call_id: id.clone(),
+                        content: output.content.clone(),
+                        is_error: output.is_error,
+                    })],
                 };
                 self.log.record(Record::Message { message }, None)
             }
@@ -1289,42 +2506,105 @@ impl SessionRecorder {
         }
     }
 
-    /// On a cancel, complete any open tool pairing, then write the stop record.
-    /// See section 8.
+    /// Write the assistant message the turn built, and forget the parts.
+    ///
+    /// It writes nothing for a turn with no content, so a file gains no blank message.
+    fn flush_turn(&mut self) -> Option<RecordId> {
+        let parts = std::mem::take(&mut self.turn);
+        let mut content = Vec::new();
+        for block in parts.into_values() {
+            if let TurnBlock::Call { id, name, .. } = &block {
+                self.awaiting_result.push((id.clone(), name.clone()));
+            }
+            if let Some(block) = block.into_content() {
+                content.push(redact_block(&block));
+            }
+        }
+        if content.is_empty() {
+            return None;
+        }
+        self.log.record(
+            Record::Message {
+                message: Message {
+                    role: Role::Assistant,
+                    content,
+                },
+            },
+            None,
+        )
+    }
+
+    /// Write an assistant message for calls whose arguments are not known.
+    ///
+    /// Only a provider that emitted no tool-call stream event reaches this, or a caller that drives
+    /// `ToolStart` directly. An empty object stands in, because nothing better is known, and the id
+    /// and the name keep the pairing valid. A guessed argument set would be replayed as if the
+    /// model had sent it.
+    ///
+    /// Two paths share this: a `ToolEnd` for a call with no block on disk, and a cancel. A second
+    /// spelling of the rule is a rule that drifts.
+    fn write_bare_calls(&mut self, calls: Vec<(String, String)>) -> Option<RecordId> {
+        let content = calls
+            .iter()
+            .map(|(id, name)| ContentBlock::ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                arguments: serde_json::json!({}),
+                state: None,
+            })
+            .collect();
+        let written = self.log.record(
+            Record::Message {
+                message: Message {
+                    role: Role::Assistant,
+                    content,
+                },
+            },
+            None,
+        );
+        self.awaiting_result.extend(calls);
+        written
+    }
+
+    /// Write an explicit title as a `Name` leaf record.
+    ///
+    /// An empty or blank title is refused, so a row never shows a blank name. A title costs no
+    /// model call. See `D-a-session-title-costs-nothing`.
+    pub fn record_name(&mut self, title: &str) -> Result<Option<RecordId>, SessionError> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(SessionError::EmptyTitle);
+        }
+        Ok(self.log.record(
+            Record::Name {
+                title: title.to_string(),
+            },
+            None,
+        ))
+    }
+
+    /// On a cancel, write the partial assistant message, complete any open tool pairing, then
+    /// write the stop record. See `D-cancel-keeps-the-session-open`.
+    ///
+    /// The partial message carries the **real** arguments the provider sent, because the turn
+    /// holds them. The old body invented an empty object for every open call, so a resume
+    /// replayed a call the model never made.
     pub fn record_cancel(&mut self) -> Option<RecordId> {
-        let mut last = None;
-        let open = std::mem::take(&mut self.open_calls);
-        if !open.is_empty() {
-            // Write the assistant message that carries the open tool calls, so every
-            // ToolCall is on disk before its result. The arguments are not known here,
-            // so an empty object stands in; the id and the name keep the pairing valid.
-            let calls = open
-                .iter()
-                .map(|(id, name)| ContentBlock::ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
-                    arguments: serde_json::json!({}),
-                    // The payload is not known here, and a guessed one would be replayed.
-                    state: None,
-                })
-                .collect();
+        // Whatever the turn already built goes to disk, including a completed tool call.
+        let mut last = self.flush_turn();
+        // A call a `ToolStart` announced with no block on disk. An empty object stands in,
+        // because nothing better is known, and the id and the name keep the pairing valid.
+        let unwritten = std::mem::take(&mut self.unwritten_calls);
+        if !unwritten.is_empty() {
+            last = self.write_bare_calls(unwritten);
+        }
+        for (id, _) in std::mem::take(&mut self.awaiting_result) {
             last = self.log.record(
                 Record::Message {
-                    message: Message {
-                        role: Role::Assistant,
-                        content: calls,
-                    },
+                    message: synthetic_error_result(&id, "the tool call was cancelled"),
                 },
                 None,
             );
-            for (id, _) in open {
-                last = self.log.record(
-                    Record::Message {
-                        message: synthetic_error_result(&id, "the tool call was cancelled"),
-                    },
-                    None,
-                );
-            }
         }
         let stop = self.log.record(
             Record::Stop {
@@ -1338,6 +2618,20 @@ impl SessionRecorder {
     /// True when the log is ephemeral, or degraded to ephemeral.
     pub fn is_ephemeral(&self) -> bool {
         self.log.is_ephemeral()
+    }
+
+    /// Write the `Closed` record, so the file states its own close.
+    ///
+    /// A run that ended on its own calls this. A cancel does not, because a cancel keeps the
+    /// session open and usable. See `D-cancel-keeps-the-session-open`. A closed file is never
+    /// offered by `newest_open`, so a crash offers only a session that really has no close.
+    ///
+    /// It is idempotent, and an ephemeral log does nothing.
+    pub fn close(&mut self) -> Result<(), SessionError> {
+        match &mut self.log {
+            SessionLog::Off => Ok(()),
+            SessionLog::File(writer) => writer.close(),
+        }
     }
 }
 

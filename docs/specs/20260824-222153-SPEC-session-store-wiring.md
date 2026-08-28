@@ -1,7 +1,11 @@
 # SPEC-session-store-wiring — the session store, reached from the command line
 
-Status: draft for the wiring lane.
+Status: delivered by the wiring lane.
 Owning crate: `rho-core`, module `session`. Callers in `rho-cli` and `rho-tui`.
+
+> **Read section 15 first.** The wiring lane reviewed this contract again before it wrote
+> any code, because sections 3, 3a, 3b, 3c and 4 had already shipped. Section 15 lists every
+> correction, and it names the tests this lane deferred and who owns each one.
 Features: F-session-store, F-session-resume, F-session-list, F-session-delete,
 F-session-fork, F-session-branching, F-ephemeral-mode, F-session-title,
 F-session-crash-continue, F-append-only-session-log, F-slash-commands.
@@ -38,6 +42,14 @@ wire format.
 ## 3. Where a session lives
 
 See `D-session-store-layout`.
+
+**Sections 3, 3a, 3b, 3c and 4 are built.** They live in
+`crates/rho-core/src/session/key.rs`, and `crates/rho-core/tests/session_key_id.rs` holds
+their tests. The prose below is the contract they were built from. One rule arrived with
+the code and is stated here too: `sanitize_name` strips every leading dot, so a project
+named `.config` does not become a hidden store directory. Its test is
+`a_dot_named_project_does_not_hide_the_store`. `PrefixMatch` in section 4 was **not** built
+with them, because it needs the store.
 
 ```rust
 use std::path::{Path, PathBuf};
@@ -373,6 +385,22 @@ and never declared by a writer. A future rho needs no cooperation from this buil
 
 The same read also refuses two records that share an id. See section 7a.
 
+**And it refuses a cycle.** Referential integrity alone cannot see one: a cycle resolves every
+parent, and no record on it is a leaf. So a three-line file whose `a` names `b` and whose `b` names
+`a` passed every check, and then every walk ran for ever and cloned an entry per turn of the loop.
+That is a denial of service reachable from a resume and from `sessions fork`.
+
+A reviewer found it, and this project already guards the same class for subagents in
+`check_no_cycle`, "to stop an infinite loop inside a lock". The session reader had forgotten it.
+
+- `SessionError::CyclicChain` names a record on the cycle.
+- The check runs at read time, with the other two, and it is linear because it memoises the
+  records it has already settled.
+- `walk_chain` keeps a visited set as well, so a caller with hand-built entries cannot spin.
+  Defence in depth, because one guard on one path is how `confine` stayed unproven.
+- `rho sessions show` walks parents too, in `depths`. It memoises, so a long session costs O(N)
+  and not O(N squared).
+
 ### 6b. A silent early stop must become an error
 
 `branch_messages` and `fork` both walk parent links with `None => break`. See lines 1084
@@ -392,11 +420,21 @@ Defence in depth, because one guard on one path is how `confine` stayed unproven
 ///
 /// A missing parent is an error, never a short list. A short list would drop the end of a
 /// conversation, and the provider request would look valid.
+///
+/// `root` names the header record id, which is not in `entries`, because `read_from`
+/// consumes the first line before its loop. A caller that read a file passes
+/// `Some(&read.header_id)`. A caller with hand-built entries passes `None`, and then every
+/// parent must resolve inside `entries`. Without this parameter the walk cannot tell the
+/// root from a hole, so it would refuse every real file. See section 15, finding 10.
 pub fn branch_messages(
     entries: &[Entry],
     head: &RecordId,
+    root: Option<&RecordId>,
 ) -> Result<Vec<Message>, SessionError>;
 ```
+
+`ReadResult` gains `header_id: RecordId` for the same reason. A fork needs it too, to
+re-parent its first copied record.
 
 ### 6c. The records
 
@@ -425,6 +463,53 @@ Session {
 },
 ```
 
+### 6d. The recorder writes the assistant turn
+
+See `D-a-recorder-writes-the-assistant-turn`. The wiring lane found this before it wrote
+any code, and the first draft of this spec did not name it.
+
+`SessionRecorder` is the only thing that turns a live run into records. It writes a tool
+result, a usage record, and a stop record. It writes **no assistant message and no tool
+call**, because its match has no `TurnEnd` arm and it reads no `StreamEvent` text or
+tool-call event. Its own doc comment claims otherwise.
+
+So a recorded session holds the prompts and the results, and nothing else. A resume then
+builds a message list with a `ToolResult` that matches no `ToolCall`, and every provider
+refuses that request. This defect makes the whole feature unusable, so it is fixed here.
+
+```rust
+impl SessionRecorder {
+    /// Fold one agent event.
+    ///
+    /// The recorder holds the parts of the current assistant turn. `TextDelta` appends
+    /// text. `ThinkingEnd` closes a reasoning block. `ToolCallEnd` completes a call with
+    /// its parsed arguments. `TurnEnd` writes one `Message` record with role `Assistant`,
+    /// in provider block order. An empty turn writes nothing.
+    ///
+    /// So the file order is always the call, then its result. A `ToolCall` on disk with no
+    /// `ToolResult` is then impossible on the run path.
+    pub fn observe(&mut self, event: &AgentEvent) -> Option<RecordId>;
+
+    /// Write an explicit title as a `Name` leaf record.
+    ///
+    /// An empty or blank title is refused, so a row never shows a blank name. See
+    /// `D-a-session-title-costs-nothing`.
+    pub fn record_name(&mut self, title: &str) -> Result<Option<RecordId>, SessionError>;
+}
+```
+
+**A tool result was not wrapped either.** `ToolEnd` wrote the raw output blocks as the
+content of the tool message, so the record carried no `tool_call_id`. `Agent::finish_tool`
+wraps the same output in a `ContentBlock::ToolResult`, so the recorded conversation had a
+different shape from the one the model saw. A resume then sent a tool message no provider can
+match to a call, and `branch_messages` invented a synthetic error result beside the real one.
+The recorder now writes the same shape the live context holds.
+
+- A reasoning payload is kept verbatim. A rewritten payload cannot replay.
+- Redaction still runs through `redact_block` before anything reaches the file.
+- A cancel writes the partial assistant message with the real arguments it holds, instead
+  of the empty object it invents today.
+
 ## 7. The store operations
 
 `create` takes one struct, not six arguments. A four-argument constructor already hid a
@@ -432,6 +517,21 @@ fake model id and an approve-all policy in this project. See
 `D-no-four-argument-session-new`.
 
 ```rust
+/// What a new session needs, when the caller has no id yet.
+///
+/// A review found `create_minted` naming a type the spec never defined. It is stated here,
+/// because a retry mints a second id and so the id cannot be a field of the request. See
+/// section 15, finding 2.
+#[derive(Clone, Debug)]
+pub struct NewSessionWithoutId<'a> {
+    pub cwd: &'a Path,
+    pub approval: &'a str,
+    pub sandbox: &'a str,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub forked_from: Option<ForkOrigin>,
+}
+
 /// What a new session needs. One struct, so a later field breaks no caller.
 #[derive(Clone, Debug)]
 pub struct NewSession<'a> {
@@ -463,11 +563,34 @@ impl SessionStore {
     ///
     /// This is what a run calls. It retries `MINT_ATTEMPTS` times, so a collision costs one
     /// more mint rather than a lost session.
+    ///
+    /// It returns the id it used beside the writer. A caller must print the id, and it
+    /// cannot recompute one that a retry replaced.
     pub fn create_minted(
         &self,
         now_millis: u64,
         new: NewSessionWithoutId<'_>,
-    ) -> Result<SessionWriter, SessionError>;
+    ) -> Result<(SessionId, SessionWriter), SessionError>;
+
+    /// Create a session, taking each id suffix from `suffixes`.
+    ///
+    /// **The retry needs this seam, or its test is theatre.** `create_minted` draws its own
+    /// suffix, so two calls in one millisecond get two ids and no collision ever happens.
+    /// A test could then never reach the retry. So the suffix source is a parameter here,
+    /// exactly as `SessionReader::read_from` and `ProjectKey::resolve_from` take their
+    /// input.
+    ///
+    /// A test passes `[0x1234, 0x1234, 0x5678]`, so the first two attempts collide and the
+    /// third wins. A test that passes one repeated suffix reaches `MINT_ATTEMPTS`.
+    ///
+    /// `create_minted` calls this with a real suffix source, so the store path and the
+    /// tested path are the same code. See section 15, finding 8.
+    pub fn create_minted_from<I: Iterator<Item = u16>>(
+        &self,
+        now_millis: u64,
+        suffixes: I,
+        new: NewSessionWithoutId<'_>,
+    ) -> Result<(SessionId, SessionWriter), SessionError>;
 
     /// Every session in the store, newest first. A file rho cannot read is one row.
     ///
@@ -617,6 +740,13 @@ pub enum SessionError {
     /// A record names a parent the reader skipped, so the chain has a hole.
     #[error("record {child} names parent {parent}, which this build could not read")]
     Orphan { child: RecordId, parent: RecordId },
+    /// A record names a leaf record as its parent. A leaf is never a parent.
+    ///
+    /// A reviewer asked for the name. Section 11 names the test and the first draft had no
+    /// error for it, so the refusal would have arrived as a bare decode message. See section
+    /// 15, finding 9a.
+    #[error("record {child} names parent {parent}, which is a leaf record and never a parent")]
+    LeafParent { child: RecordId, parent: RecordId },
     /// Two records in one file share an id.
     #[error("record id {id} appears twice in the file")]
     DuplicateId { id: RecordId },
@@ -679,24 +809,42 @@ reason the fork command is usable.
 
 `rho sessions show <id-prefix>` prints one line per record. The format is fixed:
 
+**This is real output**, from the built binary over a seeded session. A drafted example drifts, and
+this one already had: it showed `2 turns` in the header, which section 5 forbids because a turn
+count needs a whole file.
+
 ```
-session  20260825-094512-a3f9  "fix the parser"  claude-sonnet-4  2 turns  closed
-  r1  09:45:12  user       fix the parser
-  r2  09:45:14  assistant  I will read the file first.
-  r3  09:45:14  tool_call  read  path=src/parse.rs
-  r4  09:45:15  tool_result  read  1.2 KiB
-  r5  09:45:19  assistant  The bug is on line 42. Shall I fix it?
-  r6  09:46:02  user       yes
-  r7  09:46:20  assistant  Done. I changed one line.
+session  20260825-094512-a3f9  "fix the parser"  claude-sonnet-4  closed
+  r1    09:25:12  model        bedrock claude-sonnet-4
+  r2    09:25:12  user         fix the parser
+  r3    09:25:12  assistant    I will read the file first.
+  r4    09:25:12  tool_call    read  path=src/parse.rs
+  r5    09:25:12  tool_result  read  1.2 KiB
+  r6    09:25:12  assistant    The bug is on line 42. Shall I fix it?
+  r7    09:25:12  user         yes
+  r8    09:25:12  assistant    Done. I changed one line.
+  r9    09:25:12  stop         EndTurn
+  r10   09:25:12  closed
 ```
+
+The `model` line is the record `create` writes, so a reader sees which model answered. The
+`tool_result` line names the tool and 1.2 KiB, and never the body.
 
 Rules for the format:
 
 - The record id is the first column, so a user copies it into `--at`.
 - One record is one line. A long text is cut at the terminal width, and never wrapped.
 - The whole listing fits 80 columns. A test asserts that.
-- A tool call names the tool and its short arguments. A tool result names the tool and a
-  byte count, never the content.
+- **The close state is the last thing cut.** It is one word. It is also the only header field a
+  user cannot read again from a record line. The title gives way first, and then the model, which
+  keeps at most half of the room that is left. A live drive found a long title pushing both the model and
+  the state off the line, and a reviewer found a real 41 character Bedrock model id doing the same
+  to the state alone.
+- A tool call names the tool and its short arguments. **A tool message names the tool and a byte
+  count, never the content.** The rule is the **role**, and not the block shape: a first version
+  keyed on a `ToolResult` block, so a tool message holding a bare `Text` block fell through and
+  printed the body. A crafted or an imported file holds exactly that. `--full` does not turn the
+  rule off, or the flag would be a way to read every secret a session recorded.
 - `--full` prints the whole text of each record instead of one line.
 - A branch is shown by indentation, and a sibling branch is marked. So a user can see that
   two answers came from one question.
@@ -715,12 +863,18 @@ is nicer, and it is not the only way.
 
 The list is a user-facing surface, so its columns are part of the contract.
 
+Real output again, over the same seeded store:
+
 ```
-ID                    LAST ACTIVE  TITLE                          MODEL            TOKENS   COST
-20260825-094512-a3f9  2 min ago    fix the parser                 claude-sonnet-4   14.2k  $0.08
-20260824-171003-77b2  yesterday    add the retry test             claude-haiku-4     3.1k  $0.01
-20260823-092211-0c41  2 days ago   * unreadable: bad header       -                    -      -
+ID                   LAST ACTIVE TITLE              MODEL           TOKENS  COST
+20260825-094512-a3f9 just now    fix the parser     claude-sonnet-4      -     -
+20260824-171003-77b2 just now    add the retry test claude-haiku-4    3.1k $0.01
+20260823-092211-0c41 -           * unreadable: cannot decode a rec…      -     -
 ```
+
+The first row shows a dash for the tokens, because that session recorded no `Usage` record. rho
+shows no number it did not read. The unreadable row keeps its id and its reason, and its unknown
+fields are dashes.
 
 - Six columns, and they fit 80 columns. A test asserts the width.
 - The title column is cut with an ellipsis, never wrapped.
@@ -759,7 +913,10 @@ rho run --resume 20260825-09
 A space instead of an equals sign continues the wrong session. It also sends the id to the
 model as a question. No error appears. That is a fail-open shape, so the contract refuses it.
 
-- The flag sets `require_equals = true`.
+- The flag sets `require_equals = true`, **and** `num_args = 0..=1` with a
+  `default_missing_value`. A review found the first draft named the missing value and not
+  the argument count, and without the count a bare `--continue` yields no value at all. See
+  section 15, finding 5.
 - A prompt that matches the session id shape is refused. The message names `--resume=<id>`.
 - The refusal is the whole rule. rho never guesses which one the user meant.
 
@@ -933,13 +1090,13 @@ because `resolve_prefix` reads a directory. The tester found the misplacement.
   shows no number it did not read.
 - `a_row_states_the_model_from_the_second_line` — `create` writes the `ModelChange` record,
   so the row shows the model with no full read.
-- `a_row_states_its_start_time_and_its_last_activity` — `started_millis` comes from the
-  header, and `last_active_millis` comes from the file metadata.
+- `a_row_states_its_start_time_and_its_last_activity` — the start time comes from the header,
+  and the last activity comes from the file metadata.
 - `a_row_states_its_size` — `size_bytes` matches the file length.
-- `a_row_prefers_an_explicit_name` — with a `Name` record the title is the name, and
-  `title_is_explicit` is true.
-- `a_row_falls_back_to_the_first_prompt` — with no `Name` record the title is the first
-  line of the first prompt, and `title_is_explicit` is false.
+- `a_row_prefers_an_explicit_name` — with a `Name` record the title is the name, and the row
+  says the title is explicit.
+- `a_row_falls_back_to_the_first_prompt` — with no `Name` record the title is the first line of
+  the first prompt, cut at 60 bytes, and the row says the title is not explicit.
 - `a_tail_read_drops_a_partial_first_line` — a tail that starts inside a line yields no
   broken record.
 - `a_row_marks_a_closed_session` — a file that ends with `Closed` reports closed.
@@ -996,9 +1153,11 @@ and a caller that forgot to wire a guard is this project's signature defect.
 - `a_new_session_titles_itself_from_the_first_prompt` — the title is the first line, capped
   at 60 characters.
 - `the_newest_name_record_wins` — two `Name` records resolve to the later one.
-- `an_empty_title_is_refused` — `sessions name` with an empty string is an error.
-- `a_title_costs_no_model_call` — the title path calls no provider. The test asserts the
-  provider stub was never called.
+- `an_empty_name_is_refused_by_the_recorder` — `sessions name` with an empty string is an
+  error, and the error has its own name. A live drive showed the first version reporting
+  `cannot decode a record`, which reads like file corruption.
+- `a_title_costs_no_model_call` — the title path calls no provider. The recorder holds no
+  provider at all, which is the structural proof.
 
 **Recording, and the default.**
 - `a_run_writes_a_session_file_by_default` — the store holds one file after a run.
@@ -1037,15 +1196,18 @@ and a caller that forgot to wire a guard is this project's signature defect.
 - `show_names_a_tool_and_never_prints_a_result_body` — a tool result row shows the tool and a
   byte count. A secret inside a result never reaches the terminal by accident.
 - `show_marks_a_sibling_branch` — two answers to one question are shown as two branches.
-- `show_sends_nothing_to_a_model` — the provider stub is never called, so looking is free.
+- `show_sends_nothing_to_a_model` — the real binary runs `sessions show` with a provider name
+  that does not exist and no credential in the environment. It still prints the records, so
+  looking is free.
 - `list_prints_six_columns_inside_eighty` — the header and every row fit 80 columns.
 - `list_shows_an_unreadable_row_with_its_reason` — the id and the reason survive, and every
   unknown field is a dash.
 - `list_shows_no_turn_count` — no column reports a number that needs a whole file.
-- `the_fork_flow_works_from_the_two_printed_commands` — the end-to-end proof. Run a session,
-  run `show`, take a record id from its output, run `fork --at <that id>`, and the new file
-  holds the branch. **The test reads the id from the real output, so it fails if the id is
-  not printed.** This is the owner's ask, pinned as one test.
+- `the_fork_flow_works_from_the_two_printed_commands` — the end-to-end proof, driven through
+  the real binary. Write a session, run `show`, take a record id from its output, run
+  `fork --at <that id>`, and the new file holds the branch. **The test reads the id from the
+  real output, so it fails if the id is not printed.** This is the owner's ask, pinned as one
+  test.
 
 **Delete, which had no test at all.**
 - `delete_removes_the_session_and_its_sidecars` — the file and every `<id>.*.sidecar` are
@@ -1081,8 +1243,10 @@ and a caller that forgot to wire a guard is this project's signature defect.
 - `a_second_process_cannot_open_a_live_session` — a second `lock` on one session returns
   `SessionError::Busy`, and the message names the session.
 - `two_worktrees_continuing_at_once_never_share_a_file` — the defect from the review, driven
-  end to end. Two runs continue at the same moment, and each ends with its own file whose
-  record ids are unique. It must fail against an implementation with no lock.
+  end to end. Two worktrees of one repository share a project key. Two runs open at the same
+  moment, and each ends with its own file whose record ids are unique. Its partner
+  `a_second_process_cannot_continue_a_live_session` is what fails against an implementation
+  with no lock.
 - `newest_open_skips_a_locked_session` — `--continue` moves past a live session, and takes
   the next one.
 - `a_lock_is_released_when_the_process_ends` — dropping the lock frees the session, so a
@@ -1116,16 +1280,48 @@ and a caller that forgot to wire a guard is this project's signature defect.
 - `a_resumed_context_holds_no_live_result_handle` — every stale preview is rewritten to say
   the evidence expired, and the byte count survives. See
   `D-a-stale-result-handle-expires-on-resume`.
-- `a_fork_at_a_record_starts_a_new_file_and_keeps_the_original` — the original file is
-  byte-identical, and the new file names its origin.
+- `fork_copies_the_branch_and_keeps_the_original` — the original file is byte-identical, and
+  `a_row_shows_its_fork_origin` proves the new file names its origin.
 - `a_crash_offers_the_unclosed_session` — a store with an unclosed session offers it once.
 - `a_closed_session_is_never_offered` — a store of closed sessions offers nothing.
 
+**The recorder, which wrote no assistant turn.**
+- `a_run_records_the_assistant_text_of_a_turn` — a scripted stream of text deltas leaves one
+  `Message` record with role `Assistant` and the joined text. It must fail against a
+  recorder with no `TurnEnd` arm.
+- `a_run_records_a_tool_call_before_its_result` — the file holds the `ToolCall` block, and
+  it appears on an earlier line than its `ToolResult`.
+- `every_tool_call_on_disk_has_a_result_on_disk` — the invariant over a scripted run with
+  three tool calls. It is the pairing rule, checked on the file the run wrote.
+- `a_recorded_run_replays_as_a_valid_message_list` — read the file back, rebuild the branch,
+  and assert the pairing is complete and the assistant text survives. This is the resume
+  path, so it is the test that proves the feature works.
+- `an_empty_turn_writes_no_assistant_record` — a turn with no text and no call writes
+  nothing, so a file gains no blank message.
+- `a_reasoning_payload_survives_the_recorder_verbatim` — a provider replay payload reaches
+  the file unchanged.
+- `a_cancel_records_the_real_tool_arguments` — a cancel after a completed `ToolCallEnd`
+  writes the arguments the provider sent, not an empty object.
+- `an_empty_name_is_refused_by_the_recorder` — `record_name` with a blank string is an
+  error.
+
 **The budget.**
 - `a_list_of_five_hundred_sessions_reads_only_the_head_and_the_tail` — the deterministic
-  test. Across 500 files the bytes read stay at or under
-  `500 * (head line bytes + ROW_TAIL_BYTES)`, and exactly 500 files are opened. So no file is
-  fully decoded, and no directory is scanned twice.
+  test. It returns 500 rows, and one of the 500 files is a **sentinel**: it carries a `Name`
+  record after `ROW_HEAD_LINES` lines and more than `ROW_TAIL_BYTES` before the end. A
+  bounded `rows` cannot see that record, so the sentinel row reports
+  `title_is_explicit == false`. A `rows` that decodes the whole file reports `true`. So the
+  test fails against a full decode with no seam under `rows`.
+
+  A review found that the first draft asserted a byte bound over a method that opens its own
+  files, so no counting source could see the defect. That is `D-bash-line-cap` rebuilt one
+  level up. See `D-the-budget-test-needs-an-observable-difference`.
+- `create_minted_remints_after_a_collision` — the suffix source hands out one taken suffix
+  and then a free one, through `create_minted_from`. The second id differs from the first,
+  and the existing file keeps every byte. It must fail against a `create_minted` that
+  propagates the collision.
+- `create_minted_gives_up_after_mint_attempts` — a suffix source that repeats one value
+  forever returns an error after `MINT_ATTEMPTS` tries, and never spins.
 - The wall-clock number is **measured and printed, and it asserts nothing**. A shared CI
   runner makes a 100 millisecond assertion flaky, and on a fast machine it would pass against
   a full decode of small files. The number goes into `docs/benchmarks.md` with its command.
@@ -1186,3 +1382,196 @@ assume another defect of the same family was present. Both found one.
 3. Is any default fail-open? Look at the version rule and at the row fallbacks.
 4. Can `a_row_never_decodes_the_whole_file` fail against a full-file implementation?
 5. Does any test here pass against the defect it names?
+
+## 15. What the second review changed, before the wiring lane wrote code
+
+The wiring lane reviewed this contract again, because sections 3, 3a, 3b, 3c and 4 had
+already shipped between the first review and the start of the work. A reviewer that did not
+write the spec answered the five questions of section 14 against the real tree.
+
+**Nine findings. Each one is corrected above.**
+
+1. **Sections 3, 3a, 3b, 3c and 4 are built.** Section 3 now says so and names the file.
+   One rule arrived with the code and was missing here: a leading dot is stripped from a
+   key, so a project named `.config` does not hide the store. `PrefixMatch` was not built
+   with them, because it needs the store to resolve anything.
+2. **`NewSessionWithoutId` was named and never defined.** Section 7 defines it now.
+   `create_minted` also returns the id it used, because a retry replaces the first one and
+   a caller cannot recompute it.
+3. **The new `SessionSummary` replaces the old one.** It is not a second type of the same
+   name. `SessionStore::list` and the four-field `SessionSummary` both go, in the same
+   change, or the crate does not compile.
+4. **`Record::Session` gaining two fields breaks three sites.** `parse_header` matches the
+   variant with no rest pattern, and `create` and `fork` both build it as a literal. All
+   three are edits this lane must make, and none of them is optional.
+5. **Section 8c named `require_equals` and no argument count.** A bare `--continue` yields
+   no value without `num_args = 0..=1`. Section 8c states both now.
+6. **The recorder writes no assistant turn.** This is the worst finding, and the lane found
+   it, not the reviewer. Section 6d states the fix, and
+   `D-a-recorder-writes-the-assistant-turn` records the decision.
+7. **The budget test could not fail.** It asserted a byte bound over a method that opens
+   its own files, so no counting source could observe a full decode. Section 11 replaces it
+   with a sentinel row. See `D-the-budget-test-needs-an-observable-difference`.
+8. **`create_minted` had no test, and no seam.** Section 11 names two tests, and section 7
+   adds `create_minted_from`. Without the seam a test cannot force a collision, because two
+   calls in one millisecond draw two different suffixes.
+9. **Two named tests need a provider stub, and two need config keys.** The config keys
+   `ephemeral` and `session-file` already exist in `rho-config`, so this lane reads them and
+   edits nothing there. `rho-provider-testkit` supplies the stub, so no provider crate
+   changes either.
+
+### 15a. The extension point, restated
+
+A reviewer asked which new case needs an edit to shared code. One does: a second storage
+backend. Section 10 states it, keeps `SessionStore` a struct, and says a sqlite store is a
+fork. That is a deliberate choice, and it is written down rather than discovered.
+
+Everything else arrives without an edit to shared code. A new frontend calls the same store.
+A new record arrives as a leaf, and the referential check of section 6a catches a chain
+record that a build cannot read.
+
+### 15c. What the final review changed
+
+A reviewer that did not write the code read the whole diff, with the same defect history. It found
+six things, and each one is fixed.
+
+1. **A fail-open on the new-session path.** `open_recording` degraded **every** failure to
+   ephemeral, including `LockUnsupported`. So a filesystem that cannot lock would have warned and
+   continued, which section 7d forbids. A lock refusal now stops the run. Test:
+   `a_filesystem_that_cannot_lock_stops_a_new_run`.
+2. **`a_forged_header_cannot_widen_a_run` was theatre.** Its only runtime assertion was that a
+   narrower run succeeded, which passes whether or not the header is trusted. It drives a table of
+   eight stored-and-live mode pairs now, so a build that read the run's mode from the file breaks a
+   row. The code-shape half moved to `the_run_never_takes_its_permission_from_a_session_file`.
+3. **`a_forged_fork_origin_opens_no_file` was vacuous.** The sentinel did not exist, so nothing
+   could read it. The sentinel is a real file with a marker inside now, and the test asserts the
+   marker reaches neither the model nor a printed row.
+4. **A second mint loop.** `rho-cli` minted a fork id with its own bounded retry, and its give-up
+   branch had no test. `SessionStore::fork_minted` and `fork_minted_from` replace it, so one rule
+   has one spelling. Tests: `a_fork_mints_a_free_id_through_the_store`,
+   `a_fork_gives_up_after_mint_attempts`.
+5. **A delete could break the lock.** `delete` unlinks `<id>.lock`, and `flock` binds to an inode.
+   So a delete during a live session would let the next writer lock a **new** inode, and two
+   writers would both believe they held the session. A delete takes the lock first now, and a live
+   session refuses it. Test: `delete_refuses_a_live_session`.
+6. **`SessionError::NoSuchRecord` had no test**, and a user reaches it by typing `--at r99`. Test:
+   `a_fork_at_a_record_the_file_does_not_hold_is_refused`.
+
+**One finding is accepted and not fixed.** `is_locked_elsewhere` probes a lock and releases it, so
+`newest_resumable` can name a session that another process takes first. The caller then gets
+`SessionError::Busy` and stops. The invariant holds, because the real lock is taken before any
+write, so two processes never write one file. A reservation would make a read-only query return a
+resource a caller must remember to drop, and that cost is worse than one error message. The doc
+comment on `is_locked_elsewhere` states it.
+
+### 15b. Three more items needed a name
+
+Section 11 names `a_hand_built_leaf_parent_is_refused`, and section 7e listed no error for
+it. So the refusal would have arrived as a bare decode message, and a caller could not match
+on it. Section 7e adds `SessionError::LeafParent`, which names both ids.
+
+A fork at a record the file does not hold needed a name too. A user typing
+`--at r99` reaches it, so section 7e adds `SessionError::NoSuchRecord`.
+`SessionError::MintExhausted` names the bounded retry of section 7c.
+
+10. **`branch_messages` could not tell the root from a hole.** The header record is not in
+    `entries`, so the first entry of every real file names a parent the walk cannot see.
+    Section 6b adds the `root` parameter, and `ReadResult` gains `header_id`.
+
+### 15d. What the review fleet and codex found
+
+The lane ran a second review phase after the suite was green: four subagents with one lens each,
+and `codex review` from outside this harness with no sight of their findings. Ten findings were
+real. Each is fixed, and each has a mutation proof in
+`docs/verification/session-store-wiring.md` section 12.
+
+**One critical.**
+
+1. **A cyclic parent chain looped for ever.** Section 6a states the rule now. Found independently by
+   the correctness lens and the security lens, which is the strongest signal in this review.
+
+**Two that bypassed a rule through a config key.** Codex found both.
+
+2. **A `session-file` took no lock.** Two runs with the key set appended to one file, and both
+   seeded their record ids from one read.
+3. **A `session-file` skipped the permission check.** A file written under `read-only` came back
+   under `allow-all` in silence, which is `D-resume-never-widens` reached by a different door.
+
+Both are settled by `D-a-named-session-file-is-a-session-like-any-other`: **an existing named file
+is a resume.** It locks, it checks the stored modes, and it replays. `SessionStore::lock_file`
+locks any path and `lock` calls it, and `rebuild` holds the shared half of both resume paths, so
+one rule has one spelling.
+
+**Four more.**
+
+4. **A fork at a leaf record left a leaf as the head**, so the next append through the returned
+   writer named a leaf as its parent. `SessionWriter::append` already knew the rule, and the fork's
+   own copy loop was a second spelling of it. Codex found it.
+5. **A tool message with a bare text block printed its body.** Section 8a states the role rule now.
+   The security lens found it, and it was a real gap against a promise `docs/guide/sessions.md`
+   makes.
+6. **A long model id pushed the close state off the `show` header.** Section 8a states the budget
+   now. The test lens reproduced it with a real Bedrock id.
+7. **`expire_stale_result_handles` was string surgery with three holes:** it rewrote a `Text` block
+   only, it rewrote one preview per block, and it kept a nested tag inside the head it kept. The
+   security lens found all three. The impact is a wasted turn and not a leak, because the store
+   behind the handle is dead, and a promise rho makes must still hold.
+
+**Two about a test rather than the code.**
+
+8. **The grep of `cli.rs` passes against `if false`.** The test lens proved it by running the break.
+   `record_and_print` now holds the whole recording lifecycle in one function, and two tests drive
+   it on a real file: `the_whole_lifecycle_runs_in_order` and
+   `the_prompt_is_recorded_before_the_answer_even_when_the_run_fails`. The grep is a backstop for
+   one call now, and not the guard for the lifecycle. **The residual limit is stated in section 16.**
+9. **`two_worktrees_continuing_at_once_never_share_a_file` opens no concurrent run.** It proves the
+   shared project key through the real binary. The concurrency is proved by
+   `a_second_process_cannot_continue_a_live_session`, which really opens two recordings, and by
+   `a_second_process_cannot_open_a_live_session`, which locks in a child process. The test's own
+   comment says so now, rather than leaving its name to overstate.
+
+**Five findings were accepted and not fixed.** Each is stated where a reader will meet it:
+
+- `Session::replay` does not enforce its precondition. The rule is "before the first prompt", and
+  not "the context is empty", so a check would need new state that records whether a prompt has been
+  sent. There is one caller, and it replays and then prompts. The doc comment states the rule, and
+  section 16 lists it.
+- `Recording::notices` holds user-facing English in a module that is otherwise about the store. A
+  reviewer read that as a single-responsibility smell, and it is one.
+  `D-a-notice-reaches-the-transcript` already chose this trade: a notice is data and not a print, so
+  a frontend can draw it where the user is looking. The doc comment on the field says so.
+
+- `is_locked_elsewhere` probes a lock and releases it, so `newest_resumable` can name a session
+  another process takes first. The caller then gets `Busy`. The invariant holds, because the real
+  lock is taken before any write.
+- A project key has no length cap, so a four kilobyte `gitdir:` line yields a long directory
+  component and `ENAMETOOLONG`. That is a degrade and not a traversal.
+- **No cap bounds the record count of one read.** `MAX_LINE_BYTES` bounds a line and
+  `MAX_DROPPED_RECORDS` bounds the bad ones, and a resume still holds every good record: about 640
+  bytes each, roughly three times the file size, measured in `docs/benchmarks.md`. Capping it means
+  deciding which end of a conversation to lose, and losing the front breaks its beginning. That
+  belongs with `F-context-compaction`, which section 10 keeps out of this lane.
+- **A `session-file` in a directory the user already owns keeps that directory's mode.** rho sets
+  `0o700` on a directory it creates and `0o600` on the file, and it does not chmod a directory it
+  found. `docs/guide/sessions.md` says so.
+- The prior-art table in section 7d is a reading of pi, jcode and fx. It is editorial context about
+  other projects, and no rho test can back it.
+
+## 16. What no test covers
+
+`AGENTS.md` step 8 asks for this list, and a reader deserves it in the contract and not only in a
+report.
+
+- **`run_headless` calling `record_and_print`.** The lifecycle is behaviour, and this last hop is a
+  grep. `crates/rho-cli/src/provider.rs` belongs to another lane, so this crate cannot inject a stub
+  provider and drive `run_headless` in process. A break that wraps the call in `if false` still
+  passes the suite. `docs/verification/session-store-wiring.md` drives it against live Bedrock
+  instead, and that is the only guard.
+- **The terminal.** `rho-tui` records nothing and `/sessions` opens no picker.
+- **A `flock` failure from a real filesystem.** `classify_lock_failure` is pure and every code is
+  tested, and no test makes a real network filesystem refuse a lock.
+- **The precondition of `Session::replay`.** Nothing stops a caller replaying after a prompt. The
+  one caller does not, and the doc comment states the rule.
+- **`SessionStore::create_file`, `SessionSelector::resumes`, `SessionsAction`, and
+  `sessions_command::run`** are each reached only through a caller. Each has a test that fails when
+  it breaks, and none has a test that names it.

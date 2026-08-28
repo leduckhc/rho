@@ -10,6 +10,9 @@ mod extensions;
 #[cfg(feature = "jsonl")]
 mod jsonl;
 mod provider;
+mod recording;
+mod sessions;
+mod sessions_command;
 mod subagents;
 
 use clap::Parser;

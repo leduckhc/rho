@@ -325,3 +325,15 @@ fn civil_from_millis(epoch_millis: u64) -> (i64, u32, u32, u32, u32, u32) {
 
     (year, month, day, hour, minute, second)
 }
+
+/// What a prefix resolved to.
+///
+/// `Many` carries every match, so the error can list them. **A prefix never picks one.** A
+/// resolver that picked the newest would resume a session the user did not name, and a resume
+/// replays a whole conversation to a model.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PrefixMatch {
+    One(SessionId),
+    None,
+    Many(Vec<SessionId>),
+}

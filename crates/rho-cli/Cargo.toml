@@ -24,6 +24,7 @@ rho-plugin = { version = "0.1.0", path = "../rho-plugin", optional = true }
 rho-provider-azure = { version = "0.1.0", path = "../rho-provider-azure", optional = true }
 rho-provider-bedrock = { version = "0.1.0", path = "../rho-provider-bedrock", optional = true }
 rho-provider-openrouter = { version = "0.1.0", path = "../rho-provider-openrouter", optional = true }
+rho-redact.workspace = true
 rho-skills = { version = "0.1.0", path = "../rho-skills" }
 rho-tools = { version = "0.1.0", path = "../rho-tools" }
 rho-tui = { version = "0.1.0", path = "../rho-tui", optional = true }
@@ -34,6 +35,7 @@ thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "io-std"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+unicode-width = "0.2.2"
 url = "2.5.8"
 
 [features]
@@ -83,4 +85,5 @@ required-features = ["openrouter"]
 [dev-dependencies]
 async-trait = "0.1.92"
 futures = "0.3.34"
+rho-core = { path = "../rho-core" }
 tempfile = "3.27.0"
