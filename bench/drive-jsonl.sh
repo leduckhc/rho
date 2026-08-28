@@ -14,6 +14,8 @@
 #   abort    a prompt, an abort, then check the run settles as cancelled
 #   dialog   a prompt that needs tool approval, answered by nobody, so the timeout decides
 #   dialog-yes  the same approval gate, answered yes, so the tool really runs
+#   dialog-abort an abort while a dialog is open, which must settle at once
+#   cap      two lines past the 1 MiB cap, then a good command
 #   errors   an unknown command, a malformed line, and an unknown provider
 #   twice    the same prompt twice down one session
 #
@@ -26,7 +28,7 @@ PROVIDER="${2:-bedrock}"
 MODEL="${3:-global.anthropic.claude-haiku-4-5-20251001-v1:0}"
 RHO="${RHO:-./target/release/rho}"
 
-if [ "$CASE" = "dialog" ] || [ "$CASE" = "dialog-yes" ]; then
+if [ "$CASE" = "dialog" ] || [ "$CASE" = "dialog-yes" ] || [ "$CASE" = "dialog-abort" ]; then
   export RHO_APPROVAL=ask
 fi
 
@@ -186,6 +188,35 @@ case "$CASE" in
     send "{\"type\":\"dialog_response\",\"id\":\"$DIALOG_ID\",\"answer\":{\"confirmed\":true}}"
     await '"type":"tool_end"' || rc=1
     await '"type":"settled"' || rc=1
+    ;;
+
+  dialog-abort)
+    # An abort while a dialog is open. rho asks, this client aborts instead of answering,
+    # and the run must settle at once rather than wait out the 30 second dialog timeout.
+    #
+    # AWAIT_TIMEOUT is dropped to 15s for this case, well under the dialog timeout, so
+    # passing by waiting is impossible: if the abort does not end the dialog wait, the read
+    # times out and the case fails.
+    AWAIT_TIMEOUT=15
+    send '{"type":"prompt","req_id":"p1","message":"Create a file called note.txt with the word hello. Use your tools."}'
+    await '"success":true' || rc=1
+    await '"type":"dialog"' || rc=1
+    echo "    (aborting instead of answering: the run must settle without waiting 30s)"
+    send '{"type":"abort","req_id":"a1"}'
+    await '"type":"settled"' || rc=1
+    ;;
+
+  cap)
+    # The 1 MiB line cap, against the real binary. Two over-long lines must produce two
+    # replies, because the protocol promises one reply per command line, and a good command
+    # after them must still work.
+    BIG=$(head -c 1200000 /dev/zero | tr '\0' 'x')
+    send "{\"type\":\"prompt\",\"message\":\"$BIG\"}"
+    await '"error":"line_too_long"' || rc=1
+    send "{\"type\":\"prompt\",\"message\":\"$BIG\"}"
+    await '"error":"line_too_long"' || rc=1
+    send '{"type":"get_state","req_id":"c1"}'
+    await '"command":"get_state"' || rc=1
     ;;
 
   errors)

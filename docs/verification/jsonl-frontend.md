@@ -309,6 +309,61 @@ The steer case also passes on OpenRouter, with the same delivery order:
 === case steer result: PASS
 ```
 
+## 9. An abort while a dialog is open
+
+Added after review. A dialog blocks the approval gate, and `rho_core` awaits that gate with
+no cancel arm of its own. So an abort had to end the dialog wait inside this crate, or the
+run would sit until the dialog timed out.
+
+The dialog timeout here is 30 seconds, and the client's own read bound is 15. So this case
+cannot pass by waiting: if the abort does not end the wait, the read times out and the case
+fails. The whole run took **3.3 seconds** of wall clock.
+
+```text
+=== case: dialog-abort   provider: bedrock   model: global.anthropic.claude-haiku-4-5-20251001-v1:0
+=== approval: ask
+=== binary: ./target/release/rho
+--> {"type":"prompt","req_id":"p1","message":"Create a file called note.txt with the word hello. Use your tools."}
+<-- {"req_id":"p1","command":"prompt","success":true}
+<-- {"type":"turn_start"}
+<-- {"type":"text_delta","index":0,"delta":"I'll create a file called note."}
+<-- {"type":"text_delta","index":0,"delta":"txt with the word \"hello\" in"}
+<-- {"type":"text_delta","index":0,"delta":" it."}
+<-- {"type":"turn_end","stop_reason":"tool_use"}
+<-- {"type":"dialog","method":"confirm","id":"d0","title":"Allow the tool write?","message":"The agent wants to run write, which is a file edit operation.","timeout_ms":30000}
+    (aborting instead of answering: the run must settle without waiting 30s)
+--> {"type":"abort","req_id":"a1"}
+<-- {"req_id":"a1","command":"abort","success":true,"data":{"running":true}}
+<-- {"type":"tool_end","id":"tooluse_pw7V5QsDxZvgXfx2TMGK4K","ok":false}
+<-- {"type":"turn_start"}
+<-- {"type":"turn_end","stop_reason":"canceled"}
+<-- {"type":"settled","stop_reason":"cancelled"}
+=== rho exit code: 0
+=== stderr:
+=== case dialog-abort result: PASS
+```
+
+## 10. The line cap, twice
+
+Added after review. Two lines past the 1 MiB cap must draw two replies, because the
+protocol promises one reply per command line, and a good command after them must still work.
+The message names the cap and the bytes read.
+
+```text
+=== case: cap   provider: bedrock   model: global.anthropic.claude-haiku-4-5-20251001-v1:0
+=== approval: allow-all (default)
+=== binary: ./target/release/rho
+--> {"type":"prompt","message":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...
+<-- {"command":"unknown","success":false,"error":"line_too_long","message":"a command line passed the 1048576 byte cap a...
+--> {"type":"prompt","message":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...
+<-- {"command":"unknown","success":false,"error":"line_too_long","message":"a command line passed the 1048576 byte cap a...
+--> {"type":"get_state","req_id":"c1"}
+<-- {"req_id":"c1","command":"get_state","success":true,"data":{"model_id":"global.anthropic.claude-haiku-4-5-20251001-v...
+=== rho exit code: 0
+=== stderr:
+=== case cap result: PASS
+```
+
 ## What is not verified here
 
 - Azure. This lane did not drive it. The frontend links no provider, so it holds no
