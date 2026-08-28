@@ -53,6 +53,7 @@ pub fn project_sources(path: PathBuf) -> Sources {
     Sources::from_paths(ConfigPaths {
         global: None,
         project: Some(path),
+        ..Default::default()
     })
 }
 

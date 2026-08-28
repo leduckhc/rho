@@ -70,39 +70,16 @@ pub fn motion_cell(weight: f32) -> MotionCell {
 /// field is one condition from `SPEC-tui-experience` section 8.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MotionInputs {
-    /// The `tui.motion` setting. False stops the sweep.
+    /// The resolved motion choice: the `tui-motion` key, or `--no-motion`, whichever the
+    /// merge kept. False stops the sweep.
     pub tui_motion: bool,
-    /// The `--no-motion` flag. True stops the sweep.
-    pub no_motion_flag: bool,
     /// Whether stdout is a terminal. A non-terminal stdout stops the sweep.
     pub stdout_is_terminal: bool,
-    /// The `tui.reduce_motion` setting. True stops the sweep.
-    pub reduce_motion_setting: bool,
-    /// The `RHO_REDUCE_MOTION=1` variable. True stops the sweep.
-    pub reduce_motion_env: bool,
-}
-
-impl MotionInputs {
-    /// The inputs under which the sweep animates: motion on, a terminal stdout, and
-    /// no reduced-motion preference.
-    pub fn animating() -> Self {
-        Self {
-            tui_motion: true,
-            no_motion_flag: false,
-            stdout_is_terminal: true,
-            reduce_motion_setting: false,
-            reduce_motion_env: false,
-        }
-    }
 }
 
 /// True when the sweep animates. False under any one stop condition.
-pub fn motion_enabled(inputs: &MotionInputs) -> bool {
-    inputs.tui_motion
-        && !inputs.no_motion_flag
-        && inputs.stdout_is_terminal
-        && !inputs.reduce_motion_setting
-        && !inputs.reduce_motion_env
+pub fn motion_enabled(inputs: MotionInputs) -> bool {
+    inputs.tui_motion && inputs.stdout_is_terminal
 }
 
 /// The rendered cells of the working word at one tick.
@@ -111,7 +88,7 @@ pub fn motion_enabled(inputs: &MotionInputs) -> bool {
 /// `Plain`, at every tick, so the word renders as a still, plain frame.
 pub fn sweep_frame(word: &str, tick: u64, inputs: &MotionInputs) -> Vec<MotionCell> {
     let columns = word.chars().count();
-    if !motion_enabled(inputs) {
+    if !motion_enabled(*inputs) {
         return vec![MotionCell::Plain; columns];
     }
     (0..columns)

@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 use crate::client::{McpConnection, handshake};
 use crate::config::McpServerConfig;
@@ -93,6 +94,18 @@ pub struct McpPool {
     factory: Arc<dyn TransportFactory>,
     servers: Mutex<HashMap<String, ServerEntry>>,
     private_counter: AtomicU64,
+    /// Where a successful handshake records its tool list. `None` records nothing, which is
+    /// what a test wants. Without it the cache was never written and no MCP tool ever
+    /// reached the model. See `SPEC-wire-the-dead-switches`.
+    cache_path: Mutex<Option<std::path::PathBuf>>,
+    /// The outstanding background connect tasks. A connect writes the schema cache on
+    /// success, so a caller must be able to await them before the process exits, or a
+    /// short run loses the write. See A1 and [`McpPool::drain_connects`].
+    connect_tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// Notices a background connect could not deliver inline, one per line. A cache write
+    /// failure lands here, because the handshake already returned to the caller. The caller
+    /// drains the tasks, then reads these. See A6 and [`McpPool::take_cache_notices`].
+    cache_notices: Arc<Mutex<Vec<String>>>,
 }
 
 impl McpPool {
@@ -112,7 +125,21 @@ impl McpPool {
             factory,
             servers: Mutex::new(HashMap::new()),
             private_counter: AtomicU64::new(0),
+            cache_path: Mutex::new(None),
+            connect_tasks: Mutex::new(Vec::new()),
+            cache_notices: Arc::new(Mutex::new(Vec::new())),
         })
+    }
+
+    /// Record a successful handshake's tool list at this path.
+    ///
+    /// The pool is behind an `Arc` by the time a caller has it, so this takes `&self` and
+    /// stores the path behind its own lock rather than taking `self` by value.
+    pub fn set_cache_path(&self, path: std::path::PathBuf) {
+        *self
+            .cache_path
+            .lock()
+            .expect("the cache path mutex is never poisoned") = Some(path);
     }
 
     /// Take a reference to a server, connecting in the background if needed.
@@ -159,6 +186,42 @@ impl McpPool {
         self.servers.lock().unwrap().len()
     }
 
+    /// Await the outstanding background connect tasks, bounded by `timeout`.
+    ///
+    /// A connect runs on a detached task, and on a successful handshake it writes the schema
+    /// cache. A short `rho run` can finish its turn and exit before that task runs, which
+    /// loses the write. Then the cache is never written, and every run tells the user the
+    /// tools arrive next session. A caller drains the tasks before the process exits, so the
+    /// write completes. This is the rho-mcp half of A1; the rho-cli half (D3) calls this at
+    /// shutdown with a bounded timeout.
+    ///
+    /// The wait is bounded. A server that never answers must not hang the run. A task that
+    /// does not finish within `timeout` is left to run detached, and a lapsed timeout is not
+    /// an error, so the run still ends cleanly.
+    pub async fn drain_connects(&self, timeout: Duration) {
+        let handles: Vec<JoinHandle<()>> = {
+            let mut tasks = self.connect_tasks.lock().unwrap();
+            std::mem::take(&mut *tasks)
+        };
+        if handles.is_empty() {
+            return;
+        }
+        let _ = tokio::time::timeout(timeout, async {
+            for handle in handles {
+                let _ = handle.await;
+            }
+        })
+        .await;
+    }
+
+    /// Take the notices a background connect could not deliver inline.
+    ///
+    /// A cache write failure lands here, because the handshake already returned. A caller
+    /// reads these after [`McpPool::drain_connects`], and shows them to the user. See A6.
+    pub fn take_cache_notices(&self) -> Vec<String> {
+        std::mem::take(&mut *self.cache_notices.lock().unwrap())
+    }
+
     /// The pool key for a config.
     ///
     /// A shared server keys on its fingerprint, so two sessions with the same
@@ -178,14 +241,51 @@ impl McpPool {
     fn spawn_connect(&self, slot: Arc<ServerSlot>, config: McpServerConfig) {
         let factory = Arc::clone(&self.factory);
         let limits = self.limits;
-        tokio::spawn(async move {
+        let cache_path = self
+            .cache_path
+            .lock()
+            .expect("the cache path mutex is never poisoned")
+            .clone();
+        let notices = Arc::clone(&self.cache_notices);
+        let handle = tokio::spawn(async move {
             let result = async {
                 let pair = factory.open(&config, &limits).await?;
                 handshake(pair, &config, &limits).await
             }
             .await;
             match result {
-                Ok((connection, _tools)) => {
+                Ok((connection, tools)) => {
+                    // The only place that knows the handshake succeeded and still holds the
+                    // whole list. `extensions::load` returns long before this runs, so a
+                    // write there would cache nothing. A failed handshake takes the `Err`
+                    // arm and writes nothing at all.
+                    if let Some(path) = cache_path {
+                        // `record_tools` does blocking file IO and can sleep on a lock, so it
+                        // runs on a blocking thread, never on a runtime worker. See A5.
+                        let write_config = config.clone();
+                        let write = tokio::task::spawn_blocking(move || {
+                            crate::record_tools(&path, &write_config, tools)
+                        })
+                        .await;
+                        match write {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                // The user was told the tools arrive next session, forever,
+                                // when this failed silently. Surface it. The tools still work
+                                // this session over the live connection; only the cache for
+                                // the next session is missing. See A6.
+                                tracing::warn!(%error, server = %config.name, "the MCP schema cache was not written");
+                                notices.lock().unwrap().push(format!(
+                                    "rho could not save the tool schema for the MCP server {}: {error}. \
+                                     Its tools work this session. rho will try to save them again next time.",
+                                    config.name
+                                ));
+                            }
+                            Err(join_error) => {
+                                tracing::warn!(%join_error, server = %config.name, "the MCP schema cache write task did not finish");
+                            }
+                        }
+                    }
                     // `send_replace` updates the stored value even when no
                     // receiver exists yet, so a call that subscribes later still
                     // sees the ready connection. `send` would drop the update.
@@ -197,6 +297,11 @@ impl McpPool {
                 }
             }
         });
+        let mut tasks = self.connect_tasks.lock().unwrap();
+        // Drop the handles of tasks that already finished, so a long-lived pool does not
+        // grow this list without bound.
+        tasks.retain(|handle| !handle.is_finished());
+        tasks.push(handle);
     }
 
     /// Release one reference to a key. Stop the server when the count reaches zero.
@@ -487,5 +592,48 @@ mod tests {
         )
         .await;
         assert!(acquired.is_ok(), "acquire must not wait for a handshake");
+    }
+
+    #[tokio::test]
+    async fn drain_connects_awaits_the_cache_write() {
+        // A1: the whole point. `acquire` returns before the background connect runs, so on a
+        // single-threaded test runtime the cache is not written yet. `drain_connects` must
+        // await the connect task, so the write completes. No sleep, no poll: if drain does
+        // not await the task, the file is absent when we check.
+        let (pool, _counters) = fake_pool();
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("cache.json");
+        pool.set_cache_path(path.clone());
+
+        let _handle = pool.acquire(&config("server", true)).await.unwrap();
+        assert!(
+            !path.exists(),
+            "the write has not happened before the drain"
+        );
+
+        pool.drain_connects(Duration::from_secs(5)).await;
+        assert!(
+            path.exists(),
+            "drain_connects must await the background connect that writes the cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_connects_gives_up_on_a_server_that_never_answers() {
+        // A blocking factory never finishes the handshake, so its connect task never ends.
+        // The drain must be bounded by its timeout and return, so a never-answering server
+        // does not hang the run. The 100 ms bound is the code under test, not a test sleep;
+        // an unbounded drain would hang until the outer guard trips.
+        let pool = McpPool::with_factory(McpLimits::default(), Arc::new(BlockingFactory));
+        let _handle = pool.acquire(&config("server", true)).await.unwrap();
+        let drained = tokio::time::timeout(
+            Duration::from_secs(5),
+            pool.drain_connects(Duration::from_millis(100)),
+        )
+        .await;
+        assert!(
+            drained.is_ok(),
+            "drain_connects must be bounded by its timeout"
+        );
     }
 }

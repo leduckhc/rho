@@ -11,6 +11,44 @@ use rho_config::CredentialSource;
 use rho_core::Secret;
 
 #[test]
+fn merge_keeps_a_credential_the_over_layer_does_not_redefine() {
+    // C4. `merge` used a whole-map `.or()`, so any layer that defined one credential erased
+    // every credential the weaker layer held. A project file with one `[credentials]` entry
+    // dropped the user's other names wholesale. The merge is per name now: a colliding name
+    // still goes to the stronger layer, and a name it does not mention survives.
+    use rho_config::ConfigLayer;
+    use std::collections::BTreeMap;
+
+    let mut base = BTreeMap::new();
+    base.insert("openrouter".to_string(), "sk-base".to_string());
+    base.insert("azure".to_string(), "sk-azure".to_string());
+    let weaker = ConfigLayer {
+        credentials: Some(base),
+        ..ConfigLayer::default()
+    };
+
+    let mut over = BTreeMap::new();
+    over.insert("openrouter".to_string(), "sk-over".to_string());
+    let stronger = ConfigLayer {
+        credentials: Some(over),
+        ..ConfigLayer::default()
+    };
+
+    let merged = weaker.merge(stronger);
+    let creds = merged.credentials.expect("credentials survive the merge");
+    assert_eq!(
+        creds.get("openrouter").map(String::as_str),
+        Some("sk-over"),
+        "the stronger layer still wins on a colliding name"
+    );
+    assert_eq!(
+        creds.get("azure").map(String::as_str),
+        Some("sk-azure"),
+        "a name the stronger layer never mentions must survive, not be erased"
+    );
+}
+
+#[test]
 fn a_literal_credential_resolves_to_its_value() {
     // `Literal` resolves to the written value.
     let source = CredentialSource::Literal(Secret::new("sk-live-abc"));

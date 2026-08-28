@@ -102,7 +102,7 @@ pub async fn load_skills(
 /// Name a few items, then count the rest.
 ///
 /// A full list of forty names is as unreadable as forty separate lines.
-fn summarise_names(names: &[String]) -> String {
+pub(crate) fn summarise_names(names: &[String]) -> String {
     const SHOWN: usize = 3;
     if names.len() <= SHOWN {
         return names.join(", ");
@@ -200,6 +200,32 @@ pub async fn load(
     discover_skills: bool,
     mcp_config: Option<&Path>,
 ) -> Extensions {
+    load_with_factory(
+        session_root,
+        trust_project,
+        explicit_skills,
+        discover_skills,
+        mcp_config,
+        None,
+    )
+    .await
+}
+
+/// The testable core of [`load`]. `factory` overrides the MCP transport factory.
+///
+/// Production passes `None`, so the pool opens real stdio servers. A test passes a fake
+/// factory that answers the handshake in memory, so no test reaches the network and the
+/// schema-cache seam can be driven without a real process. Without this seam a critic could
+/// delete `pool.set_cache_path` and watch a green suite, because no test drove the CLI's
+/// wiring of the cache path. See D3.
+async fn load_with_factory(
+    session_root: &Path,
+    trust_project: bool,
+    explicit_skills: &[PathBuf],
+    discover_skills: bool,
+    mcp_config: Option<&Path>,
+    factory: Option<Arc<dyn rho_mcp::TransportFactory>>,
+) -> Extensions {
     let (skills_prompt, mut notices) = load_skills(
         session_root,
         trust_project,
@@ -226,13 +252,19 @@ pub async fn load(
         };
     }
 
-    let pool = McpPool::new(McpLimits::default());
+    let pool = match factory {
+        Some(factory) => McpPool::with_factory(McpLimits::default(), factory),
+        None => McpPool::new(McpLimits::default()),
+    };
     // The cache is a hint. A missing or unreadable file simply means no tool is
     // advertised yet, so the session still starts.
     let cache_path = home_dir()
         .map(|home| home.join(".rho").join("mcp-schema-cache.json"))
         .unwrap_or_else(|| PathBuf::from("mcp-schema-cache.json"));
     let cache = McpSchemaCache::load(&cache_path).unwrap_or_else(|_| McpSchemaCache::new());
+    // The write was the missing call. Nothing recorded a handshake, so the cache stayed
+    // empty, so no MCP tool ever reached the model. See `docs/verification/mcp-live-probe.md`.
+    pool.set_cache_path(cache_path.clone());
     // `tools_for` returns at once. It advertises from the cache and connects on a
     // background task, so the first provider request already carries these tools and a
     // late handshake never rewrites the stable prefix. See SPEC-mcp section 4.
@@ -240,8 +272,8 @@ pub async fn load(
         Ok(mcp_tools) => {
             if mcp_tools.is_empty() {
                 notices.push(format!(
-                    "{} MCP server(s) are configured, and no tool schema is cached yet. \
-                     Their tools appear in the next session.",
+                    "{} MCP server(s) are configured, and no tool schema is cached yet. rho \
+                     is connecting now, and their tools are available in the next session.",
                     servers.len()
                 ));
             }
@@ -277,6 +309,127 @@ fn home_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use rho_mcp::{
+        LineOutcome, McpError, McpLimits, McpServerConfig, TransportFactory, TransportPair,
+        TransportReader, TransportWriter,
+    };
+    use tokio::sync::mpsc;
+
+    // A fake MCP transport that answers the handshake in memory and lists one tool, so a
+    // background connect finishes without a real process and records a non-empty tool list.
+    // A test that must prove the cache was written needs a tool to write. No test reaches the
+    // network. This mirrors the `OneToolFactory` in the rho-mcp test helpers.
+    struct OneToolFactory;
+
+    #[async_trait]
+    impl TransportFactory for OneToolFactory {
+        async fn open(
+            &self,
+            _config: &McpServerConfig,
+            _limits: &McpLimits,
+        ) -> Result<TransportPair, McpError> {
+            let (tx, rx) = mpsc::unbounded_channel();
+            Ok(TransportPair {
+                reader: Box::new(OneToolReader { rx }),
+                writer: Arc::new(OneToolWriter { tx }),
+                guard: Box::new(()),
+            })
+        }
+    }
+
+    struct OneToolReader {
+        rx: mpsc::UnboundedReceiver<String>,
+    }
+
+    #[async_trait]
+    impl TransportReader for OneToolReader {
+        async fn next_line(&mut self) -> LineOutcome {
+            match self.rx.recv().await {
+                Some(line) => LineOutcome::Line(line),
+                None => LineOutcome::Eof,
+            }
+        }
+    }
+
+    struct OneToolWriter {
+        tx: mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait]
+    impl TransportWriter for OneToolWriter {
+        async fn send_line(&self, line: &str) -> Result<(), McpError> {
+            let message: serde_json::Value = serde_json::from_str(line).unwrap();
+            let Some(id) = message.get("id").cloned() else {
+                return Ok(());
+            };
+            let result = match message["method"].as_str().unwrap_or("") {
+                "initialize" => serde_json::json!({
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "serverInfo": { "name": "fake", "version": "0.1.0" }
+                }),
+                "tools/list" => serde_json::json!({ "tools": [{
+                    "name": "probe_tool",
+                    "description": "a probe tool",
+                    "inputSchema": { "type": "object" }
+                }] }),
+                _ => serde_json::json!({ "content": [], "isError": false }),
+            };
+            let response = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+            let _ = self.tx.send(response.to_string());
+            Ok(())
+        }
+
+        async fn close(&self) {}
+    }
+
+    #[tokio::test]
+    async fn the_cli_wires_the_schema_cache_path_so_a_drained_connect_writes_it() {
+        // D3 and the CLI half of A1, at the level a critic broke. `extensions::load` computes
+        // the cache path from the home directory and calls `pool.set_cache_path`. A bounded
+        // drain then awaits the background connect, which writes the cache on a successful
+        // handshake. Deleting `set_cache_path` leaves the pool with no path, so nothing is
+        // ever written and this fails. The single-threaded test runtime never runs the
+        // connect task until the drain awaits it, so the file is absent before the drain and
+        // present after: no sleep, no poll, no network.
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mcp = root.path().join("mcp.json");
+        std::fs::write(
+            &mcp,
+            r#"{ "servers": [ { "name": "probe",
+                   "transport": { "type": "stdio", "command": "unused", "args": [] } } ] }"#,
+        )
+        .unwrap();
+
+        let _home_guard = TempHome::set(home.path());
+        let extensions = load_with_factory(
+            root.path(),
+            false,
+            &[],
+            false,
+            Some(&mcp),
+            Some(Arc::new(OneToolFactory)),
+        )
+        .await;
+
+        let pool = extensions
+            .mcp_pool
+            .clone()
+            .expect("a configured server yields a pool");
+        let cache = home.path().join(".rho").join("mcp-schema-cache.json");
+        assert!(
+            !cache.exists(),
+            "the write must not have happened before the drain"
+        );
+
+        pool.drain_connects(std::time::Duration::from_secs(5)).await;
+        assert!(
+            cache.exists(),
+            "the CLI must set the cache path, so a drained connect writes the schema cache"
+        );
+    }
 
     // ---------------------------------------------------------------------------
     // Authority, proved at the wiring layer.

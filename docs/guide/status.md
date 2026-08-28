@@ -30,9 +30,13 @@ This page describes rho as of 2026-08-26.
 | A lock, so two rho processes never write one session | [sessions](sessions.md) |
 | Skills loaded from `SKILL.md` files | [skills](skills.md) |
 | `/help`, `/quit`, and `/guide` slash commands | [terminal interface](terminal.md) |
+| A local model host, through `--base-url` | [providers](providers.md) |
+| MCP tools, cached after the first handshake | [MCP servers](mcp.md) |
+| The working animation, and `--no-motion` to stop it | [terminal interface](terminal.md) |
+| `--no-agents`, separate from `--no-skills` | [commands and flags](cli.md) |
 | The two minute tour, three pages, keys generated from the binding table | [terminal interface](terminal.md) |
 | Slash-command list (`/` opens it, typing filters it) | [terminal interface](terminal.md) |
-| 1464 tests passing in the workspace | — |
+| 1592 tests passing in the workspace | — |
 
 ## Partly built
 
@@ -40,8 +44,7 @@ This page describes rho as of 2026-08-26.
 |---|---|
 | `approval = "ask"` parses in the config. | rho refuses it with an error message. Use `--read-only` to block writes, or omit the flag to allow all. |
 | `rho run` records a session, and `--continue` resumes one. `session-file` and `ephemeral` both reach the run. | The terminal records nothing, and `/sessions` opens no picker. Use `rho run` when you want a session, and `rho sessions list` as the picker. See [sessions](sessions.md). |
-| The `[subagents]` table parses in the config. | No value from it reaches the agent. Pass the limits as flags: `--max-children-per-parent`, `--max-live-agents`, `--child-timeout-secs`, `--max-queued-per-parent`, `--max-queued-total`, `--agent-grace-turns`, `--max-agent-tool-calls`. |
-| `--no-skills` stops the skill search, as its help says. | It also stops subagent discovery, and warns about neither. rho then offers no `spawn_agent`. Drop the flag to keep subagents. |
+| The `[subagents]` table parses in the config. | No value from it reaches the agent. Pass the limits as flags: `--max-children-per-parent`, `--max-live-agents`, `--child-timeout-secs`, `--max-queued-per-parent`, `--max-queued-total`, `--queue-wait-secs`, `--max-agent-steer-bytes`, `--agent-grace-turns`, `--max-agent-tool-calls`. |
 | A subagent can be steered while it runs, with `steer_agent`. | You cannot steer your own turn. The terminal interface wires no queue for your session. A message you type mid-run never reaches the running turn, and Enter starts a new turn instead. |
 | A background task reports progress, and rho summarises it. | The terminal interface never draws the summary. The task row ignores the field, so a long build shows no percentage. |
 | The approval panel is drawn and its keys are unwired. | Nothing opens it in a real run. This is why `approval = "ask"` has nowhere to go, even in the terminal build. |
@@ -58,8 +61,8 @@ This page describes rho as of 2026-08-26.
 | A `todo` tool — the model keeps no task list, so a long job has no checklist you can read. |
 | An `ask_user` tool — the model cannot ask you a question mid-turn. It guesses instead, or it stops. |
 | A token count or a cost display — the interface shows neither, so you cannot see what a turn spent. |
-| A way to stop the sweep animation — the code holds a `--no-motion` flag and three other switches. Nothing sets any of them, and the renderer never checks, so the sweep always runs. |
-| MCP tools — rho starts your server and reads its tool list, and the tools never reach the model. Nothing writes the schema cache they are advertised from. Every run says they will appear next session, and they do not. See [MCP servers](mcp.md). |
+
+
 | Context compaction — rho has no compaction logic. A turn that writes too much output stops with a `max tokens` reason. An input that outgrows the window returns a provider error. Either way there is no recovery path. |
 | A model registry — rho passes whatever model id you give it straight to the provider. An invalid id returns a provider error. |
 | A subagent spawning its own subagent — the CLI sets the depth limit to 1 and offers no flag to raise it. |

@@ -22,7 +22,7 @@ mod sanitize;
 mod tool;
 mod transport;
 
-pub use cache::McpSchemaCache;
+pub use cache::{McpSchemaCache, record_tools};
 pub use client::McpClient;
 pub use config::{McpServerConfig, McpToolDef, McpTransport};
 pub use error::McpError;

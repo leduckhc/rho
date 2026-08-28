@@ -34,6 +34,7 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal"]
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 unicode-width = "0.2.2"
+url = "2.5.8"
 
 [features]
 default = ["tui", "openrouter", "bedrock", "azure", "plugins"]
@@ -78,6 +79,7 @@ name = "many_sessions"
 required-features = ["openrouter"]
 
 [dev-dependencies]
+async-trait = "0.1.92"
 futures = "0.3.34"
 rho-core = { path = "../rho-core" }
 tempfile = "3.27.0"

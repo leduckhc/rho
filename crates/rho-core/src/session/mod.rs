@@ -208,6 +208,11 @@ pub enum SessionError {
     #[error("unsupported session version {0}")]
     Version(u32),
     /// A resume would widen a permission, and the user did not allow it.
+    ///
+    /// **The message names the flag again, because this lane created it.** `main` had removed the
+    /// name, and rightly: it told a user to pass `--allow-widen`, and no such flag existed. That is
+    /// the shape `bench/check-flag-names.py` exists to catch. `rho run` now defines the flag, so the
+    /// refusal can say what to do, and the guard passes because the name is real.
     #[error(
         "a resume would widen {field} from {stored} to {requested}; pass --allow-widen to allow it"
     )]

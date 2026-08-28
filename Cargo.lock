@@ -2781,6 +2781,7 @@ name = "rho-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "futures",
  "rho-acp",
@@ -2804,6 +2805,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-width",
+ "url",
 ]
 
 [[package]]
@@ -2818,6 +2820,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -2896,6 +2899,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
  "wiremock",
 ]
 
@@ -2937,6 +2941,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "url",
  "wiremock",
 ]
 

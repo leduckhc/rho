@@ -29,6 +29,7 @@ See [configuration](configuration.md) for the full order.
 
 | Flag | Environment variable | What it does |
 |---|---|---|
+| `--base-url <URL>` | `RHO_BASE_URL` | The provider endpoint. Use it for a local model host such as Ollama or vLLM. A remote plain-`http` url is refused, and a notice names the host your key goes to. |
 | `--provider <NAME>` | `RHO_PROVIDER` | The provider to use, for example `openrouter` or `azure`. |
 | `--model <ID>` | `RHO_MODEL` | The model id to send. For Azure, this is your deployment name. |
 | `--profile <NAME>` | — | Load a named block from the config file. |
@@ -92,6 +93,7 @@ Pass `--read-only` instead.
 |---|---|---|
 | `--no-mouse` | — | Return mouse control to the terminal. Drag selects text without a modifier. |
 | `--mouse` | — | Capture the mouse. The scroll wheel moves the transcript. On by default. |
+| `--no-motion [true|false]` | — | Stop the animation that sweeps the working word. The footer still names the state. `--no-motion false` re-enables motion and beats a global `tui-motion = false`. |
 | `--reasoning <off\|summary\|full\|live>` | `summary` | How rho draws reasoning in the terminal interface. `summary` shows one row. `full` adds the text, dimmed. `live` streams the text then collapses it. `off` hides it. |
 | `--reasoning-effort <off\|low\|medium\|high\|xhigh>` | provider default | How hard the model thinks. Unset means rho sends no field to the provider. |
 
@@ -108,7 +110,8 @@ A build without it prints: `this build has no terminal UI. Use "rho run <prompt>
 |---|---|
 | `--trust-project` | Load skills from the repository you are editing. Off by default. A skill can instruct the model and carry scripts. |
 | `--skill <PATH>` | Load a skill from this path. Repeatable. Works even with `--no-skills`. |
-| `--no-skills` | Stop the skill directory search. An explicit `--skill` still loads. It also stops subagent discovery, in silence. See below. |
+| `--no-skills` | Stop the skill directory search. An explicit `--skill` still loads. |
+| `--no-agents` | Stop the agent-definition search, so rho offers no subagent. |
 | `--mcp-config <PATH>` | Read MCP servers from this file instead of `~/.rho/mcp.json`. |
 
 ## Subagents
@@ -120,11 +123,15 @@ A build without it prints: `this build has no terminal UI. Use "rho run <prompt>
 | `--child-timeout-secs <N>` | 600 | Seconds before rho cancels a child. |
 | `--max-queued-per-parent <N>` | 16 | How many children one parent may queue for a slot. |
 | `--max-queued-total <N>` | 128 | How many children may wait across the whole process. |
+| `--queue-wait-secs <N>` | the child timeout | Seconds a child may wait for a slot. `0` refuses any child that must wait. |
+| `--max-agent-steer-bytes <N>` | 16384 | The largest steering message a subagent queue accepts, in bytes. |
 | `--agent-grace-turns <N>` | 5 | Turns of warning before a child hits its turn cap. `0` turns off the warning. |
 | `--max-agent-tool-calls <N>` | 64 | How many tool calls one child may make. |
 
 When a child hits `--max-children-per-parent`, rho queues it.
 When the queue hits `--max-queued-per-parent`, rho refuses with an error that names the flag.
+A queued child waits for `--queue-wait-secs` at most.
+Then rho refuses it, and your turn comes back.
 
 > **Not built yet.** There is no `--max-depth` flag. A subagent cannot spawn
 > a grandchild. rho sets depth to 1 in code and offers no way to change it.
@@ -144,8 +151,4 @@ When the queue hits `--max-queued-per-parent`, rho refuses with an error that na
 > `rho run` when you want a session, and `rho sessions list` as the picker. There is no rewind
 > and no replay.
 
-> **Partly built.** `--no-skills` also turns off subagent discovery, and it says nothing.
-> rho then registers no `spawn_agent`, so the model cannot delegate, and your agent
-> definitions are ignored. A live run proved it: with `--no-skills` the tool list stopped at
-> `read_tool_result`, and without it five subagent tools appeared. There is no flag that
-> keeps subagents while dropping skills.
+

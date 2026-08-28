@@ -14,9 +14,11 @@
 use std::path::{Path, PathBuf};
 
 use rho_core::{SandboxMode, ToolIntersection, intersect_tools};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
+use crate::discover::is_inside;
 use crate::frontmatter::{extract_frontmatter, read_bounded, sanitize};
+use crate::rejection::{Detail, MAX_LINES_PER_KIND, RejectedDefinition, RejectionReason, bounded};
 use crate::types::SkillOrigin;
 
 /// The most characters allowed in a name. The same rule as a skill.
@@ -59,6 +61,37 @@ impl AgentDefinition {
     pub fn resolve_tools(&self, parent_tools: &[String]) -> ToolIntersection {
         intersect_tools(parent_tools, self.tools.as_deref())
     }
+
+    /// The name, made safe to draw and short enough to read.
+    ///
+    /// A name comes from a file, so a repository chooses it. The loader sanitises it,
+    /// and this bounds it as well. A live run printed 800 KB of one repository's names
+    /// on a start-up line, because a name only warns above 64 characters.
+    pub fn safe_name(&self) -> String {
+        bounded(&self.name, MAX_NAME_LENGTH)
+    }
+
+    /// The lines this definition owes the user, and no more than a bounded number.
+    ///
+    /// A warning is rho's own sentence with the file's text inside it. `Detail` bounds
+    /// that text, this bounds the name, and the cap bounds the count. So one definition
+    /// cannot fill a terminal.
+    pub fn notices(&self) -> Vec<String> {
+        let name = self.safe_name();
+        let mut lines: Vec<String> = self
+            .warnings
+            .iter()
+            .take(MAX_LINES_PER_KIND)
+            .map(|warning| format!("agent definition {name}: {warning}"))
+            .collect();
+        let hidden = self.warnings.len().saturating_sub(MAX_LINES_PER_KIND);
+        if hidden > 0 {
+            lines.push(format!(
+                "agent definition {name} raised {hidden} more warning(s), not listed here."
+            ));
+        }
+        lines
+    }
 }
 
 /// Read one agent definition's body, the text after the frontmatter.
@@ -93,13 +126,22 @@ fn strip_frontmatter(text: &str) -> String {
 }
 
 /// The set an agent discovery pass found.
+///
+/// `#[non_exhaustive]`, so no crate outside this one writes the literal. This field set
+/// has grown once already, and a struct literal in another crate would have broken on
+/// that change. `discover_agents` and `Default` are the two ways to build one.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct AgentSet {
     /// Definitions that may be used now.
     pub loaded: Vec<AgentDefinition>,
     /// Project definitions found but withheld, because the project is not
     /// trusted.
     pub withheld: Vec<AgentDefinition>,
+    /// Files that did not load at all, with the reason for each one.
+    ///
+    /// A rejected file used to vanish. See decision D-a-rejected-definition-is-reported.
+    pub rejected: Vec<RejectedDefinition>,
 }
 
 /// Where to look for agent definitions, and what to trust.
@@ -139,11 +181,22 @@ pub async fn discover_agents(config: &AgentConfig) -> AgentSet {
         return set;
     }
 
+    // Resolve the root once. A user directory may hold a symlink that points inside
+    // the session root, and that file is a project file whatever directory found it.
+    let canonical_root = config
+        .session_root
+        .as_deref()
+        .and_then(|root| root.canonicalize().ok());
+
     for dir in &config.user_dirs {
         for path in markdown_files(dir) {
-            if let Some(def) = load_definition(&path, SkillOrigin::User).await {
-                set.loaded.push(def);
-            }
+            let origin = if is_inside(&path, canonical_root.as_deref()) {
+                SkillOrigin::Project
+            } else {
+                SkillOrigin::User
+            };
+            let outcome = load_definition(&path, origin).await;
+            admit(&mut set, outcome, config.project_trusted);
         }
     }
 
@@ -154,13 +207,8 @@ pub async fn discover_agents(config: &AgentConfig) -> AgentSet {
         ];
         for dir in project_dirs {
             for path in markdown_files(&dir) {
-                if let Some(def) = load_definition(&path, SkillOrigin::Project).await {
-                    if config.project_trusted {
-                        set.loaded.push(def);
-                    } else {
-                        set.withheld.push(def);
-                    }
-                }
+                let outcome = load_definition(&path, SkillOrigin::Project).await;
+                admit(&mut set, outcome, config.project_trusted);
             }
         }
     }
@@ -168,30 +216,102 @@ pub async fn discover_agents(config: &AgentConfig) -> AgentSet {
     set
 }
 
-/// Load one definition from a path. Return `None` when it does not load.
-pub async fn load_definition(path: &Path, origin: SkillOrigin) -> Option<AgentDefinition> {
+/// File one load outcome into the set, under the trust rule.
+///
+/// One place decides trust, so the user pass and the project pass cannot drift apart.
+/// The origin comes from the outcome itself, so no caller can pass one that disagrees
+/// with the definition it files.
+///
+/// An untrusted rejection loses its detail, because a repository rho has not been told
+/// to trust must not put its own prose on a start-up line.
+fn admit(
+    set: &mut AgentSet,
+    outcome: Result<AgentDefinition, RejectedDefinition>,
+    project_trusted: bool,
+) {
+    let origin = match &outcome {
+        Ok(def) => def.origin,
+        Err(rejected) => rejected.origin,
+    };
+    let trusted = matches!(origin, SkillOrigin::User) || project_trusted;
+    match outcome {
+        Ok(def) => {
+            if trusted {
+                set.loaded.push(def);
+            } else {
+                set.withheld.push(def);
+            }
+        }
+        Err(rejected) => set.rejected.push(if trusted {
+            rejected
+        } else {
+            rejected.without_detail()
+        }),
+    }
+}
+
+/// Load one definition from a path.
+///
+/// The error side carries the reason, so no caller can drop it by accident. It used to
+/// be an `Option`, and every failure was one `None`.
+pub async fn load_definition(
+    path: &Path,
+    origin: SkillOrigin,
+) -> Result<AgentDefinition, RejectedDefinition> {
+    let reject = |reason: RejectionReason| {
+        Err(RejectedDefinition {
+            path: path.to_path_buf(),
+            origin,
+            reason,
+        })
+    };
+
     let fallback_name = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    let text = read_bounded(path).await.ok()?;
-    let yaml = extract_frontmatter(&text)?;
-    let raw: RawFrontmatter = serde_yaml::from_str(&yaml).ok()?;
+    let text = match read_bounded(path).await {
+        Ok(text) => text,
+        Err(error) => {
+            return reject(RejectionReason::Unreadable {
+                detail: Detail::new(error.to_string()),
+            });
+        }
+    };
+    let Some(yaml) = extract_frontmatter(&text) else {
+        // Two different faults, and two different repairs. An unclosed block used to
+        // report "no frontmatter", which asks for a description the file already holds.
+        return reject(if opens_frontmatter(&text) {
+            RejectionReason::UnclosedFrontmatter
+        } else {
+            RejectionReason::NoFrontmatter
+        });
+    };
+    let raw: RawFrontmatter = match serde_yaml::from_str(&yaml) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return reject(RejectionReason::BadFrontmatter {
+                detail: Detail::new(error.to_string()),
+            });
+        }
+    };
 
     // A missing description does not load. The description is the only text the
     // model sees, so an agent without one can never be chosen.
     let description = match raw.description {
         Some(description) if !description.trim().is_empty() => sanitize(&description),
-        _ => return None,
+        _ => return reject(RejectionReason::NoDescription),
     };
 
     let mut warnings = Vec::new();
     let name = match raw.name {
         Some(name) => sanitize(&name),
         None => {
+            // The stem is repository text, so it goes through the bounded type.
             warnings.push(format!(
-                "the agent has no name. The file name \"{fallback_name}\" is used instead."
+                "the agent has no name. The file name \"{}\" is used instead.",
+                Detail::new(&fallback_name)
             ));
             sanitize(&fallback_name)
         }
@@ -199,22 +319,33 @@ pub async fn load_definition(path: &Path, origin: SkillOrigin) -> Option<AgentDe
     warnings.extend(name_warnings(&name));
 
     let tools = match raw.tools {
-        Some(raw_tools) => resolve_tool_list(&raw_tools, &mut warnings),
+        Some(value) => match tool_tokens(&value) {
+            Ok(tokens) => resolve_tool_list(&tokens, &mut warnings),
+            // A broken tool list refuses the whole file. The only other reading is to
+            // ignore the field, and an ignored field inherits every parent tool.
+            Err(detail) => return reject(RejectionReason::BadToolsField { detail }),
+        },
         None => None,
     };
 
     let sandbox = match raw.sandbox {
         Some(text) => match text.parse::<SandboxMode>() {
             Ok(mode) => Some(mode),
-            Err(error) => {
-                warnings.push(error);
+            // rho-core's message quotes the whole value, and a value is repository
+            // text of any length. So the value goes through the bounded type here, and
+            // the repair stays whole.
+            Err(_) => {
+                warnings.push(format!(
+                    "the sandbox mode \"{}\" is unknown. Use off, confined, or strict.",
+                    Detail::new(&text)
+                ));
                 None
             }
         },
         None => None,
     };
 
-    Some(AgentDefinition {
+    Ok(AgentDefinition {
         name,
         description,
         path: path.to_path_buf(),
@@ -227,15 +358,85 @@ pub async fn load_definition(path: &Path, origin: SkillOrigin) -> Option<AgentDe
     })
 }
 
+/// True when the text starts a frontmatter block.
+///
+/// `extract_frontmatter` returns `None` for a file with no opening fence and for a
+/// file whose fence never closes. This tells the two apart.
+fn opens_frontmatter(text: &str) -> bool {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    text.lines()
+        .next()
+        .is_some_and(|line| line.trim_end() == "---")
+}
+
 /// The raw frontmatter, before validation. Unknown fields are ignored.
 #[derive(Debug, Deserialize)]
 struct RawFrontmatter {
     name: Option<String>,
     description: Option<String>,
-    tools: Option<String>,
+    /// The tool list, in whichever form the author wrote.
+    ///
+    /// A plain `Option<Value>` reads `tools:` with no value as `None`, which is the
+    /// value an absent field gives. That difference matters, because an absent field
+    /// inherits every parent tool. So an empty line arrives here as `Some(Null)`.
+    #[serde(default, deserialize_with = "present_value")]
+    tools: Option<serde_yaml::Value>,
     model: Option<String>,
     max_turns: Option<u32>,
     sandbox: Option<String>,
+}
+
+/// Read a present field as `Some`, even when it holds nothing.
+fn present_value<'de, D>(deserializer: D) -> Result<Option<serde_yaml::Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    serde_yaml::Value::deserialize(deserializer).map(Some)
+}
+
+/// Turn the `tools` field into tokens, whichever form the author wrote.
+///
+/// A string is the comma or space form. A sequence is the ordinary YAML form. Both
+/// mean the same thing. See decision D-a-tool-list-accepts-a-yaml-sequence.
+fn tool_tokens(value: &serde_yaml::Value) -> Result<Vec<String>, Detail> {
+    match value {
+        serde_yaml::Value::String(line) => Ok(parse_tool_list(line)),
+        serde_yaml::Value::Sequence(items) => {
+            let mut names = Vec::new();
+            for item in items {
+                match item {
+                    serde_yaml::Value::String(name) => names.extend(parse_tool_list(name)),
+                    other => {
+                        return Err(Detail::new(format!(
+                            "one item in the list is {}, and a tool name is a word",
+                            yaml_kind(other)
+                        )));
+                    }
+                }
+            }
+            Ok(names)
+        }
+        serde_yaml::Value::Null => Err(Detail::new(
+            "the line holds no value, and an empty line would inherit every parent tool",
+        )),
+        other => Err(Detail::new(format!(
+            "the field is {}, and a tool list is a line of words or a sequence",
+            yaml_kind(other)
+        ))),
+    }
+}
+
+/// A plain name for a YAML value, for a message a user reads.
+fn yaml_kind(value: &serde_yaml::Value) -> &'static str {
+    match value {
+        serde_yaml::Value::Null => "empty",
+        serde_yaml::Value::Bool(_) => "a true or false value",
+        serde_yaml::Value::Number(_) => "a number",
+        serde_yaml::Value::String(_) => "a word",
+        serde_yaml::Value::Sequence(_) => "a list",
+        serde_yaml::Value::Mapping(_) => "a map",
+        serde_yaml::Value::Tagged(_) => "a tagged value",
+    }
 }
 
 /// The keywords that mean "every tool the parent holds".
@@ -255,21 +456,21 @@ const KEYWORD_NONE: &str = "none";
 /// contradiction, so the keyword is dropped and the names stand. That narrows,
 /// and widening on an unclear line is the fail-open shape. See `SPEC-subagents`
 /// section 5 and decision D-a-tool-keyword-stands-alone.
-fn resolve_tool_list(raw: &str, warnings: &mut Vec<String>) -> Option<Vec<String>> {
+fn resolve_tool_list(tokens: &[String], warnings: &mut Vec<String>) -> Option<Vec<String>> {
     let mut names = Vec::new();
     let mut keywords = Vec::new();
     let mut wants_all = false;
     let mut wants_none = false;
-    for name in parse_tool_list(raw) {
+    for name in tokens {
         let lower = name.to_ascii_lowercase();
         if KEYWORDS_ALL.contains(&lower.as_str()) {
             wants_all = true;
-            keywords.push(name);
+            keywords.push(name.clone());
         } else if lower == KEYWORD_NONE {
             wants_none = true;
-            keywords.push(name);
+            keywords.push(name.clone());
         } else {
-            names.push(name);
+            names.push(name.clone());
         }
     }
 
@@ -277,10 +478,11 @@ fn resolve_tool_list(raw: &str, warnings: &mut Vec<String>) -> Option<Vec<String
         return Some(names);
     }
     if !names.is_empty() {
+        // Both lists hold repository text, so both go through the bounded type.
         warnings.push(format!(
             "a tool keyword must stand alone. \"{}\" was dropped. These named tools stand: {}.",
-            keywords.join(", "),
-            names.join(", ")
+            Detail::new(keywords.join(", ")),
+            Detail::new(names.join(", "))
         ));
         return Some(names);
     }
@@ -326,6 +528,15 @@ fn name_warnings(name: &str) -> Vec<String> {
 }
 
 /// Every `.md` file directly inside `dir`, sorted for a stable order.
+///
+/// A regular file counts, and so does a **dangling symlink**: a link whose target does
+/// not exist. `is_file()` follows a link, so a dangling one used to be skipped here and
+/// reached nobody, while an unreadable regular file reached the user as a rejection. That
+/// silence is the defect this module exists to end, so the link goes through the loader
+/// and fails into `Unreadable` with its own path.
+///
+/// A link whose target **does** exist and is not a regular file stays out. A symlink to a
+/// fifo is the case that matters: opening one can block until a writer appears.
 fn markdown_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -333,12 +544,22 @@ fn markdown_files(dir: &Path) -> Vec<PathBuf> {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        if path.is_file() || is_dangling_symlink(&path) {
             files.push(path);
         }
     }
     files.sort();
     files
+}
+
+/// True when the path is a symlink and its target does not exist.
+fn is_dangling_symlink(path: &Path) -> bool {
+    path.symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_symlink())
+        && !path.exists()
 }
 
 /// The user home directory, read from the environment. It never reads the

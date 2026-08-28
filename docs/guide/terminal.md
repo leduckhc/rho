@@ -168,7 +168,7 @@ The footer shows the current state.
 
 | What you see | When |
 |-------------|------|
-| `◈ working · <duration>` | A turn is running, with a sweep over the word |
+| `◈ working · <duration>` | A turn is running. A sweep moves over the word, and `--no-motion` stops it |
 | `◈ canceling · <duration>` | Cancellation is in progress |
 | `◈ waiting · <duration>` | rho is waiting on an approval panel |
 | `ready` | Idle |
@@ -180,11 +180,18 @@ Reasons after `done`: `end turn`, `max tokens`, `max turns`, `refusal`, `cancele
 > **Not built yet.** rho draws no token count and no cost. The interface keeps a token
 > field and never puts it on screen. So you cannot see what a turn spent.
 
-> **Not built yet.** You cannot turn the sweep animation off. The code holds four ways to
-> stop it, including a `--no-motion` flag and an `RHO_REDUCE_MOTION` variable, and nothing
-> sets any of them. The renderer never asks whether motion is allowed, so the sweep always
-> runs. If the movement bothers you, the only escape today is `rho run`, which draws no
-> footer at all.
+### Stop the animation
+
+```
+rho --no-motion
+```
+
+`tui-motion = false` in a config file does the same, and so does `RHO_REDUCE_MOTION=1`. The
+footer still names the state in words, so nothing is lost but the movement. A redirected
+stdout stops it too.
+
+Until this version nothing moved at all: the renderer read a flag that no code ever set, so
+the sweep never drew. An earlier version of this page said the opposite.
 
 ## Startup notices
 

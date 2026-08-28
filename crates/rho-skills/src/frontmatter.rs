@@ -12,7 +12,7 @@ use tokio::io::AsyncReadExt;
 /// The frontmatter is small by design. This cap stops a huge or hostile file
 /// from filling memory during discovery. A file whose frontmatter does not close
 /// inside this many bytes does not load.
-const MAX_FRONTMATTER_BYTES: u64 = 16 * 1024;
+pub(crate) const MAX_FRONTMATTER_BYTES: u64 = 16 * 1024;
 
 /// The most characters allowed in a name.
 const MAX_NAME_LENGTH: usize = 64;
@@ -176,11 +176,26 @@ pub(crate) fn sanitize(input: &str) -> String {
 }
 
 /// True when a character must not reach the terminal. A space is safe.
+///
+/// The set covers three families. A control character or a C1 byte can drive a
+/// terminal. A bidirectional control can reorder a line, so text from a file could
+/// read as though rho wrote it. A line or paragraph separator can start a new line,
+/// which forges a second notice.
 fn is_unsafe(c: char) -> bool {
     if c == ' ' {
         return false;
     }
-    c.is_control() || c == '\u{7f}' || ('\u{80}'..='\u{9f}').contains(&c)
+    if c.is_control() || c == '\u{7f}' || ('\u{80}'..='\u{9f}').contains(&c) {
+        return true;
+    }
+    matches!(c,
+        // The bidirectional embedding, override, and isolate controls.
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        // The line and paragraph separators.
+        | '\u{2028}' | '\u{2029}'
+        // A byte order mark inside a line is invisible and never wanted.
+        | '\u{feff}'
+    )
 }
 
 /// Read at most `MAX_FRONTMATTER_BYTES` from a file, as lossy UTF-8.

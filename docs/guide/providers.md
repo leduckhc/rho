@@ -131,6 +131,24 @@ the normalised event stream.
 An outside author implements `ProviderHarness` for their provider and calls `run_all`.
 See [extending.md](../extending.md) for how to wire a new provider into the build.
 
+## A local model host
+
+```sh
+rho --base-url http://localhost:11434 --model qwen2.5
+```
+
+Any host that speaks the OpenAI format works: Ollama, vLLM, LiteLLM, LM Studio. rho appends the
+standard chat path, so a base with or without `/v1` both work. The provider stays `openrouter`,
+because that crate is the OpenAI-compatible client.
+
+Your key still goes with the request, so rho names the host it is going to in a startup notice.
+An `https` url is allowed anywhere. Plain `http` is allowed only to `localhost`, `127.0.0.0/8`,
+or `[::1]`, and a loopback endpoint also bypasses every proxy, so `HTTP_PROXY` cannot capture
+the key. rho follows no redirect, because a redirect could carry the key to another scheme.
+
+`--base-url` with `bedrock` or `azure` stops the run, since each names its endpoint its own way.
+See [configuration](configuration.md) for the config key and the variable.
+
 ## Storing credentials
 
 Give every provider its key through the environment. That is the only route that works.

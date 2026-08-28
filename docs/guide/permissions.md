@@ -72,7 +72,12 @@ Symlinks are resolved before the check, so a link that points outside the root i
 
 rho reads a project config file if one is present.
 By default it loads the `approval` and `sandbox` settings.
-It drops `skill-paths`, `mcp-config`, and any `!command` credential.
+It drops `session-root`, `session-file`, `skill-paths`, `mcp-config`, and `base-url`, and it
+refuses any `!command` credential. The same applies inside a profile, and to the matching
+`RHO_*` variables. rho names every key it ignored in a startup notice.
+
+`session-root` is on that list because it is the boundary every tool is confined to. A probe
+proved a cloned repository could move it and read a file outside itself.
 Pass `--trust-project` to allow those fields.
 
 A `!command` credential in an untrusted project file never runs. A live probe put
