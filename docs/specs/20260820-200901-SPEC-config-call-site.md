@@ -1,14 +1,16 @@
 # SPEC-config-call-site — the config files reach the product
 
 Status: the call site is built and driven for real. See
-`docs/verification/config-call-site.md`. Rules 4, 7, and 8 stay unbuilt while question U4
-of `.rho-work/reasoning-task.md` is open, and item I15, the provider credentials, is next.
+`docs/verification/config-call-site.md` and `docs/verification/config-credentials.md`. Rules
+4, 7, and 8 stay unbuilt while question U4 of `.rho-work/reasoning-task.md` is open. Item
+I15, the provider credentials, is built. See section 7.
 
 Owner crates: `rho-config` owns discovery and the merge. `rho-cli` owns the one call.
 
 Decisions: `D-the-config-call-site-lands` (supersedes `D-the-layered-config-has-no-caller`),
 `D-a-bad-reasoning-mode-is-refused`, `D-project-skill-needs-trust` (inconsistent, see the
-risk section).
+risk section), `D-a-provider-names-its-own-credential`,
+`D-an-untrusted-clone-supplies-no-credential`.
 
 ## 0. The problem
 
@@ -82,14 +84,18 @@ impl Sources {
     pub fn with_project_trust(self, trust: ProjectTrust) -> Sources;
 }
 
-/// A credential the project file asked to run as a command, without trust.
+/// A credential an untrusted project file asked for, in any form.
 ///
 /// It is a variant and not a dropped value, because dropping it would hand the provider
 /// an empty key and a 401. It fails when it is resolved, and the message names
 /// `--trust-project`.
+///
+/// It was named `RefusedProjectCommand` and gated the `!command` form alone. Section 5
+/// now gates the whole table, so the name no longer lies. See
+/// `D-an-untrusted-clone-supplies-no-credential`.
 pub enum CredentialSource {
     // ... the existing kinds stay ...
-    RefusedProjectCommand { path: std::path::PathBuf },
+    RefusedProjectCredential { path: std::path::PathBuf },
 }
 ```
 
@@ -274,6 +280,8 @@ Note: `bootstrap_root` honours `RHO_SESSION_ROOT` only under `--trust-project`. 
   defect `SPEC-config` section 2 forbids.
 - `a_missing_env_credential_is_an_error` — an absent credential stops the run. It replaces
   an `unwrap_or_default()` that read an absent key as an empty key.
+- `an_absent_credential_is_an_error_not_an_empty_key` — the error names the entry and the
+  variable, and no empty `Secret` reaches a provider.
 
 Added while building it, each one for a reason the list above did not hold:
 
@@ -311,7 +319,21 @@ Added while building it, each one for a reason the list above did not hold:
   bypass of `D-project-skill-needs-trust`.
 - `an_untrusted_project_file_still_sets_the_display_keys` — the gate is narrow, and the
   owner's full-trust ruling still holds for every other key.
-- `a_project_literal_credential_needs_no_trust` — only a command is gated.
+
+Added on 20260829, when the credential row widened to the whole table. One old line asserted
+the opposite, that a project literal needed no trust, so it is deleted and recorded in
+`bench/deleted-tests.txt`:
+
+- `an_untrusted_project_env_credential_cannot_name_a_victim_variable` — the attack a review
+  found. An untrusted `env:AWS_SECRET_ACCESS_KEY` refuses, and no secret is read.
+- `an_untrusted_project_literal_credential_is_refused` — the second attack. An attacker key
+  would send the victim's whole conversation to an account the attacker reads.
+- `an_untrusted_project_interpolated_credential_is_refused` — the third form, so the gate
+  covers the table and not a list of prefixes.
+- `a_trusted_project_literal_credential_resolves` — the flag restores every form, so the
+  wider gate is still a gate and not a wall.
+- `a_global_literal_credential_needs_no_trust` — a home directory is not a clone, and the
+  widening did not reach the user's own file.
 
 ## 5. The trust gate, and what the probe proved
 
@@ -334,19 +356,27 @@ nothing else:
 
 | Key, from a project file | Without `--trust-project` |
 | --- | --- |
-| a `credentials` value starting with `!` | becomes `RefusedProjectCommand`, and fails when resolved |
+| a `credentials` value, in **any** form | becomes `RefusedProjectCredential`, and fails when resolved |
 | `skill-paths` | dropped, and reported once on stderr |
 | `mcp-config` | dropped, and reported once on stderr |
 
 Every other key keeps the owner's full-trust ruling, including `approval` and `sandbox`.
 Those two are still worth a later look, because the probe rated them High and
-Medium-High, but they change no code path outside rho and they need no new contract.
+Medium-High, but they change no code path outside rho and they need no new contract. A
+subagent limit is now the exception, and `SPEC-subagent-limits-are-a-floor` owns it.
 
-A literal credential, an `env:` credential, and a global-file command are not gated. A home
-directory is not a clone.
+**The credential row widened on 20260829.** It gated a value starting with `!` alone, and it
+named the other three forms safe. That was true only while nothing resolved a credential.
+Section 7 makes them resolve, so a security review of the amendment found two live attacks.
+`openrouter = "env:AWS_SECRET_ACCESS_KEY"` sends the victim's own secret to openrouter.ai. A
+literal attacker key sends the victim's whole conversation to an account the attacker reads.
+A clone chooses `provider` too, so it chooses which credential name resolves. See
+`D-an-untrusted-clone-supplies-no-credential`.
 
-The cost to an honest user is one flag, once, when their own project file uses a
-shell-command credential. A global file needs no flag.
+A global-file credential is not gated, in any form. A home directory is not a clone.
+
+The cost to an honest user is one flag, once, when their own project file names a credential.
+A global file needs no flag, and neither does the fallback variable of section 7.
 
 ## 6. Out of scope
 
@@ -360,3 +390,177 @@ shell-command credential. A global file needs no flag.
   `rho-config` needs no change was wrong.
 - No trust store, and no remembered trust decision. `--trust-project` is a flag for one run,
   and a persisted trust file would be a new contract with its own spec.
+
+## 7. I15: a provider resolves its credential
+
+This section is the amendment that closed item I15. It comes after the out-of-scope list
+because the earlier sections stay as they were written, and renumbering them would break
+every reference to them. `.rho-work/i15-credential-expansion.md` is the requirement
+breakdown, and `D-a-provider-names-its-own-credential` is the one decision it needed.
+
+### What was still broken
+
+Section 2 forbids a credential read through `std::env::var`, and `provider.rs` did five of
+them. Four used `unwrap_or_default()`, which turns an absent key into an empty string, so a
+user with no key read a provider 401 instead of a sentence naming what to set.
+
+```
+$ grep -rn "resolve_credential" crates --include=*.rs | grep -v rho-config
+(nothing)
+```
+
+### The contract
+
+One new method on `Config`. `resolve_credential` keeps its meaning, and this one adds the
+fallback the user base needs.
+
+```rust
+impl Config {
+    /// Resolve a named credential, or fall back to one environment variable.
+    ///
+    /// A `[credentials]` entry named `name` wins. With no such entry, rho reads
+    /// `fallback_var` through the same `CredentialSource::Env` path, so the project trust
+    /// gate, the `Secret` type, and the error taxonomy all still hold.
+    ///
+    /// An absent value is a `ConfigError::Credential` naming both the entry and the
+    /// variable. An empty value is the same error, because an empty key reaches the
+    /// provider and returns 401, which reads as a broken account rather than a missing
+    /// key. It is never an empty `Secret`.
+    ///
+    /// The provider builder supplies `fallback_var`, so a new provider names its own
+    /// variable and edits no shared code. See `D-a-provider-names-its-own-credential`.
+    pub fn resolve_credential_or_env(
+        &self,
+        name: &str,
+        fallback_var: &str,
+        env: &dyn EnvLookup,
+    ) -> Result<Secret, ConfigError>;
+}
+```
+
+Changed API in `rho-cli`. The argument list gets shorter, not longer, because `base_url`
+already lives in `Config`.
+
+```rust
+/// Build a provider by name, and resolve its credential through the merged configuration.
+///
+/// It reads no environment variable directly. `env` is the lookup `rho-config` uses, so a
+/// test never touches the real process environment.
+pub fn build_provider(
+    name: &str,
+    config: &rho_config::Config,
+    env: &dyn rho_config::EnvLookup,
+) -> Result<Arc<dyn Provider>, ProviderError>;
+
+/// Whether this build can use a provider name, with no credential work.
+///
+/// A caller that only needs to know whether a name is usable must not run a credential
+/// helper to find out. The JSONL frontend is that caller.
+pub fn check_provider_name(name: &str) -> Result<(), ProviderError>;
+```
+
+One new `ProviderError` variant, because a credential failure is not a missing environment
+variable and the two need different words.
+
+```rust
+pub enum ProviderError {
+    // ... the existing variants stay ...
+    /// A credential could not be resolved. `rho-config` names the reason, and the reason
+    /// may be a refusal rather than an absence, so the message is passed through whole.
+    #[error("{message}")]
+    Credential { message: String },
+}
+```
+
+### The credential name of each provider
+
+| Provider | Credential name | Fallback variable | Resolves a credential |
+| --- | --- | --- | --- |
+| openrouter | `openrouter` | `OPENROUTER_API_KEY` | yes |
+| azure | `azure` | `AZURE_OPENAI_API_KEY` | yes |
+| bedrock | none | none | **no** |
+
+**Bedrock resolves no credential, on purpose.** The AWS SDK owns its own credential chain:
+environment variables, a profile, the SSO cache, and IMDS. `provider.rs` reads only
+`AWS_REGION` for it, and a region is not a secret. Routing the region through
+`resolve_credential` would wrap a public value in a `Secret`, which has no `Display`, and it
+would break the SDK chain that `F-aws-bedrock-provider` states. So line 205's region read
+stays a plain environment read.
+
+### What the amendment forbids
+
+- No `std::env::var` in `provider.rs`. Every read goes through `&dyn EnvLookup`, so a test
+  never depends on the machine it runs on.
+- No `unwrap_or_default()` on a credential. An absent value is an error with a name.
+- No empty `Secret` reaching a provider.
+- No `Secret` in a log, an error, or a panic. `Secret` has no `Display`, and its `Debug` is
+  a fixed mask, so this holds by construction and not by a filter.
+- No credential seed table inside `rho-config`. See `D-a-provider-names-its-own-credential`.
+- No fallback after a `Credential` error. A `RefusedProjectCredential` must stay a refusal,
+  so the fallback fires **only** when no entry carries that name. A `.or_else` on the
+  resolve result would turn a refusal into an environment read, and the gate would then
+  teach the user nothing. This is the U3(b) shape the decision rules out.
+- No credential value inside an error message. A review found one leak beside this path: a
+  `base-url` holding `https://user:password@host` was echoed whole into
+  `ConfigError::BaseUrl`. That message now carries the url with its userinfo replaced.
+- No credential helper's stderr on rho's stderr. `resolve_command` piped stdout and left
+  stderr inherited, so a chatty helper could print a key. It is now null.
+
+### Two rules a test can pass for the wrong reason
+
+A security review named both, and each is written here because the test design is the whole
+guard.
+
+1. **The refusal test must set the fallback variable.** With `OPENROUTER_API_KEY` unset,
+   correct code and the `.or_else` bug both fail, so the test passes and proves nothing.
+   `a_refused_project_credential_does_not_fall_back` sets the variable to a value it then
+   asserts is **not** returned.
+2. **The empty-credential test must make the fallback empty too.** Otherwise an
+   implementation that skips the empty check still fails, for the wrong reason.
+
+### The non-secret provider settings
+
+`AWS_REGION`, `AZURE_OPENAI_ENDPOINT`, and `AZURE_OPENAI_DEPLOYMENT` are not secrets, and
+U1(a) of the requirement breakdown left them as environment reads. They stay environment
+reads, and they now go through the same `&dyn EnvLookup`. So a test isolates them, and no new
+config key joins the contract.
+
+### Test cases for section 7
+
+In `rho-config`:
+
+- `an_absent_credential_is_an_error_not_an_empty_key` — the named entry is absent, the
+  fallback variable is unset, and the error names both. No empty `Secret` is returned.
+- `an_empty_credential_is_an_error` — an exported-but-empty variable is not a key. The entry
+  and the fallback are both empty, so the test cannot pass for the wrong reason.
+- `a_credentials_entry_beats_the_fallback_variable` — the file wins, so a config file really
+  chooses the key. The entry value and the variable value differ, so a swap of the two
+  arguments fails it.
+- `the_fallback_variable_resolves_when_no_entry_names_it` — U2(a), so no existing user
+  breaks.
+- `a_refused_project_credential_does_not_fall_back` — the refusal survives **while the
+  fallback variable is set**, and the message names `--trust-project`.
+- `resolving_a_credential_twice_gives_the_same_answer` — I9. A build happens per process and
+  a helper may run more than once.
+- `a_credential_error_never_holds_the_resolved_value` — the pass-through message of
+  `ProviderError::Credential` cannot leak a key.
+- `a_userinfo_base_url_error_hides_the_password` — the leak beside this path.
+- `a_credential_command_stderr_does_not_reach_the_parent` — a chatty helper cannot print a
+  key onto rho's stderr.
+
+In `rho-cli`:
+
+- `the_openrouter_key_comes_from_the_config_file` — a `[credentials]` entry named
+  `openrouter` reaches the provider.
+- `the_azure_key_comes_from_the_config_file` — one provider is not every provider.
+- `a_missing_openrouter_credential_names_what_to_set` — the message names
+  `OPENROUTER_API_KEY`, and it is not a 401.
+- `a_missing_azure_credential_names_what_to_set` — the same, per provider.
+- `an_untrusted_project_command_credential_fails_the_provider_build` — the gate runs at the
+  call site, and the message names `--trust-project`.
+- `bedrock_needs_no_credential_entry` — the AWS chain still owns the credential, and an
+  empty `[credentials]` table does not stop a Bedrock build.
+- `bedrock_still_reads_its_region_from_the_environment` — the region is not a credential.
+- `no_provider_builder_reads_the_process_environment` — a source guard, so a sixth
+  `std::env::var` cannot come back.
+- `check_provider_name_agrees_with_build_provider` — the two name lists cannot drift.

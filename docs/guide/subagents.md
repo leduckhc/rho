@@ -189,6 +189,13 @@ Start rho with flags to change the defaults:
 | `--agent-grace-turns` | 5 | Turns of warning before a child's turn cap. |
 | `--max-agent-tool-calls` | 64 | Tool calls one child may make in total. |
 
+Four of these also have a config-file key, in a `[subagents]` table: `max-depth`,
+`max-children-per-parent`, `max-live-total`, and `child-timeout-secs`. See
+[configuration](configuration.md).
+
+A flag beats a file. A project file may lower a limit and never raise one, and rho says on
+stderr which limit it refused to raise. `--trust-project` does not lift that rule.
+
 When rho refuses a spawn, it names the flag to raise.
 
 A queued child does not wait for ever. It waits for `--queue-wait-secs`, which is the child
@@ -263,11 +270,8 @@ Rename the file to avoid a silent override.
 
 ## What does not work yet
 
-> **Partly built.** rho reads the `[subagents]` table in a config file and no code applies it.
-> Set limits with flags instead, for example `--max-children-per-parent 8`.
-
 > **Not built yet.** There is no flag to allow a child to spawn a child.
-> `max_depth` is fixed at 1 in this version.
+> `max-depth` is capped at 1 in this version, and a config file cannot raise it.
 > A definition that sets it has no effect.
 
 `--no-skills` leaves subagents alone. It used to turn them off and say nothing, so a definition

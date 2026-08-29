@@ -454,7 +454,7 @@ pub(crate) async fn build_session(
     // notice is the security-relevant half, so it must not be lost to an unrelated failure.
     // See D6.
     let wiring_notices = wiring_notices(loaded, &name);
-    let provider = match provider::build_provider(&name, loaded.base_url.as_deref()) {
+    let provider = match provider::build_provider(&name, loaded, &rho_config::SystemEnv) {
         Ok(provider) => provider,
         Err(error) => {
             // Surface what rho already decided before the failure, so a user whose untrusted
@@ -534,7 +534,7 @@ pub(crate) async fn build_session(
         provider: Arc::clone(&provider),
         hooks: Arc::clone(&hooks),
         parent_tools,
-        limits: subagent_limits(cli),
+        limits: subagent_limits(cli, loaded),
     })
     .await;
     for tool in spawn_tools {
@@ -1423,6 +1423,16 @@ fn wiring_notices(loaded: &rho_config::Config, provider_name: &str) -> Vec<Strin
             loaded.dropped_keys.join(", ")
         ));
     }
+    if !loaded.lowered_limits.is_empty() {
+        // A different sentence from the one above, on purpose. `--trust-project` restores a
+        // dropped key, and it does not lift the limit floor, so naming the flag here would be
+        // false. A notice that names the wrong fix teaches the user to distrust every notice.
+        // See `D-a-project-file-only-lowers-a-limit`.
+        notices.push(format!(
+            "a project file may only lower a subagent limit, so rho kept your own value for {}.",
+            loaded.lowered_limits.join(", ")
+        ));
+    }
     if !loaded.discover_agents {
         notices.push(
             "agent discovery is off, so rho offers no subagent. Unset no-agents to use one."
@@ -1432,47 +1442,61 @@ fn wiring_notices(loaded: &rho_config::Config, provider_name: &str) -> Vec<Strin
     notices
 }
 
-/// The subagent limits for this run, from the flags.
+/// The subagent limits for this run: the merged configuration, then the flags.
 ///
 /// Every limit refusal in `rho-core` tells the user which flag to raise. The flags
 /// did not exist, so a refusal named something impossible. A live sweep found it.
 /// See `docs/verification/subagents-bedrock.md`.
 ///
-/// `max_depth` is **not** a flag, and it is 1. `rho-cli` captures the parent tool
-/// set before `spawn_agent` joins it, so a child never holds a spawn tool and a
-/// grandchild cannot exist. Offering a depth flag would promise something the CLI
-/// cannot do. See decision D-cli-depth-is-zero.
+/// `loaded.subagents` already holds the built-in defaults, the global file, and the narrowed
+/// project file. A flag beats all of them, because a flag is layer 6. See
+/// `SPEC-subagent-limits-are-a-floor`.
 ///
-/// It is 1 and not 0, because 0 forbids spawning altogether. The root session is
-/// depth 0, so a value of 0 refuses the very first child and the feature dies. A
-/// live run caught that after the unit tests passed.
-fn subagent_limits(cli: &Cli) -> rho_core::SubagentLimits {
-    let stated = rho_core::SubagentLimits::new();
+/// `max_depth` is the one limit the CLI bounds itself, and it takes the **smaller** of the
+/// merged value and 1. `rho-cli` captures the parent tool set before `spawn_agent` joins it,
+/// so a child never holds a spawn tool and a grandchild cannot exist. A depth above 1 would
+/// promise something the CLI cannot do. A depth of 0 is stricter, so it is honoured and it
+/// forbids spawning. See decision D-cli-depth-is-zero.
+///
+/// The clamp is why `max-depth = 0` in a file works while `max-depth = 3` becomes 1. Without
+/// the clamp the key would parse and change nothing, which is the dead-switch defect this
+/// whole change exists to close.
+///
+/// **`loaded.subagents.queue_wait` is not authoritative, and this function does not read
+/// it.** `build_subagents` fills every field from `SubagentLimits::default()`, so `queue_wait`
+/// is always 600 seconds and can never say "the user set nothing". The deadline follows the
+/// **resolved** `child_timeout`, so a config `child-timeout-secs = 30` gives a waiter 30
+/// seconds of patience and not ten minutes. A contract review named the naive shape:
+/// `.unwrap_or(loaded.subagents.queue_wait)` passes every per-limit test and breaks the rule
+/// in silence.
+fn subagent_limits(cli: &Cli, loaded: &rho_config::Config) -> rho_core::SubagentLimits {
+    let merged = loaded.subagents;
     let child_timeout = cli
         .child_timeout_secs
         .map(std::time::Duration::from_secs)
-        .unwrap_or(stated.child_timeout);
+        .unwrap_or(merged.child_timeout);
     rho_core::SubagentLimits {
-        max_depth: 1,
+        max_depth: merged.max_depth.min(1),
         max_children_per_parent: cli
             .max_children_per_parent
-            .unwrap_or(stated.max_children_per_parent),
-        max_live_total: cli.max_live_agents.unwrap_or(stated.max_live_total),
-        max_tool_calls: cli.max_agent_tool_calls.unwrap_or(stated.max_tool_calls),
-        grace_turns: cli.agent_grace_turns.unwrap_or(stated.grace_turns),
+            .unwrap_or(merged.max_children_per_parent),
+        max_live_total: cli.max_live_agents.unwrap_or(merged.max_live_total),
+        max_tool_calls: cli.max_agent_tool_calls.unwrap_or(merged.max_tool_calls),
+        grace_turns: cli.agent_grace_turns.unwrap_or(merged.grace_turns),
         max_queued_per_parent: cli
             .max_queued_per_parent
-            .unwrap_or(stated.max_queued_per_parent),
-        max_queued_total: cli.max_queued_total.unwrap_or(stated.max_queued_total),
-        // An unset deadline follows the child timeout, so a waiter gets one whole sibling
-        // run of patience. A fixed default would time out every waiter of a longer child.
+            .unwrap_or(merged.max_queued_per_parent),
+        max_queued_total: cli.max_queued_total.unwrap_or(merged.max_queued_total),
+        // An unset deadline follows the **resolved** child timeout, so a waiter gets one whole
+        // sibling run of patience. A fixed default would time out every waiter of a longer
+        // child, and `merged.queue_wait` cannot say "unset", so it is never read.
         queue_wait: cli
             .queue_wait_secs
             .map(std::time::Duration::from_secs)
             .unwrap_or(child_timeout),
         max_steer_message_bytes: cli
             .max_agent_steer_bytes
-            .unwrap_or(stated.max_steer_message_bytes),
+            .unwrap_or(merged.max_steer_message_bytes),
         child_timeout,
     }
 }
@@ -1648,6 +1672,34 @@ mod tests {
         std::fs::write(dir.join("config.toml"), body).expect("the project file");
     }
 
+    /// A `Config` with nothing set, so a flag-only test reads the stated defaults.
+    ///
+    /// It goes through `Config::load` with no file, so the defaults are the product's own and
+    /// never a copy a test keeps in step by hand.
+    fn no_config() -> rho_config::Config {
+        rho_config::Config::load(&rho_config::Sources::from_paths(
+            rho_config::ConfigPaths::default(),
+        ))
+        .expect("an empty source set loads")
+    }
+
+    /// A `Config` loaded from one project config file body, with no global file.
+    ///
+    /// The project file is the untrusted layer, which is the harder half: a limit it raises
+    /// must be lowered to the ceiling.
+    fn config_from_project(body: &str) -> (rho_config::Config, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("project.toml");
+        std::fs::write(&path, body).expect("write the project config");
+        let sources = rho_config::Sources::from_paths(rho_config::ConfigPaths {
+            global: None,
+            project: Some(path),
+            ..Default::default()
+        });
+        let config = rho_config::Config::load(&sources).expect("the file is valid TOML");
+        (config, dir)
+    }
+
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
@@ -1676,7 +1728,7 @@ mod tests {
             "11",
         ])
         .unwrap();
-        let limits = subagent_limits(&cli);
+        let limits = subagent_limits(&cli, &no_config());
         assert_eq!(limits.max_children_per_parent, 2);
         assert_eq!(limits.max_live_total, 7);
         assert_eq!(limits.child_timeout, std::time::Duration::from_secs(30));
@@ -1700,14 +1752,14 @@ mod tests {
     #[test]
     fn the_grace_flag_reaches_the_limits() {
         let cli = Cli::parse_from(["rho", "--agent-grace-turns", "2"]);
-        assert_eq!(subagent_limits(&cli).grace_turns, 2);
+        assert_eq!(subagent_limits(&cli, &no_config()).grace_turns, 2);
     }
 
     #[test]
     fn the_grace_window_defaults_to_the_stated_subagent_value() {
         let cli = Cli::parse_from(["rho"]);
         assert_eq!(
-            subagent_limits(&cli).grace_turns,
+            subagent_limits(&cli, &no_config()).grace_turns,
             rho_core::DEFAULT_SUBAGENT_GRACE_TURNS,
             "a child is warned by default, because it has nobody to ask for more turns"
         );
@@ -1718,7 +1770,7 @@ mod tests {
         // A refusal names this flag, so the flag has to change the deadline.
         let cli = Cli::parse_from(["rho", "--queue-wait-secs", "30"]);
         assert_eq!(
-            subagent_limits(&cli).queue_wait,
+            subagent_limits(&cli, &no_config()).queue_wait,
             std::time::Duration::from_secs(30)
         );
     }
@@ -1728,13 +1780,13 @@ mod tests {
         // A waiter gets one whole sibling run of patience. So a host that lengthens a
         // child run lengthens the patience with it. See decision D-a-waiter-has-a-deadline.
         let cli = Cli::parse_from(["rho", "--child-timeout-secs", "900"]);
-        let limits = subagent_limits(&cli);
+        let limits = subagent_limits(&cli, &no_config());
         assert_eq!(
             limits.queue_wait,
             std::time::Duration::from_secs(900),
             "an unset deadline follows the child timeout, and never the stated default"
         );
-        let plain = subagent_limits(&Cli::parse_from(["rho"]));
+        let plain = subagent_limits(&Cli::parse_from(["rho"]), &no_config());
         assert_eq!(plain.queue_wait, plain.child_timeout);
     }
 
@@ -1742,8 +1794,11 @@ mod tests {
     fn the_agent_steer_byte_flag_reaches_the_limits() {
         // A cap only the default constructor applied would make this flag dead surface.
         let cli = Cli::parse_from(["rho", "--max-agent-steer-bytes", "4096"]);
-        assert_eq!(subagent_limits(&cli).max_steer_message_bytes, 4096);
-        let plain = subagent_limits(&Cli::parse_from(["rho"]));
+        assert_eq!(
+            subagent_limits(&cli, &no_config()).max_steer_message_bytes,
+            4096
+        );
+        let plain = subagent_limits(&Cli::parse_from(["rho"]), &no_config());
         assert_eq!(
             plain.max_steer_message_bytes,
             rho_core::SubagentLimits::new().max_steer_message_bytes,
@@ -1754,7 +1809,7 @@ mod tests {
     #[test]
     fn the_grace_warning_can_be_turned_off_from_the_command_line() {
         let cli = Cli::parse_from(["rho", "--agent-grace-turns", "0"]);
-        assert_eq!(subagent_limits(&cli).grace_turns, 0);
+        assert_eq!(subagent_limits(&cli, &no_config()).grace_turns, 0);
     }
 
     #[test]
@@ -1762,7 +1817,7 @@ mod tests {
         // The defaults stay where `SubagentLimits::new` states them, so a flag that
         // is absent changes nothing. See decision D-no-four-argument-session-new.
         let cli = Cli::try_parse_from(["rho", "--provider", "openrouter"]).unwrap();
-        let limits = subagent_limits(&cli);
+        let limits = subagent_limits(&cli, &no_config());
         let stated = rho_core::SubagentLimits::new();
         assert_eq!(
             limits.max_children_per_parent,
@@ -1773,6 +1828,133 @@ mod tests {
         assert_eq!(limits.max_tool_calls, stated.max_tool_calls);
     }
 
+    // ---- SPEC-subagent-limits-are-a-floor: the [subagents] table reaches the agent ----
+    //
+    // One test per limit, and not one for the set. A per-field bug hides inside a set-shaped
+    // assertion, and the whole point of these is that a hand-kept field list drops a field.
+
+    #[test]
+    fn a_config_file_alone_lowers_the_children_limit() {
+        let (loaded, _dir) = config_from_project("[subagents]\nmax-children-per-parent = 2\n");
+        let cli = Cli::try_parse_from(["rho"]).unwrap();
+        assert_eq!(subagent_limits(&cli, &loaded).max_children_per_parent, 2);
+    }
+
+    #[test]
+    fn a_config_file_alone_lowers_the_live_limit() {
+        let (loaded, _dir) = config_from_project("[subagents]\nmax-live-total = 3\n");
+        let cli = Cli::try_parse_from(["rho"]).unwrap();
+        assert_eq!(subagent_limits(&cli, &loaded).max_live_total, 3);
+    }
+
+    #[test]
+    fn a_config_file_alone_lowers_the_child_timeout() {
+        let (loaded, _dir) = config_from_project("[subagents]\nchild-timeout-secs = 30\n");
+        let cli = Cli::try_parse_from(["rho"]).unwrap();
+        assert_eq!(
+            subagent_limits(&cli, &loaded).child_timeout,
+            std::time::Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn a_config_file_alone_forbids_spawning_with_a_zero_depth() {
+        // `max-depth = 0` is stricter than the CLI's own bound of 1, so it is honoured and it
+        // forbids spawning. Without this the key would parse and change nothing, which is the
+        // dead-switch defect this change exists to close.
+        let (loaded, _dir) = config_from_project("[subagents]\nmax-depth = 0\n");
+        let cli = Cli::try_parse_from(["rho"]).unwrap();
+        assert_eq!(subagent_limits(&cli, &loaded).max_depth, 0);
+    }
+
+    #[test]
+    fn a_config_depth_above_one_is_clamped_to_one() {
+        // `rho-cli` captures the parent tool set before `spawn_agent` joins it, so a
+        // grandchild cannot exist. A depth above 1 is a promise the CLI cannot keep. See
+        // decision D-cli-depth-is-zero.
+        let (loaded, _dir) = config_from_project("[subagents]\nmax-depth = 3\n");
+        let cli = Cli::try_parse_from(["rho"]).unwrap();
+        assert_eq!(subagent_limits(&cli, &loaded).max_depth, 1);
+    }
+
+    #[test]
+    fn the_children_flag_beats_the_config_file() {
+        let (loaded, _dir) = config_from_project("[subagents]\nmax-children-per-parent = 2\n");
+        let cli = Cli::try_parse_from(["rho", "--max-children-per-parent", "3"]).unwrap();
+        assert_eq!(
+            subagent_limits(&cli, &loaded).max_children_per_parent,
+            3,
+            "a flag is layer 6, so it wins even when it raises the cap"
+        );
+    }
+
+    #[test]
+    fn the_live_agents_flag_beats_the_config_file() {
+        let (loaded, _dir) = config_from_project("[subagents]\nmax-live-total = 3\n");
+        let cli = Cli::try_parse_from(["rho", "--max-live-agents", "9"]).unwrap();
+        assert_eq!(subagent_limits(&cli, &loaded).max_live_total, 9);
+    }
+
+    #[test]
+    fn the_child_timeout_flag_beats_the_config_file() {
+        let (loaded, _dir) = config_from_project("[subagents]\nchild-timeout-secs = 30\n");
+        let cli = Cli::try_parse_from(["rho", "--child-timeout-secs", "45"]).unwrap();
+        assert_eq!(
+            subagent_limits(&cli, &loaded).child_timeout,
+            std::time::Duration::from_secs(45)
+        );
+    }
+
+    #[test]
+    fn a_config_child_timeout_moves_the_queue_wait() {
+        // The deadline follows the **resolved** child timeout, so a 30 second child does not
+        // leave a waiter with ten minutes of patience. The timeout comes from a config file
+        // and not a flag on purpose: `Config.subagents.queue_wait` is always the filled
+        // default, so reading it would pass every per-limit test and break this rule in
+        // silence. A contract review named that shape.
+        let (loaded, _dir) = config_from_project("[subagents]\nchild-timeout-secs = 30\n");
+        let cli = Cli::try_parse_from(["rho"]).unwrap();
+        let limits = subagent_limits(&cli, &loaded);
+        assert_eq!(
+            limits.queue_wait,
+            std::time::Duration::from_secs(30),
+            "a waiter gets one whole sibling run of patience, and no more"
+        );
+        assert_eq!(limits.queue_wait, limits.child_timeout);
+    }
+
+    #[test]
+    fn a_flag_only_limit_still_comes_from_the_flag() {
+        // Six limits have a flag and no config key. This change must not disturb them.
+        let (loaded, _dir) = config_from_project("[subagents]\nmax-live-total = 3\n");
+        let cli = Cli::try_parse_from(["rho", "--agent-grace-turns", "2"]).unwrap();
+        let limits = subagent_limits(&cli, &loaded);
+        assert_eq!(limits.grace_turns, 2);
+        assert_eq!(
+            limits.max_queued_total,
+            rho_core::SubagentLimits::new().max_queued_total,
+            "a limit with no config key keeps its stated default"
+        );
+    }
+
+    #[test]
+    fn a_refused_raise_reaches_a_notice() {
+        // A silent refusal to obey a file is its own confusion. The notice must **not** name
+        // `--trust-project`, because trust does not lift the floor, and a notice that names
+        // the wrong fix teaches the user to distrust every notice.
+        let (loaded, _dir) = config_from_project("[subagents]\nmax-live-total = 4096\n");
+        let notices = wiring_notices(&loaded, "openrouter");
+        let joined = notices.join(" | ");
+        assert!(
+            joined.contains("max-live-total"),
+            "the notice names the limit rho refused to raise: {joined}"
+        );
+        assert!(
+            !joined.contains("--trust-project"),
+            "and it must not offer a flag that does not lift this rule: {joined}"
+        );
+    }
+
     #[test]
     fn a_cli_allows_one_level_of_delegation_and_no_more() {
         // The CLI depth is 1, so the root may spawn a child and the child may not
@@ -1781,7 +1963,7 @@ mod tests {
         // exactly that, after these unit tests passed. See
         // docs/verification/subagents-bedrock.md and decision D-cli-depth-is-zero.
         let cli = Cli::try_parse_from(["rho", "--provider", "openrouter"]).unwrap();
-        let limits = subagent_limits(&cli);
+        let limits = subagent_limits(&cli, &no_config());
         assert_eq!(
             limits.max_depth, 1,
             "the root must be able to spawn a child"

@@ -13,7 +13,6 @@ crates/rho-core/src/subagent/tree.rs::spawn_child  SPEC-subagent-slots-handles-g
 crates/rho-core/src/usage.rs::cache_hit_ratio  SPEC-core-runtime section 1 holds the append-only-cache claim it measures, and docs/benchmarks.md reports it through the live_sessions harness. The usage summary that shows it to a user is not wired.
 crates/rho-tools/src/lib.rs::builtin_registry  SPEC-core-runtime section 7 defines the registry. Production registers through builtin_registry_with_tasks_and_sandbox, which always has a task registry and a sandbox. Delete this no-tasks constructor when the rho-cli examples move to that builder.
 crates/rho-plugin/src/host.rs::load_cache  SPEC-hooks-and-plugins section 5 consumes it, and F-plugin-schema-cache is planned. No frontend constructs the plugin host yet, so the whole rho-plugin surface waits on one wiring lane.
-crates/rho-config/src/lib.rs::resolve_credential  No provider asks for a credential yet. The [credentials] table is documented as partly built, and item I15 wires it.
 crates/rho-session-import-pi/src/lib.rs::import_pi_session  A library for an importer nobody has built a command for. It is documented as a library only.
 
 # Test-only surface, said plainly. A review called the earlier wording an excuse, and it was:
