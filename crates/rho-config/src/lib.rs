@@ -161,13 +161,21 @@ fn clear<T>(slot: &mut Option<T>, name: &'static str, cleared: &mut Vec<&'static
     }
 }
 
-/// A bound, handled by `ConfigLayer::narrow_limits` and not by the trust gate.
+/// A bound this crate narrows elsewhere, and not in the trust gate.
 ///
 /// A bound is neither powerful nor harmless. A project file may lower one and never raise
-/// one, and that rule runs whether the project is trusted or not, so it cannot live in a
-/// gate that only fires when trust is absent. Naming a field here is a statement, and the
-/// reviewer can check it against `narrow_limits`. See `D-a-project-file-only-lowers-a-limit`.
-fn bound<T>(_value: &Option<T>) {}
+/// one, and that rule runs whether the project is trusted or not, so it cannot live in a gate
+/// that only fires when trust is absent.
+///
+/// The trait is the classification, exactly as `Leaf` is. It is implemented **only** for a
+/// type that `ConfigLayer::narrow_limits` really narrows. So routing a future field here does
+/// not compile until that field's type is narrowed too, and `bound` cannot become a shrug
+/// that lets a powerful field past with no gate at all. A review named that risk. See
+/// `D-a-project-file-only-lowers-a-limit`.
+trait Bounded {}
+impl Bounded for SubagentLimitsLayer {}
+
+fn bound<T: Bounded>(_value: &Option<T>) {}
 
 /// Strip every nested layer in a map, one level deeper. The recursion is structural: it
 /// descends into any `BTreeMap<String, ConfigLayer>`, so a later nesting level inherits the
@@ -543,23 +551,52 @@ fn non_empty(value: Option<String>) -> Option<String> {
 
 /// Echo a url with any user and password replaced, so an error message holds no secret.
 ///
-/// A url that does not parse is echoed whole, because there is no userinfo span to find and
-/// the user needs to see what they typed. A url that parses keeps its scheme, host, port,
-/// and path, so the message still names the endpoint the user set.
+/// A url that parses keeps its scheme, host, port, and path, so the message still names the
+/// endpoint the user set.
+///
+/// **A url that does not parse is scrubbed by hand.** An earlier version returned it whole,
+/// and said a url that does not parse has no userinfo span to find. That was wrong.
+/// `https://user:secret@host:70000` fails on the port and still carries the password, so the
+/// password reached stderr. A security review found it. The fallback therefore cuts the span
+/// between `://` and the last `@` of the authority, where userinfo sits whether the parser
+/// accepted it or not.
 fn hide_userinfo(value: &str) -> String {
-    let Ok(mut url) = url::Url::parse(value) else {
-        // A url that does not parse has no userinfo span to find, and the user needs to see
-        // what they typed.
+    if let Ok(mut url) = url::Url::parse(value) {
+        if url.username().is_empty() && url.password().is_none() {
+            return value.to_string();
+        }
+        // `set_username` and `set_password` fail only for a url that cannot have a host, such
+        // as `mailto:`. Such a url carries no userinfo either, so the check above returned.
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
+        return url.to_string();
+    }
+    scrub_userinfo_by_hand(value)
+}
+
+/// Cut the userinfo span out of a string that is not a valid url.
+///
+/// Userinfo sits between `://` and the last `@` of the authority. With no `://`, or no `@` in
+/// the authority, the value is returned whole, because there is no span to cut.
+fn scrub_userinfo_by_hand(value: &str) -> String {
+    let Some(scheme_end) = value.find("://") else {
         return value.to_string();
     };
-    if url.username().is_empty() && url.password().is_none() {
-        return value.to_string();
+    let authority_start = scheme_end + 3;
+    let authority_end = value[authority_start..]
+        .find(['/', '?', '#'])
+        .map(|offset| authority_start + offset)
+        .unwrap_or(value.len());
+    let authority = &value[authority_start..authority_end];
+    match authority.rfind('@') {
+        Some(at) => format!(
+            "{}{}{}",
+            &value[..authority_start],
+            &authority[at + 1..],
+            &value[authority_end..]
+        ),
+        None => value.to_string(),
     }
-    // `set_username` and `set_password` fail only for a url that cannot have a host, such as
-    // `mailto:`. Such a url carries no userinfo either, so the checks above already returned.
-    let _ = url.set_username("");
-    let _ = url.set_password(None);
-    url.to_string()
 }
 
 /// Whether the user trusts the project file's powerful keys. `--trust-project` sets it.
@@ -1283,20 +1320,33 @@ fn parse_reasoning(layer: &ConfigLayer) -> Result<rho_core::ReasoningDisplay, Co
     }
 }
 
+/// Turn the file's limit fields into the runtime limits, filling each gap with the default.
+///
+/// It opens with an exhaustive `let Self { .. }` destructure, with no `..` and no `_`, for the
+/// reason `merge` and `narrow_to` do. A review found the gap: a fifth field could be added to
+/// `merge` and `narrow_to`, where the compiler forces it, and forgotten **here**, where it
+/// would parse and narrow and still never reach `rho-core`. That is the dead-switch class this
+/// whole change exists to close.
 fn build_subagents(layer: Option<&SubagentLimitsLayer>) -> rho_core::SubagentLimits {
     let mut limits = rho_core::SubagentLimits::default();
     if let Some(source) = layer {
-        if let Some(value) = source.max_depth {
-            limits.max_depth = value;
+        let SubagentLimitsLayer {
+            max_depth,
+            max_children_per_parent,
+            max_live_total,
+            child_timeout_secs,
+        } = source;
+        if let Some(value) = max_depth {
+            limits.max_depth = *value;
         }
-        if let Some(value) = source.max_children_per_parent {
-            limits.max_children_per_parent = value;
+        if let Some(value) = max_children_per_parent {
+            limits.max_children_per_parent = *value;
         }
-        if let Some(value) = source.max_live_total {
-            limits.max_live_total = value;
+        if let Some(value) = max_live_total {
+            limits.max_live_total = *value;
         }
-        if let Some(secs) = source.child_timeout_secs {
-            limits.child_timeout = std::time::Duration::from_secs(secs);
+        if let Some(secs) = child_timeout_secs {
+            limits.child_timeout = std::time::Duration::from_secs(*secs);
         }
     }
     limits
@@ -1662,5 +1712,156 @@ mod tests {
             "a nested powerful key is cleared within the bound, got {:?}",
             cursor.skill_paths
         );
+    }
+
+    #[test]
+    fn narrow_to_leaves_an_unset_field_unset() {
+        // An unset field states nothing, so narrowing must not write the ceiling into it. A
+        // pinned field would name a limit the user never set, and it would beat a later layer
+        // that states nothing.
+        //
+        // **This has to be a unit test.** Two attempts to prove it through `Config::load`
+        // failed, and a deliberate break passed both: `build_subagents` fills every gap with
+        // the same default the ceiling holds, so a pinned field and an unset field give the
+        // identical `Config` today. The invariant is real and it is only visible here. It will
+        // become visible through `load` the day a layer after the project file can set a limit,
+        // which is why it is pinned now rather than left to that day.
+        let ceiling = rho_core::SubagentLimits::new();
+        let mut layer = SubagentLimitsLayer {
+            max_live_total: Some(ceiling.max_live_total + 4000),
+            ..SubagentLimitsLayer::default()
+        };
+        let lowered = layer.narrow_to(&ceiling);
+
+        assert_eq!(lowered, vec!["subagents.max-live-total"]);
+        assert_eq!(layer.max_live_total, Some(ceiling.max_live_total));
+        assert_eq!(
+            layer.max_depth, None,
+            "a field the layer never set must stay unset"
+        );
+        assert_eq!(layer.max_children_per_parent, None, "the same, per field");
+        assert_eq!(layer.child_timeout_secs, None, "the same, per field");
+    }
+
+    #[test]
+    fn narrow_to_leaves_a_value_at_or_below_the_ceiling_untouched() {
+        // The other half. A value the ceiling allows is not rewritten, and it is not named, so a
+        // project file that asks for less is obeyed in silence.
+        //
+        // **Every field sits exactly at the ceiling**, which is the boundary. An earlier version
+        // put one field below the ceiling and one at it, and a break that changed a single arm
+        // from `>` to `>=` passed, because that arm's field was the one below. So each field is
+        // at the boundary here, and a wrong comparison in any arm fails.
+        let ceiling = rho_core::SubagentLimits::new();
+        let mut layer = SubagentLimitsLayer {
+            max_depth: Some(ceiling.max_depth),
+            max_children_per_parent: Some(ceiling.max_children_per_parent),
+            max_live_total: Some(ceiling.max_live_total),
+            child_timeout_secs: Some(ceiling.child_timeout.as_secs()),
+        };
+        let lowered = layer.narrow_to(&ceiling);
+        assert!(
+            lowered.is_empty(),
+            "a value at the ceiling asks for nothing more: {lowered:?}"
+        );
+        assert_eq!(layer.max_depth, Some(ceiling.max_depth));
+        assert_eq!(
+            layer.max_children_per_parent,
+            Some(ceiling.max_children_per_parent)
+        );
+        assert_eq!(layer.max_live_total, Some(ceiling.max_live_total));
+        assert_eq!(
+            layer.child_timeout_secs,
+            Some(ceiling.child_timeout.as_secs())
+        );
+
+        // And a value below the ceiling is kept as it is, per field.
+        let mut lower = SubagentLimitsLayer {
+            max_depth: Some(0),
+            max_children_per_parent: Some(1),
+            max_live_total: Some(3),
+            child_timeout_secs: Some(30),
+        };
+        assert!(lower.narrow_to(&ceiling).is_empty());
+        assert_eq!(lower.max_depth, Some(0));
+        assert_eq!(lower.max_children_per_parent, Some(1));
+        assert_eq!(lower.max_live_total, Some(3));
+        assert_eq!(lower.child_timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn the_depth_bound_also_truncates_a_nested_limit_table() {
+        // The limit floor recurses into a profile, and it carries the same bound the trust gate
+        // carries, for the same reason: a project profile once smuggled a powerful key past a
+        // gate that read only the top layer. See `docs/verification/profile-trust-bypass.md`.
+        //
+        // A review found this branch untested. Past the bound the nested limit tables are
+        // cleared wholesale, so nothing deeper can raise a cap.
+        let ceiling = rho_core::SubagentLimits::new();
+        let mut layer = nested_limit_chain(20, ceiling.max_live_total + 4000);
+        layer.narrow_limits(&ceiling);
+
+        let mut cursor = &layer;
+        for _ in 0..MAX_PROFILE_DEPTH {
+            cursor = cursor
+                .profiles
+                .get("p")
+                .expect("levels up to the bound remain");
+        }
+        let past_bound = cursor
+            .profiles
+            .get("p")
+            .expect("the level past the bound exists");
+        assert!(
+            past_bound.subagents.is_none(),
+            "past the bound a nested limit table is cleared, so it cannot raise a cap"
+        );
+        assert!(
+            past_bound.profiles.is_empty(),
+            "and nothing deeper survives either"
+        );
+    }
+
+    #[test]
+    fn a_nested_limit_table_within_the_bound_is_narrowed() {
+        // The other half. Shallower than the bound, the value is lowered rather than dropped,
+        // so a project profile that asks for less still works.
+        let ceiling = rho_core::SubagentLimits::new();
+        let mut layer = nested_limit_chain(3, ceiling.max_live_total + 4000);
+        let lowered = layer.narrow_limits(&ceiling);
+        assert!(
+            lowered.contains(&"subagents.max-live-total"),
+            "the nested raise is named: {lowered:?}"
+        );
+        let mut cursor = &layer;
+        for _ in 0..3 {
+            cursor = cursor.profiles.get("p").expect("levels remain");
+        }
+        assert_eq!(
+            cursor
+                .subagents
+                .as_ref()
+                .and_then(|limits| limits.max_live_total),
+            Some(ceiling.max_live_total),
+            "a nested limit is lowered to the ceiling within the bound"
+        );
+    }
+
+    /// A chain of profiles named `p`, `depth` levels deep, with a raised `max-live-total` at
+    /// the deepest level.
+    fn nested_limit_chain(depth: usize, live_total: usize) -> ConfigLayer {
+        let mut layer = ConfigLayer {
+            subagents: Some(SubagentLimitsLayer {
+                max_live_total: Some(live_total),
+                ..SubagentLimitsLayer::default()
+            }),
+            ..ConfigLayer::default()
+        };
+        for _ in 0..depth {
+            let mut parent = ConfigLayer::default();
+            parent.profiles.insert("p".to_string(), layer);
+            layer = parent;
+        }
+        layer
     }
 }

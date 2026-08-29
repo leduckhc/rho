@@ -5,11 +5,11 @@
 //! here states its choices, so no credential or session boundary is set by accident. See
 //! `SPEC-core-runtime` decisions D-session-config and D-no-four-argument-session-new.
 //!
-//! **No function here reads the process environment.** A credential comes from the merged
-//! configuration, through `Config::resolve_credential_or_env`, and every other value comes
-//! through the same `&dyn EnvLookup`. So a test never depends on the machine it runs on, and
-//! `unwrap_or_default()` can never turn an absent key into an empty string again. See
-//! `SPEC-config-call-site` section 7.
+//! **No function here reads the real process environment directly.** A credential comes from
+//! the merged configuration, through `Config::resolve_credential_or_env`, and every other
+//! value comes through an injected `&dyn EnvLookup`. So a test never depends on the machine it
+//! runs on, and `unwrap_or_default()` can never turn an absent key into an empty string again.
+//! See `SPEC-config-call-site` section 7.
 
 use std::sync::Arc;
 
@@ -785,8 +785,11 @@ mod tests {
     fn no_provider_builder_reads_the_process_environment() {
         // A source guard. Five `std::env::var` calls here turned an absent key into an empty
         // string, and `SPEC-config-call-site` section 2 forbids a credential read that way. A
-        // sixth must not come back, and a test cannot see one, because a test cannot tell a
-        // read of the real environment from a read of the map it passed in.
+        // sixth must not come back.
+        //
+        // A grep cannot catch an aliased import, such as `use std::env as sys; sys::var(...)`,
+        // so it is not the whole guard. `a_provider_builder_honours_the_injected_environment`
+        // is the behavioural half, and it cannot be walked around. A review named the bypass.
         // The needle is built from two pieces, so this guard's own line does not match it.
         let needle = concat!("std::env", "::var");
         let source = include_str!("provider.rs");
@@ -794,10 +797,38 @@ mod tests {
             .lines()
             .filter(|line| line.contains(needle))
             .filter(|line| !line.trim_start().starts_with("//"))
+            // The behavioural test above reads the real environment on purpose, to prove the
+            // value it injects is not already there.
+            .filter(|line| !line.contains("OPENROUTER_KEY_ENV).is_ok_and("))
             .collect();
         assert!(
             reads.is_empty(),
-            "every read goes through &dyn EnvLookup, got: {reads:?}"
+            "every production read goes through &dyn EnvLookup, got: {reads:?}"
+        );
+    }
+
+    #[cfg(feature = "openrouter")]
+    #[test]
+    fn a_provider_builder_honours_the_injected_environment() {
+        // The behavioural half of the guard above, and the one that cannot be walked around.
+        //
+        // A source grep catches the literal spelling `std::env::var`. It does not catch
+        // `use std::env as sys; sys::var(...)`, which reads the real process environment just
+        // as well. So this injects a value the real process environment does not hold, and
+        // asserts the builder used it. A builder that read the real environment sees nothing
+        // and fails.
+        let injected = "sk-only-in-the-injected-map";
+        assert!(
+            !std::env::var(OPENROUTER_KEY_ENV).is_ok_and(|value| value == injected),
+            "the real environment must not hold the injected value, or this proves nothing"
+        );
+        let (config, _dir) = config_from_global("");
+        let built = openrouter_config_from(&config, &env(&[(OPENROUTER_KEY_ENV, injected)]))
+            .expect("the injected key resolves");
+        assert_eq!(
+            built.api_key.expose(),
+            injected,
+            "the builder must read the lookup it was given, and not the real environment"
         );
     }
 

@@ -19,8 +19,9 @@ $ grep -rn "\.subagents" crates --include=*.rs | grep -v rho-config
 ```
 
 So `subagent_limits` in `crates/rho-cli/src/cli.rs` reads flags only, and a `[subagents]`
-block in a config file is silently inert. `docs/guide/configuration.md` and
-`docs/guide/subagents.md` both say so, in a warning box each.
+block in a config file was silently inert. `docs/guide/configuration.md`,
+`docs/guide/subagents.md`, and `docs/guide/status.md` each said so in a warning, and this
+change deletes those warnings.
 
 A second defect sits beside it. `ConfigLayer::merge` replaces `subagents` wholesale, so a
 project table that names one limit erases every limit the global file set. That is the same
@@ -227,9 +228,24 @@ a per-field bug hides inside a set-shaped assertion.
   user's own profile is still their own choice.
 - `trust_does_not_let_a_project_file_raise_a_limit` — `--trust-project` loads a capability
   and does not lift this rule.
-- `an_unset_limit_field_stays_unset_after_narrowing` — narrowing must not pin the ceiling
-  into a layer. A pinned field would name a limit the user never set in the notice, and it
-  would beat a later layer that states nothing.
+- `narrow_to_leaves_an_unset_field_unset` — narrowing must not pin the ceiling into a layer. A
+  pinned field would name a limit the user never set, and it would beat a later layer that
+  states nothing.
+
+  It is a **unit** test, in `crates/rho-config/src/lib.rs`. `build_subagents` fills every gap
+  with the same default the ceiling holds, so a pinned field and an unset field give the
+  identical `Config` today. Two attempts to prove it through `Config::load` passed against a
+  deliberate break, and a review found that. The invariant is real, and it becomes visible
+  through `load` the day a layer after the project file can set a limit.
+- `narrow_to_leaves_a_value_at_or_below_the_ceiling_untouched` — the boundary. Every field sits
+  exactly at the ceiling, so a `>` that became `>=` in any one arm fails it.
+- `only_the_limit_a_file_raised_is_named` — a notice must not name a limit the user never set.
+- `the_refusal_report_holds_exactly_one_line_per_raised_limit` — the whole vector is asserted,
+  so a duplicate line fails it.
+- `the_depth_bound_also_truncates_a_nested_limit_table` and
+  `a_nested_limit_table_within_the_bound_is_narrowed` — the `MAX_PROFILE_DEPTH` bound on the
+  limit recursion, which a review found untested. Both are unit tests, for the same reason as
+  the trust gate's own two.
 - `a_refused_raise_is_named_in_the_config` — `lowered_limits` holds the key and the file.
 - `loading_twice_gives_the_same_limits` — rule 8.
 

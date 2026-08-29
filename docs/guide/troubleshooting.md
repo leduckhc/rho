@@ -245,11 +245,32 @@ rho: 1 agent definition(s) available to spawn_agent: summariser
 
 No such line means no definition was found.
 
-### A `[credentials]` block has no effect
+### rho refuses a credential my project file sets
 
-Nothing resolves a named credential in this version, and no provider asks for one. So the
-whole table is inert. Give the provider its key through the environment instead, as
-[providers](providers.md) shows.
+The message names `--trust-project`:
+
+```
+rho: cannot resolve the credential "openrouter": the project file /repo/.rho/config.toml
+names this credential, and the project is not trusted. Pass --trust-project to allow it.
+```
+
+A project config file arrives with a clone, so rho refuses its whole `credentials` table by
+default. Every form is refused, not only a `!command`. A clone chooses `provider` too, so it
+chooses which credential resolves, and it could name a variable holding another secret.
+
+Pass `--trust-project` when the repository is your own. Or move the entry to your own
+`~/.config/rho/config.toml`, which is never refused.
+
+### rho says a project file may only lower a subagent limit
+
+```
+rho: a project file may only lower a subagent limit, so rho kept your own value for
+subagents.max-live-total (from /repo/.rho/config.toml).
+```
+
+A limit is a bound, so a repository may make a run stricter and never looser. `--trust-project`
+does not change this. To raise the cap, pass the flag for this run, or set the value in your own
+global file.
 
 ### Instructions above your project are skipped
 

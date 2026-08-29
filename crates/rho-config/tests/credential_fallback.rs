@@ -20,6 +20,9 @@ use rho_config::{Config, ConfigPaths, ProjectTrust, Sources};
 const NAME: &str = "openrouter";
 const FALLBACK: &str = "OPENROUTER_API_KEY";
 
+/// The token the stderr probe prints on stdout, so the parent knows the child really ran.
+const PROBE_RAN: &str = "STDERR-PROBE-RESOLVED-A-CREDENTIAL";
+
 /// Load a config from one global file. A global file is the user's own, so nothing is gated.
 fn load_global(contents: &str) -> Config {
     let dir = temp_dir();
@@ -63,6 +66,36 @@ fn an_empty_credential_is_an_error() {
     assert!(
         error.to_string().contains(NAME),
         "the message names the credential: {error}"
+    );
+}
+
+#[test]
+fn an_empty_entry_value_is_an_error_through_resolve_credential() {
+    // `non_empty_secret` guards `resolve_credential` too, and a review found that path
+    // untested: the only tested empty case went through the fallback branch, which has its own
+    // check. An empty **literal** in a file reaches this one.
+    //
+    // It matters because an empty key reaches the provider and returns 401, which reads as a
+    // broken account rather than a missing key.
+    let config = load_global("[credentials]\nopenrouter = \"\"\n");
+    let error = config
+        .resolve_credential(NAME, &env_map(&[]))
+        .expect_err("an empty literal is not a key");
+    let message = error.to_string();
+    assert!(
+        message.contains("empty"),
+        "the message says the value was empty: {message}"
+    );
+
+    // The same value through the fallback-carrying entry point, so both doors are shut. The
+    // fallback variable is **set** here, so a fallback that fired on the empty entry would
+    // return a key and pass.
+    let error = config
+        .resolve_credential_or_env(NAME, FALLBACK, &env_map(&[(FALLBACK, "sk-from-the-env")]))
+        .expect_err("an empty entry must not fall back either");
+    assert!(
+        error.to_string().contains("empty"),
+        "an empty entry is refused, and never replaced by the variable: {error}"
     );
 }
 
@@ -229,6 +262,66 @@ fn a_userinfo_base_url_error_hides_the_password() {
 }
 
 #[test]
+fn a_userinfo_base_url_error_hides_the_password_even_when_the_url_is_malformed() {
+    // The leak a security review found after the first fix. `hide_userinfo` returned an
+    // unparseable url whole, and said such a url has no userinfo span. That was wrong: a bad
+    // port fails the parse and the password is still there, so it reached stderr.
+    //
+    // Each case below fails `url::Url::parse` and still carries a password.
+    let dir = temp_dir();
+    for (index, value) in [
+        "https://alice:sup3rsecret@models.example.com:70000/v1",
+        "https://alice:sup3rsecret@mod els.example.com/v1",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let global = write_file(
+            &dir,
+            &format!("malformed{index}.toml"),
+            &format!("base-url = \"{value}\"\n"),
+        );
+        let sources = Sources::from_paths(ConfigPaths {
+            global: Some(global),
+            project: None,
+            ..Default::default()
+        });
+        let error = Config::load(&sources).expect_err("a malformed url is refused");
+        let message = error.to_string();
+        assert!(
+            !message.contains("sup3rsecret"),
+            "a malformed url must not print its password either: {message}"
+        );
+        assert!(
+            message.contains("models.example.com") || message.contains("els.example.com"),
+            "and the host still reaches the user: {message}"
+        );
+    }
+}
+
+#[test]
+fn a_base_url_with_no_userinfo_is_echoed_whole() {
+    // The other half. A value with no user and no password is shown exactly as the user typed
+    // it, so the scrub does not damage an honest typo.
+    let dir = temp_dir();
+    let global = write_file(
+        &dir,
+        "typo.toml",
+        "base-url = \"htps:/models.example.com\"\n",
+    );
+    let sources = Sources::from_paths(ConfigPaths {
+        global: Some(global),
+        project: None,
+        ..Default::default()
+    });
+    let error = Config::load(&sources).expect_err("a value that is not a url is refused");
+    assert!(
+        error.to_string().contains("htps:/models.example.com"),
+        "the user must see what they typed: {error}"
+    );
+}
+
+#[test]
 fn a_credential_command_stderr_does_not_reach_the_parent() {
     // A chatty helper, or a `set -x` in a wrapper script, could print a key onto rho's own
     // stderr. `resolve_command` piped stdout and left stderr inherited.
@@ -259,6 +352,8 @@ fn a_credential_command_stderr_does_not_reach_the_parent() {
             .resolve_credential_or_env(NAME, FALLBACK, &env_map(&[("PATH", path_value())]))
             .expect("the helper runs");
         assert_eq!(secret.expose(), "ok");
+        // The parent reads this off stdout, so it knows the probe really ran.
+        println!("{PROBE_RAN}");
         return;
     }
 
@@ -276,6 +371,14 @@ fn a_credential_command_stderr_does_not_reach_the_parent() {
         output.status.success(),
         "the child probe must pass: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    // The child must really have run the probe. Without this the argv could select zero tests,
+    // the status would still be a success, and the stderr assertion below would prove nothing.
+    // A review named that trap.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(PROBE_RAN),
+        "the child must really have resolved a credential, got stdout: {stdout}"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

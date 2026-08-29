@@ -305,12 +305,21 @@ fn a_global_profile_may_raise_a_limit() {
 // ---- the shape of the narrowing ----
 
 #[test]
-fn an_unset_limit_field_stays_unset_after_narrowing() {
-    // Narrowing must not pin the ceiling into every field. A pinned field would name a limit
-    // the user never set, and a notice that names the wrong limit teaches the user to
-    // distrust every notice. So exactly one limit is named here.
+fn only_the_limit_a_file_raised_is_named() {
+    // A notice must name the limit the file raised, and no other. A notice that names a limit
+    // the user never set teaches the user to distrust every notice.
+    //
+    // **This test does not prove that an unset field stays unset.** Two versions tried, and a
+    // deliberate break passed both: `build_subagents` fills every gap with the same default the
+    // ceiling holds, so a pinned field and an unset field give the identical `Config` today.
+    // `narrow_to_leaves_an_unset_field_unset`, a unit test in `crates/rho-config/src/lib.rs`,
+    // is where that invariant is observable. A review found this, and the honest split is the
+    // fix.
+    //
+    // The global file raises two limits, so the ceiling is not the built-in default and the
+    // value assertions below can fail.
     let (config, _dir) = load(
-        "",
+        "[subagents]\nmax-children-per-parent = 9\nchild-timeout-secs = 900\n",
         "[subagents]\nmax-live-total = 4096\n",
         ProjectTrust::Untrusted,
     );
@@ -320,13 +329,53 @@ fn an_unset_limit_field_stays_unset_after_narrowing() {
         "only the limit the file raised may be named: {:?}",
         config.lowered_limits
     );
-    let stated = SubagentLimits::new();
+    // The project file states nothing about these two, so the global file's values must stand.
+    // A narrowing that pinned the ceiling into the project layer would write 9 and 900 there
+    // too, and the merge would then read them from the project layer instead. That is still 9
+    // and 900 today, so the load is checked from the other side as well: the project layer
+    // must remain silent about a field it never named.
+    assert_eq!(config.subagents.max_children_per_parent, 9);
+    assert_eq!(config.subagents.child_timeout, Duration::from_secs(900));
     assert_eq!(
-        config.subagents.max_children_per_parent,
-        stated.max_children_per_parent
+        config.subagents.max_depth,
+        SubagentLimits::new().max_depth,
+        "a field no layer set keeps the built-in default"
     );
-    assert_eq!(config.subagents.max_depth, stated.max_depth);
-    assert_eq!(config.subagents.child_timeout, stated.child_timeout);
+}
+
+#[test]
+fn the_refusal_report_holds_exactly_one_line_per_raised_limit() {
+    // The report is what the notice prints, so a duplicate line or an extra line is a defect a
+    // user sees. This asserts the whole vector, not its length, so an extra name fails it.
+    let (config, _dir) = load_with_profile(
+        "[subagents]\nmax-children-per-parent = 9\n",
+        "[subagents]\nmax-live-total = 4096\n\
+         [profiles.fast]\nmodel = \"some-model\"\n",
+        "fast",
+    );
+    assert_eq!(
+        config.lowered_limits,
+        vec![format!(
+            "subagents.max-live-total (from {})",
+            config_project_path(&config)
+        )],
+        "exactly one limit asked for more, so exactly one is named"
+    );
+    assert_eq!(
+        config.subagents.max_children_per_parent, 9,
+        "the user's own raised value stands, because no project layer touched it"
+    );
+}
+
+/// The project path a `lowered_limits` line names. It is read back out of the report, so the
+/// assertion above does not have to thread the temp path through.
+fn config_project_path(config: &Config) -> String {
+    config
+        .lowered_limits
+        .first()
+        .and_then(|line| line.split_once("(from "))
+        .map(|(_, tail)| tail.trim_end_matches(')').to_string())
+        .unwrap_or_default()
 }
 
 #[test]

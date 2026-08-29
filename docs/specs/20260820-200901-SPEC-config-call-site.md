@@ -533,6 +533,9 @@ In `rho-config`:
   fallback variable is unset, and the error names both. No empty `Secret` is returned.
 - `an_empty_credential_is_an_error` — an exported-but-empty variable is not a key. The entry
   and the fallback are both empty, so the test cannot pass for the wrong reason.
+- `an_empty_entry_value_is_an_error_through_resolve_credential` — `non_empty_secret` guards
+  `resolve_credential` too, and a review found that path untested. An empty literal in a file is
+  refused, and it does not fall back to the variable either.
 - `a_credentials_entry_beats_the_fallback_variable` — the file wins, so a config file really
   chooses the key. The entry value and the variable value differ, so a swap of the two
   arguments fails it.
@@ -562,5 +565,9 @@ In `rho-cli`:
   empty `[credentials]` table does not stop a Bedrock build.
 - `bedrock_still_reads_its_region_from_the_environment` — the region is not a credential.
 - `no_provider_builder_reads_the_process_environment` — a source guard, so a sixth
-  `std::env::var` cannot come back.
+  `std::env::var` cannot come back. It is a backstop, not the whole guard: a grep cannot see an
+  aliased import.
+- `a_provider_builder_honours_the_injected_environment` — the behavioural half, which an aliased
+  import cannot walk around. It injects a value the real environment does not hold. A review
+  found the bypass.
 - `check_provider_name_agrees_with_build_provider` — the two name lists cannot drift.

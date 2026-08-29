@@ -314,3 +314,38 @@ asking for a smaller fan-out is obeyed.
   and each needs its own probe. `SPEC-subagent-limits-are-a-floor` keeps them out of scope.
 - **CI.** GitHub Actions is billing-blocked in this repository, so every job finishes in about
   three seconds with no steps and no logs. The local gate is the only proof.
+
+## Re-driven after the review phase
+
+The review phase changed the code, so every claim above was re-driven against the rebuilt
+release binary. The review is recorded here because two of its findings changed behaviour.
+
+### Run 20 — an empty key in a config file
+
+A security review and a code review both asked for this path. `[credentials] openrouter = ""`:
+
+```
+rho: cannot resolve the credential "openrouter": the credential resolved to an empty value.
+An empty key reaches the provider and returns 401. Set a real value.
+```
+
+Exit 1. The empty rule guards a value from a file, and not only a value from a variable.
+
+### Run 21 — a base-url password no longer reaches stderr
+
+A security review found that `hide_userinfo` echoed a url whole when the url failed to parse,
+and a bad port does exactly that. So `https://alice:sup3rsecret@models.example.com:70000/v1`
+printed the password.
+
+```
+rho: the base-url value "https://models.example.com:70000/v1" is malformed: it is not a url
+with a scheme, for example https://host/v1. Fix it, or unset base-url to use the default
+endpoint.
+```
+
+The password is gone, and the host still reaches the user.
+
+### Runs 1 to 19, re-driven
+
+Run 1 answered `REDRIVE-OK` on live OpenRouter. Run 2's message is unchanged. Run 17's notice
+and its enforced cap of 0 are unchanged. So the review fixes broke nothing.
