@@ -10,10 +10,12 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-a-bad-middle-record-is-skipped-and-counted](20260822-093000-D-a-bad-middle-record-is-skipped-and-counted.md) | 20260822 | A bad record in the middle of a session file is skipped and counted |
 | [D-a-bad-session-file-is-one-row](20260824-221849-D-a-bad-session-file-is-one-row.md) | 20260824 | One unreadable session file must not fail a list |
 | [D-a-budget-is-measured-not-asserted](20260818-120304-D-a-budget-is-measured-not-asserted.md) | 20260818 | A cost budget is measured, or it is prose |
+| [D-a-callsite-caches-interest-globally](20260829-212318-D-a-callsite-caches-interest-globally.md) | 20260829 | A thread-local log capture cannot be repaired, so it goes |
 | [D-a-command-is-strict-and-an-event-is-loose](20260826-184416-D-a-command-is-strict-and-an-event-is-loose.md) | 20260826 | A command denies an unknown field, and an event ignores one |
 | [D-a-command-line-is-capped](20260826-184415-D-a-command-line-is-capped.md) | 20260826 | One command line is capped, because stdin is the third unbounded reader |
 | [D-a-dialog-answer-holds-exactly-one-value](20260826-184413-D-a-dialog-answer-holds-exactly-one-value.md) | 20260826 | A dialog answer holds exactly one value, and an untagged reader cannot |
 | [D-a-dialog-timeout-cancels](20260826-184414-D-a-dialog-timeout-cancels.md) | 20260826 | A dialog timeout denies, and it never picks an option |
+| [D-a-drop-report-is-data-not-a-log-line](20260829-212319-D-a-drop-report-is-data-not-a-log-line.md) | 20260829 | The provider answers with its refusals, so no test reads a log |
 | [D-a-live-session-holds-a-lock](20260824-224512-D-a-live-session-holds-a-lock.md) | 20260824 | A live session holds an advisory lock, because fx is the only prior art that solved this |
 | [D-a-merged-value-error-names-no-file](20260821-231500-D-a-merged-value-error-names-no-file.md) | 20260821 | A merged value error names the key and the value, and never a file |
 | [D-a-panel-nobody-can-open](20260818-171500-D-a-panel-nobody-can-open.md) | 20260818 | A rendered panel with no key that opens it is not a feature |

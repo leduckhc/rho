@@ -6,6 +6,9 @@ Prior art: pi, jcode, and fx, all three read as source. See `docs/comparison.md`
 Amended 20260821. The replay payload is now one opaque, owner-tagged provider state. See
 decision `D-reasoning-replay-is-opaque-provider-state`. Section 4 holds the change.
 
+Amended 20260829. A refused replay is reported as data, and no longer only as a log line.
+See decision `D-a-drop-report-is-data-not-a-log-line`. Section 6 holds the contract.
+
 ## 0. The defects this fixes
 
 Each one is measured, and each has a named test in section 8.
@@ -482,6 +485,71 @@ D-a-bad-reasoning-mode-is-refused.
     wildcard, because a wire event set is open and a provider adds events without rho.
     `rho-provider-azure/src/lib.rs:600` is a request builder, so its `_ => {}` goes.
 
+### How a drop is reported
+
+Rule 8 says a drop is never silent. It first said that in a log line only, so the only test
+that could prove the rule had to install a subscriber and read text. That seam broke. A
+thread-local capture caught nothing under a parallel run, six times in four hundred runs. See
+`D-a-callsite-caches-interest-globally` for the measurement.
+
+So the report is **data**, and the log line is a courtesy. The request builder answers with
+the payloads it refused.
+
+```rust
+/// Why one stored reasoning payload did not travel to the provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayDropReason {
+    /// The payload belongs to another provider, or to another model.
+    AnotherOwner,
+    /// The payload carries no signature, so the endpoint would refuse the turn.
+    NoSignature,
+    /// An encrypted payload did not decode from base64.
+    UndecodableRedaction,
+    /// The provider SDK refused to build the block.
+    UnbuildableBlock,
+}
+
+impl ReplayDropReason {
+    /// The one sentence a drop report says.
+    pub fn report(self) -> &'static str;
+}
+
+/// One refused payload, named by where it sat and why it stayed behind.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DroppedReplay {
+    /// The index of the message the payload sat in.
+    pub message_index: usize,
+    /// Why the payload did not travel.
+    pub reason: ReplayDropReason,
+}
+
+/// The messages a request carries, and the payloads that did not travel.
+///
+/// No `Default`, on purpose. A default would say "nothing was refused".
+#[derive(Debug)]
+pub struct BuiltMessages {
+    pub messages: Vec<aws_sdk_bedrockruntime::types::Message>,
+    pub dropped_replays: Vec<DroppedReplay>,
+}
+
+pub fn build_messages_for_model(messages: &[Message], model: &str) -> BuiltMessages;
+```
+
+The rules this shape keeps:
+
+- **The wire does not change.** The caller reads `messages` and sends what it always sent.
+- **No payload sits in the data.** `DroppedReplay` has no field for one, so rule 9 holds by
+  construction.
+- **The log and the data read one table**, `ReplayDropReason::report`. So a report cannot
+  drift from the reason it names.
+- **The enum stays exhaustive.** A new refusal breaks every reader on purpose. A catch-all
+  arm is how `ToolKind::Other` approved every tool that forgot its kind.
+- **Rule 12 is not a refusal.** A payload outside the current tool loop is history. It is not
+  in `dropped_replays`, and it gets no log line, because a report on every turn is noise.
+
+Only `rho-provider-bedrock` carries this shape today. Each other provider crate keeps its own
+return type until the same need reaches it.
+
 ### The tag rule, stated for a stream
 
 A review found that rule 7 could not be implemented as first written. The pipeline emits a
@@ -599,6 +667,23 @@ Added while building it, each for a reason the list above did not hold:
   **Not built.** the repair exists for a trailing call at resume only.
 - `every_content_block_has_an_explicit_arm` — a compile-time exhaustive match, so no
   `_ => {}` can hide a new block. This is the test that would have caught defect three.
+
+Added on 20260829, when the drop report became data. See
+`D-a-drop-report-is-data-not-a-log-line`.
+
+- `a_dropped_payload_is_reported` — rule 8, now asserted on `dropped_replays` and not on a
+  log. It names the exact `ReplayDropReason` for each of the four refusals.
+- `a_drop_names_the_message_it_sat_in` — `message_index` points at the right message, so a
+  caller can say which turn lost its reasoning.
+- `every_drop_reason_has_a_report` — every variant maps to a sentence, so the log line and the
+  data cannot drift.
+- `an_out_of_loop_payload_is_not_reported_as_a_drop` — rule 12 is history, not a refusal.
+- `a_replayed_payload_is_not_reported_as_a_drop` — a good payload reports nothing, in the data
+  and in the log.
+- `a_drop_report_never_names_the_payload` — rule 9, asserted against the log **and** against
+  the debug form of the data. A later field cannot leak a signature in silence.
+- `the_capture_survives_a_callsite_reached_first_without_a_subscriber` — the guard for
+  `D-a-callsite-caches-interest-globally`. It fails against a thread-local capture.
 
 ### The display
 

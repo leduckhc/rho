@@ -608,12 +608,88 @@ fn sdk_event_to_mirror(
     Some(mirror)
 }
 
+/// Why one stored reasoning payload did not travel to the provider.
+///
+/// Rule 8 of `SPEC-reasoning-across-providers` says a drop is never silent. It used to say
+/// that in a log line only, so the only test that could prove the rule had to install a
+/// subscriber and read text. That seam broke under a parallel run. See
+/// `D-a-drop-report-is-data-not-a-log-line` and `D-a-callsite-caches-interest-globally`.
+///
+/// The enum is exhaustive on purpose. A new refusal must break every reader, because a reader
+/// that quietly ignores one is the `ToolKind::Other` defect again. See
+/// `D-plugin-does-not-classify-itself`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayDropReason {
+    /// The payload belongs to another provider, or to another model.
+    AnotherOwner,
+    /// The payload carries no signature, so Bedrock would refuse the whole turn.
+    NoSignature,
+    /// An encrypted payload did not decode from base64.
+    UndecodableRedaction,
+    /// The AWS SDK refused to build the block.
+    ///
+    /// No test reaches this arm today, and `every_drop_reason_has_a_report` only names it.
+    /// `ReasoningTextBlock::builder` cannot fail once `text` and `signature` are both set,
+    /// and this code always sets both. The arm stays because the branch stays: deleting it
+    /// would need an `expect`, and a refusal that no data reports is the silence rule 8
+    /// forbids. It fails closed, so it is the opposite of the `ToolKind::Other` defect.
+    UnbuildableBlock,
+}
+
+impl ReplayDropReason {
+    /// The one sentence a drop report says.
+    ///
+    /// The log line and the returned data read this one table, so a report can never drift
+    /// from the reason it names. `every_drop_reason_has_a_report` pins that.
+    pub fn report(self) -> &'static str {
+        match self {
+            Self::AnotherOwner => {
+                "a reasoning payload belongs to another owner, so it was not replayed"
+            }
+            Self::NoSignature => "a reasoning payload carries no signature, so it was not replayed",
+            Self::UndecodableRedaction => {
+                "an encrypted reasoning payload did not decode, so it was not replayed"
+            }
+            Self::UnbuildableBlock => "a reasoning block did not build, so it was not replayed",
+        }
+    }
+}
+
+/// One refused reasoning payload, named by where it sat and why it stayed behind.
+///
+/// It carries **no payload field**, so rule 9 holds by construction and not by care.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DroppedReplay {
+    /// The index, in the messages the caller passed, of the message the payload sat in.
+    ///
+    /// **It does not index `BuiltMessages::messages`.** That vector is shorter: a message
+    /// whose blocks all drop is skipped, and consecutive same-role turns merge into one wire
+    /// message. rho has no per-message id yet, so an index into the caller's own slice is the
+    /// cheapest handle that says which turn lost its reasoning.
+    pub message_index: usize,
+    /// Why the payload did not travel.
+    pub reason: ReplayDropReason,
+}
+
+/// The messages one request carries, and the stored payloads that did not travel with them.
+///
+/// There is no `Default` on purpose. A default value would say "nothing was refused", which
+/// is the safe-looking answer and the wrong one. A caller must get this struct from
+/// `build_messages_for_model`, or not at all.
+#[derive(Debug)]
+pub struct BuiltMessages {
+    /// What the request sends. This is what used to be the whole return value.
+    pub messages: Vec<aws_sdk_bedrockruntime::types::Message>,
+    /// Every payload the owner rule, the signature rule, or a decode refused.
+    ///
+    /// A payload **outside the current tool loop** is not here. Rule 12 drops history by
+    /// design, so it is not a refusal, and a report on every later turn would be noise.
+    pub dropped_replays: Vec<DroppedReplay>,
+}
+
 /// Build the request messages for one model. The model decides whether a stored reasoning
 /// payload may travel, per rule 8.
-pub fn build_messages_for_model(
-    messages: &[Message],
-    model: &str,
-) -> Vec<aws_sdk_bedrockruntime::types::Message> {
+pub fn build_messages_for_model(messages: &[Message], model: &str) -> BuiltMessages {
     // A review deleted the old `build_messages`, which passed an empty model. It made the
     // replay path look covered by tests that could never reach it, because `for_owner`
     // refuses an empty name. One function now, and every caller states its model.
@@ -648,6 +724,9 @@ pub fn build_messages_for_model(
     let pending_run = run_start..messages.len();
 
     let mut grouped: Vec<(ConversationRole, Vec<SdkBlock>)> = Vec::new();
+    // Every refusal this build meets. It is the answer to rule 8, and a test reads it
+    // instead of a log line.
+    let mut dropped_replays: Vec<DroppedReplay> = Vec::new();
     for (position, message) in messages.iter().enumerate() {
         let role = match message.role {
             Role::User | Role::Tool => ConversationRole::User,
@@ -701,14 +780,48 @@ pub fn build_messages_for_model(
                 // whole point of the split, and the type enforces it here.
                 ContentBlock::ReasoningTrace { .. } => {}
                 // A replay block travels only when the payload is ours and the model still
-                // matches. Otherwise it is dropped in this named arm, never by `_ => {}`.
+                // matches. Otherwise it is dropped in this named arm, never by `_ => {}`, and
+                // the drop is answered as data. See `D-a-drop-report-is-data-not-a-log-line`.
                 ContentBlock::ReasoningReplay { text, state } => {
                     // Out of the current loop, so it is history. It is dropped whole, and it
-                    // never becomes prose, because prose would read as an answer.
+                    // never becomes prose, because prose would read as an answer. Rule 12
+                    // makes that a design choice and not a refusal, so it is not reported.
+                    //
+                    // A replay block with **no state** is not a refusal either: there is no
+                    // payload to refuse. Rule 11 gives that report to the reader, in
+                    // `rho-core`, so this crate stays quiet. See
+                    // `a_replay_key_with_no_state_reads_as_a_trace`.
                     if pending_run.contains(&position)
-                        && let Some(reasoning) = replay_block(text, state, model)
+                        && let Some(state) = state
                     {
-                        blocks.push(SdkBlock::ReasoningContent(reasoning));
+                        match replay_block(text, state, model) {
+                            Ok(reasoning) => {
+                                blocks.push(SdkBlock::ReasoningContent(reasoning));
+                            }
+                            Err(reason) => {
+                                // The log line is a courtesy for whoever reads a terminal.
+                                // The contract is the returned data, so no test needs a log
+                                // capture to prove rule 8.
+                                //
+                                // Every one of these strings can come from a session file,
+                                // which is untrusted input. A security review found that a
+                                // crafted `owner.model` could carry terminal escapes or a
+                                // forged newline straight into a log. `rho-redact` is the one
+                                // home for that, per `D-one-redaction-home`.
+                                tracing::warn!(
+                                    owner_provider =
+                                        %rho_redact::sanitize_line(&state.owner.provider),
+                                    owner_model = %rho_redact::sanitize_line(&state.owner.model),
+                                    request_model = %rho_redact::sanitize_line(model),
+                                    "{}",
+                                    reason.report()
+                                );
+                                dropped_replays.push(DroppedReplay {
+                                    message_index: position,
+                                    reason,
+                                });
+                            }
+                        }
                     }
                 }
                 // Image input in a request is out of scope for sprint 1. Drop it in a named
@@ -737,7 +850,10 @@ pub fn build_messages_for_model(
             out.push(message);
         }
     }
-    out
+    BuiltMessages {
+        messages: out,
+        dropped_replays,
+    }
 }
 
 /// Build the inference configuration when the request sets any limit.
@@ -751,13 +867,9 @@ fn apply_request(
     builder: aws_sdk_bedrockruntime::operation::converse_stream::builders::ConverseStreamFluentBuilder,
     request: &CompletionRequest,
 ) -> aws_sdk_bedrockruntime::operation::converse_stream::builders::ConverseStreamFluentBuilder {
-    let mut builder =
-        builder
-            .model_id(request.model.clone())
-            .set_messages(Some(build_messages_for_model(
-                &request.messages,
-                &request.model,
-            )));
+    let mut builder = builder.model_id(request.model.clone()).set_messages(Some(
+        build_messages_for_model(&request.messages, &request.model).messages,
+    ));
     if let Some(system) = &request.system {
         builder = builder.system(aws_sdk_bedrockruntime::types::SystemContentBlock::Text(
             system.clone(),
@@ -820,30 +932,16 @@ fn take_reasoning_state(
 /// another model is dropped, because a signature is bound to the model that made it.
 fn replay_block(
     text: &str,
-    state: &Option<rho_core::ProviderState>,
+    state: &rho_core::ProviderState,
     model: &str,
-) -> Option<aws_sdk_bedrockruntime::types::ReasoningContentBlock> {
+) -> Result<aws_sdk_bedrockruntime::types::ReasoningContentBlock, ReplayDropReason> {
     use aws_sdk_bedrockruntime::types::{ReasoningContentBlock, ReasoningTextBlock};
 
-    let state = state.as_ref()?;
-    let value = match state.for_owner(PROVIDER_ID, model) {
-        Some(value) => value,
-        None => {
-            // Rule 8 says a drop is never silent. A review found that every one of these
-            // paths returned `None` with nothing said, which is the same silence the rule
-            // forbids. The report names the owner and the reason, and never the payload.
-            // Every one of these strings can come from a session file, which is untrusted
-            // input. A security review found that a crafted `owner.model` could carry
-            // terminal escapes or a forged newline straight into a log. `rho-redact` is the
-            // one home for that, per `D-one-redaction-home`.
-            tracing::warn!(
-                owner_provider = %rho_redact::sanitize_line(&state.owner.provider),
-                owner_model = %rho_redact::sanitize_line(&state.owner.model),
-                request_model = %rho_redact::sanitize_line(model),
-                "a reasoning payload belongs to another owner, so it was not replayed"
-            );
-            return None;
-        }
+    let Some(value) = state.for_owner(PROVIDER_ID, model) else {
+        // Rule 8 says a drop is never silent. A review found that every one of these
+        // paths returned `None` with nothing said, which is the same silence the rule
+        // forbids. The caller names the owner and the reason, and never the payload.
+        return Err(ReplayDropReason::AnotherOwner);
     };
     if let Some(redacted) = value.get("redacted").and_then(Value::as_str) {
         use base64::Engine;
@@ -857,34 +955,23 @@ fn replay_block(
         // The payload holds base64, because a blob is not valid UTF-8 in general. A failed
         // decode sends nothing: a wrong blob is worse than a missing one, because Bedrock
         // would reject the whole turn.
-        match base64::engine::general_purpose::STANDARD.decode(redacted) {
-            Ok(bytes) => {
-                return Some(ReasoningContentBlock::RedactedContent(
-                    aws_smithy_types::Blob::new(bytes),
-                ));
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "an encrypted reasoning payload did not decode, so it was not replayed"
-                );
-                return None;
-            }
-        }
+        return match base64::engine::general_purpose::STANDARD.decode(redacted) {
+            Ok(bytes) => Ok(ReasoningContentBlock::RedactedContent(
+                aws_smithy_types::Blob::new(bytes),
+            )),
+            Err(_) => Err(ReplayDropReason::UndecodableRedaction),
+        };
     }
     let Some(signature) = value.get("signature").and_then(Value::as_str) else {
-        tracing::warn!("a reasoning payload carries no signature, so it was not replayed");
-        return None;
+        return Err(ReplayDropReason::NoSignature);
     };
     match ReasoningTextBlock::builder()
         .text(text)
         .signature(signature)
         .build()
     {
-        Ok(block) => Some(ReasoningContentBlock::ReasoningText(block)),
-        Err(error) => {
-            tracing::warn!(%error, "a reasoning block did not build, so it was not replayed");
-            None
-        }
+        Ok(block) => Ok(ReasoningContentBlock::ReasoningText(block)),
+        Err(_) => Err(ReplayDropReason::UnbuildableBlock),
     }
 }
 
@@ -1154,6 +1241,134 @@ fn production_code(source: &str) -> String {
         .map(code_only)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// One log capture for every test in this crate, and the reason it is not thread-local.
+///
+/// **A thread-local subscriber cannot hold a log assertion.** `tracing` caches each
+/// callsite's interest in a process-global atomic. When one dispatch or fewer is registered,
+/// the rebuild asks the **calling** thread for its default subscriber. A thread with no
+/// subscriber answers `NoSubscriber`, whose `register_callsite` is `Interest::never()`. That
+/// answer is then stored for every thread, and the capturing thread skips its own `warn!`,
+/// because the macro reads the cached interest before it asks any subscriber.
+///
+/// So the first test to reach a callsite decided whether any later test could see it. A
+/// harness of this shape failed six times in four hundred runs at `--test-threads=16`, and
+/// the same harness with a global subscriber failed none. See
+/// `D-a-callsite-caches-interest-globally` for the measurement, and
+/// `D-log-capture-proves-itself` for the rule this crate had not yet applied.
+///
+/// A global default subscriber removes the source instead of repairing the damage. Every
+/// thread then has a default that wants every callsite, so `Interest::never()` has no source.
+/// The buffer stays thread-local, so parallel tests never read each other's lines.
+#[cfg(test)]
+mod log_capture {
+    use std::sync::Mutex;
+
+    thread_local! {
+        /// The captured bytes for this thread. The one global subscriber writes here.
+        static CAPTURE: Mutex<Vec<u8>> = const { Mutex::new(Vec::new()) };
+    }
+
+    /// A writer that appends to the calling thread's buffer, and discards on any other.
+    #[derive(Clone, Copy, Default)]
+    pub struct ThreadCapture;
+
+    impl std::io::Write for ThreadCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            CAPTURE.with(|cell| cell.lock().unwrap().extend_from_slice(buf));
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadCapture {
+        type Writer = ThreadCapture;
+        fn make_writer(&'a self) -> Self::Writer {
+            ThreadCapture
+        }
+    }
+
+    /// Install the one global subscriber for this test binary.
+    fn install() {
+        static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        ONCE.get_or_init(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(ThreadCapture)
+                .with_max_level(tracing::Level::TRACE)
+                // The formatter's own colours are escape bytes too. Turn them off, or a test
+                // cannot tell an attacker's escape from the formatter's.
+                .with_ansi(false)
+                .without_time()
+                .finish();
+            // A second install would fail, and the `OnceLock` makes that impossible.
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("the capture subscriber installs once per test binary");
+            // One window stays open, and it is nanoseconds wide. `Dispatch::new` rebuilds the
+            // interest cache before `set_global_default` marks the global as initialised. A
+            // thread that registers a brand new callsite inside that window still reads no
+            // global, so it can still cache "never". `install` runs under the `OnceLock`
+            // before any capture, so no test in this binary races it.
+        });
+    }
+
+    fn buffered() -> String {
+        CAPTURE.with(|cell| String::from_utf8(cell.lock().unwrap().clone()).expect("valid utf8"))
+    }
+
+    /// Run `f`, and return its value beside everything it logged on this thread.
+    ///
+    /// The captured text ends with the probe line "the capture is live". A caller may assert
+    /// on it, and this helper asserts on it either way, per `D-log-capture-proves-itself`. An
+    /// assertion about an **absent** line means nothing until the pipe proves itself.
+    ///
+    /// **The probe is not enough on its own.** It proves that the probe's own callsite reaches
+    /// the capture, and a callsite is the unit `tracing` caches. So a test that asserts a line
+    /// is absent must also assert that the line it cares about arrived. A security review
+    /// found exactly that hole in `a_hostile_owner_cannot_inject_a_terminal_escape`.
+    ///
+    /// It is not reentrant. A nested `captured` on one thread would clear the outer buffer,
+    /// and no test nests one.
+    pub fn captured<T>(f: impl FnOnce() -> T) -> (T, String) {
+        install();
+        CAPTURE.with(|cell| cell.lock().unwrap().clear());
+        let value = f();
+        // Prove the capture works before anybody trusts what it holds.
+        tracing::warn!("the capture is live");
+        let text = buffered();
+        CAPTURE.with(|cell| cell.lock().unwrap().clear());
+        assert!(
+            text.contains("the capture is live"),
+            "the log capture is broken, so no log assertion in this test means anything"
+        );
+        (value, text)
+    }
+
+    /// A callsite that only the guard below reaches, so it stays unregistered until then.
+    fn probe_line() {
+        tracing::warn!("a callsite reached first from another thread");
+    }
+
+    /// The capture must not depend on which test reached a callsite first.
+    ///
+    /// A thread with no subscriber reaches the callsite before the capturing thread does.
+    /// Against a thread-local capture that line is lost for ever, and this test fails. See
+    /// `D-a-callsite-caches-interest-globally`.
+    #[test]
+    fn the_capture_survives_a_callsite_reached_first_without_a_subscriber() {
+        let (_, logged) = captured(|| {
+            std::thread::spawn(probe_line)
+                .join()
+                .expect("the poisoning thread joins");
+            probe_line();
+        });
+        assert!(
+            logged.contains("a callsite reached first from another thread"),
+            "a poisoned callsite must still reach the capture: {logged:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1453,6 +1668,7 @@ mod replay_tests {
     /// The reasoning blocks Bedrock received, as (text, signature) pairs.
     fn sent_reasoning(messages: &[Message], model: &str) -> Vec<(String, String)> {
         build_messages_for_model(messages, model)
+            .messages
             .iter()
             .flat_map(|message| message.content().iter())
             .filter_map(|block| match block {
@@ -1512,7 +1728,7 @@ mod replay_tests {
         });
         assert!(sent_reasoning(&messages, MODEL).is_empty());
         // And it does not arrive as text either, which would look like an answer.
-        let sent = build_messages_for_model(&messages, MODEL);
+        let sent = build_messages_for_model(&messages, MODEL).messages;
         assert!(sent.is_empty(), "a trace-only message carries nothing");
     }
 
@@ -1664,52 +1880,11 @@ mod replay_tests {
 
 #[cfg(test)]
 mod drop_report_tests {
+    use super::log_capture::captured;
     use super::*;
     use rho_core::{ContentBlock, Message, ProviderState, ReasoningOwner, Role};
-    use std::sync::{Arc, Mutex};
 
     const MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
-
-    #[derive(Clone)]
-    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for BufferWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufferWriter {
-        type Writer = BufferWriter;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    /// Build messages under a log capture, and return what was logged.
-    fn logged_while_building(block: ContentBlock, model: &str) -> String {
-        let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(BufferWriter(Arc::clone(&buffer)))
-            .with_max_level(tracing::Level::TRACE)
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            build_messages_for_model(
-                &[Message {
-                    role: Role::Assistant,
-                    content: vec![block],
-                }],
-                model,
-            );
-            // Prove the capture works before trusting what it holds.
-            tracing::warn!("the capture is live");
-        });
-        String::from_utf8(buffer.lock().unwrap().clone()).expect("valid utf8")
-    }
 
     fn state(provider: &str, model: &str, value: serde_json::Value) -> Option<ProviderState> {
         Some(ProviderState {
@@ -1721,11 +1896,24 @@ mod drop_report_tests {
         })
     }
 
+    fn assistant(block: ContentBlock) -> Vec<Message> {
+        vec![Message {
+            role: Role::Assistant,
+            content: vec![block],
+        }]
+    }
+
     /// Rule 8: the drop is never silent. Every one of these paths said nothing before a
     /// second review found them.
+    ///
+    /// The assertion reads the returned data, not a log. A log line is a bad seam: the
+    /// capture caught nothing under a parallel run, and the test then failed on its own
+    /// canary instead of on the behaviour. See `D-a-drop-report-is-data-not-a-log-line` and
+    /// `D-a-callsite-caches-interest-globally`. An enum also says more than a substring: the
+    /// old assertion `logged.contains("no signature")` passed on any line holding those words.
     #[test]
     fn a_dropped_payload_is_reported() {
-        let cases: Vec<(&str, ContentBlock, &str)> = vec![
+        let cases: Vec<(&str, ContentBlock, ReplayDropReason)> = vec![
             (
                 "another model",
                 ContentBlock::ReasoningReplay {
@@ -1736,7 +1924,7 @@ mod drop_report_tests {
                         serde_json::json!({"signature": "s"}),
                     ),
                 },
-                "another owner",
+                ReplayDropReason::AnotherOwner,
             ),
             (
                 "another provider",
@@ -1744,7 +1932,7 @@ mod drop_report_tests {
                     text: "plan".to_string(),
                     state: state("openrouter", MODEL, serde_json::json!({"signature": "s"})),
                 },
-                "another owner",
+                ReplayDropReason::AnotherOwner,
             ),
             (
                 "no signature",
@@ -1752,7 +1940,7 @@ mod drop_report_tests {
                     text: "plan".to_string(),
                     state: state("bedrock", MODEL, serde_json::json!({"unrelated": true})),
                 },
-                "no signature",
+                ReplayDropReason::NoSignature,
             ),
             (
                 "bad base64",
@@ -1764,31 +1952,163 @@ mod drop_report_tests {
                         serde_json::json!({"redacted": "!!not base64!!"}),
                     ),
                 },
-                "did not decode",
+                ReplayDropReason::UndecodableRedaction,
             ),
         ];
-        for (name, block, needle) in cases {
-            let logged = logged_while_building(block, MODEL);
-            assert!(
-                logged.contains("the capture is live"),
-                "{name}: capture works"
+        for (name, block, reason) in cases {
+            let built = build_messages_for_model(&assistant(block), MODEL);
+            assert_eq!(
+                built.dropped_replays,
+                vec![DroppedReplay {
+                    message_index: 0,
+                    reason,
+                }],
+                "{name}: the drop must be reported, and say why"
             );
             assert!(
-                logged.contains(needle),
-                "{name}: the drop must be reported, and say why: {logged}"
+                built.messages.is_empty(),
+                "{name}: a refused payload leaves nothing to send"
             );
         }
+    }
+
+    /// A caller must be able to say **which** turn lost its reasoning.
+    ///
+    /// The index counts messages the caller passed, and not the refusals. A count of its own
+    /// would read `0` here and look right.
+    #[test]
+    fn a_drop_names_the_message_it_sat_in() {
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "go on".to_string(),
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ReasoningReplay {
+                    text: "plan".to_string(),
+                    state: state(
+                        "bedrock",
+                        "other-model",
+                        serde_json::json!({"signature": "s"}),
+                    ),
+                }],
+            },
+        ];
+        let built = build_messages_for_model(&messages, MODEL);
+        assert_eq!(
+            built.dropped_replays,
+            vec![DroppedReplay {
+                message_index: 1,
+                reason: ReplayDropReason::AnotherOwner,
+            }]
+        );
+    }
+
+    /// Every reason says one sentence, and the log reads the same table as the data.
+    ///
+    /// So a report can never drift from the reason it names. The match below is what makes a
+    /// new variant break this test instead of shipping with no sentence.
+    #[test]
+    fn every_drop_reason_has_a_report() {
+        let all = [
+            ReplayDropReason::AnotherOwner,
+            ReplayDropReason::NoSignature,
+            ReplayDropReason::UndecodableRedaction,
+            ReplayDropReason::UnbuildableBlock,
+        ];
+        for reason in all {
+            // A new variant must fail this match, and the array above must then grow too.
+            match reason {
+                ReplayDropReason::AnotherOwner
+                | ReplayDropReason::NoSignature
+                | ReplayDropReason::UndecodableRedaction
+                | ReplayDropReason::UnbuildableBlock => {}
+            }
+            assert!(
+                reason.report().contains("not replayed"),
+                "{reason:?} must say the payload did not travel: {}",
+                reason.report()
+            );
+        }
+        let mut reports: Vec<&str> = all.iter().map(|reason| reason.report()).collect();
+        reports.sort_unstable();
+        let total = reports.len();
+        reports.dedup();
+        assert_eq!(
+            reports.len(),
+            total,
+            "two reasons must not share a sentence"
+        );
+        // The needles the log assertions in this crate rely on.
+        assert!(
+            ReplayDropReason::AnotherOwner
+                .report()
+                .contains("another owner")
+        );
+        assert!(
+            ReplayDropReason::NoSignature
+                .report()
+                .contains("no signature")
+        );
+        assert!(
+            ReplayDropReason::UndecodableRedaction
+                .report()
+                .contains("did not decode")
+        );
+    }
+
+    /// A payload from before the current tool loop is history, not a refusal.
+    ///
+    /// Rule 12 drops it by design, so it is absent from the report and from the log. A report
+    /// on every later turn would be noise, and noise is how a real warning gets ignored.
+    #[test]
+    fn an_out_of_loop_payload_is_not_reported_as_a_drop() {
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ReasoningReplay {
+                    text: "plan".to_string(),
+                    state: state(
+                        "bedrock",
+                        "other-model",
+                        serde_json::json!({"signature": "s"}),
+                    ),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "a new prompt".to_string(),
+                }],
+            },
+        ];
+        let (built, logged) = captured(|| build_messages_for_model(&messages, MODEL));
+        assert!(
+            built.dropped_replays.is_empty(),
+            "history is not a refusal: {:?}",
+            built.dropped_replays
+        );
+        assert!(
+            !logged.contains("not replayed"),
+            "history is quiet: {logged}"
+        );
     }
 
     /// A payload that replays says nothing, because there is nothing to report.
     #[test]
     fn a_replayed_payload_is_not_reported_as_a_drop() {
-        let logged = logged_while_building(
-            ContentBlock::ReasoningReplay {
-                text: "plan".to_string(),
-                state: state("bedrock", MODEL, serde_json::json!({"signature": "s"})),
-            },
-            MODEL,
+        let block = ContentBlock::ReasoningReplay {
+            text: "plan".to_string(),
+            state: state("bedrock", MODEL, serde_json::json!({"signature": "s"})),
+        };
+        let (built, logged) = captured(|| build_messages_for_model(&assistant(block), MODEL));
+        assert!(
+            built.dropped_replays.is_empty(),
+            "a good payload is not a drop: {:?}",
+            built.dropped_replays
         );
         assert!(
             !logged.contains("not replayed"),
@@ -1797,19 +2117,20 @@ mod drop_report_tests {
     }
 
     /// The report never carries the payload, per rule 9.
+    ///
+    /// It asserts that of the log **and** of the data. `DroppedReplay` has no field for a
+    /// payload today, so a later field cannot leak one in silence.
     #[test]
     fn a_drop_report_never_names_the_payload() {
-        let logged = logged_while_building(
-            ContentBlock::ReasoningReplay {
-                text: "plan".to_string(),
-                state: state(
-                    "bedrock",
-                    "other-model",
-                    serde_json::json!({ "signature": "secret-signature-value" }),
-                ),
-            },
-            MODEL,
-        );
+        let block = ContentBlock::ReasoningReplay {
+            text: "plan".to_string(),
+            state: state(
+                "bedrock",
+                "other-model",
+                serde_json::json!({ "signature": "secret-signature-value" }),
+            ),
+        };
+        let (built, logged) = captured(|| build_messages_for_model(&assistant(block), MODEL));
         // A mutation review noted that this passed on an empty log, so it now asserts both
         // halves: the report happened, and it carried no payload.
         assert!(
@@ -1817,42 +2138,22 @@ mod drop_report_tests {
             "the report is present: {logged}"
         );
         assert!(!logged.contains("secret-signature-value"), "{logged}");
+        assert!(
+            !format!("{:?}", built.dropped_replays).contains("secret-signature-value"),
+            "the data carries no payload either: {:?}",
+            built.dropped_replays
+        );
     }
 }
 
 #[cfg(test)]
 mod capability_report_tests {
+    use super::log_capture::captured;
     use super::*;
     use rho_core::{ContentBlock, Message, ReasoningEffort, Role};
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Clone)]
-    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for BufferWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufferWriter {
-        type Writer = BufferWriter;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
 
     fn logged_for(model: &str, effort: Option<ReasoningEffort>) -> String {
-        let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(BufferWriter(Arc::clone(&buffer)))
-            .with_max_level(tracing::Level::TRACE)
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
+        captured(|| {
             let request = CompletionRequest {
                 model: model.to_string(),
                 system: None,
@@ -1868,9 +2169,8 @@ mod capability_report_tests {
                 reasoning: effort,
             };
             build_thinking_fields(&request);
-            tracing::warn!("the capture is live");
-        });
-        String::from_utf8(buffer.lock().unwrap().clone()).expect("valid utf8")
+        })
+        .1
     }
 
     /// An id rho cannot read still fails closed, and it no longer does so in silence.
@@ -2243,49 +2543,23 @@ mod log_safety_tests {
     //! `Display` and no sanitiser, so a crafted file could inject a terminal escape or forge
     //! a log line. `rho-redact` is the one home for that, per `D-one-redaction-home`.
 
+    use super::log_capture::captured;
     use super::*;
     use rho_core::{ContentBlock, Message, ProviderState, ReasoningOwner, Role};
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Clone)]
-    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for BufferWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufferWriter {
-        type Writer = BufferWriter;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
 
     #[test]
     fn a_hostile_owner_cannot_inject_a_terminal_escape() {
-        let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(BufferWriter(Arc::clone(&buffer)))
-            .with_max_level(tracing::Level::TRACE)
-            // The subscriber's own colours are escape bytes too. Turn them off, or the test
-            // cannot tell the attacker's escape from the formatter's.
-            .with_ansi(false)
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            let hostile = ProviderState {
-                owner: ReasoningOwner {
-                    provider: "bedrock".to_string(),
-                    // An escape, a title-setting sequence, and a forged log line.
-                    model: "\u{1b}]0;pwned\u{7}\nWARN forged".to_string(),
-                },
-                value: serde_json::json!({ "signature": "s" }),
-            };
+        let hostile = ProviderState {
+            owner: ReasoningOwner {
+                provider: "bedrock".to_string(),
+                // An escape, a title-setting sequence, and a forged log line.
+                model: "\u{1b}]0;pwned\u{7}\nWARN forged".to_string(),
+            },
+            value: serde_json::json!({ "signature": "s" }),
+        };
+        // The capture turns the formatter's own colours off. Otherwise the test cannot tell
+        // the attacker's escape from the formatter's.
+        let (_, logged) = captured(|| {
             build_messages_for_model(
                 &[Message {
                     role: Role::Assistant,
@@ -2296,10 +2570,23 @@ mod log_safety_tests {
                 }],
                 "us.anthropic.claude-haiku-4-5-20251001-v1:0",
             );
-            tracing::warn!("the capture is live");
         });
-        let logged = String::from_utf8(buffer.lock().unwrap().clone()).expect("utf8");
         assert!(logged.contains("the capture is live"), "the capture works");
+        // The two absence assertions below are the point of this test, and an absence proves
+        // nothing unless the line was really logged. A security review found that the probe
+        // above proves only that **its own** callsite reaches the capture, which is a
+        // different callsite. So the hostile value is asserted present, in its defanged form,
+        // before it is asserted harmless. `sanitize_line` drops the escape sequence whole and
+        // folds the newline to a space, so `\u{1b}]0;pwned\u{7}\nWARN forged` arrives as
+        // " WARN forged". Stop logging `owner_model` and this test goes red.
+        assert!(
+            logged.contains("another owner"),
+            "the drop report fired: {logged:?}"
+        );
+        assert!(
+            logged.contains("WARN forged"),
+            "the hostile value reached the log, so the checks below mean something: {logged:?}"
+        );
         assert!(
             !logged.contains('\u{1b}'),
             "no escape byte reaches a log: {logged:?}"
@@ -2363,6 +2650,7 @@ mod replay_scope_tests {
             ContentBlock as SdkBlock, ReasoningContentBlock as SdkReasoning,
         };
         build_messages_for_model(messages, MODEL)
+            .messages
             .iter()
             .flat_map(|message| message.content().iter())
             .filter_map(|block| match block {
@@ -2473,6 +2761,7 @@ mod replay_scope_tests {
         ];
         let built = build_messages_for_model(&messages, MODEL);
         let text: String = built
+            .messages
             .iter()
             .flat_map(|message| message.content().iter())
             .filter_map(|block| block.as_text().ok())
@@ -2530,6 +2819,7 @@ mod loop_growth_tests {
             ContentBlock as SdkBlock, ReasoningContentBlock as SdkReasoning,
         };
         build_messages_for_model(messages, MODEL)
+            .messages
             .iter()
             .flat_map(|message| message.content().iter())
             .filter_map(|block| match block {
@@ -2716,6 +3006,7 @@ mod merged_turn_tests {
             ContentBlock as SdkBlock, ReasoningContentBlock as SdkReasoning,
         };
         build_messages_for_model(messages, MODEL)
+            .messages
             .iter()
             .flat_map(|message| message.content().iter())
             .filter_map(|block| match block {
