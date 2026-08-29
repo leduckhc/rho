@@ -33,7 +33,14 @@ can forget.
 **A test guards the pattern itself.** The compiler catches a *new* field. It cannot catch a
 contributor who adds `..` back, because `..` compiles. So one test reads the renderer
 source and fails on a `Row::Task` pattern that ends in `..`. The test states the rule where
-a contributor meets it.
+a contributor meets it, and it reads the field list from the enum declaration rather than
+holding its own copy. A hand-written list is worthless against the case that matters. A
+field added tomorrow is not in a list written today.
+
+**What this cannot hold, said plainly.** The rule forces a *decision* per field. It cannot
+force a *draw*, because `field: _` compiles and satisfies the pattern. A review named the
+stronger claim as an overclaim, and it was right. Only a reviewer closes the last step, and
+that is why step 9 of `AGENTS.md` asks for the list of public items with no test.
 
 ## What this rules out
 

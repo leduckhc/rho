@@ -91,6 +91,42 @@ def row_lines(raw):
     return [line[4:] for line in re.split(r"[\r\n]+", text) if line.startswith("ROW|")]
 
 
+def leaked_sequences(raw):
+    """Every escape-sequence payload that reached the terminal with its escape stripped.
+
+    A security review called the three-literal check a canary: it matched `pwned`, a bell,
+    and `[2J`, so it would miss OSC 52 clipboard writes, any other window title, a bare
+    cursor move, and a DCS string. This check is generic instead. It finds a CSI or OSC
+    **payload** that no escape byte introduces:
+
+        [ <digits and semicolons> <final byte @ to ~>        a stripped CSI
+        ] <digits> ;                                        a stripped OSC
+
+    A real sequence from `ratatui` is preceded by `ESC`, and the hostile command drawn on the
+    row holds the literal text `\\u001b[2J`, which a reader should see. Both are excluded.
+    """
+    found = []
+    for match in re.finditer(rb"\[[0-9;?]*[@-~]|\][0-9]+;", raw):
+        at = match.start()
+        if at > 0 and raw[at - 1] == 0x1B:
+            continue
+        if raw[max(0, at - 6):at] == rb"\u001b":
+            continue
+        found.append(raw[max(0, at - 8):at + 8])
+    return found
+
+
+def c1_controls(raw):
+    """Every C1 control character. `U+009B` is CSI and `U+009D` is OSC, each in one character.
+
+    The bytes are decoded first, because a raw byte scan is wrong here: every multi-byte
+    UTF-8 character has continuation bytes in `0x80` to `0xBF`, so a scan reported four
+    hundred hits for the middle-dot separator and the box-drawing rules rho draws itself.
+    """
+    text = raw.decode("utf-8", "replace")
+    return [ch for ch in text if 0x80 <= ord(ch) <= 0x9F]
+
+
 def bare_clear_screen(raw):
     """Every `[2J` that is a leaked payload, and not a real sequence or printed text.
 
@@ -137,6 +173,14 @@ def main():
         bad += check(f"{label}: no OSC payload on the wire", b"pwned" not in raw)
         bad += check(f"{label}: no bell on the wire", b"\x07" not in raw)
         bad += check(f"{label}: no bare clear-screen payload", bare_clear_screen(raw) == 0)
+        leaks = leaked_sequences(raw)
+        bad += check(
+            f"{label}: no stripped escape payload of any kind",
+            not leaks,
+            f"{leaks[:3]}" if leaks else "",
+        )
+        c1 = c1_controls(raw)
+        bad += check(f"{label}: no eight-bit control byte", not c1, f"{len(c1)} bytes" if c1 else "")
 
         if scenario == "progress" and columns >= 36:
             bad += check(

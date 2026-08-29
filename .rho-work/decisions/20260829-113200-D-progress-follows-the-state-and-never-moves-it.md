@@ -49,6 +49,21 @@ command needs eight, beside the state and the slot. Below that the row draws no 
 no separator. A bare ellipsis teaches the reader nothing. Narrower still, the command goes
 too, and the space that carried it goes with it, so the row never grows a double space.
 
+**Every field of the row is bounded, and the state word too.** `Row` is public, so the
+state is untrusted like the command and the progress. The state takes at most the text
+columns less the label, so no field can reach the slot. A review found a five hundred
+character state taking the slot, which is the one thing this row exists to protect.
+
+**A row that carries a right-aligned slot justifies to the measure, not the frame width.**
+The scroll rail draws over the last column of the transcript whenever it overflows, and
+`RAIL_COLUMN` reserves that column always for exactly this reason. The row used the frame
+width, so a settled duration read `1m 12│`. The tool row had the same defect, in the same
+one word, and it was live rather than latent. Both rows are fixed, and the design fixtures
+`100-idle.txt` and `100-tool-run.txt` moved one column with the fix.
+
+**A command that can only draw as an ellipsis is dropped whole.** One column holds the cut
+marker and nothing else, which is the bare marker this decision refuses for the progress.
+
 **The progress is bounded twice, and both bounds are security.**
 
 - The **row** cuts the progress to the columns that are left, with `fit_to_width`, so the
@@ -84,6 +99,13 @@ minutes. Ten tasks would take twenty rows of a band that also holds the conversa
 
 **A percent bar.** A bar needs a percent, and `TaskProgress` has three optional fields. A
 task that reports `6/10 compiling` and no percent could draw no bar.
+
+## What the compiler can and cannot hold
+
+The exhaustive destructure forces a **decision** about every new field of `Row::Task`. It
+cannot force a **draw**: a contributor can name a new field `field: _` and the build passes.
+So the claim stops there, and a reviewer is the only guard for the last step. Codex named this
+overclaim in review, and the sentence above is the corrected version.
 
 ## What a live drive changed
 

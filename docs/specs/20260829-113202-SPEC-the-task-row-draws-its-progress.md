@@ -54,10 +54,12 @@ Left to right:
 
 ### The rank under pressure
 
-The state word draws always. The command is cut with a marked ellipsis, and it takes at most
-half the columns left of the duration slot while a progress draws. The progress is dropped
-whole when the command cannot keep `TASK_COMMAND_MIN_COLUMNS`. Narrower still, the command
-goes too, and the space that carried it goes with it.
+The state word draws first, and it is bounded by the text columns less the label. The command
+is cut with a marked ellipsis, and it takes at most half the text columns while a progress
+draws. The text columns are what remains after the scroll rail, the duration slot, and the gap
+beside it. The progress is dropped whole when the command cannot keep
+`TASK_COMMAND_MIN_COLUMNS`. A command that can only draw as a lone ellipsis goes too, and the
+space that carried it goes with it.
 
 Both command rules came from the live drive, not from a test. A three hundred character
 command drew alone and pushed the state word off the right edge. A greedy bounded command
@@ -73,6 +75,14 @@ same field and may trust the same bound.
 /// The most display columns a stored task progress summary keeps.
 const PROGRESS_SUMMARY_COLUMNS: usize = 64;
 ```
+
+### The row respects the rail
+
+A row that carries a right-aligned slot justifies to the **measure**, which is the frame width
+less `RAIL_COLUMN`. The scroll rail draws over the last column of the transcript whenever it
+overflows, so a row that used the whole width lost the last character of its duration. The
+tool row had the same defect and it was live, because a tool row settles a real duration. Both
+rows are fixed here. The design fixtures `100-idle.txt` and `100-tool-run.txt` moved one column.
 
 ### The renderer
 
@@ -120,6 +130,30 @@ public and a frontend can build a task row itself. Text that does not fit is cut
 | `the_task_row_pattern_names_every_field` | The source guard: the renderer's `Row::Task` pattern holds no `..`. |
 | `a_failed_task_row_draws_in_the_error_role` | The `failed` flag drives the row colour, which its own doc comment promised and no code read. |
 | `a_long_command_never_pushes_the_state_or_the_progress_off_the_row` | The rank and the half share. The state word and the whole progress survive a three hundred character command. |
+| `a_task_row_keeps_its_whole_duration_beside_the_scroll_rail` | An overflowing transcript cannot take the last character of a task duration. |
+| `a_tool_row_keeps_its_whole_duration_beside_the_scroll_rail` | The same, for the sibling row, which had the defect live. |
+| `a_hostile_state_word_cannot_reach_the_duration_slot` | The state word is bounded too, so no field can take the slot. |
+| `a_task_row_filters_a_command_a_frontend_built` | The row filters the command itself, and does not trust the reducer. |
+| `a_task_row_drops_a_command_it_can_only_draw_as_an_ellipsis` | A one-column command goes whole, with its space. |
+| `a_command_that_filters_to_nothing_leaves_no_gap` | A command of escape bytes alone leaves no double space. |
+| `the_command_takes_at_most_half_the_row_beside_a_progress` | The share is exact, so the divisor cannot change in silence. |
+| `a_random_task_row_never_leaves_its_bounds` | Two thousand generated rows, over all three fields and the width, keep the slot bound and the filter. |
+
+## 3a. What the review changed
+
+The contract went to four reviewers with one lens each, and to `codex review` as an
+independent second opinion. Six findings changed the code, and every one is now a test:
+
+| Finding | Who found it | The change |
+| --- | --- | --- |
+| The scroll rail took the last column of a duration, on this row and on the tool row | layout review | Both rows justify to the measure. Two design fixtures moved. |
+| An unbounded state word could take the reserved slot | codex, security, layout | The state is bounded like every other field. |
+| The row's filter on the command was never exercised by a test | codex, tests | A raw-command test with a filter oracle. |
+| A one-column command drew as a lone ellipsis | layout | The command is dropped whole. |
+| The half share was free: a change from two to three passed the suite | tests | The share is asserted exactly. |
+| The stored bound was one-sided: 64 could shrink to 7 in silence | tests | The kept width is asserted exactly, and a character bound too. |
+| The `..` guard claimed more than a compiler can hold | codex | The claim is narrowed, and the field list now comes from the enum. |
+| The live check was a three-literal canary | security | It now finds any stripped CSI or OSC payload, and any C1 character. |
 
 ## 4. Out of scope
 

@@ -615,7 +615,10 @@ fn push_row(
             ..
         } => {
             out.push(one((
-                tool_header(state, index, name, preview, *status, width),
+                // The measure, not the frame width, for the same reason the task row uses it:
+                // the rail takes the last column, and it took the last character of every
+                // tool duration when the transcript overflowed.
+                tool_header(state, index, name, preview, *status, measure),
                 text_style(),
             )));
             if row_fold(state, index) == RowFold::Expanded {
@@ -712,8 +715,13 @@ fn push_row(
             } else {
                 text_style()
             };
-            let text = task_row_text(command, task_state, progress, width);
-            out.push(one((justify(&text, &right, width), style)));
+            // The row is justified to the **measure**, not the frame width. The scroll rail
+            // draws over the last column of the transcript whenever it overflows, so a row
+            // that used the whole width lost the last character of its duration: `1m 12│`.
+            // `RAIL_COLUMN` reserves that column always, and this row must respect it. Found
+            // by review, then measured. See `D-text-fills-the-width`.
+            let text = task_row_text(command, task_state, progress, measure);
+            out.push(one((justify(&text, &right, measure), style)));
         }
     }
 }
@@ -756,6 +764,12 @@ fn tool_header(
 /// the status. The space between the two goes with the command, so the row never grows a
 /// double space where the command used to be.
 fn task_head(command: &str, state_text: &str, command_columns: usize) -> String {
+    // One column can only hold the ellipsis itself, which is the bare marker the decision
+    // refuses for the progress. The same rule holds for the command, so it goes whole and the
+    // space that carried it goes with it. Found by review at width 22.
+    if command_columns <= 1 {
+        return format!("{TASK_LABEL}{state_text}");
+    }
     let cut = fit_to_width(command, command_columns);
     if cut.is_empty() {
         return format!("{TASK_LABEL}{state_text}");
@@ -785,13 +799,20 @@ fn task_head(command: &str, state_text: &str, command_columns: usize) -> String 
 /// from a review. The cut keeps a hostile string inside the row and out of the duration slot.
 /// See `D-progress-follows-the-state-and-never-moves-it`.
 fn task_row_text(command: &str, task_state: &str, progress: &str, width: usize) -> String {
-    let state_text = sanitize_line(task_state);
     let command_text = sanitize_line(command);
     let progress_text = sanitize_line(progress);
     // The columns left of the duration slot and of the gap beside it.
     let text_columns = width
         .saturating_sub(DURATION_SLOT_COLUMNS)
         .saturating_sub(TASK_GAP_COLUMNS);
+    // **The state word is bounded too.** `Row` is public, so the state is untrusted like the
+    // rest, and the row counted its width without ever cutting it. A five hundred character
+    // state took the reserved slot, which is the one thing this row exists to protect. Found
+    // by review. The bound leaves the label its columns, and nothing else.
+    let state_text = fit_to_width(
+        &sanitize_line(task_state),
+        text_columns.saturating_sub(TASK_LABEL.width()),
+    );
     let lead = format!(" {GLYPH_SEPARATOR} ");
     // The label, the space before the state word, and the state word itself.
     let fixed = TASK_LABEL.width() + 1 + state_text.width();
@@ -820,13 +841,17 @@ fn task_row_text(command: &str, task_state: &str, progress: &str, width: usize) 
         return head;
     }
     // The command is often shorter than its budget, so the progress takes every column that
-    // is really left.
+    // is really left. The budget cannot fall below the minimum here: the command took at most
+    // `with_progress` columns, and `with_progress` is `text_columns` less `fixed` and less the
+    // separator and the minimum together. A review found the guard this replaces unreachable,
+    // and unreachable code no test can pin is code this project deletes.
     let budget = text_columns
         .saturating_sub(head.width())
         .saturating_sub(lead.width());
-    if budget < TASK_PROGRESS_MIN_COLUMNS {
-        return head;
-    }
+    debug_assert!(
+        budget >= TASK_PROGRESS_MIN_COLUMNS,
+        "the progress budget fell to {budget} columns, which the arithmetic above forbids"
+    );
     format!("{head}{lead}{}", fit_to_width(&progress_text, budget))
 }
 

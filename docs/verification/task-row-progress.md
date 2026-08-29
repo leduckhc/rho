@@ -64,18 +64,20 @@ The tests `a_long_command_never_pushes_the_state_or_the_progress_off_the_row` an
 Every check passed. The row lines below are the drawn rows, verbatim.
 
 ```text
---- progress at 100 columns: 2447 bytes, 2 task rows
-    'task for i in 1 2 3 4 5; do echo "RHO_PROGRESS {\\"… done · 100% 5/5 compiling'
-    'task for i in 1 2 3 4 5; do echo "RHO_PROGRESS {\\"… done · 100% 5/5 compiling'
+--- progress at 100 columns: 2423 bytes, 2 task rows
+    'task for i in 1 2 3 4 5; do echo "RHO_PROGRESS {\\… done · 100% 5/5 compiling'
+    'task for i in 1 2 3 4 5; do echo "RHO_PROGRESS {\\… done · 100% 5/5 compiling'
 PASS  progress at 100 columns: the run drew a task row — 2 rows
-PASS  progress at 100 columns: every row is inside the width — widest 77
+PASS  progress at 100 columns: every row is inside the width — widest 76
 PASS  progress at 100 columns: no OSC payload on the wire
 PASS  progress at 100 columns: no bell on the wire
 PASS  progress at 100 columns: no bare clear-screen payload
+PASS  progress at 100 columns: no stripped escape payload of any kind
+PASS  progress at 100 columns: no eight-bit control byte
 PASS  progress at 100 columns: the percent draws
 PASS  progress at 100 columns: the separator draws
 
---- quiet at 100 columns: 1497 bytes, 2 task rows
+--- quiet at 100 columns: 1491 bytes, 2 task rows
     'task sleep 0.2; echo working done'
     'task sleep 0.2; echo working done'
 PASS  quiet at 100 columns: the run drew a task row — 2 rows
@@ -83,18 +85,22 @@ PASS  quiet at 100 columns: every row is inside the width — widest 33
 PASS  quiet at 100 columns: no OSC payload on the wire
 PASS  quiet at 100 columns: no bell on the wire
 PASS  quiet at 100 columns: no bare clear-screen payload
+PASS  quiet at 100 columns: no stripped escape payload of any kind
+PASS  quiet at 100 columns: no eight-bit control byte
 PASS  quiet at 100 columns: no separator with no progress
 
---- hostile at 100 columns: 1870 bytes, 2 task rows
-    'task printf \'RHO_PROGRESS {"percent": 50, "message… done · 50% wiped'
-    'task printf \'RHO_PROGRESS {"percent": 50, "message… done · 50% wiped'
+--- hostile at 100 columns: 1868 bytes, 2 task rows
+    'task printf \'RHO_PROGRESS {"percent": 50, "messag… done · 50% wiped'
+    'task printf \'RHO_PROGRESS {"percent": 50, "messag… done · 50% wiped'
 PASS  hostile at 100 columns: the run drew a task row — 2 rows
-PASS  hostile at 100 columns: every row is inside the width — widest 68
+PASS  hostile at 100 columns: every row is inside the width — widest 67
 PASS  hostile at 100 columns: no OSC payload on the wire
 PASS  hostile at 100 columns: no bell on the wire
 PASS  hostile at 100 columns: no bare clear-screen payload
+PASS  hostile at 100 columns: no stripped escape payload of any kind
+PASS  hostile at 100 columns: no eight-bit control byte
 
---- raw at 100 columns: 1869 bytes, 4 task rows
+--- raw at 100 columns: 1875 bytes, 4 task rows
     'task raw running · wiped pass 1'
     'task long running · 50% yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy…'
     'task raw running · wiped pass 2'
@@ -104,6 +110,8 @@ PASS  raw at 100 columns: every row is inside the width — widest 84
 PASS  raw at 100 columns: no OSC payload on the wire
 PASS  raw at 100 columns: no bell on the wire
 PASS  raw at 100 columns: no bare clear-screen payload
+PASS  raw at 100 columns: no stripped escape payload of any kind
+PASS  raw at 100 columns: no eight-bit control byte
 
 --- missing at 100 columns: 1819 bytes, 2 task rows
     'task cat /nope/nope/nope failed (1)'
@@ -113,6 +121,8 @@ PASS  missing at 100 columns: every row is inside the width — widest 35
 PASS  missing at 100 columns: no OSC payload on the wire
 PASS  missing at 100 columns: no bell on the wire
 PASS  missing at 100 columns: no bare clear-screen payload
+PASS  missing at 100 columns: no stripped escape payload of any kind
+PASS  missing at 100 columns: no eight-bit control byte
 PASS  missing at 100 columns: the row says it failed
 PASS  missing at 100 columns: the failed row draws in the error role
 
@@ -124,17 +134,21 @@ PASS  denied at 100 columns: every row is inside the width — widest 85
 PASS  denied at 100 columns: no OSC payload on the wire
 PASS  denied at 100 columns: no bell on the wire
 PASS  denied at 100 columns: no bare clear-screen payload
+PASS  denied at 100 columns: no stripped escape payload of any kind
+PASS  denied at 100 columns: no eight-bit control byte
 PASS  denied at 100 columns: the row says it failed
 PASS  denied at 100 columns: the failed row draws in the error role
 
---- progress at 32 columns: 1049 bytes, 2 task rows
-    'task for i in 1 2 … done'
-    'task for i in 1 2 … done'
+--- progress at 32 columns: 1061 bytes, 2 task rows
+    'task for i in 1 2… done'
+    'task for i in 1 2… done'
 PASS  progress at 32 columns: the run drew a task row — 2 rows
-PASS  progress at 32 columns: every row is inside the width — widest 24
+PASS  progress at 32 columns: every row is inside the width — widest 23
 PASS  progress at 32 columns: no OSC payload on the wire
 PASS  progress at 32 columns: no bell on the wire
 PASS  progress at 32 columns: no bare clear-screen payload
+PASS  progress at 32 columns: no stripped escape payload of any kind
+PASS  progress at 32 columns: no eight-bit control byte
 PASS  progress at 32 columns: the progress leaves a narrow row
 PASS  progress at 32 columns: the state word survives
 
@@ -148,6 +162,8 @@ PASS  raw at 32 columns: every row is inside the width — widest 17
 PASS  raw at 32 columns: no OSC payload on the wire
 PASS  raw at 32 columns: no bell on the wire
 PASS  raw at 32 columns: no bare clear-screen payload
+PASS  raw at 32 columns: no stripped escape payload of any kind
+PASS  raw at 32 columns: no eight-bit control byte
 
 FAILED CHECKS 0
 ```
@@ -158,19 +174,48 @@ Step 12 asks for proof that the guard catches the defect. The row filter was rem
 purpose, `let progress_text = progress.to_string();`, and the drive was run again:
 
 ```text
---- raw at 100 columns: 1901 bytes, 4 task rows
-    'task raw running · [2J[H]0;pwnedwiped pass 1'
-    'task long running · 50% yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy…'
-    'task raw running · [2J[H]0;pwnedwiped pass 2'
-    'task long running · 50% yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy…'
 FAIL  raw at 100 columns: no OSC payload on the wire
 FAIL  raw at 100 columns: no bare clear-screen payload
-FAILED CHECKS 2
+FAIL  raw at 100 columns: no stripped escape payload of any kind — [b'\x1b[18;20H[2J[H]0;', b'8;20H[2J[H]0;pwn', b'20H[2J[H]0;pwned']
+FAILED CHECKS 3
 ```
 
-The terminal received `[2J[H]0;pwned` as text. The file was then copied back, and the drive
+The terminal received `[2J[H]0;pwned` as text, and the row read
+`task raw running · [2J[H]0;pwnedwiped pass 1`. The file was then copied back, and the drive
 reported `FAILED CHECKS 0` again. The good file was copied to `/tmp` first, and `git checkout`
 was never used, because it would throw away the whole change.
+
+A security review called the first check set a canary, because it matched three literals:
+`pwned`, a bell, and `[2J`. It would have missed an OSC 52 clipboard write, another window
+title, a bare cursor move, and a DCS string. The check is generic now. It finds any CSI or OSC
+payload that no escape byte introduces, and any C1 control character.
+
+## What the review round changed
+
+Four reviewers with one lens each, plus `codex review`, read the commit. Two findings were
+defects in shipped code that this change would have built upon:
+
+**The scroll rail took the last column of every duration.** `draw_rail` writes at column
+`width - 1` whenever the transcript overflows, and both the task row and the tool row justified
+to the frame width rather than to the measure. `RAIL_COLUMN` reserves that column for exactly
+this reason. Measured at width 60 with an overflowing transcript:
+
+```text
+before: "task build done                                       1m 12│"
+after:  "task build done                                      1m 12s "
+```
+
+The tool row's case was live, not latent, because a tool row settles a real duration today.
+Both rows are fixed, and the design fixtures `100-idle.txt` and `100-tool-run.txt` moved one
+column with the fix.
+
+**An unbounded state word could take the reserved slot.** `Row` is public, so the state is
+untrusted like the command and the progress, and the row counted its width without ever cutting
+it. A five hundred character state filled the row including the slot. The state is bounded now.
+
+Twenty-one mutations were applied one at a time, and each was killed by at least one test. The
+two that survived the first round are both closed: a command that filters to an empty string
+left a double space, and the half share could change from two to three in silence.
 
 ## What is not proved here
 
