@@ -501,11 +501,15 @@ the payloads it refused.
 pub enum ReplayDropReason {
     /// The payload belongs to another provider, or to another model.
     AnotherOwner,
-    /// The payload carries no signature, so the endpoint would refuse the turn.
+    /// The payload carries no signature, so Bedrock would refuse the whole turn.
     NoSignature,
     /// An encrypted payload did not decode from base64.
     UndecodableRedaction,
-    /// The provider SDK refused to build the block.
+    /// The AWS SDK refused to build the block.
+    ///
+    /// No test reaches this arm today. `ReasoningTextBlock::builder` cannot fail once both
+    /// required fields are set, and this code always sets both. It stays because the branch
+    /// stays, and it fails closed.
     UnbuildableBlock,
 }
 

@@ -64,6 +64,11 @@ signature block travels, and that evidence still stands.
 by construction and not by care. A test asserts that the debug form of the data carries no
 signature, so a later field cannot leak one in silence.
 
+**One log field went away.** The old unbuildable-block path logged `%error` from the AWS SDK
+`BuildError`. The four report sites became one, and that field went with them. A security
+review judged the loss negligible: a `BuildError` names a missing required field, never the
+payload. Dropping it is a small win for rule 9, because one less value crosses into a log.
+
 **`ReplayDropReason` stays exhaustive.** A new refusal must break every reader. A
 `#[non_exhaustive]` enum forces a catch-all arm on each reader, and a catch-all is how
 `ToolKind::Other` approved every tool that forgot its kind. See
