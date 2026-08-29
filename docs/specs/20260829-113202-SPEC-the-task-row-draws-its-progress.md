@@ -145,6 +145,7 @@ public and a frontend can build a task row itself. Text that does not fit is cut
 | `the_command_takes_at_most_half_the_row_beside_a_progress` | The share is exact, so the divisor cannot change in silence. |
 | `a_random_task_row_never_leaves_its_bounds` | Two thousand generated rows, over all three fields and the width, keep the slot bound and the filter. |
 | `a_row_drops_a_duration_it_cannot_draw_whole` | Every width from 10 to 30, on both rows: the duration is whole or absent, never a fragment. |
+| `a_progress_and_a_duration_never_touch` | The gap column is blank while a full progress and a real duration both draw. |
 
 ## 3a. What the review changed
 
@@ -162,6 +163,7 @@ independent second opinion. Six findings changed the code, and every one is now 
 | The `..` guard claimed more than a compiler can hold | codex | The claim is narrowed, and the field list now comes from the enum. |
 | The live check was a three-literal canary | security | It now finds any stripped CSI or OSC payload, and any C1 character. |
 | A narrow row drew a **cut** duration, `1m 12`, which reads as a different span | codex, second pass | Both rows drop the slot instead, through `justify_slot`. |
+| The gap column was pinned by three tests about other rules, never by its own purpose | tests | Every bound asserts a clear column before the slot, and one test states the rule. |
 
 ## 4. Out of scope
 

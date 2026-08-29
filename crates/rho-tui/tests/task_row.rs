@@ -267,9 +267,10 @@ fn any_progress_string_stays_inside_the_task_row() {
                     .expect("the task row draws");
                 let last_used = line.iter().rposition(|cell| cell != " ").unwrap_or(0);
                 assert!(
-                    last_used < usize::from(width) - DURATION_SLOT_COLUMNS,
-                    "the text stops before the duration slot at {width}, and it reached \
-                     column {last_used}: {row:?}"
+                    last_used < last_allowed_column(width),
+                    "the text stops a clear column before the duration slot at {width}, and \
+                     it reached column {last_used} of a limit of {}: {row:?}",
+                    last_allowed_column(width)
                 );
             }
             // The same bounds hold for a row a frontend built itself, with no reducer to
@@ -294,8 +295,9 @@ fn any_progress_string_stays_inside_the_task_row() {
                     .expect("the task row draws");
                 let last_used = line.iter().rposition(|cell| cell != " ").unwrap_or(0);
                 assert!(
-                    last_used < usize::from(width) - DURATION_SLOT_COLUMNS,
-                    "an unsanitised row stops before the duration slot at {width}: {raw_line:?}"
+                    last_used < last_allowed_column(width),
+                    "an unsanitised row stops a clear column before the slot at {width}: \
+                     {raw_line:?}"
                 );
             }
             // The row runs the filter itself. Asserting that no cell holds a control byte
@@ -622,9 +624,24 @@ fn a_failed_task_row_draws_in_the_error_role() {
 /// measure depend on the overflow it decides.
 const RAIL: usize = 1;
 
+/// The columns the row keeps between its text and the duration slot, from
+/// `TASK_GAP_COLUMNS` in the renderer. The gap exists so the progress and the duration never
+/// read as one word.
+const GAP: usize = 1;
+
 /// The first column of the duration slot, at a given frame width.
 fn slot_start(width: u16) -> usize {
     usize::from(width) - RAIL - DURATION_SLOT_COLUMNS
+}
+
+/// The last column the row text may use: the gap keeps it clear of the slot.
+///
+/// A review found every bound here asserted only `< slot_start`, which lets the text abut the
+/// slot with no blank column between them. That made `TASK_GAP_COLUMNS` pinned by boundary
+/// arithmetic rather than by intent: a mutation to zero died, but it died in three tests about
+/// other rules. This is the rule itself.
+fn last_allowed_column(width: u16) -> usize {
+    slot_start(width) - GAP
 }
 
 /// The last column any text reached on the first task row.
@@ -720,9 +737,10 @@ fn a_hostile_state_word_cannot_reach_the_duration_slot() {
             }];
             let last = last_text_column(&state, width);
             assert!(
-                last < slot_start(width),
-                "the state word reached column {last} of {width}, and the slot starts at {}",
-                slot_start(width)
+                last < last_allowed_column(width),
+                "the state word reached column {last} of {width}, and the last allowed \
+                 column is {}",
+                last_allowed_column(width)
             );
         }
     }
@@ -884,10 +902,10 @@ fn a_random_task_row_never_leaves_its_bounds() {
             .expect("the task row draws");
         let last = line.iter().rposition(|cell| cell != " ").unwrap_or(0);
         assert!(
-            last < slot_start(width),
-            "text reached column {last} of {width}, and the slot starts at {}. \
+            last < last_allowed_column(width),
+            "text reached column {last} of {width}, and the last allowed column is {}. \
              command {command:?} state {state_word:?} progress {progress:?}",
-            slot_start(width)
+            last_allowed_column(width)
         );
         // The row filters every field itself, whatever a frontend handed it.
         let mut oracle = TuiState::default();
@@ -904,6 +922,58 @@ fn a_random_task_row_never_leaves_its_bounds() {
             cells(&oracle, width),
             "the row filters every field at {width}. command {command:?} \
              state {state_word:?} progress {progress:?}"
+        );
+    }
+}
+
+#[test]
+fn a_progress_and_a_duration_never_touch() {
+    // The purpose of `TASK_GAP_COLUMNS`, stated as a test. A review found the gap pinned only
+    // by the boundary arithmetic of three tests about other rules, so a refactor that moved a
+    // boundary could let the progress and the duration read as one word.
+    let mut state = started("build");
+    progressed(
+        &mut state,
+        TaskProgress {
+            percent: Some(99),
+            // Long enough to fill every column the row will give it.
+            message: Some("x".repeat(400)),
+            done: None,
+            total: None,
+        },
+    );
+    let index = state
+        .rows
+        .iter()
+        .position(|row| matches!(row, Row::Task { .. }))
+        .expect("a task row");
+    state.row_durations[index] = Some(72_000);
+    for width in [40u16, 60, 80, 120] {
+        let drawn = cells(&state, width);
+        let line = drawn
+            .iter()
+            .find(|line| line.concat().contains("task "))
+            .expect("the task row draws");
+        // The duration is there, so the row really has two things to keep apart.
+        assert!(
+            line.concat().contains("1m 12s"),
+            "the duration draws at {width}: {:?}",
+            line.concat()
+        );
+        // Walk left from the slot: every gap column is blank.
+        for column in last_allowed_column(width)..slot_start(width) {
+            assert_eq!(
+                line[column],
+                " ",
+                "column {column} of {width} must be the gap, and the row was {:?}",
+                line.concat()
+            );
+        }
+        // And the progress really did want those columns.
+        assert!(
+            line.concat().contains('\u{2026}'),
+            "the progress was cut, so it wanted every column at {width}: {:?}",
+            line.concat()
         );
     }
 }
