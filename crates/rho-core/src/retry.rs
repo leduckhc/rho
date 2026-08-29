@@ -134,7 +134,7 @@ mod tests {
         let policy = RetryPolicy::default();
         let error = ProviderError::Client {
             status: 401,
-            message: "invalid api key".into(),
+            advice: "invalid api key",
         };
         assert!(!policy.should_retry(&error, 1));
     }
@@ -145,7 +145,7 @@ mod tests {
         for status in [400, 401, 403, 404, 422] {
             let error = ProviderError::Client {
                 status,
-                message: "no".into(),
+                advice: "no",
             };
             assert!(!policy.should_retry(&error, 1), "{status} must not retry");
         }

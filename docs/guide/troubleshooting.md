@@ -245,6 +245,19 @@ rho: 1 agent definition(s) available to spawn_agent: summariser
 
 No such line means no definition was found.
 
+### A 4xx says the body is not shown
+
+```
+rho: client error: status 400: the provider refused the request. rho does not show the body,
+because a body can echo the credential. Read the host's own log for the reason.
+```
+
+rho does not relay a provider's error body. A host that reflects the request header would put
+your key on your terminal, and in any log or bug report you paste it into. A local gateway is a
+process you run, so its own log holds the reason.
+
+The status still reaches you, and 401 and 403 keep their own message naming the credential.
+
 ### rho refuses a credential my project file sets
 
 The message names `--trust-project`:

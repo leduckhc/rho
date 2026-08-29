@@ -505,6 +505,21 @@ stays a plain environment read.
   `ConfigError::BaseUrl`. That message now carries the url with its userinfo replaced.
 - No credential helper's stderr on rho's stderr. `resolve_command` piped stdout and left
   stderr inherited, so a chatty helper could print a key. It is now null.
+- No credential value inside a provider error. A 4xx that was not 401 or 403 kept the peer's
+  response body in `ProviderError::Client`, and rho prints that error, so a host echoing the
+  `Authorization` header put a resolved credential on stderr. The field is now a
+  `&'static str`, so a run-time string cannot reach it, and rho no longer reads the body at
+  all. OpenRouter and Azure both had the line. See
+  `D-a-client-error-carries-no-peer-body`.
+- No unbounded read from a credential helper. Its stdout is capped at 64 KiB, and the reader
+  runs beside the wait so the cap binds before the timeout.
+- No subagent limit the runtime cannot accept. `max-live-total` reached `Semaphore::new`
+  unclamped and tokio panicked, so a config file aborted the binary. Every numeric limit now
+  has a bound or a tested proof that it needs none. See
+  `D-a-limit-too-large-is-refused-not-clamped`.
+- No silent provider choice by a clone. A project file that sets `provider` decides which of
+  the user's keys is exercised, so rho says so once. See
+  `D-a-project-provider-choice-is-announced`.
 
 ### Two rules a test can pass for the wrong reason
 
@@ -550,6 +565,15 @@ In `rho-config`:
 - `a_userinfo_base_url_error_hides_the_password` — the leak beside this path.
 - `a_credential_command_stderr_does_not_reach_the_parent` — a chatty helper cannot print a
   key onto rho's stderr.
+- `a_reflected_header_cannot_reach_a_client_error` — a host that echoes the `Authorization`
+  header in a 400 cannot put the key on stderr. It exists once per provider, in
+  `rho-provider-openrouter` and in `rho-provider-azure`, because both carried the body.
+- `a_runaway_credential_helper_is_refused_at_the_cap` and
+  `a_credential_at_the_cap_still_resolves` — the 64 KiB bound, and its boundary.
+- `a_project_file_that_chooses_the_provider_is_recorded`,
+  `a_flag_that_names_the_same_provider_as_the_project_still_clears_the_notice`, and
+  `a_project_provider_choice_reaches_a_notice` — the provider notice, and the one case the
+  stronger-layer check decides.
 
 In `rho-cli`:
 

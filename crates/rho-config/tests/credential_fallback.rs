@@ -415,3 +415,72 @@ fn write_script(dir: &tempfile::TempDir, name: &str, body: &str) -> String {
     );
     command
 }
+
+#[test]
+fn a_runaway_credential_helper_is_refused_at_the_cap() {
+    // A review found `read_to_string` unbounded: a helper that streams without stopping was
+    // bounded only by the pipe buffer and the 30-second timeout, and neither is a contract. The
+    // reviewer could not drive it, because its harness mis-escaped a nested `sh -c`. A script
+    // file has no quoting to mis-escape, which is the same lesson an earlier test in this file
+    // records.
+    //
+    // `yes` would run for the whole timeout, so the helper prints a bounded but over-cap payload
+    // and returns at once. That keeps the test fast and still crosses the cap.
+    let dir = temp_dir();
+    let helper = write_script(
+        &dir,
+        "runaway.sh",
+        // 128 KiB, which is twice the cap. `head -c` needs no loop and no PATH beyond /usr/bin.
+        "dd if=/dev/zero bs=1024 count=128 2>/dev/null | tr '\\0' 'k'\n",
+    );
+    let global = write_file(
+        &dir,
+        "global.toml",
+        &format!("[credentials]\nopenrouter = \"!{helper}\"\n"),
+    );
+    let sources = Sources::from_paths(ConfigPaths {
+        global: Some(global),
+        project: None,
+        ..Default::default()
+    });
+    let config = Config::load(&sources).expect("the file is valid TOML");
+    let error = config
+        .resolve_credential_or_env(NAME, FALLBACK, &env_map(&[("PATH", path_value())]))
+        .expect_err("a helper over the cap is refused");
+    let message = error.to_string();
+    assert!(
+        message.contains("more than"),
+        "the message says the helper wrote too much: {message}"
+    );
+    assert!(
+        !message.contains("kkk"),
+        "and it does not echo what the helper wrote: {message}"
+    );
+}
+
+#[test]
+fn a_credential_at_the_cap_still_resolves() {
+    // The boundary. Refusing a payload rho can accept would be its own defect, and reading
+    // exactly the cap must not read as a cut.
+    let dir = temp_dir();
+    let helper = write_script(
+        &dir,
+        "atcap.sh",
+        "dd if=/dev/zero bs=1024 count=64 2>/dev/null | tr '\\0' 'k'\n",
+    );
+    let global = write_file(
+        &dir,
+        "global.toml",
+        &format!("[credentials]\nopenrouter = \"!{helper}\"\n"),
+    );
+    let sources = Sources::from_paths(ConfigPaths {
+        global: Some(global),
+        project: None,
+        ..Default::default()
+    });
+    let config = Config::load(&sources).expect("the file is valid TOML");
+    let secret = config
+        .resolve_credential_or_env(NAME, FALLBACK, &env_map(&[("PATH", path_value())]))
+        .expect("a payload exactly at the cap is accepted");
+    assert_eq!(secret.expose().len(), 64 * 1024);
+}

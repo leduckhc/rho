@@ -491,3 +491,49 @@ async fn a_loopback_request_bypasses_a_proxy_variable() {
         "the loopback server must receive the request directly"
     );
 }
+
+/// A peer that reflects the request headers must not put the api-key on rho's stderr.
+///
+/// The review found this on OpenRouter. Azure had the identical line, and it had a second one
+/// on the mid-stream error event, so both are covered here. One provider is not every provider.
+///
+/// See `D-a-client-error-carries-no-peer-body`.
+#[tokio::test]
+async fn a_reflected_header_cannot_reach_a_client_error() {
+    const SECRET: &str = "sk-SECRET-AZURE-KEY";
+
+    let host = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(RESPONSES_PATH))
+        .respond_with(ResponseTemplate::new(400).set_body_string(format!(
+            "{{\"error\": {{\"message\": \"bad request; api-key was {SECRET}\"}}}}"
+        )))
+        .mount(&host)
+        .await;
+
+    let config = AzureConfig::new(host.uri(), "gpt-4o", AzureAuth::ApiKey(Secret::new(SECRET)))
+        .with_retry(RetryPolicy::none());
+    let provider = AzureProvider::new(config);
+    let error = match provider
+        .stream(common::sample_request(), CancelToken::new())
+        .await
+    {
+        Ok(_) => panic!("a 400 must be an error"),
+        Err(error) => error,
+    };
+
+    let printed = format!("{error}");
+    assert!(
+        !printed.contains(SECRET),
+        "a peer's body must never reach an error a user reads, got: {printed}"
+    );
+    assert!(
+        printed.contains("400"),
+        "the status still reaches the user: {printed}"
+    );
+    let debugged = format!("{error:?}");
+    assert!(
+        !debugged.contains(SECRET),
+        "nor the Debug form, got: {debugged}"
+    );
+}

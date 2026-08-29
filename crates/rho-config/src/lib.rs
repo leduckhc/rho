@@ -711,6 +711,13 @@ pub struct Config {
     /// Credential sources, by name. A value resolves through `resolve_credential`, or
     /// through `resolve_credential_or_env` when the caller carries a fallback variable.
     pub credentials: BTreeMap<String, CredentialSource>,
+    /// True when the `provider` came from a project file, and rho obeyed it.
+    ///
+    /// A clone chooses which of the user's credentials is exercised, and which vendor bills
+    /// them. It is not exfiltration, because an untrusted `base-url` is dropped, so the key
+    /// still travels only to that provider's own endpoint. It is consent and cost, so the caller
+    /// says so once. See `D-a-project-provider-choice-is-announced`.
+    pub provider_from_project: bool,
     /// Every subagent limit a project file asked to raise, with the file that asked.
     ///
     /// A project file may lower a cap and never raise one. A silent refusal to obey a file
@@ -1161,6 +1168,17 @@ impl CredentialSource {
     }
 }
 
+/// The largest credential a helper may print, in bytes.
+///
+/// A key is short. 64 KiB is generous for one, and it bounds a helper that streams without
+/// stopping: `read_to_string` had no bound but the pipe buffer and the 30-second timeout, and
+/// neither is a contract. It sits behind the trust gate, so an untrusted project cannot reach
+/// it, which is why this is a cap and not a refusal of the whole feature.
+///
+/// It is the same shape as two caps this project already argued through: the `bash` output cap,
+/// and the steering message that turned 8 MB into 805 MB. Both ended with a cap at the one door.
+const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
+
 /// The default timeout for a credential command. A hung helper fails after this.
 const DEFAULT_CREDENTIAL_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -1214,13 +1232,49 @@ fn resolve_command(
         message: format!("the credential command did not run: {error}"),
     })?;
 
-    // Wait for the child, but never longer than the timeout. A hung helper is killed
-    // and reaped, so it leaks no process and leaves no zombie. See SPEC-config section 5.
+    // Read the helper's stdout on a thread, bounded to the cap, while the main thread waits for
+    // the child. The two bounds are independent on purpose, and each is a stated contract:
+    //
+    //   * memory is bounded by `MAX_CREDENTIAL_BYTES`, whatever the OS pipe buffer happens to be
+    //   * time is bounded by `timeout`
+    //
+    // The reader must not run after the wait, and the wait must not run after the reader. A
+    // read-then-wait order hangs forever on a helper that writes nothing and never exits. A
+    // wait-then-read order lets a runaway fill the pipe, block on its own write, and stall until
+    // the timeout, so the cap would never bind and a 64 KiB payload would cost 30 seconds. A
+    // review named the cap; driving it is what showed the ordering matters.
+    let reader = child.stdout.take().map(|handle| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            // The read is one byte over the cap, so `stdout.len() > cap` is a deterministic
+            // overflow signal that does not depend on which of the child and the reader the
+            // poll loop notices first. A mutation showed no test separates it from a read of
+            // exactly the cap, because `over_cap` catches that case too. It stays as the
+            // race-free half of the pair, and the comment says so rather than claiming more.
+            let outcome = handle
+                .take(MAX_CREDENTIAL_BYTES as u64 + 1)
+                .read_to_string(&mut text);
+            (text, outcome.is_ok())
+        })
+    });
+
+    // Wait for the child, but never longer than the timeout, and never longer than it takes the
+    // reader to fill the cap. A hung helper is killed and reaped, so it leaks no process and
+    // leaves no zombie. See SPEC-config section 5.
     let start = Instant::now();
+    let mut over_cap = false;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
+                // The reader finishes only at EOF or at the cap. The child has not exited, so
+                // this is the cap: stop the helper now rather than wait out the timeout.
+                if reader.as_ref().is_some_and(|handle| handle.is_finished()) {
+                    over_cap = true;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break std::process::ExitStatus::default();
+                }
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -1241,20 +1295,31 @@ fn resolve_command(
             }
         }
     };
+
+    let (stdout, read_ok) = match reader {
+        Some(handle) => handle.join().unwrap_or_else(|_| (String::new(), false)),
+        None => (String::new(), true),
+    };
+    if !read_ok {
+        return Err(ConfigError::Credential {
+            name: name.to_string(),
+            message: "the credential command wrote invalid UTF-8".to_string(),
+        });
+    }
+    if over_cap || stdout.len() > MAX_CREDENTIAL_BYTES {
+        return Err(ConfigError::Credential {
+            name: name.to_string(),
+            message: format!(
+                "the credential command wrote more than {MAX_CREDENTIAL_BYTES} bytes. \
+                 A key is short, so this is a runaway helper."
+            ),
+        });
+    }
     if !status.success() {
         return Err(ConfigError::Credential {
             name: name.to_string(),
             message: format!("the credential command failed with status {status}"),
         });
-    }
-    let mut stdout = String::new();
-    if let Some(mut handle) = child.stdout.take() {
-        handle
-            .read_to_string(&mut stdout)
-            .map_err(|_| ConfigError::Credential {
-                name: name.to_string(),
-                message: "the credential command wrote invalid UTF-8".to_string(),
-            })?;
     }
     Ok(Secret::new(stdout.trim()))
 }
@@ -1327,6 +1392,25 @@ fn parse_reasoning(layer: &ConfigLayer) -> Result<rho_core::ReasoningDisplay, Co
 /// `merge` and `narrow_to`, where the compiler forces it, and forgotten **here**, where it
 /// would parse and narrow and still never reach `rho-core`. That is the dead-switch class this
 /// whole change exists to close.
+/// Turn the file's limit fields into the runtime limits, and refuse a value the runtime cannot
+/// accept.
+///
+/// `max-live-total` reached `Semaphore::new` unclamped, and tokio panics above `MAX_PERMITS`, so
+/// a config file aborted the binary with a tokio backtrace. The bound lives in `rho-core`,
+/// beside the code that calls the semaphore, and this is one of its two callers. See
+/// `D-a-limit-too-large-is-refused-not-clamped`.
+fn build_subagents_checked(
+    layer: Option<&SubagentLimitsLayer>,
+) -> Result<rho_core::SubagentLimits, ConfigError> {
+    let limits = build_subagents(layer);
+    limits.check().map_err(|error| ConfigError::Value {
+        key: error.key,
+        value: error.value.to_string(),
+        message: format!("the maximum is {}", error.maximum),
+    })?;
+    Ok(limits)
+}
+
 fn build_subagents(layer: Option<&SubagentLimitsLayer>) -> rho_core::SubagentLimits {
     let mut limits = rho_core::SubagentLimits::default();
     if let Some(source) = layer {
@@ -1413,10 +1497,15 @@ impl Config {
         // Whether a project file was actually read. The environment gate keys off this, not
         // off trust alone: without a project file there is no cloned project to distrust.
         let mut project_file_read = false;
+        // The provider a project file named, if it named one. A clone that only sets `provider`
+        // needs no `credentials` entry to benefit: it chooses which of the user's keys is
+        // exercised, and which vendor bills them. See `D-a-project-provider-choice-is-announced`.
+        let mut project_provider: Option<String> = None;
         if let Some(path) = &sources.project_file
             && let Some(mut layer) = Config::read_file(path)?
         {
             project_file_read = true;
+            project_provider = layer.provider.clone();
             // A limit narrows whether the project is trusted or not. `--trust-project` loads
             // a capability, and a limit is not a capability a file adds; it is a bound a file
             // relaxes. See `D-your-settings-are-a-floor`.
@@ -1487,8 +1576,16 @@ impl Config {
                 refused_commands = Some((PathBuf::from("the environment"), stripped.refused));
             }
         }
+        // A project provider is reported only when no stronger layer overrode it. A notice that
+        // blames the project for the user's own flag is worse than no notice. A profile is caught
+        // by the value comparison below, because a profile that set another provider changes it.
+        let provider_from_a_stronger_layer =
+            env_layer.provider.is_some() || sources.flags.provider.is_some();
         merged = merged.merge(env_layer);
         merged = merged.merge(sources.flags.clone());
+        let provider_from_project = project_provider.is_some()
+            && !provider_from_a_stronger_layer
+            && merged.provider == project_provider;
 
         // The environment layer fails closed on an unaccepted boolean, before use.
         validate_env_booleans(&sources.env)?;
@@ -1544,9 +1641,10 @@ impl Config {
             reasoning,
             reasoning_effort,
             mcp_config: merged.mcp_config,
-            subagents: build_subagents(merged.subagents.as_ref()),
+            subagents: build_subagents_checked(merged.subagents.as_ref())?,
             credentials,
             lowered_limits,
+            provider_from_project,
         })
     }
 

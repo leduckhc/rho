@@ -156,7 +156,12 @@ No new error. Nothing here fails the run.
 - No trust branch on the narrowing. `--trust-project` loads a capability, and a limit is not
   a capability. See `D-a-project-file-only-lowers-a-limit`.
 - No whole-table replacement in `merge`. A layer that names one limit states one limit.
-- No silent clamp. Every limit rho refused to raise is named in a notice.
+- No silent clamp. Every limit rho refused to raise is named in a notice, and a value the
+  runtime cannot accept is refused rather than clamped. See
+  `D-a-limit-too-large-is-refused-not-clamped`.
+- No numeric limit without a decision about its bound. `SubagentLimits::check` reads a table
+  of all ten, built from an exhaustive destructure, so a new limit fails the build until
+  somebody bounds it or states that it needs none.
 - No limit read from the environment. `ConfigLayer::from_env` maps no `[subagents]` key
   today, and this spec adds none.
 
@@ -248,6 +253,17 @@ a per-field bug hides inside a set-shaped assertion.
   the trust gate's own two.
 - `a_refused_raise_is_named_in_the_config` — `lowered_limits` holds the key and the file.
 - `loading_twice_gives_the_same_limits` — rule 8.
+- `a_limit_above_the_runtime_maximum_is_refused_and_names_the_key`,
+  `a_children_limit_above_the_runtime_maximum_is_refused_too`,
+  `a_limit_at_the_runtime_maximum_still_loads`, and
+  `a_refused_limit_is_not_silently_clamped` — the tokio semaphore panic a config file could
+  reach, and its boundary.
+- `every_numeric_limit_is_bounded_or_provably_safe` and `the_stated_defaults_pass_their_own_check`
+  — the table over all ten limits, in `rho-core`. Each unbounded field is driven at its
+  extreme, so "no bound needed" is proved rather than assumed.
+- `a_flag_above_the_runtime_maximum_is_refused`,
+  `a_children_flag_above_the_runtime_maximum_is_refused`, and
+  `a_flag_at_the_runtime_maximum_is_accepted` — the flag path had the same hole.
 
 ### The call site, in `rho-cli`
 

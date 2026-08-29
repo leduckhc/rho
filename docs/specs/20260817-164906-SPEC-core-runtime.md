@@ -317,7 +317,7 @@ pub enum ProviderError {
     Server { status: u16 },
     /// HTTP 4xx other than 429. Permanent. Never retried.
     #[error("client error: status {status}: {message}")]
-    Client { status: u16, message: String },
+    Client { status: u16, advice: &'static str },
     /// The response body could not be decoded. Permanent.
     #[error("stream decode error: {0}")]
     Decode(String),

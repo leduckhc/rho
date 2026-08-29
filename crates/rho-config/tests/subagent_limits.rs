@@ -424,3 +424,104 @@ fn loading_twice_gives_the_same_limits() {
     );
     assert_eq!(first.lowered_limits, second.lowered_limits);
 }
+
+// ---- a limit too large is refused, not clamped, and never panics ----
+
+#[test]
+fn a_limit_above_the_runtime_maximum_is_refused_and_names_the_key() {
+    // A config file panicked the binary. `max-live-total` reached `Semaphore::new` unclamped,
+    // and tokio panics above `MAX_PERMITS`, so a typo aborted the process with a tokio
+    // backtrace instead of a sentence. Driven live before the fix:
+    //
+    //   thread 'main' panicked at tokio-1.53.1/src/sync/batch_semaphore.rs:141:9:
+    //   a semaphore may not have more than MAX_PERMITS permits (2305843009213693951)
+    //
+    // The floor rule does not help, because a ceiling bounds a project file and the user's own
+    // global file is unbounded by design. See `D-a-limit-too-large-is-refused-not-clamped`.
+    let dir = temp_dir();
+    let global = write_file(
+        &dir,
+        "global.toml",
+        "[subagents]\nmax-live-total = 18446744073709551615\n",
+    );
+    let sources = Sources::from_paths(ConfigPaths {
+        global: Some(global),
+        project: None,
+        ..Default::default()
+    });
+    let error = Config::load(&sources).expect_err("a value the runtime cannot accept is refused");
+    let message = error.to_string();
+    assert!(
+        message.contains("subagents.max-live-total"),
+        "the message names the key: {message}"
+    );
+    assert!(
+        message.contains(&SubagentLimits::MAX_COUNT.to_string()),
+        "and it names the maximum: {message}"
+    );
+}
+
+#[test]
+fn a_children_limit_above_the_runtime_maximum_is_refused_too() {
+    // The second semaphore count. One field is not the set.
+    let dir = temp_dir();
+    let global = write_file(
+        &dir,
+        "global.toml",
+        "[subagents]\nmax-children-per-parent = 18446744073709551615\n",
+    );
+    let sources = Sources::from_paths(ConfigPaths {
+        global: Some(global),
+        project: None,
+        ..Default::default()
+    });
+    let error = Config::load(&sources).expect_err("a value the runtime cannot accept is refused");
+    assert!(
+        error
+            .to_string()
+            .contains("subagents.max-children-per-parent"),
+        "the message names the key: {error}"
+    );
+}
+
+#[test]
+fn a_limit_at_the_runtime_maximum_still_loads() {
+    // The boundary. Refusing a value rho can accept would be its own defect.
+    let dir = temp_dir();
+    let global = write_file(
+        &dir,
+        "global.toml",
+        &format!(
+            "[subagents]\nmax-live-total = {}\n",
+            SubagentLimits::MAX_COUNT
+        ),
+    );
+    let sources = Sources::from_paths(ConfigPaths {
+        global: Some(global),
+        project: None,
+        ..Default::default()
+    });
+    let config = Config::load(&sources).expect("a value at the maximum is accepted");
+    assert_eq!(config.subagents.max_live_total, SubagentLimits::MAX_COUNT);
+}
+
+#[test]
+fn a_refused_limit_is_not_silently_clamped() {
+    // `D-your-settings-are-a-floor` argues against a value the user wrote and rho changed in
+    // silence. So this is a refusal, and the load must fail rather than return a smaller value.
+    let dir = temp_dir();
+    let global = write_file(
+        &dir,
+        "global.toml",
+        "[subagents]\nmax-live-total = 18446744073709551615\n",
+    );
+    let sources = Sources::from_paths(ConfigPaths {
+        global: Some(global),
+        project: None,
+        ..Default::default()
+    });
+    assert!(
+        Config::load(&sources).is_err(),
+        "a clamp would return Ok with a value the user never wrote"
+    );
+}

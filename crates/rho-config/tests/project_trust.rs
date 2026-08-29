@@ -1087,3 +1087,151 @@ fn a_home_directory_is_never_scanned() {
         "a ~/.envrc must not gate a project below the home directory"
     );
 }
+
+// ---- a project provider choice is recorded, so the caller can announce it ----
+
+/// Load a global file and a project file together, so provenance can be told apart.
+fn load_pair(global: &str, project: &str) -> (Config, TempDir) {
+    let dir = temp_dir();
+    let g = write_file(&dir, "global.toml", global);
+    let p = write_file(&dir, "project.toml", project);
+    let sources = Sources::from_paths(ConfigPaths {
+        global: Some(g),
+        project: Some(p),
+        ..Default::default()
+    });
+    (
+        Config::load(&sources).expect("both files are valid TOML"),
+        dir,
+    )
+}
+
+#[test]
+fn a_project_file_that_chooses_the_provider_is_recorded() {
+    // A clone needs no `credentials` entry to benefit: naming the provider decides which of the
+    // user's keys is exercised, and which vendor bills them. The endpoint is not moved, because
+    // an untrusted `base-url` is dropped, so this is consent and cost rather than exfiltration.
+    // See `D-a-project-provider-choice-is-announced`.
+    let (config, _dir) = load_pair("", "provider = \"openrouter\"\n");
+    assert!(
+        config.provider_from_project,
+        "the caller must be able to say the project chose this"
+    );
+    assert_eq!(config.provider.as_deref(), Some("openrouter"));
+}
+
+#[test]
+fn a_global_provider_choice_is_not_recorded() {
+    // The user's own file is their own choice, so there is nothing to announce.
+    let (config, _dir) = load_pair("provider = \"openrouter\"\n", "");
+    assert!(!config.provider_from_project);
+}
+
+#[test]
+fn a_flag_beats_the_project_and_clears_the_notice() {
+    // A notice that blames the project for the user's own flag is worse than no notice.
+    let dir = temp_dir();
+    let project = write_file(&dir, "project.toml", "provider = \"openrouter\"\n");
+    let sources = Sources::from_paths(ConfigPaths {
+        global: None,
+        project: Some(project),
+        ..Default::default()
+    })
+    .with_flags(rho_config::ConfigLayer {
+        provider: Some("bedrock".to_string()),
+        ..Default::default()
+    });
+    let config = Config::load(&sources).expect("valid");
+    assert_eq!(config.provider.as_deref(), Some("bedrock"));
+    assert!(
+        !config.provider_from_project,
+        "the flag won, so the project chose nothing"
+    );
+}
+
+#[test]
+fn an_environment_provider_beats_the_project_and_clears_the_notice() {
+    // The same rule for layer 5. A variable the user exported is theirs.
+    let dir = temp_dir();
+    let project = write_file(&dir, "project.toml", "provider = \"openrouter\"\n");
+    let sources = Sources::from_paths(ConfigPaths {
+        global: None,
+        project: Some(project),
+        ..Default::default()
+    })
+    .with_env(vec![("RHO_PROVIDER".to_string(), "bedrock".to_string())]);
+    let config = Config::load(&sources).expect("valid");
+    assert_eq!(config.provider.as_deref(), Some("bedrock"));
+    assert!(!config.provider_from_project);
+}
+
+#[test]
+fn a_project_provider_is_recorded_even_when_the_project_is_trusted() {
+    // `--trust-project` says the capabilities are safe to load. It does not mean the user
+    // remembers which vendor the repository picked, so the notice still fires.
+    let dir = temp_dir();
+    let project = write_file(&dir, "project.toml", "provider = \"openrouter\"\n");
+    let sources = Sources::from_paths(ConfigPaths {
+        global: None,
+        project: Some(project),
+        ..Default::default()
+    })
+    .with_project_trust(ProjectTrust::Trusted);
+    let config = Config::load(&sources).expect("valid");
+    assert!(config.provider_from_project);
+}
+
+#[test]
+fn no_project_file_records_no_provider_choice() {
+    let dir = temp_dir();
+    let global = write_file(&dir, "global.toml", "provider = \"openrouter\"\n");
+    let sources = Sources::from_paths(ConfigPaths {
+        global: Some(global),
+        project: None,
+        ..Default::default()
+    });
+    let config = Config::load(&sources).expect("valid");
+    assert!(!config.provider_from_project);
+}
+
+#[test]
+fn a_flag_that_names_the_same_provider_as_the_project_still_clears_the_notice() {
+    // A mutation showed the earlier pair could not see this. Both used a **different** provider
+    // in the flag, so `merged.provider == project_provider` was already false and the
+    // stronger-layer check was never reached. Deleting that check passed both tests.
+    //
+    // When the user's flag names the same provider the project did, the user chose it, so no
+    // notice is owed. This is the only case the stronger-layer check decides.
+    let dir = temp_dir();
+    let project = write_file(&dir, "project.toml", "provider = \"openrouter\"\n");
+    let sources = Sources::from_paths(ConfigPaths {
+        global: None,
+        project: Some(project),
+        ..Default::default()
+    })
+    .with_flags(rho_config::ConfigLayer {
+        provider: Some("openrouter".to_string()),
+        ..Default::default()
+    });
+    let config = Config::load(&sources).expect("valid");
+    assert_eq!(config.provider.as_deref(), Some("openrouter"));
+    assert!(
+        !config.provider_from_project,
+        "the user's own flag named it, so the project chose nothing to announce"
+    );
+}
+
+#[test]
+fn a_variable_that_names_the_same_provider_as_the_project_still_clears_the_notice() {
+    // The layer-5 half of the same rule.
+    let dir = temp_dir();
+    let project = write_file(&dir, "project.toml", "provider = \"openrouter\"\n");
+    let sources = Sources::from_paths(ConfigPaths {
+        global: None,
+        project: Some(project),
+        ..Default::default()
+    })
+    .with_env(vec![("RHO_PROVIDER".to_string(), "openrouter".to_string())]);
+    let config = Config::load(&sources).expect("valid");
+    assert!(!config.provider_from_project);
+}

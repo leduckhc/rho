@@ -42,6 +42,7 @@ fn config_holding(source: CredentialSource) -> Config {
         subagents: SubagentLimits::default(),
         credentials,
         lowered_limits: Vec::new(),
+        provider_from_project: false,
     }
 }
 

@@ -534,7 +534,7 @@ pub(crate) async fn build_session(
         provider: Arc::clone(&provider),
         hooks: Arc::clone(&hooks),
         parent_tools,
-        limits: subagent_limits(cli, loaded),
+        limits: subagent_limits(cli, loaded)?,
     })
     .await;
     for tool in spawn_tools {
@@ -1423,6 +1423,17 @@ fn wiring_notices(loaded: &rho_config::Config, provider_name: &str) -> Vec<Strin
             loaded.dropped_keys.join(", ")
         ));
     }
+    if loaded.provider_from_project {
+        // A clone that names only `provider` chooses which of the user's keys is exercised, and
+        // which vendor bills them. The endpoint is not moved, because an untrusted `base-url` is
+        // dropped, so this is consent and cost rather than exfiltration. Gating `provider`
+        // outright would break a legitimate per-repository choice. See
+        // `D-a-project-provider-choice-is-announced`.
+        notices.push(format!(
+            "this project chose the {provider_name} provider, so your {provider_name} credential \
+             is in use. Pass --provider to override it."
+        ));
+    }
     if !loaded.lowered_limits.is_empty() {
         // A different sentence from the one above, on purpose. `--trust-project` restores a
         // dropped key, and it does not lift the limit floor, so naming the flag here would be
@@ -1469,13 +1480,16 @@ fn wiring_notices(loaded: &rho_config::Config, provider_name: &str) -> Vec<Strin
 /// seconds of patience and not ten minutes. A contract review named the naive shape:
 /// `.unwrap_or(loaded.subagents.queue_wait)` passes every per-limit test and breaks the rule
 /// in silence.
-fn subagent_limits(cli: &Cli, loaded: &rho_config::Config) -> rho_core::SubagentLimits {
+fn subagent_limits(
+    cli: &Cli,
+    loaded: &rho_config::Config,
+) -> anyhow::Result<rho_core::SubagentLimits> {
     let merged = loaded.subagents;
     let child_timeout = cli
         .child_timeout_secs
         .map(std::time::Duration::from_secs)
         .unwrap_or(merged.child_timeout);
-    rho_core::SubagentLimits {
+    let limits = rho_core::SubagentLimits {
         max_depth: merged.max_depth.min(1),
         max_children_per_parent: cli
             .max_children_per_parent
@@ -1498,7 +1512,14 @@ fn subagent_limits(cli: &Cli, loaded: &rho_config::Config) -> rho_core::Subagent
             .max_agent_steer_bytes
             .unwrap_or(merged.max_steer_message_bytes),
         child_timeout,
-    }
+    };
+    // A flag reaches the same semaphore a config key does, and the flag path had the same hole.
+    // `rho-config` refuses a file value, so a value that arrives here too large came from a
+    // flag. See `D-a-limit-too-large-is-refused-not-clamped`.
+    limits
+        .check()
+        .map_err(|error| anyhow::anyhow!("{error} Lower it, or unset the flag that set it."))?;
+    Ok(limits)
 }
 
 #[cfg(test)]
@@ -1728,7 +1749,7 @@ mod tests {
             "11",
         ])
         .unwrap();
-        let limits = subagent_limits(&cli, &no_config());
+        let limits = subagent_limits(&cli, &no_config()).unwrap();
         assert_eq!(limits.max_children_per_parent, 2);
         assert_eq!(limits.max_live_total, 7);
         assert_eq!(limits.child_timeout, std::time::Duration::from_secs(30));
@@ -1752,14 +1773,14 @@ mod tests {
     #[test]
     fn the_grace_flag_reaches_the_limits() {
         let cli = Cli::parse_from(["rho", "--agent-grace-turns", "2"]);
-        assert_eq!(subagent_limits(&cli, &no_config()).grace_turns, 2);
+        assert_eq!(subagent_limits(&cli, &no_config()).unwrap().grace_turns, 2);
     }
 
     #[test]
     fn the_grace_window_defaults_to_the_stated_subagent_value() {
         let cli = Cli::parse_from(["rho"]);
         assert_eq!(
-            subagent_limits(&cli, &no_config()).grace_turns,
+            subagent_limits(&cli, &no_config()).unwrap().grace_turns,
             rho_core::DEFAULT_SUBAGENT_GRACE_TURNS,
             "a child is warned by default, because it has nobody to ask for more turns"
         );
@@ -1770,7 +1791,7 @@ mod tests {
         // A refusal names this flag, so the flag has to change the deadline.
         let cli = Cli::parse_from(["rho", "--queue-wait-secs", "30"]);
         assert_eq!(
-            subagent_limits(&cli, &no_config()).queue_wait,
+            subagent_limits(&cli, &no_config()).unwrap().queue_wait,
             std::time::Duration::from_secs(30)
         );
     }
@@ -1780,13 +1801,13 @@ mod tests {
         // A waiter gets one whole sibling run of patience. So a host that lengthens a
         // child run lengthens the patience with it. See decision D-a-waiter-has-a-deadline.
         let cli = Cli::parse_from(["rho", "--child-timeout-secs", "900"]);
-        let limits = subagent_limits(&cli, &no_config());
+        let limits = subagent_limits(&cli, &no_config()).unwrap();
         assert_eq!(
             limits.queue_wait,
             std::time::Duration::from_secs(900),
             "an unset deadline follows the child timeout, and never the stated default"
         );
-        let plain = subagent_limits(&Cli::parse_from(["rho"]), &no_config());
+        let plain = subagent_limits(&Cli::parse_from(["rho"]), &no_config()).unwrap();
         assert_eq!(plain.queue_wait, plain.child_timeout);
     }
 
@@ -1795,10 +1816,12 @@ mod tests {
         // A cap only the default constructor applied would make this flag dead surface.
         let cli = Cli::parse_from(["rho", "--max-agent-steer-bytes", "4096"]);
         assert_eq!(
-            subagent_limits(&cli, &no_config()).max_steer_message_bytes,
+            subagent_limits(&cli, &no_config())
+                .unwrap()
+                .max_steer_message_bytes,
             4096
         );
-        let plain = subagent_limits(&Cli::parse_from(["rho"]), &no_config());
+        let plain = subagent_limits(&Cli::parse_from(["rho"]), &no_config()).unwrap();
         assert_eq!(
             plain.max_steer_message_bytes,
             rho_core::SubagentLimits::new().max_steer_message_bytes,
@@ -1809,7 +1832,7 @@ mod tests {
     #[test]
     fn the_grace_warning_can_be_turned_off_from_the_command_line() {
         let cli = Cli::parse_from(["rho", "--agent-grace-turns", "0"]);
-        assert_eq!(subagent_limits(&cli, &no_config()).grace_turns, 0);
+        assert_eq!(subagent_limits(&cli, &no_config()).unwrap().grace_turns, 0);
     }
 
     #[test]
@@ -1817,7 +1840,7 @@ mod tests {
         // The defaults stay where `SubagentLimits::new` states them, so a flag that
         // is absent changes nothing. See decision D-no-four-argument-session-new.
         let cli = Cli::try_parse_from(["rho", "--provider", "openrouter"]).unwrap();
-        let limits = subagent_limits(&cli, &no_config());
+        let limits = subagent_limits(&cli, &no_config()).unwrap();
         let stated = rho_core::SubagentLimits::new();
         assert_eq!(
             limits.max_children_per_parent,
@@ -1837,14 +1860,19 @@ mod tests {
     fn a_config_file_alone_lowers_the_children_limit() {
         let (loaded, _dir) = config_from_project("[subagents]\nmax-children-per-parent = 2\n");
         let cli = Cli::try_parse_from(["rho"]).unwrap();
-        assert_eq!(subagent_limits(&cli, &loaded).max_children_per_parent, 2);
+        assert_eq!(
+            subagent_limits(&cli, &loaded)
+                .unwrap()
+                .max_children_per_parent,
+            2
+        );
     }
 
     #[test]
     fn a_config_file_alone_lowers_the_live_limit() {
         let (loaded, _dir) = config_from_project("[subagents]\nmax-live-total = 3\n");
         let cli = Cli::try_parse_from(["rho"]).unwrap();
-        assert_eq!(subagent_limits(&cli, &loaded).max_live_total, 3);
+        assert_eq!(subagent_limits(&cli, &loaded).unwrap().max_live_total, 3);
     }
 
     #[test]
@@ -1852,7 +1880,7 @@ mod tests {
         let (loaded, _dir) = config_from_project("[subagents]\nchild-timeout-secs = 30\n");
         let cli = Cli::try_parse_from(["rho"]).unwrap();
         assert_eq!(
-            subagent_limits(&cli, &loaded).child_timeout,
+            subagent_limits(&cli, &loaded).unwrap().child_timeout,
             std::time::Duration::from_secs(30)
         );
     }
@@ -1864,7 +1892,7 @@ mod tests {
         // dead-switch defect this change exists to close.
         let (loaded, _dir) = config_from_project("[subagents]\nmax-depth = 0\n");
         let cli = Cli::try_parse_from(["rho"]).unwrap();
-        assert_eq!(subagent_limits(&cli, &loaded).max_depth, 0);
+        assert_eq!(subagent_limits(&cli, &loaded).unwrap().max_depth, 0);
     }
 
     #[test]
@@ -1874,7 +1902,7 @@ mod tests {
         // decision D-cli-depth-is-zero.
         let (loaded, _dir) = config_from_project("[subagents]\nmax-depth = 3\n");
         let cli = Cli::try_parse_from(["rho"]).unwrap();
-        assert_eq!(subagent_limits(&cli, &loaded).max_depth, 1);
+        assert_eq!(subagent_limits(&cli, &loaded).unwrap().max_depth, 1);
     }
 
     #[test]
@@ -1882,7 +1910,9 @@ mod tests {
         let (loaded, _dir) = config_from_project("[subagents]\nmax-children-per-parent = 2\n");
         let cli = Cli::try_parse_from(["rho", "--max-children-per-parent", "3"]).unwrap();
         assert_eq!(
-            subagent_limits(&cli, &loaded).max_children_per_parent,
+            subagent_limits(&cli, &loaded)
+                .unwrap()
+                .max_children_per_parent,
             3,
             "a flag is layer 6, so it wins even when it raises the cap"
         );
@@ -1892,7 +1922,7 @@ mod tests {
     fn the_live_agents_flag_beats_the_config_file() {
         let (loaded, _dir) = config_from_project("[subagents]\nmax-live-total = 3\n");
         let cli = Cli::try_parse_from(["rho", "--max-live-agents", "9"]).unwrap();
-        assert_eq!(subagent_limits(&cli, &loaded).max_live_total, 9);
+        assert_eq!(subagent_limits(&cli, &loaded).unwrap().max_live_total, 9);
     }
 
     #[test]
@@ -1900,7 +1930,7 @@ mod tests {
         let (loaded, _dir) = config_from_project("[subagents]\nchild-timeout-secs = 30\n");
         let cli = Cli::try_parse_from(["rho", "--child-timeout-secs", "45"]).unwrap();
         assert_eq!(
-            subagent_limits(&cli, &loaded).child_timeout,
+            subagent_limits(&cli, &loaded).unwrap().child_timeout,
             std::time::Duration::from_secs(45)
         );
     }
@@ -1914,7 +1944,7 @@ mod tests {
         // silence. A contract review named that shape.
         let (loaded, _dir) = config_from_project("[subagents]\nchild-timeout-secs = 30\n");
         let cli = Cli::try_parse_from(["rho"]).unwrap();
-        let limits = subagent_limits(&cli, &loaded);
+        let limits = subagent_limits(&cli, &loaded).unwrap();
         assert_eq!(
             limits.queue_wait,
             std::time::Duration::from_secs(30),
@@ -1928,12 +1958,41 @@ mod tests {
         // Six limits have a flag and no config key. This change must not disturb them.
         let (loaded, _dir) = config_from_project("[subagents]\nmax-live-total = 3\n");
         let cli = Cli::try_parse_from(["rho", "--agent-grace-turns", "2"]).unwrap();
-        let limits = subagent_limits(&cli, &loaded);
+        let limits = subagent_limits(&cli, &loaded).unwrap();
         assert_eq!(limits.grace_turns, 2);
         assert_eq!(
             limits.max_queued_total,
             rho_core::SubagentLimits::new().max_queued_total,
             "a limit with no config key keeps its stated default"
+        );
+    }
+
+    #[test]
+    fn a_project_provider_choice_reaches_a_notice() {
+        // The MINOR from the review. A clone that names only `provider` decides which of the
+        // user's keys is exercised and which vendor bills them, and nothing said so. Gating the
+        // key outright would break a legitimate per-repository choice, so this is a notice.
+        let (loaded, _dir) = config_from_project("provider = \"openrouter\"\n");
+        let notices = wiring_notices(&loaded, "openrouter");
+        let joined = notices.join(" | ");
+        assert!(
+            joined.contains("this project chose the openrouter provider"),
+            "the notice names the provider the project chose: {joined}"
+        );
+        assert!(
+            joined.contains("--provider"),
+            "and it names the flag that overrides it: {joined}"
+        );
+    }
+
+    #[test]
+    fn a_provider_the_project_did_not_choose_reaches_no_notice() {
+        // The other half. With no project provider, rho stays quiet.
+        let (loaded, _dir) = config_from_project("model = \"some-model\"\n");
+        let joined = wiring_notices(&loaded, "openrouter").join(" | ");
+        assert!(
+            !joined.contains("this project chose"),
+            "no project provider means no notice: {joined}"
         );
     }
 
@@ -1956,6 +2015,48 @@ mod tests {
     }
 
     #[test]
+    fn a_flag_above_the_runtime_maximum_is_refused() {
+        // The flag path had the same hole as the file path, and nobody had met it. A config file
+        // is refused by `rho-config`, so a value that reaches here too large came from a flag.
+        // See `D-a-limit-too-large-is-refused-not-clamped`.
+        let over = (rho_core::SubagentLimits::MAX_COUNT + 1).to_string();
+        let cli = Cli::try_parse_from(["rho", "--max-live-agents", &over]).unwrap();
+        let error = subagent_limits(&cli, &no_config())
+            .expect_err("a flag the runtime cannot accept is refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("subagents.max-live-total"),
+            "the message names the limit: {message}"
+        );
+        assert!(
+            message.contains("flag"),
+            "and it names the flag as the thing to unset: {message}"
+        );
+    }
+
+    #[test]
+    fn a_flag_at_the_runtime_maximum_is_accepted() {
+        // The boundary, on the flag path too.
+        let at = rho_core::SubagentLimits::MAX_COUNT.to_string();
+        let cli = Cli::try_parse_from(["rho", "--max-live-agents", &at]).unwrap();
+        let limits = subagent_limits(&cli, &no_config()).expect("a value at the maximum is fine");
+        assert_eq!(limits.max_live_total, rho_core::SubagentLimits::MAX_COUNT);
+    }
+
+    #[test]
+    fn a_children_flag_above_the_runtime_maximum_is_refused() {
+        let over = (rho_core::SubagentLimits::MAX_COUNT + 1).to_string();
+        let cli = Cli::try_parse_from(["rho", "--max-children-per-parent", &over]).unwrap();
+        let error = subagent_limits(&cli, &no_config()).expect_err("refused");
+        assert!(
+            error
+                .to_string()
+                .contains("subagents.max-children-per-parent"),
+            "the message names the limit: {error}"
+        );
+    }
+
+    #[test]
     fn a_cli_allows_one_level_of_delegation_and_no_more() {
         // The CLI depth is 1, so the root may spawn a child and the child may not
         // spawn a grandchild. It must never be 0: the root session is itself depth 0,
@@ -1963,7 +2064,7 @@ mod tests {
         // exactly that, after these unit tests passed. See
         // docs/verification/subagents-bedrock.md and decision D-cli-depth-is-zero.
         let cli = Cli::try_parse_from(["rho", "--provider", "openrouter"]).unwrap();
-        let limits = subagent_limits(&cli, &no_config());
+        let limits = subagent_limits(&cli, &no_config()).unwrap();
         assert_eq!(
             limits.max_depth, 1,
             "the root must be able to spawn a child"

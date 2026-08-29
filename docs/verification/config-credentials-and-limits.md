@@ -398,3 +398,104 @@ exit=1
 Restored, it exits 0. **The exit code was read directly, not through a pipe.** A first attempt
 read `$?` after piping the checker into `tail`, which reported the shell's success rather than
 the checker's failure. That is the same mistake the prose checker's own comment records.
+
+## The review found a leak this lane created a path to
+
+A PR review drove the release binary against hostile config files and found one blocker, one
+major, and one minor. Each was reproduced here before anything changed, and re-driven after.
+
+### Run 22 — a resolved credential reached rho's stderr
+
+A 4xx that is not 401 or 403 kept the provider's response body in `ProviderError::Client`, and
+rho prints that error. So a host that reflects the `Authorization` header put the key on stderr.
+
+The stub is a loopback host that echoes the header in a 400. The credential comes from a
+`!command` helper, and the `base-url` is the user's own, which the safety gate allows for
+loopback:
+
+```toml
+provider = "openrouter"
+base-url = "http://127.0.0.1:8791/v1"
+[credentials]
+openrouter = "!/tmp/leak/home/key-helper.sh"
+```
+
+Before:
+
+```
+rho: client error: status 400: {"error": {"message": "bad request; your header was Bearer sk-SECRET-FROM-HELPER"}}
+$ ... | grep -c "sk-SECRET-FROM-HELPER"
+1
+```
+
+After:
+
+```
+rho: client error: status 400: the provider refused the request. rho does not show the body,
+because a body can echo the credential. Read the host's own log for the reason.
+$ ... | grep -c "sk-SECRET-FROM-HELPER"
+0
+```
+
+Zero on two consecutive runs. **Azure had the identical line**, and a second one on its
+mid-stream error event. The review found OpenRouter; all three providers were checked, and
+Bedrock was already correct because it used a literal. See
+`D-a-client-error-carries-no-peer-body`.
+
+### Run 23 — a config file panicked the binary
+
+`max-live-total` reached `Semaphore::new` unclamped.
+
+Before:
+
+```
+$ printf '[subagents]\nmax-live-total = 18446744073709551615\n' >> config.toml
+thread 'main' panicked at tokio-1.53.1/src/sync/batch_semaphore.rs:141:9:
+a semaphore may not have more than MAX_PERMITS permits (2305843009213693951)
+exit=134
+```
+
+After:
+
+```
+rho: the subagents.max-live-total value "18446744073709551615" is not valid: the maximum is 2305843009213693951
+exit=1
+```
+
+The flag path had the same hole, and it is closed too:
+
+```
+$ rho run "hi" --max-live-agents 18446744073709551615
+rho: the subagents.max-live-total value 18446744073709551615 is too large. The maximum is
+2305843009213693951. Lower it, or unset the flag that set it.
+exit=1
+```
+
+### Run 24 — a clone chose the provider in silence
+
+An untrusted project file that names only `provider` decides which of the user's keys is
+exercised, and which vendor bills them. The endpoint is not moved, because an untrusted
+`base-url` is dropped, so this is consent and cost rather than exfiltration.
+
+After:
+
+```
+rho: this project chose the openrouter provider, so your openrouter credential is in use.
+Pass --provider to override it.
+```
+
+The user's own flag clears it, and a project that names no provider stays quiet. Both were
+driven, and both printed the notice zero times.
+
+### What the review's own harness could not drive, and now can
+
+The review could not drive the credential helper's stdout cap, because its harness mis-escaped a
+nested `sh -c`. That is the same trap recorded earlier in this file:
+`CredentialSource::parse` splits on whitespace and honours no quoting, so a helper must be a
+script file.
+
+The cap is now 64 KiB, and driving it changed the design. The reader has to run **beside** the
+wait, not after it. A wait-then-read order lets a runaway helper fill the pipe, block on its own
+write, and stall until the 30-second timeout, so the cap never binds and a 64 KiB payload costs
+30 seconds. The test proves the ordering: it runs in 1.14 seconds, where the first attempt took
+30.01.
