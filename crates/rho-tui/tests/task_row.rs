@@ -907,3 +907,54 @@ fn a_random_task_row_never_leaves_its_bounds() {
         );
     }
 }
+
+#[test]
+fn a_row_drops_a_duration_it_cannot_draw_whole() {
+    // A second review pass found this. At a pathological width the text and the slot together
+    // exceed the row, and `pad` cuts the tail, so `1m 12s` drew as `1m 12`. That reads as a
+    // different span, which is worse than no span at all. A duration is drawn whole or it is
+    // dropped, which is the rule the progress cell already follows.
+    let mut task = TuiState::default();
+    task.rows = vec![Row::Task {
+        id: "t1".to_string(),
+        command: "build".to_string(),
+        state: "running".to_string(),
+        finished: false,
+        failed: false,
+        progress: String::new(),
+    }];
+    task.row_durations.push(Some(72_000));
+
+    let mut tool = TuiState::default();
+    tool.rows = vec![Row::Tool {
+        id: "x1".to_string(),
+        name: "read".to_string(),
+        kind: rho_core::ToolKind::Read,
+        status: ToolRowStatus::Ok,
+        preview: "x".to_string(),
+    }];
+    tool.row_durations.push(Some(72_000));
+
+    for width in 10u16..=30 {
+        for (label, state) in [("task", &task), ("tool", &tool)] {
+            let rows = screen(state, width);
+            let row = rows
+                .iter()
+                .find(|row| row.contains("task ") || row.contains('\u{2713}'))
+                .cloned()
+                .unwrap_or_default();
+            // Either the whole duration draws, or none of it does. A fragment is a wrong span.
+            let whole = row.contains("1m 12s");
+            let fragment = row.contains("1m 1") && !whole;
+            assert!(
+                !fragment,
+                "{label} row at {width} drew a cut duration: {row:?}"
+            );
+        }
+    }
+    // At a comfortable width the duration is there, so the rule above is not vacuous.
+    assert!(
+        task_row(&task, 40).contains("1m 12s"),
+        "the duration draws at 40 columns"
+    );
+}

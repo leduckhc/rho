@@ -721,7 +721,7 @@ fn push_row(
             // `RAIL_COLUMN` reserves that column always, and this row must respect it. Found
             // by review, then measured. See `D-text-fills-the-width`.
             let text = task_row_text(command, task_state, progress, measure);
-            out.push(one((justify(&text, &right, measure), style)));
+            out.push(one((justify_slot(&text, &right, measure), style)));
         }
     }
 }
@@ -755,7 +755,7 @@ fn tool_header(
         sanitize_line(payload)
     );
     let right = duration_slot(row_duration(state, index));
-    justify(&left, &right, width)
+    justify_slot(&left, &right, width)
 }
 
 /// The label, the command cut to `command_columns`, and the state word.
@@ -1497,6 +1497,19 @@ fn blank(width: usize) -> String {
 /// A full-width rule in the box-drawing dash.
 fn rule_line(width: usize) -> String {
     "─".repeat(width)
+}
+
+/// Place `left` and a fixed right-hand slot on a row, and drop the slot when both cannot fit.
+///
+/// A cut duration is misinformation: `1m 12s` clipped to `1m 12` reads as a different span. So
+/// the slot is drawn whole or not at all, which is the rule the progress cell already follows.
+/// Found by a second review pass at width 11, where the label and the slot alone exceed the
+/// measure.
+fn justify_slot(left: &str, slot: &str, width: usize) -> String {
+    if left.width() + slot.width() > width {
+        return pad(left, width);
+    }
+    justify(left, slot, width)
 }
 
 /// Place `left` at the start and `right` at the end of a `width` row, filling the

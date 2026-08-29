@@ -61,6 +61,11 @@ width, so a settled duration read `1m 12│`. The tool row had the same defect, 
 one word, and it was live rather than latent. Both rows are fixed, and the design fixtures
 `100-idle.txt` and `100-tool-run.txt` moved one column with the fix.
 
+**A duration is drawn whole, or it is not drawn.** At a pathological width the text and the
+slot together exceed the row, and the shared `pad` cuts the tail, so `1m 12s` drew as `1m 12`.
+That reads as a different span, which is worse than no span. A second review pass found it at
+width 11. Both rows drop the slot instead, through one helper.
+
 **A command that can only draw as an ellipsis is dropped whole.** One column holds the cut
 marker and nothing else, which is the bare marker this decision refuses for the progress.
 

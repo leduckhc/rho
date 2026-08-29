@@ -84,6 +84,12 @@ overflows, so a row that used the whole width lost the last character of its dur
 tool row had the same defect and it was live, because a tool row settles a real duration. Both
 rows are fixed here. The design fixtures `100-idle.txt` and `100-tool-run.txt` moved one column.
 
+### A duration is whole or absent
+
+At a pathological width the row text and the slot together exceed the row. The row then drops
+the slot rather than draw a cut duration, because `1m 12s` clipped to `1m 12` reads as a
+different span. One helper, `justify_slot`, holds the rule for both rows.
+
 ### The renderer
 
 ```rust
@@ -138,6 +144,7 @@ public and a frontend can build a task row itself. Text that does not fit is cut
 | `a_command_that_filters_to_nothing_leaves_no_gap` | A command of escape bytes alone leaves no double space. |
 | `the_command_takes_at_most_half_the_row_beside_a_progress` | The share is exact, so the divisor cannot change in silence. |
 | `a_random_task_row_never_leaves_its_bounds` | Two thousand generated rows, over all three fields and the width, keep the slot bound and the filter. |
+| `a_row_drops_a_duration_it_cannot_draw_whole` | Every width from 10 to 30, on both rows: the duration is whole or absent, never a fragment. |
 
 ## 3a. What the review changed
 
@@ -154,6 +161,7 @@ independent second opinion. Six findings changed the code, and every one is now 
 | The stored bound was one-sided: 64 could shrink to 7 in silence | tests | The kept width is asserted exactly, and a character bound too. |
 | The `..` guard claimed more than a compiler can hold | codex | The claim is narrowed, and the field list now comes from the enum. |
 | The live check was a three-literal canary | security | It now finds any stripped CSI or OSC payload, and any C1 character. |
+| A narrow row drew a **cut** duration, `1m 12`, which reads as a different span | codex, second pass | Both rows drop the slot instead, through `justify_slot`. |
 
 ## 4. Out of scope
 

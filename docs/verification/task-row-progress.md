@@ -64,7 +64,7 @@ The tests `a_long_command_never_pushes_the_state_or_the_progress_off_the_row` an
 Every check passed. The row lines below are the drawn rows, verbatim.
 
 ```text
---- progress at 100 columns: 2423 bytes, 2 task rows
+--- progress at 100 columns: 2417 bytes, 2 task rows
     'task for i in 1 2 3 4 5; do echo "RHO_PROGRESS {\\… done · 100% 5/5 compiling'
     'task for i in 1 2 3 4 5; do echo "RHO_PROGRESS {\\… done · 100% 5/5 compiling'
 PASS  progress at 100 columns: the run drew a task row — 2 rows
@@ -152,7 +152,7 @@ PASS  progress at 32 columns: no eight-bit control byte
 PASS  progress at 32 columns: the progress leaves a narrow row
 PASS  progress at 32 columns: the state word survives
 
---- raw at 32 columns: 738 bytes, 4 task rows
+--- raw at 32 columns: 744 bytes, 4 task rows
     'task raw running'
     'task long running'
     'task raw running'
@@ -213,7 +213,12 @@ column with the fix.
 untrusted like the command and the progress, and the row counted its width without ever cutting
 it. A five hundred character state filled the row including the slot. The state is bounded now.
 
-Twenty-one mutations were applied one at a time, and each was killed by at least one test. The
+A second `codex review` pass, run after those fixes, found one more: at width 11 the text and
+the duration slot together exceed the row, so the shared `pad` cut the tail and `1m 12s` drew as
+`1m 12`. A cut duration reads as a different span, so both rows now drop the slot instead.
+`a_row_drops_a_duration_it_cannot_draw_whole` walks every width from 10 to 30 on both rows.
+
+Twenty-two mutations were applied one at a time, and each was killed by at least one test. The
 two that survived the first round are both closed: a command that filters to an empty string
 left a double space, and the half share could change from two to three in silence.
 
