@@ -319,7 +319,7 @@ cargo build -p rho-cli --no-default-features --features minimal
 python3 bench/check-ids.py
 python3 bench/check-claimed-tests.py
 python3 bench/check-flag-names.py
-cargo test -p rho-cli --no-default-features --features minimal --no-run
+cargo test -p rho-cli --no-default-features --features minimal
 python3 bench/check-prose.py $(find docs -name '*.md')
 python3 bench/check-agentic-workflow.py
 python3 bench/check-spec-tests.py

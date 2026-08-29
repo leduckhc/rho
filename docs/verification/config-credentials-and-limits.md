@@ -349,3 +349,52 @@ The password is gone, and the host still reaches the user.
 
 Run 1 answered `REDRIVE-OK` on live OpenRouter. Run 2's message is unchanged. Run 17's notice
 and its enforced cap of 0 are unchanged. So the review fixes broke nothing.
+
+## The gate itself had a blind spot, and a test review found it
+
+A test review asked whether `check_provider_name_agrees_with_build_provider` could distinguish
+anything. It pins two name lists together: the `match` in `check_provider_name` and the `match`
+in `build_provider`. A drift between them makes the JSONL frontend report an unknown provider
+for a provider that works, or the reverse.
+
+The default build compiles all three providers, so no name is ever `NotCompiled` there. That
+whole arm is dead in the default build. The ship gate held
+`cargo test ... --features minimal --no-run`, which compiled the minimal test binaries and threw
+the answer away.
+
+So the rule was broken on purpose. `"bedrock" => cfg!(feature = "bedrock")` became
+`"bedrock" => true`, which claims a provider is compiled when it is not:
+
+```
+$ cargo test --bin rho provider::tests::check_provider_name_agrees_with_build_provider -- --exact
+test result: ok. 1 passed; 0 failed
+```
+
+```
+$ cargo test -p rho-cli --no-default-features --features minimal --bin rho \
+    provider::tests::check_provider_name_agrees_with_build_provider -- --exact
+assertion `left == right` failed: the two name lists disagree about "bedrock"
+test result: FAILED. 0 passed; 1 failed
+```
+
+Invisible to all 2001 tests of the default suite. Caught in one second under minimal.
+
+The gate now runs the minimal tests instead of only building them. 233 tests, about one
+second, and every one already passed. Running a test binary also compiles it, so the new
+command is strictly stronger than the old one. See
+`D-the-minimal-gate-runs-its-tests`.
+
+`agentic-workflow.yaml` `gate_sets.full` changed with it, because
+`bench/check-agentic-workflow.py` compares the two command for command. That coupling was
+broken on purpose too:
+
+```
+$ python3 bench/check-agentic-workflow.py ; echo "exit=$?"
+VIOLATION: gate_sets.full is missing the AGENTS.md gate command
+  `cargo test -p rho-cli --no-default-features --features minimal`
+exit=1
+```
+
+Restored, it exits 0. **The exit code was read directly, not through a pipe.** A first attempt
+read `$?` after piping the checker into `tail`, which reported the shell's success rather than
+the checker's failure. That is the same mistake the prose checker's own comment records.
