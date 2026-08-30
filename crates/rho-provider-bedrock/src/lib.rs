@@ -3183,6 +3183,52 @@ mod merged_turn_tests {
         );
     }
 
+    /// A merged pair **answered by a tool result** keeps both traces.
+    ///
+    /// This is the composition of the two rules, and it is the shape neither test covered.
+    /// `a_merged_pair_of_turns_keeps_both_traces` ends with an assistant turn, so every run in
+    /// it is the whole tail; `a_loop_that_ends_with_a_tool_result_still_sends_one_trace` ends
+    /// with a tool result, but each of its runs holds exactly one turn. So an implementation
+    /// that replayed only the **last** turn instead of the whole run passed both. A review
+    /// found that gap. Here the run holds two turns **and** a tool result anchors it, so only
+    /// the real rule passes.
+    #[test]
+    fn a_merged_pair_answered_by_a_tool_result_keeps_both_traces() {
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "do it".to_string(),
+                }],
+            },
+            // A turn that was cancelled before its tool ran, so no result follows it.
+            Message {
+                role: Role::Assistant,
+                content: vec![replay("first thought"), call("1")],
+            },
+            // The retry, whose call the result below answers. Both merge into one message.
+            Message {
+                role: Role::Assistant,
+                content: vec![replay("second thought"), call("2")],
+            },
+            Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::ToolResult {
+                    tool_call_id: "2".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: "result".to_string(),
+                    }],
+                    is_error: false,
+                }],
+            },
+        ];
+        assert_eq!(
+            sent(&messages),
+            vec!["first thought".to_string(), "second thought".to_string()],
+            "a tool_use with no thinking in front of it is the request Anthropic refuses"
+        );
+    }
+
     /// A tool result still ends the run, so a long loop sends one trace.
     #[test]
     fn a_tool_result_still_bounds_the_run() {

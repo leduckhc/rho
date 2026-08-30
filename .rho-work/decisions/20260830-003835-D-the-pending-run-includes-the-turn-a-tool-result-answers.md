@@ -82,6 +82,21 @@ assistant turns both replay, whether a tool result follows them or not. Anthropi
 **Parallel calls work.** Step 1 takes a run of tool results, not one, so two results for one
 turn still anchor that turn.
 
+## The limit, stated rather than left implicit
+
+**A user message between an assistant turn and its tool result would break this rule.** The
+trailing tool run would start at that user message, the pending run would be empty, and rho
+would ship a tool result with no thinking in front of it. Bedrock answers 400.
+
+That shape is **not reachable today.** A review checked the steering path: a steer is delivered
+at a turn boundary, after the tool results, so it produces `[..., tool, user]` and never
+`[..., assistant, user, tool]`. The reachable steer shape resolves correctly, because the
+trailing tool run still touches the assistant turn that made the pending call.
+
+No branch is added for the unreachable shape. A branch no test reaches is surface this project
+deletes. If steering ever injects a message before the tool results, this rule needs a test
+first, and the failure mode is a loud 400 rather than a quiet drop.
+
 ## Rules out
 
 **Replaying every assistant turn.** That is the O(turns squared) growth
