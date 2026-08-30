@@ -712,6 +712,11 @@ Added on 20260830, when a live probe found that no reasoning reached the wire. S
   pinned on the shape that ships as well. The count stays one at 1, 5, 20, and 100 iterations.
 - `a_turn_whose_call_was_already_answered_does_not_replay` — a closed chain stays history, so
   the wider scope did not become unbounded.
+- `the_request_the_agent_loop_builds_carries_its_reasoning` — **the guard for the whole
+  class.** It does not describe the shape. It asks `rho-core`'s agent loop for it, through a
+  fake provider that records the request it receives on turn two. So a later change to how the
+  loop orders or merges messages is seen with no edit to this test. It fails against the rule
+  that shipped broken.
 - `a_merged_pair_answered_by_a_tool_result_keeps_both_traces` — the two rules composed. A
   review found that an implementation replaying only the last turn passed both earlier tests,
   because one shape had a single-turn run and the other had no tool result.

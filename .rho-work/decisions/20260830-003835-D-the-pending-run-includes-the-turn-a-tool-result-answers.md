@@ -82,6 +82,27 @@ assistant turns both replay, whether a tool result follows them or not. Anthropi
 **Parallel calls work.** Step 1 takes a run of tool results, not one, so two results for one
 turn still anchor that turn.
 
+## The guard for the class, not the case
+
+A review made the plain point: eight of the nine scope tests model no request rho can build, and
+that is how the defect hid. Adding a tenth hand-written shape would repeat the mistake, because
+the author of a hand-written shape is the same person who misread the caller.
+
+So the guard **asks the caller for the shape.**
+`the_request_the_agent_loop_builds_carries_its_reasoning` runs a real `Session` with a fake
+provider. Turn one mints a reasoning payload and a tool call. Turn two records the request it is
+handed, which is the message list `rho-core` assembled after it ran the tool. That list, not a
+literal, goes into `build_messages_for_model`.
+
+Two properties make it a class guard:
+
+- It asserts its own harness first. The recorded list must end with a tool result, or the test
+  says so and fails, rather than proving nothing quietly.
+- A later change to how the loop orders or merges the messages of a loop arrives in this test
+  with no edit.
+
+It fails against the rule that shipped broken, with `left: []`.
+
 ## The limit, stated rather than left implicit
 
 **A user message between an assistant turn and its tool result would break this rule.** The
