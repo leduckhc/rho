@@ -37,6 +37,8 @@ fn config_with_credentials(credentials: BTreeMap<String, CredentialSource>) -> C
         mcp_config: None,
         subagents: SubagentLimits::default(),
         credentials,
+        lowered_limits: Vec::new(),
+        provider_from_project: false,
     }
 }
 

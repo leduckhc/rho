@@ -151,12 +151,28 @@ See [configuration](configuration.md) for the config key and the variable.
 
 ## Storing credentials
 
-Give every provider its key through the environment. That is the only route that works.
+Two routes work. Set the provider's own environment variable, or name the key in a
+`[credentials]` table in `config.toml`.
 
-> **Partly built.** A `[credentials]` table in `config.toml` parses, and nothing resolves an
-> entry, and no provider asks for one. So the table changes nothing today, in silence. A live
-> probe confirmed it. See [configuration](configuration.md) for the format, and treat it as
-> unfinished.
+Each entry is named after its provider:
+
+```toml
+[credentials]
+openrouter = "sk-live-abc123"
+azure = "env:MY_AZURE_KEY"
+```
+
+With no entry, rho reads the provider's own variable: `OPENROUTER_API_KEY` for OpenRouter and
+`AZURE_OPENAI_API_KEY` for Azure. So nothing changes if you already set one.
+
+Bedrock takes no entry. The AWS SDK reads its own chain, and rho reads only `AWS_REGION` for
+it. A region is not a secret.
+
+An absent or empty key stops the run and names what to set. It never reaches the provider as
+an empty key, because that returns 401 and reads as a broken account.
+
+A `credentials` table inside a cloned repository needs `--trust-project`, in every form. See
+[configuration](configuration.md) for the four value forms and the trust rule.
 
 For a first run, see [quickstart](quickstart.md).
 
@@ -164,5 +180,3 @@ For a first run, see [quickstart](quickstart.md).
 
 Azure reasoning is not sent.
 `--reasoning-effort` logs a warning for Azure and has no effect on the request.
-
-No provider reads a credential from a config file. Use the environment.

@@ -47,13 +47,12 @@ impl SessionFactory for CliFactory {
         // Refuse an unknown provider by name, before any credential work. A client then
         // learns which of the three failures happened.
         //
-        // The probe passes no base url on purpose. `main` gained one for an
-        // OpenAI-compatible host, and Bedrock and Azure refuse it rather than ignore it, so
-        // passing one here would report an unknown provider for a provider that exists. The
-        // real build below reads the merged value and reports that refusal properly.
-        // A name nobody knows, and a name this build left out, both mean the client cannot
-        // use it. Each keeps its own message, and the wire case is the same.
-        if let Err(error) = provider::build_provider(&request.provider, None) {
+        // `check_provider_name` does the name check alone, with no credential resolve. The
+        // probe used to call `build_provider`, which now resolves a credential, so a `!command`
+        // helper would have run twice per session. A name nobody knows, and a name this build
+        // left out, both mean the client cannot use it. Each keeps its own message, and the
+        // wire case is the same.
+        if let Err(error) = provider::check_provider_name(&request.provider) {
             use provider::ProviderError;
             if matches!(
                 error,

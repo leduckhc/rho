@@ -271,8 +271,10 @@ impl AzureProvider {
             return Ok(response);
         }
         let retry_after_ms = parse_retry_after(&response);
-        let message = response.text().await.unwrap_or_default();
-        Err(status_to_error(status.as_u16(), retry_after_ms, message))
+        // The body is not read, for the reason `CLIENT_ADVICE` states: a host that reflects the
+        // `api-key` header would otherwise put the credential on rho's stderr. See
+        // `D-a-client-error-carries-no-peer-body`.
+        Err(status_to_error(status.as_u16(), retry_after_ms))
     }
 }
 
@@ -289,15 +291,25 @@ fn parse_retry_after(response: &reqwest::Response) -> Option<u64> {
         .map(|seconds| seconds * 1_000)
 }
 
+/// What rho tells a user about a 4xx, instead of the peer's body.
+///
+/// It is a `&'static str`, so the peer's bytes cannot take its place. See
+/// `D-a-client-error-carries-no-peer-body`.
+const CLIENT_ADVICE: &str = "the provider refused the request. rho does not show the body, \
+     because a body can echo the credential. Read the host's own log for the reason.";
+
 /// Map an HTTP status to a provider error.
-fn status_to_error(status: u16, retry_after_ms: Option<u64>, message: String) -> ProviderError {
+fn status_to_error(status: u16, retry_after_ms: Option<u64>) -> ProviderError {
     match status {
         429 => ProviderError::RateLimited { retry_after_ms },
         500..=599 => ProviderError::Server { status },
         401 | 403 => ProviderError::Auth(format!(
             "Azure rejected the credential (status {status}). Check the api-key or the Entra token audience {AZURE_ENTRA_AUDIENCE}."
         )),
-        _ => ProviderError::Client { status, message },
+        _ => ProviderError::Client {
+            status,
+            advice: CLIENT_ADVICE,
+        },
     }
 }
 
@@ -369,12 +381,16 @@ struct AzureInputTokenDetails {
     cache_write_tokens: u64,
 }
 
+/// The error shape of a mid-stream event.
+///
+/// It holds the code alone. It carried the peer's `message` too, and a 4xx put that text into
+/// `ProviderError::Client`, which is the leak `D-a-client-error-carries-no-peer-body` names. The field is
+/// gone rather than merely unread, so no later edit can reach for it. `serde` ignores the
+/// `message` key on the wire, because this struct does not deny unknown fields.
 #[derive(Debug, Deserialize)]
 struct ResponseError {
     #[serde(default)]
     code: Option<u16>,
-    #[serde(default)]
-    message: Option<String>,
 }
 
 // --- The mapping state. --------------------------------------------------
@@ -505,14 +521,14 @@ impl ResponsesState {
                 };
             }
             "response.failed" | "error" => {
-                let (code, message) = event
-                    .error
-                    .map(|error| (error.code, error.message.unwrap_or_default()))
-                    .unwrap_or((None, String::new()));
+                // Only the code is read. The event's own message is the peer's text, and a 4xx
+                // would carry it into `ProviderError::Client`, which is the same leak the HTTP
+                // path had. See `D-a-client-error-carries-no-peer-body`.
+                let code = event.error.and_then(|error| error.code);
                 let status = code.unwrap_or(500);
                 return EventOutcome {
                     events,
-                    error: Some(status_to_error(status, None, message)),
+                    error: Some(status_to_error(status, None)),
                     done: true,
                 };
             }

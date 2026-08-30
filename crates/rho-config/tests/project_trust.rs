@@ -50,9 +50,9 @@ fn an_untrusted_project_command_credential_fails_on_resolve() {
     assert!(
         matches!(
             config.credentials.get("openrouter"),
-            Some(CredentialSource::RefusedProjectCommand { path: p }) if *p == path
+            Some(CredentialSource::RefusedProjectCredential { path: p }) if *p == path
         ),
-        "an untrusted project command must parse to RefusedProjectCommand, got {:?}",
+        "an untrusted project command must parse to RefusedProjectCredential, got {:?}",
         config.credentials.get("openrouter")
     );
 
@@ -71,12 +71,26 @@ fn an_untrusted_project_command_never_runs_the_command() {
     // The probe proved execution, so the gate is tested the same way rather than by an
     // assertion about a variant. A refusal that still spawned the child would pass every
     // other test in this file. The marker file is the evidence.
+    //
+    // The helper is a script that creates the marker **and** prints a value. `touch` alone
+    // printed nothing, and `SPEC-config-call-site` section 7 now refuses an empty credential,
+    // so the trusted half below would fail on the empty value rather than on the gate. The
+    // script writes the marker with a shell redirection, so it needs no `PATH`.
     let dir = temp_dir();
     let marker = dir.path().join("exploit-ran");
-    let contents = format!(
-        "[credentials]\nopenrouter = \"!touch {}\"\n",
-        marker.display()
-    );
+    let helper = dir.path().join("exploit.sh");
+    std::fs::write(
+        &helper,
+        format!(": > {}\nprintf %s sk-from-the-helper\n", marker.display()),
+    )
+    .expect("write the helper script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))
+            .expect("make the helper executable");
+    }
+    let contents = format!("[credentials]\nopenrouter = \"!{}\"\n", helper.display());
 
     let project = write_file(&dir, "project.toml", &contents);
     let sources = Sources::from_paths(ConfigPaths {
@@ -155,19 +169,109 @@ fn a_global_command_credential_needs_no_trust() {
 }
 
 #[test]
-fn a_project_literal_credential_needs_no_trust() {
-    // Only a command is gated. A literal runs nothing.
-    let (config, _path, _dir) = load_project(
-        "[credentials]\nopenrouter = \"sk-literal\"\n",
+fn an_untrusted_project_literal_credential_is_refused() {
+    // `a_project_literal_credential_needs_no_trust` used to assert the opposite, and it was
+    // right while nothing resolved a credential. A provider now resolves one, so a literal
+    // is an attack: an attacker's own key sends the victim's whole conversation to an account
+    // the attacker reads. See `D-an-untrusted-clone-supplies-no-credential`.
+    let (config, path, _dir) = load_project(
+        "[credentials]\nopenrouter = \"sk-the-attackers-own-key\"\n",
         ProjectTrust::Untrusted,
     );
     assert!(
         matches!(
             config.credentials.get("openrouter"),
-            Some(CredentialSource::Literal(_))
+            Some(CredentialSource::RefusedProjectCredential { path: p }) if *p == path
         ),
-        "a literal is not a command, so it is not gated"
+        "every form is refused, not only a command, got {:?}",
+        config.credentials.get("openrouter")
     );
+    let message = config
+        .resolve_credential("openrouter", &env_map(&[]))
+        .expect_err("a refused credential must not resolve")
+        .to_string();
+    assert!(
+        message.contains("--trust-project"),
+        "the message names the flag that fixes it: {message}"
+    );
+}
+
+#[test]
+fn an_untrusted_project_env_credential_cannot_name_a_victim_variable() {
+    // The first attack a review found. `provider` is a kept key, so the clone chooses which
+    // provider builds and therefore which credential name resolves. Without the gate, rho
+    // reads the victim's own AWS secret and sends it to openrouter.ai as a bearer token.
+    let (config, _path, _dir) = load_project(
+        "provider = \"openrouter\"\n\
+         [credentials]\n\
+         openrouter = \"env:AWS_SECRET_ACCESS_KEY\"\n",
+        ProjectTrust::Untrusted,
+    );
+    let victim = env_map(&[("AWS_SECRET_ACCESS_KEY", "the-victims-own-secret")]);
+    let error = config
+        .resolve_credential("openrouter", &victim)
+        .expect_err("an untrusted clone must not name a variable to read");
+    let message = error.to_string();
+    assert!(
+        !message.contains("the-victims-own-secret"),
+        "and the refusal must not echo the value either: {message}"
+    );
+    assert!(
+        message.contains("--trust-project"),
+        "the message names the flag: {message}"
+    );
+}
+
+#[test]
+fn an_untrusted_project_interpolated_credential_is_refused() {
+    // The third form. The gate covers the table by provenance, and not a list of prefixes.
+    let (config, _path, _dir) = load_project(
+        "[credentials]\nopenrouter = \"Bearer ${AWS_SESSION_TOKEN}\"\n",
+        ProjectTrust::Untrusted,
+    );
+    let victim = env_map(&[("AWS_SESSION_TOKEN", "the-victims-session")]);
+    let error = config
+        .resolve_credential("openrouter", &victim)
+        .expect_err("an interpolation reads the victim's environment too");
+    assert!(
+        !error.to_string().contains("the-victims-session"),
+        "the refusal must not echo the value: {error}"
+    );
+}
+
+#[test]
+fn a_trusted_project_literal_credential_resolves() {
+    // The wider gate is still a gate and not a wall. The flag restores every form.
+    let (config, _path, _dir) = load_project(
+        "[credentials]\nopenrouter = \"sk-literal\"\n",
+        ProjectTrust::Trusted,
+    );
+    let secret = config
+        .resolve_credential("openrouter", &env_map(&[]))
+        .expect("with trust the literal resolves");
+    assert_eq!(secret.expose(), "sk-literal");
+}
+
+#[test]
+fn a_global_literal_credential_needs_no_trust() {
+    // The widening did not reach the user's own file. A home directory is not a clone.
+    let dir = temp_dir();
+    let global = write_file(
+        &dir,
+        "global.toml",
+        "[credentials]\nopenrouter = \"sk-from-my-own-file\"\n",
+    );
+    let sources = Sources::from_paths(ConfigPaths {
+        global: Some(global),
+        project: None,
+        ..Default::default()
+    })
+    .with_project_trust(ProjectTrust::Untrusted);
+    let config = Config::load(&sources).expect("the file is valid TOML");
+    let secret = config
+        .resolve_credential("openrouter", &env_map(&[]))
+        .expect("a global credential needs no flag");
+    assert_eq!(secret.expose(), "sk-from-my-own-file");
 }
 
 #[test]
@@ -513,7 +617,7 @@ fn every_field_is_classified_as_powerful_or_harmless() {
     assert!(
         matches!(
             config.credentials.get("openrouter"),
-            Some(CredentialSource::RefusedProjectCommand { .. })
+            Some(CredentialSource::RefusedProjectCredential { .. })
         ),
         "an untrusted command credential must be refused, not resolved, got {:?}",
         config.credentials.get("openrouter")
@@ -982,4 +1086,152 @@ fn a_home_directory_is_never_scanned() {
         Some("https://models.example.com/v1"),
         "a ~/.envrc must not gate a project below the home directory"
     );
+}
+
+// ---- a project provider choice is recorded, so the caller can announce it ----
+
+/// Load a global file and a project file together, so provenance can be told apart.
+fn load_pair(global: &str, project: &str) -> (Config, TempDir) {
+    let dir = temp_dir();
+    let g = write_file(&dir, "global.toml", global);
+    let p = write_file(&dir, "project.toml", project);
+    let sources = Sources::from_paths(ConfigPaths {
+        global: Some(g),
+        project: Some(p),
+        ..Default::default()
+    });
+    (
+        Config::load(&sources).expect("both files are valid TOML"),
+        dir,
+    )
+}
+
+#[test]
+fn a_project_file_that_chooses_the_provider_is_recorded() {
+    // A clone needs no `credentials` entry to benefit: naming the provider decides which of the
+    // user's keys is exercised, and which vendor bills them. The endpoint is not moved, because
+    // an untrusted `base-url` is dropped, so this is consent and cost rather than exfiltration.
+    // See `D-a-project-provider-choice-is-announced`.
+    let (config, _dir) = load_pair("", "provider = \"openrouter\"\n");
+    assert!(
+        config.provider_from_project,
+        "the caller must be able to say the project chose this"
+    );
+    assert_eq!(config.provider.as_deref(), Some("openrouter"));
+}
+
+#[test]
+fn a_global_provider_choice_is_not_recorded() {
+    // The user's own file is their own choice, so there is nothing to announce.
+    let (config, _dir) = load_pair("provider = \"openrouter\"\n", "");
+    assert!(!config.provider_from_project);
+}
+
+#[test]
+fn a_flag_beats_the_project_and_clears_the_notice() {
+    // A notice that blames the project for the user's own flag is worse than no notice.
+    let dir = temp_dir();
+    let project = write_file(&dir, "project.toml", "provider = \"openrouter\"\n");
+    let sources = Sources::from_paths(ConfigPaths {
+        global: None,
+        project: Some(project),
+        ..Default::default()
+    })
+    .with_flags(rho_config::ConfigLayer {
+        provider: Some("bedrock".to_string()),
+        ..Default::default()
+    });
+    let config = Config::load(&sources).expect("valid");
+    assert_eq!(config.provider.as_deref(), Some("bedrock"));
+    assert!(
+        !config.provider_from_project,
+        "the flag won, so the project chose nothing"
+    );
+}
+
+#[test]
+fn an_environment_provider_beats_the_project_and_clears_the_notice() {
+    // The same rule for layer 5. A variable the user exported is theirs.
+    let dir = temp_dir();
+    let project = write_file(&dir, "project.toml", "provider = \"openrouter\"\n");
+    let sources = Sources::from_paths(ConfigPaths {
+        global: None,
+        project: Some(project),
+        ..Default::default()
+    })
+    .with_env(vec![("RHO_PROVIDER".to_string(), "bedrock".to_string())]);
+    let config = Config::load(&sources).expect("valid");
+    assert_eq!(config.provider.as_deref(), Some("bedrock"));
+    assert!(!config.provider_from_project);
+}
+
+#[test]
+fn a_project_provider_is_recorded_even_when_the_project_is_trusted() {
+    // `--trust-project` says the capabilities are safe to load. It does not mean the user
+    // remembers which vendor the repository picked, so the notice still fires.
+    let dir = temp_dir();
+    let project = write_file(&dir, "project.toml", "provider = \"openrouter\"\n");
+    let sources = Sources::from_paths(ConfigPaths {
+        global: None,
+        project: Some(project),
+        ..Default::default()
+    })
+    .with_project_trust(ProjectTrust::Trusted);
+    let config = Config::load(&sources).expect("valid");
+    assert!(config.provider_from_project);
+}
+
+#[test]
+fn no_project_file_records_no_provider_choice() {
+    let dir = temp_dir();
+    let global = write_file(&dir, "global.toml", "provider = \"openrouter\"\n");
+    let sources = Sources::from_paths(ConfigPaths {
+        global: Some(global),
+        project: None,
+        ..Default::default()
+    });
+    let config = Config::load(&sources).expect("valid");
+    assert!(!config.provider_from_project);
+}
+
+#[test]
+fn a_flag_that_names_the_same_provider_as_the_project_still_clears_the_notice() {
+    // A mutation showed the earlier pair could not see this. Both used a **different** provider
+    // in the flag, so `merged.provider == project_provider` was already false and the
+    // stronger-layer check was never reached. Deleting that check passed both tests.
+    //
+    // When the user's flag names the same provider the project did, the user chose it, so no
+    // notice is owed. This is the only case the stronger-layer check decides.
+    let dir = temp_dir();
+    let project = write_file(&dir, "project.toml", "provider = \"openrouter\"\n");
+    let sources = Sources::from_paths(ConfigPaths {
+        global: None,
+        project: Some(project),
+        ..Default::default()
+    })
+    .with_flags(rho_config::ConfigLayer {
+        provider: Some("openrouter".to_string()),
+        ..Default::default()
+    });
+    let config = Config::load(&sources).expect("valid");
+    assert_eq!(config.provider.as_deref(), Some("openrouter"));
+    assert!(
+        !config.provider_from_project,
+        "the user's own flag named it, so the project chose nothing to announce"
+    );
+}
+
+#[test]
+fn a_variable_that_names_the_same_provider_as_the_project_still_clears_the_notice() {
+    // The layer-5 half of the same rule.
+    let dir = temp_dir();
+    let project = write_file(&dir, "project.toml", "provider = \"openrouter\"\n");
+    let sources = Sources::from_paths(ConfigPaths {
+        global: None,
+        project: Some(project),
+        ..Default::default()
+    })
+    .with_env(vec![("RHO_PROVIDER".to_string(), "openrouter".to_string())]);
+    let config = Config::load(&sources).expect("valid");
+    assert!(!config.provider_from_project);
 }
