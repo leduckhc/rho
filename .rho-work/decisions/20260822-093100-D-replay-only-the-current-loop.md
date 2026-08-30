@@ -1,5 +1,11 @@
 # Only the pending run of assistant turns replays its reasoning
 
+> **Step 4 of this decision was wrong, and it is superseded.** Ending the run at a tool result
+> also emptied it, because rho appends the tool results before it builds a request. So no
+> reasoning reached the wire at all between 20260822 and 20260829. A tool result now anchors the
+> run. See `D-the-pending-run-includes-the-turn-a-tool-result-answers`. Everything else here
+> stands, including the cost analysis and the rules it ruled out.
+
 Date: 20260822. Reference: `D-replay-only-the-current-loop`.
 Found by a performance review of the reasoning work.
 

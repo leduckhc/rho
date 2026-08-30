@@ -119,6 +119,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-staged-server-serves-every-connection](20260818-043346-D-staged-server-serves-every-connection.md) | 20260818 | A test double must answer every connection |
 | [D-the-frontend-settles-every-prompt](20260826-184411-D-the-frontend-settles-every-prompt.md) | 20260826 | The frontend settles every accepted prompt, because rho-core does not |
 | [D-the-merge-cannot-name-a-values-source](20260820-214513-D-the-merge-cannot-name-a-values-source.md) | 20260820 | The merge loses which layer held a bad value |
+| [D-the-pending-run-includes-the-turn-a-tool-result-answers](20260830-003835-D-the-pending-run-includes-the-turn-a-tool-result-answers.md) | 20260830 | The replay scope excluded every real request |
 | [D-the-record-id-is-visible-on-the-command-line](20260824-224710-D-the-record-id-is-visible-on-the-command-line.md) | 20260824 | A fork needs a record id that a user can actually see |
 | [D-the-wheel-needs-capture](20260819-120429-D-the-wheel-needs-capture.md) | 20260819 | rho captures the mouse, because the wheel is the only way to scroll |
 | [D-the-wire-reuses-the-core-stop-reason](20260826-184409-D-the-wire-reuses-the-core-stop-reason.md) | 20260826 | The wire reuses the core stop reason, and keeps no copy |
