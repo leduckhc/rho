@@ -34,7 +34,7 @@ fn provider_error_transport_is_retryable() {
 fn provider_error_client_is_not_retryable() {
     let err = ProviderError::Client {
         status: 400,
-        message: "bad request".to_string(),
+        advice: "bad request",
     };
     assert!(!err.is_retryable());
 }

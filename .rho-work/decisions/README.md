@@ -16,6 +16,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-a-dialog-answer-holds-exactly-one-value](20260826-184413-D-a-dialog-answer-holds-exactly-one-value.md) | 20260826 | A dialog answer holds exactly one value, and an untagged reader cannot |
 | [D-a-dialog-timeout-cancels](20260826-184414-D-a-dialog-timeout-cancels.md) | 20260826 | A dialog timeout denies, and it never picks an option |
 | [D-a-drop-report-is-data-not-a-log-line](20260829-212319-D-a-drop-report-is-data-not-a-log-line.md) | 20260829 | The provider answers with its refusals, so no test reads a log |
+| [D-a-lagged-frontend-is-resynced-not-told](20260831-071528-D-a-lagged-frontend-is-resynced-not-told.md) | 20260831 | The bridge repairs a lagged reader itself, and the frontend never learns |
 | [D-a-live-session-holds-a-lock](20260824-224512-D-a-live-session-holds-a-lock.md) | 20260824 | A live session holds an advisory lock, because fx is the only prior art that solved this |
 | [D-a-merged-value-error-names-no-file](20260821-231500-D-a-merged-value-error-names-no-file.md) | 20260821 | A merged value error names the key and the value, and never a file |
 | [D-a-panel-nobody-can-open](20260818-171500-D-a-panel-nobody-can-open.md) | 20260818 | A rendered panel with no key that opens it is not a feature |
@@ -23,6 +24,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-a-record-id-is-minted-against-the-set](20260824-221848-D-a-record-id-is-minted-against-the-set.md) | 20260824 | A record id is minted against the set, because a counter mints a duplicate |
 | [D-a-rejected-definition-is-reported](20260826-184108-D-a-rejected-definition-is-reported.md) | 20260826 | A definition file that does not load says so |
 | [D-a-role-column-is-not-a-stack](20260818-181500-D-a-role-column-is-not-a-stack.md) | 20260818 | A theme role resolves in one mode, and the columns never stack |
+| [D-a-row-pattern-names-every-field](20260829-113201-D-a-row-pattern-names-every-field.md) | 20260829 | A renderer pattern over a row names every field, so the compiler catches the next one |
 | [D-a-second-writer-can-delete-a-test-in-silence](20260822-131500-D-a-second-writer-can-delete-a-test-in-silence.md) | 20260822 | A second writer can delete a test in silence, so a commit's claims are checked |
 | [D-a-session-file-is-private](20260824-223010-D-a-session-file-is-private.md) | 20260824 | The session store carries the transcript's mode bits |
 | [D-a-session-id-sorts-by-time](20260824-221846-D-a-session-id-sorts-by-time.md) | 20260824 | A session id is a stamp and four hex characters, so a list sorts with no read |
@@ -30,6 +32,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-a-stale-result-handle-expires-on-resume](20260824-221855-D-a-stale-result-handle-expires-on-resume.md) | 20260824 | A stale result handle expires on resume, and the model is told |
 | [D-a-steer-is-never-rejected-for-being-early](20260826-184412-D-a-steer-is-never-rejected-for-being-early.md) | 20260826 | A steer is never rejected for being early |
 | [D-a-steering-message-is-bounded-by-bytes](20260826-184207-D-a-steering-message-is-bounded-by-bytes.md) | 20260826 | The steering queue counts bytes, not only messages |
+| [D-a-task-event-outlives-its-tool-call](20260831-071527-D-a-task-event-outlives-its-tool-call.md) | 20260831 | A task event travels on a session-lifetime stream, because it outlives its tool call |
 | [D-a-tool-keyword-stands-alone](20260820-115845-D-a-tool-keyword-stands-alone.md) | 20260820 | A tool keyword stands alone, and a mixed line keeps the names |
 | [D-a-tool-list-accepts-a-yaml-sequence](20260826-184109-D-a-tool-list-accepts-a-yaml-sequence.md) | 20260826 | Both spellings of a tool list are right |
 | [D-a-waiter-has-a-deadline](20260826-184208-D-a-waiter-has-a-deadline.md) | 20260826 | A queued child stops waiting, and the parent's turn returns |
@@ -82,6 +85,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-own-session-format](20260817-164906-D-own-session-format.md) | 20260817 | Session file format is rho's own, not pi's |
 | [D-plugin-does-not-classify-itself](20260817-190542-D-plugin-does-not-classify-itself.md) | 20260817 | A plugin does not classify itself |
 | [D-plugin-trust-policy](20260817-210307-D-plugin-trust-policy.md) | 20260817 | The plugin host states a trust policy, and refuses a plugin in the session root |
+| [D-progress-follows-the-state-and-never-moves-it](20260829-113200-D-progress-follows-the-state-and-never-moves-it.md) | 20260829 | The task row draws its progress last, and a value that changes never moves one that does not |
 | [D-project-skill-needs-trust](20260817-215003-D-project-skill-needs-trust.md) | 20260817 | A project skill is not loaded until the project is trusted |
 | [D-provider-contract-crate](20260817-175201-D-provider-contract-crate.md) | 20260817 | The provider contract suite is a real crate, not a private test file |
 | [D-provider-extension-verified-outside](20260817-200505-D-provider-extension-verified-outside.md) | 20260817 | The provider extension point is verified from outside the workspace |

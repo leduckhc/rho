@@ -65,6 +65,13 @@ pub struct App {
     session: Session,
     cancel: Option<CancelToken>,
     events: Option<AgentEvents>,
+    /// Background task events, for the whole life of the interface.
+    ///
+    /// This is not `AgentEvents`, and it must not become part of one. A task outlives the
+    /// tool call that started it and it outlives the run, so a run-scoped stream would
+    /// drop the `TaskEnd` of a build that finished while the user was typing. See
+    /// `SPEC-the-task-event-bridge` and `D-a-task-event-outlives-its-tool-call`.
+    task_events: Option<rho_core::SessionEvents>,
     /// Whether the app captures the mouse. On by default, because in the alternate screen
     /// the wheel is the only way to scroll. See `SPEC-tui-alternate-screen` section 8.
     mouse: bool,
@@ -88,9 +95,25 @@ impl App {
             session,
             cancel: None,
             events: None,
+            task_events: None,
             mouse: true,
             started: Instant::now(),
         }
+    }
+
+    /// Read background task events for the whole life of the interface.
+    ///
+    /// Without this call the interface draws no task row, whatever the renderer can draw.
+    /// That was true of every shipped version until this lane: the renderer folded and drew
+    /// a task row, and nothing in a binary ever subscribed to the registry.
+    ///
+    /// The stream outlives one run on purpose. A build usually ends between two prompts, and
+    /// a run-scoped stream would leave that row saying `running` for good.
+    ///
+    /// See `SPEC-the-task-event-bridge`.
+    pub fn with_task_events(mut self, events: rho_core::SessionEvents) -> Self {
+        self.task_events = Some(events);
+        self
     }
 
     /// State the session context the banner reports: the directory, the branch, and the
@@ -205,6 +228,7 @@ impl App {
             session,
             cancel,
             events,
+            task_events,
             started,
             ..
         } = self;
@@ -324,6 +348,24 @@ impl App {
                         }
                     }
                 }
+                // Background task events, for the whole life of the interface and not for
+                // the life of one run. A task outlives the tool call that started it, so
+                // this arm is the only way a task row ever reaches a user. It runs while a
+                // run is active and while rho sits idle, which is when a build usually
+                // ends. See `SPEC-the-task-event-bridge`.
+                maybe_task = next_task_event(task_events), if task_events.is_some() => {
+                    match maybe_task {
+                        Some(event) => {
+                            state.apply(&event, elapsed_millis(started));
+                            update_metrics(terminal, state)?;
+                            state.scroll_on_new_rows();
+                            draw(terminal, state)?;
+                        }
+                        // The registry is gone, so no later task event can arrive. Stop
+                        // polling this arm, and leave every drawn row as it is.
+                        None => *task_events = None,
+                    }
+                }
             }
         }
         Ok(())
@@ -424,6 +466,21 @@ fn temp_draft_path() -> std::path::PathBuf {
 async fn next_agent_event(
     events: &mut Option<AgentEvents>,
 ) -> Option<Result<AgentEvent, rho_core::Error>> {
+    match events {
+        Some(stream) => stream.next().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Await the next background task event, or wait forever when no stream is wired.
+///
+/// The `select!` guard skips this branch when `task_events` is `None`, so the pending
+/// future never resolves in that case. This mirrors `next_agent_event`, and it is a free
+/// function for the same reason: the loop destructures `App`, so it cannot call a method
+/// on `self` inside the `select!`.
+///
+/// `SessionEvents::next` is cancel-safe, so an arm that loses a race loses no event.
+async fn next_task_event(events: &mut Option<rho_core::SessionEvents>) -> Option<AgentEvent> {
     match events {
         Some(stream) => stream.next().await,
         None => std::future::pending().await,

@@ -41,6 +41,8 @@ fn config_holding(source: CredentialSource) -> Config {
         mcp_config: None,
         subagents: SubagentLimits::default(),
         credentials,
+        lowered_limits: Vec::new(),
+        provider_from_project: false,
     }
 }
 

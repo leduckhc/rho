@@ -299,11 +299,12 @@ pub fn map_converse_error(exception_name: &str) -> ProviderError {
         "internalserverexception" | "modelstreamerrorexception" => {
             ProviderError::Server { status: 500 }
         }
+        // Bedrock was already correct: this is rho's own sentence, not the peer's body. The
+        // `&'static str` field now makes that the only possibility. See
+        // `D-a-client-error-carries-no-peer-body`.
         "validationexception" => ProviderError::Client {
             status: 400,
-            message:
-                "Bedrock rejected the request as invalid. Check the model id and the request shape."
-                    .to_string(),
+            advice: "Bedrock rejected the request as invalid. Check the model id and the request shape.",
         },
         // An unknown exception is treated as a server fault. A retry may clear a
         // transient server-side problem, and this keeps a new exception name safe.

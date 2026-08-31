@@ -245,11 +245,45 @@ rho: 1 agent definition(s) available to spawn_agent: summariser
 
 No such line means no definition was found.
 
-### A `[credentials]` block has no effect
+### A 4xx says the body is not shown
 
-Nothing resolves a named credential in this version, and no provider asks for one. So the
-whole table is inert. Give the provider its key through the environment instead, as
-[providers](providers.md) shows.
+```
+rho: client error: status 400: the provider refused the request. rho does not show the body,
+because a body can echo the credential. Read the host's own log for the reason.
+```
+
+rho does not relay a provider's error body. A host that reflects the request header would put
+your key on your terminal, and in any log or bug report you paste it into. A local gateway is a
+process you run, so its own log holds the reason.
+
+The status still reaches you, and 401 and 403 keep their own message naming the credential.
+
+### rho refuses a credential my project file sets
+
+The message names `--trust-project`:
+
+```
+rho: cannot resolve the credential "openrouter": the project file /repo/.rho/config.toml
+names this credential, and the project is not trusted. Pass --trust-project to allow it.
+```
+
+A project config file arrives with a clone, so rho refuses its whole `credentials` table by
+default. Every form is refused, not only a `!command`. A clone chooses `provider` too, so it
+chooses which credential resolves, and it could name a variable holding another secret.
+
+Pass `--trust-project` when the repository is your own. Or move the entry to your own
+`~/.config/rho/config.toml`, which is never refused.
+
+### rho says a project file may only lower a subagent limit
+
+```
+rho: a project file may only lower a subagent limit, so rho kept your own value for
+subagents.max-live-total (from /repo/.rho/config.toml).
+```
+
+A limit is a bound, so a repository may make a run stricter and never looser. `--trust-project`
+does not change this. To raise the cap, pass the flag for this run, or set the value in your own
+global file.
 
 ### Instructions above your project are skipped
 

@@ -58,6 +58,15 @@ pub fn map_event(event: &AgentEvent) -> Option<Event> {
         AgentEvent::Stream(_) => None,
         // Out of scope: background tasks and subagents. Each needs its own event
         // family, and adding one is an extension. See SPEC-jsonl-frontend section 7.
+        //
+        // **A warning for whoever wires the task bridge here.** `TaskRegistry::session_events`
+        // now gives a frontend every task event, and the terminal draws a row from it. Feeding
+        // that stream into this pump would drop all three arms below, at runtime, in silence.
+        // The no-wildcard match catches a *new* variant; it cannot catch these three, because
+        // they already return `None`. A task event also carries no `Settled`, so it sits
+        // outside this pump's one-`Settled`-per-prompt rule. Give the wire a task event family
+        // first, in a spec, because a wire format binds every client. See
+        // `SPEC-the-task-event-bridge` section 8.
         AgentEvent::TaskStart { .. }
         | AgentEvent::TaskProgressed { .. }
         | AgentEvent::TaskEnd { .. }

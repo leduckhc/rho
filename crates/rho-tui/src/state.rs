@@ -611,6 +611,17 @@ impl TuiState {
     }
 
     fn on_task_start(&mut self, id: &TaskId, command: &str, now_millis: i64) {
+        // A start for a task already on screen changes nothing. A lag repair announces
+        // every task the registry holds, including the ones already drawn, so an
+        // unconditional push would draw one task twice.
+        //
+        // It is a no-op, and not an update, on purpose. The row already carries the live
+        // command and the live progress, and its start time is the clock the duration slot
+        // measures. An update would reset that clock, so a four-minute build would look
+        // new. See `D-a-lagged-frontend-is-resynced-not-told`.
+        if self.task_row_mut(&id.0).is_some() {
+            return;
+        }
         // A command is untrusted text, because the model wrote it. Sanitise it before
         // it reaches the screen.
         self.push_row(
@@ -630,9 +641,16 @@ impl TuiState {
         let summary = summarise_progress(progress);
         if let Some(Row::Task {
             progress: row_progress,
+            finished,
             ..
         }) = self.task_row_mut(&id.0)
         {
+            // A finished row never moves again. A report from before a lag can arrive
+            // after the repair has finished the row, and no later report would correct
+            // it, so the row would draw a mid-run percentage for the rest of the session.
+            if *finished {
+                return;
+            }
             *row_progress = summary;
         }
     }
@@ -1369,6 +1387,15 @@ fn stop_reason_label(reason: AgentStopReason) -> &'static str {
     }
 }
 
+/// The most display columns a stored task progress summary keeps.
+///
+/// The field says it is a short summary, and `Row` is public, so another frontend reads the
+/// same value. A bound in the data model keeps that promise for every reader, and it stops a
+/// task that prints four kilobytes of chatter from living in the state for the whole session.
+/// The row applies its own, narrower bound, because that one depends on the frame width. See
+/// `D-progress-follows-the-state-and-never-moves-it`.
+const PROGRESS_SUMMARY_COLUMNS: usize = 64;
+
 /// A one-line summary of a progress report, for the status column.
 ///
 /// A progress `message` is untrusted, because a child prints whatever it likes. So it
@@ -1387,7 +1414,8 @@ fn summarise_progress(progress: &TaskProgress) -> String {
             parts.push(clean);
         }
     }
-    parts.join(" ")
+    // The numbers lead, so the bound cuts the message and never the percent.
+    crate::fit_to_width(&parts.join(" "), PROGRESS_SUMMARY_COLUMNS)
 }
 
 /// A short word for a task state, for the status column.

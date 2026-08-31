@@ -300,8 +300,11 @@ impl OpenRouterProvider {
             return Ok(response);
         }
         let retry_after_ms = parse_retry_after(&response);
-        let message = response.text().await.unwrap_or_default();
-        Err(status_to_error(status.as_u16(), retry_after_ms, message))
+        // The body is not read. No arm of `status_to_error` uses it, and a host that reflects
+        // the `Authorization` header would otherwise put the credential on rho's stderr
+        // through `ProviderError::Client`. Not reading it is stronger than scrubbing it, because
+        // the bytes never enter the process. See `D-a-client-error-carries-no-peer-body`.
+        Err(status_to_error(status.as_u16(), retry_after_ms))
     }
 }
 
@@ -319,14 +322,26 @@ fn parse_retry_after(response: &reqwest::Response) -> Option<u64> {
 }
 
 /// Map an HTTP status to a provider error. See `SPEC-provider-interface` section 4.
-fn status_to_error(status: u16, retry_after_ms: Option<u64>, message: String) -> ProviderError {
+/// What rho tells a user about a 4xx, instead of the peer's body.
+///
+/// It is a `&'static str`, so the peer's bytes cannot take its place. A local gateway is a
+/// process the user runs, so its own log holds the reason and rho does not have to relay
+/// untrusted bytes to find it. See `D-a-client-error-carries-no-peer-body`.
+const CLIENT_ADVICE: &str = "the provider refused the request. rho does not show the body, \
+     because a body can echo the credential. Read the host's own log for the reason.";
+
+/// Map an HTTP status to a provider error.
+fn status_to_error(status: u16, retry_after_ms: Option<u64>) -> ProviderError {
     match status {
         429 => ProviderError::RateLimited { retry_after_ms },
         500..=599 => ProviderError::Server { status },
         401 | 403 => ProviderError::Auth(format!(
             "OpenRouter rejected the API key (status {status}). Set a valid OPENROUTER_API_KEY."
         )),
-        _ => ProviderError::Client { status, message },
+        _ => ProviderError::Client {
+            status,
+            advice: CLIENT_ADVICE,
+        },
     }
 }
 
