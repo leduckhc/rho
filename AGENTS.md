@@ -315,15 +315,20 @@ All of these must pass before you report work as done.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
-cargo build -p rho-cli --no-default-features --features minimal
+RUSTFLAGS="-D warnings" cargo build -p rho-cli --no-default-features --features minimal
 python3 bench/check-ids.py
 python3 bench/check-claimed-tests.py
 python3 bench/check-flag-names.py
-cargo test -p rho-cli --no-default-features --features minimal
+RUSTFLAGS="-D warnings" cargo test -p rho-cli --no-default-features --features minimal
 python3 bench/check-prose.py $(find docs -name '*.md')
 python3 bench/check-agentic-workflow.py
 python3 bench/check-spec-tests.py
 ```
+
+**`RUSTFLAGS="-D warnings"` on the two minimal commands is not decoration.** CI sets that
+variable for every job, so the minimal build denies a warning there and allowed one here. A
+dead `MissingConfig` variant and a dead `missing` function reached `main` that way: the local
+gate passed, and the job built to catch exactly that failed. Run the gate the way CI runs it.
 
 `bench/check-ids.py` proves that every spec, ADR, decision, and feature reference resolves,
 and that no numeric id came back. See `docs/ids.md`.
