@@ -269,3 +269,45 @@ test uses `sleep`.
 - Editing a message the model already received. The prompt prefix is append-only.
 - The ACP frontend copy. F-steer-command owns that surface.
 - Removing a waiting row from the composer's own history recall.
+
+## Amendments after the contract review, binding
+
+Where an amendment and the text above disagree, the amendment wins.
+
+### 1. The lost-run defect is fixed inside this feature
+
+This spec treated a mid-turn message as a display problem. A live drive showed it is a
+correctness problem, and the fix belongs here, because shipping the label over the defect would
+hide it.
+
+`KeyAction::Submit` carries no guard on the activity state. So `crates/rho-tui/src/app.rs`
+calls `Session::prompt` a second time and overwrites `*events` and `*cancel`. The first run
+then has no reader and no cancel token.
+
+Measured in a pty against Bedrock. The drive sent `ALPHA`, then sent `BETA` while the turn ran.
+Both rows drew. Only `ALPHA` was answered. `BETA` produced no answer and no error, and the run
+settled as `done · end turn · 14s`.
+
+So this feature must:
+
+- Route Enter by activity. A running turn steers. An idle session prompts.
+- Never call `Session::prompt` while a run is live. One live run per session, and the code
+  makes a second one unreachable rather than merely unlikely.
+- Never overwrite a live `*events` or `*cancel`.
+
+Tests: `enter_during_a_turn_steers_and_starts_no_second_run`,
+`a_second_prompt_cannot_replace_a_live_run`, and
+`the_first_run_keeps_its_cancel_token_after_a_steer`.
+
+The last test matters most. The lost cancel token is what makes the orphaned run unstoppable,
+and a test that only checks the answer would miss it.
+
+### 2. The footer format is shared
+
+`SPEC-the-turn-clock-and-the-working-state` owns the format, and this feature extends it:
+
+```
+◈ working · {duration} · {n} waiting
+```
+
+The clock task lands first. This task adds the waiting count and changes nothing else.

@@ -249,12 +249,35 @@ that calls `run_all`, so the new check runs in the workspace suite.
 
 Test: `every_provider_runs_the_contract_harness`.
 
-### 3. Only Bedrock is verifiable here, and the spec says which providers are unproven
+### 3. The wire path is verified on both providers, and it is nested
 
-Bedrock reports no reasoning token count, so its answer is `None`. That is verifiable, and a
-live drive proves it.
+This amendment replaces an earlier one that marked OpenRouter and Azure unproven. A live probe
+settled it, so the claim is now measured rather than deferred.
 
-OpenRouter and Azure report a count on the wire, and the field names in this spec are not
-verified against a live response. This project forbids a claim it cannot prove. So each of
-those two providers stays unimplemented until someone with a key probes the real response, and
-`docs/features.md` names them as unproven rather than delivered.
+Both providers carry the count at the **same nested path**, and neither carries it at the top
+level of `usage`:
+
+```
+usage.completion_tokens_details.reasoning_tokens
+```
+
+| provider | model or deployment | value seen |
+| --- | --- | --- |
+| OpenRouter | `openai/gpt-5` | 64 |
+| Azure | deployment `gpt-5.5`, api-version `2025-04-01-preview` | 13 |
+| Bedrock | `us.anthropic.claude-haiku-4-5` | the field is absent |
+
+So one parser serves both, because both speak the OpenAI completion shape. The parser reads
+`completion_tokens_details.reasoning_tokens` and treats a missing object or a missing key as
+`None`. It never reads a top-level `reasoning_tokens`, because neither provider sends one.
+
+Bedrock stays `None`, and that is a measured absence rather than an assumption.
+
+Two further fields appeared in the same probe. They are out of scope here, and they are
+recorded so a later feature does not have to probe again. OpenRouter sends
+`usage.cost_details` beside the `cost` this project already reads. Azure sends
+`usage.latency_checkpoint`, with a server-side time to first token.
+
+Tests: `openrouter_reads_the_nested_reasoning_count`,
+`azure_reads_the_nested_reasoning_count`, and
+`a_missing_completion_tokens_details_reads_as_none`.

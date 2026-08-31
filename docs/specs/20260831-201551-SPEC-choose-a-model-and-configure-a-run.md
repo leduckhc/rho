@@ -294,3 +294,26 @@ user typed, and the provider decides. The picker is a convenience, never the aut
 A mid-session effort or speed change is lost on resume, because the session file records a
 model change and not a reasoning setting. The review asked whether that boundary is
 acceptable. It is, for now, and the guide must say so rather than leave a user to find out.
+
+### 4. A live probe proves Azure cannot list, and the number is 456
+
+This spec decided Azure answers `None` from `Provider::catalog`, because Azure names
+deployments rather than models. A live probe confirmed it, and the shape of the failure is
+worth recording.
+
+The resource's models endpoint answered with **456 models**. None of them was callable. Every
+attempt to use a listed model id as a deployment name returned 404, across eight ids. The
+deployments endpoint itself answered 404.
+
+```sh
+GET {base}/openai/models?api-version=2025-04-01-preview      -> 456 models
+GET {base}/openai/deployments?api-version=2025-04-01-preview -> 404
+POST {base}/openai/deployments/o3-mini-2025-01-31/chat/completions -> 404
+```
+
+A deployment the operator had actually created answered at once. So an Azure listing would be
+worse than no listing: it would offer 456 names, and each one would fail.
+
+That is the strongest argument for keeping `catalog()` optional in the type system. A default
+body returning an empty list would have made this look like a provider with no models, and a
+default body returning the model list would have offered 456 dead ids.
