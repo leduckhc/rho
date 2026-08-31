@@ -701,8 +701,8 @@ pub fn build_messages_for_model(messages: &[Message], model: &str) -> BuiltMessa
     };
     use rho_core::ContentBlock;
 
-    // The scope is the **trailing run of assistant turns**, which is the message the provider
-    // is being asked to continue. Three reviews and one test shaped this rule.
+    // The scope is the **pending run**: the assistant turns whose signature chain the provider
+    // still needs. Four reviews and one live probe shaped this rule.
     //
     // 1. "From the last user message onward" replayed every turn of a loop. A performance
     //    review found that an autonomous loop holds no user message, so a hundred iterations
@@ -713,16 +713,31 @@ pub fn build_messages_for_model(messages: &[Message], model: &str) -> BuiltMessa
     //    wants alternating roles, so consecutive assistant turns **merge into one wire message**.
     //    Keeping only the last turn's thinking left the earlier turn's tool call with no thinking
     //    in front of it, which Anthropic refuses. See `a_merged_pair_of_turns_keeps_both_traces`.
+    // 4. "The trailing run of assistant turns, ended by a tool result" sent **nothing at all**
+    //    on every real request. rho builds a request right after it appends the tool results,
+    //    so the last message is always a tool result and that run is always empty. A live probe
+    //    found it: a corrupted signature was accepted, because no signature travelled. Every
+    //    scope test ended its list with an assistant turn, which is the transcript after a model
+    //    answers, and never the request rho builds. See
+    //    `D-the-pending-run-includes-the-turn-a-tool-result-answers`.
     //
-    // So the run starts after the last message that is not from the assistant, and it replays
-    // every turn inside it. A tool result ends the run, so a long loop still sends one trace.
-    let run_start = messages
+    // So a tool result **anchors** the run instead of ending it. Take the trailing run of tool
+    // results, then take the maximal run of assistant turns that ends where it starts. Those are
+    // exactly the turns the results answer. A trailing user message is not a tool result, so a
+    // closed chain still travels nowhere. The run never reaches back over an earlier tool result,
+    // so a long loop still sends one trace.
+    let tool_run_start = messages
+        .iter()
+        .rposition(|message| message.role != Role::Tool)
+        .map(|last_other| last_other + 1)
+        .unwrap_or(0);
+    let run_start = messages[..tool_run_start]
         .iter()
         .rposition(|message| message.role != Role::Assistant)
         .map(|last_other| last_other + 1)
         .unwrap_or(0);
     // A run that is empty carries no pending call, so nothing replays.
-    let pending_run = run_start..messages.len();
+    let pending_run = run_start..tool_run_start;
 
     let mut grouped: Vec<(ConversationRole, Vec<SdkBlock>)> = Vec::new();
     // Every refusal this build meets. It is the answer to rule 8, and a test reads it
@@ -2655,6 +2670,28 @@ mod replay_scope_tests {
         }
     }
 
+    fn call(id: &str) -> ContentBlock {
+        ContentBlock::ToolCall {
+            id: id.to_string(),
+            name: "read".to_string(),
+            arguments: serde_json::json!({}),
+            state: None,
+        }
+    }
+
+    fn tool_result(id: &str) -> Message {
+        Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: id.to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "result".to_string(),
+                }],
+                is_error: false,
+            }],
+        }
+    }
+
     /// The reasoning texts that reached the wire, in order.
     fn sent(messages: &[Message]) -> Vec<String> {
         use aws_sdk_bedrockruntime::types::{
@@ -2760,6 +2797,92 @@ mod replay_scope_tests {
             user("a new question"),
         ];
         assert!(sent(&messages).is_empty());
+    }
+
+    /// **The shape rho actually sends.** A request is built right after the tool results are
+    /// appended, so the last message is a tool result and never an assistant turn.
+    ///
+    /// Every other test in this module ends its list with an assistant turn, which is the
+    /// transcript *after* a model answers. So the whole scope suite tested a shape rho never
+    /// builds, and the rule sent nothing at all on every real request. A live probe found it:
+    /// a deliberately corrupted signature was accepted at exit 0, because no signature
+    /// travelled. See `D-the-pending-run-includes-the-turn-a-tool-result-answers`.
+    #[test]
+    fn the_turn_a_tool_result_answers_replays_its_reasoning() {
+        let messages = vec![
+            user("do it"),
+            assistant(vec![replay("the pending thought"), call("1")]),
+            tool_result("1"),
+        ];
+        assert_eq!(
+            sent(&messages),
+            vec!["the pending thought".to_string()],
+            "Anthropic needs the thinking of the turn that made the call it is answering"
+        );
+    }
+
+    /// Two results for one turn still anchor that turn, so parallel calls keep their chain.
+    #[test]
+    fn parallel_tool_results_still_anchor_their_turn() {
+        let messages = vec![
+            user("do both"),
+            assistant(vec![replay("one thought"), call("1"), call("2")]),
+            tool_result("1"),
+            tool_result("2"),
+        ];
+        assert_eq!(
+            sent(&messages),
+            vec!["one thought".to_string()],
+            "the trailing run of results anchors the one turn that made both calls"
+        );
+    }
+
+    /// A tool result anchors the run, and it still does not let the scope grow.
+    ///
+    /// This is the invariant, not an example. The count must stay flat however long the loop
+    /// runs, on the shape that ends with a tool result as well as the one that does not.
+    #[test]
+    fn a_loop_that_ends_with_a_tool_result_still_sends_one_trace() {
+        let mut counts = Vec::new();
+        for iterations in [1usize, 5, 20, 100] {
+            let mut messages = vec![user("go")];
+            for index in 0..iterations {
+                messages.push(assistant(vec![
+                    replay(&format!("thought {index}")),
+                    call(&index.to_string()),
+                ]));
+                messages.push(tool_result(&index.to_string()));
+            }
+            let reached = sent(&messages);
+            assert_eq!(
+                reached,
+                vec![format!("thought {}", iterations - 1)],
+                "only the last turn replays, at {iterations} iterations"
+            );
+            counts.push(reached.len());
+        }
+        assert_eq!(
+            counts,
+            vec![1, 1, 1, 1],
+            "a tool result anchors the run without letting it grow"
+        );
+    }
+
+    /// An earlier turn, whose call a tool result already answered, stays history.
+    #[test]
+    fn a_turn_whose_call_was_already_answered_does_not_replay() {
+        let messages = vec![
+            user("do it"),
+            assistant(vec![replay("old thought"), call("1")]),
+            tool_result("1"),
+            assistant(vec![replay("pending thought"), call("2")]),
+            tool_result("2"),
+        ];
+        assert_eq!(
+            sent(&messages),
+            vec!["pending thought".to_string()],
+            "the closed chain never travels again"
+        );
     }
 
     /// The text of a dropped block does not leak into the request as prose either.
@@ -3060,9 +3183,61 @@ mod merged_turn_tests {
         );
     }
 
-    /// A tool result still ends the run, so a long loop sends one trace.
+    /// A merged pair **answered by a tool result** keeps both traces.
+    ///
+    /// This is the composition of the two rules, and it is the shape neither test covered.
+    /// `a_merged_pair_of_turns_keeps_both_traces` ends with an assistant turn, so every run in
+    /// it is the whole tail; `a_loop_that_ends_with_a_tool_result_still_sends_one_trace` ends
+    /// with a tool result, but each of its runs holds exactly one turn. So an implementation
+    /// that replayed only the **last** turn instead of the whole run passed both. A review
+    /// found that gap. Here the run holds two turns **and** a tool result anchors it, so only
+    /// the real rule passes.
     #[test]
-    fn a_tool_result_still_bounds_the_run() {
+    fn a_merged_pair_answered_by_a_tool_result_keeps_both_traces() {
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "do it".to_string(),
+                }],
+            },
+            // A turn that was cancelled before its tool ran, so no result follows it.
+            Message {
+                role: Role::Assistant,
+                content: vec![replay("first thought"), call("1")],
+            },
+            // The retry, whose call the result below answers. Both merge into one message.
+            Message {
+                role: Role::Assistant,
+                content: vec![replay("second thought"), call("2")],
+            },
+            Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::ToolResult {
+                    tool_call_id: "2".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: "result".to_string(),
+                    }],
+                    is_error: false,
+                }],
+            },
+        ];
+        assert_eq!(
+            sent(&messages),
+            vec!["first thought".to_string(), "second thought".to_string()],
+            "a tool_use with no thinking in front of it is the request Anthropic refuses"
+        );
+    }
+
+    /// An **earlier** tool result bounds the run, so a long loop sends one trace.
+    ///
+    /// The name and this line used to say a tool result "ends the run", which is the rule
+    /// this lane deleted: the trailing tool result **anchors** the run, and only an earlier
+    /// one stops the backward walk. A review found the wording contradicting the decision it
+    /// tests, and a reader who trusted it would rebuild the defect. See
+    /// `D-the-pending-run-includes-the-turn-a-tool-result-answers`.
+    #[test]
+    fn an_earlier_tool_result_bounds_the_run() {
         let messages = vec![
             Message {
                 role: Role::User,
@@ -3092,7 +3267,7 @@ mod merged_turn_tests {
         assert_eq!(
             sent(&messages),
             vec!["pending thought".to_string()],
-            "a separated turn is history, so a long loop stays at one trace"
+            "an earlier tool result stops the walk, so a long loop stays at one trace"
         );
     }
 }

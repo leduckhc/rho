@@ -293,3 +293,81 @@ out of the current loop. Rule 12 drops history by design and reports nothing, wh
 So the owner refusal still cannot be driven live, for the same reason section 2's list already
 gave, plus the scope defect above. Four unit tests cover it, and they now assert data instead
 of a log line. This page claims no live proof of the refusal.
+
+## 9. Re-driven on 20260830, after the scope was fixed
+
+Section 8 found that no reasoning reached the wire. The pending run ended at a tool result, and
+rho appends the tool results before it builds a request, so the run was always empty. A tool
+result now anchors the run. See `D-the-pending-run-includes-the-turn-a-tool-result-answers`.
+
+Same account, same region, same model, same files.
+
+### The proof: the 400 is back
+
+This is the only run on this page that proves the block travels. The signature was replaced with
+a literal, the release binary was rebuilt, and the two-call loop was driven again.
+
+```rust
+// deliberate break, restored from /tmp after the run
+.signature("deliberately-wrong-signature")
+```
+
+| date | scope rule | corrupted signature | what it proves |
+| --- | --- | --- | --- |
+| 20260821 | before `D-replay-only-the-current-loop` | 400, exit 1 | the block travelled |
+| 20260829 | a tool result ends the run | **exit 0, accepted** | nothing travelled |
+| 20260830 | a tool result anchors the run | **400, exit 1** | the block travels again |
+
+```text
+rho: client error: status 400: Bedrock rejected the request as invalid. Check the model id
+     and the request shape.                                               exit 1
+```
+
+A wrong signature can only break a request that carries it.
+
+The break was restored from a copy in `/tmp`, never with `git checkout`, per
+`D-jcode-bash-lessons`. The restore was checked two ways:
+
+```sh
+grep -c "deliberately-wrong" crates/rho-provider-bedrock/src/lib.rs   # 0
+diff -q /tmp/lib.rs.good crates/rho-provider-bedrock/src/lib.rs       # identical
+```
+
+### The good path, and the failure path twice
+
+Every run below used the restored binary.
+
+```text
+two-call loop, run 1:            zx9-quibble, kt4-marlow            exit 0
+two-call loop, run 2:            zx9-quibble,kt4-marlow             exit 0
+three-call loop, effort medium:  zx9-quibble, kt4-marlow, qp7-tundra  exit 0
+a plain turn, no thinking:       Found in a.txt: zx9-quibble         exit 0
+an absent file, run 1:           reported the missing file           exit 0
+an absent file, run 2:           reported the missing file           exit 0
+```
+
+The absent-file runs matter more than they look. An error tool result is still a tool result, so
+it anchors the run too. Both runs kept the chain whole and finished.
+
+### What this section proves, and what it does not
+
+Proved live: the signed block travels, Bedrock rejects a corrupted one, a longer loop works, a
+turn with no thinking is unaffected, and an error result keeps the chain.
+
+Not proved live, and stated so nobody reads more into it:
+
+- **The no-growth invariant.** A 100-iteration loop is a unit test,
+  `a_loop_that_ends_with_a_tool_result_still_sends_one_trace`, not a live run.
+- **Parallel tool calls in one turn.** A unit test covers the anchor,
+  `parallel_tool_results_still_anchor_their_turn`. The live parallel run in section 6 predates
+  this change.
+- **The owner refusal.** Still unreachable live, for the reasons section 8 gives.
+
+### The lesson this page keeps failing to learn
+
+`D-replay-only-the-current-loop` recorded "the two-call tool loop still passes on Bedrock" as its
+live evidence. Section 1 of this page already warned that such a run proves nothing, because it
+passed before the replay existed. The rule shipped broken for seven days behind a green run.
+
+**A green tool loop is not evidence that a field travelled.** Only the corrupted-signature run
+is. Any later change to the request path repeats section 9, not section 1.

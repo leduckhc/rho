@@ -9,6 +9,10 @@ decision `D-reasoning-replay-is-opaque-provider-state`. Section 4 holds the chan
 Amended 20260829. A refused replay is reported as data, and no longer only as a log line.
 See decision `D-a-drop-report-is-data-not-a-log-line`. Section 6 holds the contract.
 
+Amended 20260830. A tool result anchors the pending run instead of ending it. Rule 12 sent no
+reasoning at all on every real request before this. See decision
+`D-the-pending-run-includes-the-turn-a-tool-result-answers`.
+
 ## 0. The defects this fixes
 
 Each one is measured, and each has a named test in section 8.
@@ -481,6 +485,13 @@ D-a-bad-reasoning-mode-is-refused.
     bytes on every later turn. A review worked that growth out from the code path as O(turns
     squared). It is arithmetic over the append-only rule, and not a measurement, because no
     bench builds a twenty-turn request yet.
+
+    **A tool result anchors the pending run. It does not end it.** Take the trailing run of
+    tool results, then take the maximal run of assistant turns that ends where it starts.
+    Those are the turns the results answer. An earlier version ended the run at a tool result,
+    and that sent nothing at all on every real request, because rho appends the tool results
+    before it builds the request. See
+    `D-the-pending-run-includes-the-turn-a-tool-result-answers`.
 13. A request builder has a named arm for every content block. A stream parser may keep a
     wildcard, because a wire event set is open and a provider adds events without rho.
     `rho-provider-azure/src/lib.rs:600` is a request builder, so its `_ => {}` goes.
@@ -688,6 +699,27 @@ Added on 20260829, when the drop report became data. See
   the debug form of the data. A later field cannot leak a signature in silence.
 - `the_capture_survives_a_callsite_reached_first_without_a_subscriber` — the guard for
   `D-a-callsite-caches-interest-globally`. It fails against a thread-local capture.
+
+Added on 20260830, when a live probe found that no reasoning reached the wire. See
+`D-the-pending-run-includes-the-turn-a-tool-result-answers`.
+
+- `the_turn_a_tool_result_answers_replays_its_reasoning` — **the shape rho actually sends.**
+  Every other scope test ended its list with an assistant turn, so none of them covered a real
+  request.
+- `parallel_tool_results_still_anchor_their_turn` — a run of results, not one, anchors the turn
+  that made every call.
+- `a_loop_that_ends_with_a_tool_result_still_sends_one_trace` — the no-growth invariant, now
+  pinned on the shape that ships as well. The count stays one at 1, 5, 20, and 100 iterations.
+- `a_turn_whose_call_was_already_answered_does_not_replay` — a closed chain stays history, so
+  the wider scope did not become unbounded.
+- `the_request_the_agent_loop_builds_carries_its_reasoning` — **the guard for the whole
+  class.** It does not describe the shape. It asks `rho-core`'s agent loop for it, through a
+  fake provider that records the request it receives on turn two. So a later change to how the
+  loop orders or merges messages is seen with no edit to this test. It fails against the rule
+  that shipped broken.
+- `a_merged_pair_answered_by_a_tool_result_keeps_both_traces` — the two rules composed. A
+  review found that an implementation replaying only the last turn passed both earlier tests,
+  because one shape had a single-turn run and the other had no tool result.
 
 ### The display
 
