@@ -63,6 +63,21 @@ Until that lands, `rho-tui` and any later `rho-acp` bridge have the same hang wa
 them, because both read the same stream. This decision is the record that the defect is
 known, reproduced, and unfixed here on purpose.
 
+## Amended 20260831: the rho-core defect is fixed
+
+The queue worktree merged, so the debt above came due and is now paid. See
+`D-a-failed-run-releases-the-queue-observer`. Two corrections to what this decision claimed:
+
+- It says "both sites that send an error". There are **three**: a failed `stream` call, an
+  error mid-stream, and a stream that ends with no `Done` event.
+- The fix is not the snippet above. Six early returns skipped the release, so adding a line
+  to two of them would leave four, and a seventh return could still forget. `run` now wraps
+  `run_inner` and owns the release, so no exit can miss it.
+
+What this decision decided still holds unchanged: an error on the event stream ends the run,
+and a frontend settles on the error item rather than waiting for the stream to close. The
+stream now ends as well, so a frontend that waits is merely slower, not stuck.
+
 ## What it rules out
 
 - No frontend code that waits for the event stream to close before it settles a run.

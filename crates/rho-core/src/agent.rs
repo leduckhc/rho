@@ -494,7 +494,25 @@ fn grace_message(remaining: u32) -> String {
 
 impl Driver {
     /// Drive the whole run. Append the user input, then run turns until a stop.
+    ///
+    /// Every exit releases the steering-queue observer, including an early one. `run_inner`
+    /// holds the loop and may return from anywhere; this wrapper owns the release. Six early
+    /// returns each skipped it before, and the two that end a failed run left the event
+    /// channel open for ever, because the task that forwards queue announcements holds a
+    /// clone of the event sender and ends only when the queue drops its observer. One leaked
+    /// task per failed run, and a hang for any consumer that reads to the end of the stream.
+    ///
+    /// A seventh early return cannot forget, because it cannot reach this line. That is the
+    /// point of the split: the release is not a rule a caller must remember. See
+    /// `D-a-failed-run-releases-the-queue-observer`.
     async fn run(self, input: Vec<ContentBlock>) {
+        self.run_inner(input).await;
+        // The run is over, so a later push must not announce itself on a dead channel. It
+        // stays queued and the next run delivers it.
+        self.inner.queue.unobserve();
+    }
+
+    async fn run_inner(&self, input: Vec<ContentBlock>) {
         {
             let mut context = self.inner.context.lock().await;
             context.append(Message {
@@ -616,9 +634,6 @@ impl Driver {
         };
 
         let _ = self.emit(AgentEvent::AgentEnd { stop_reason }).await;
-        // The run is over, so a later push must not announce itself on a dead
-        // channel. It stays queued and the next run delivers it.
-        self.inner.queue.unobserve();
     }
 
     /// Run one provider turn. Forward each stream event. Build the assistant

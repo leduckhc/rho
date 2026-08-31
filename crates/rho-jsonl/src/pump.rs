@@ -127,11 +127,15 @@ where
                 // An error on the event stream ends the run, so settle here.
                 //
                 // rho-core returns `TurnOutcome::Failed` at every site that sends an
-                // error, and the driver loop then returns with no `AgentEnd`. Waiting
-                // for the stream to close instead would hang: that early return skips
-                // `queue.unobserve()`, so the task that forwards queue announcements
-                // keeps a clone of the event sender alive and the stream never ends.
-                // A live probe found that hang. See
+                // error, and the driver loop then returns with no `AgentEnd`. So the error
+                // item is the signal, and this settles on it rather than waiting.
+                //
+                // Waiting used to hang: the early return skipped `queue.unobserve()`, so
+                // the task that forwards queue announcements kept a clone of the event
+                // sender alive and the stream never ended. A live probe found that hang.
+                // `D-a-failed-run-releases-the-queue-observer` fixed it, so a waiting
+                // frontend would now be slow rather than stuck. Settling on the error is
+                // still the contract, because no `AgentEnd` follows it. See
                 // D-an-error-on-the-event-stream-ends-the-run.
                 out.event(&Event::Settled {
                     stop_reason: SettleReason::Faulted,
