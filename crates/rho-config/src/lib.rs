@@ -50,6 +50,12 @@ pub enum ConfigError {
     /// The user asked for a profile that no file defines.
     #[error("the profile \"{name}\" is not defined")]
     UnknownProfile { name: String },
+    /// The file is larger than rho reads. A project file arrives with a clone, so its size
+    /// is attacker-controlled, and an unbounded read is a denial of service. It is separate
+    /// from `Read` so a caller can tell a hostile file from a permission fault, exactly as
+    /// `BaseUrl` is separate from `Value`. See `D-a-config-file-is-read-under-a-cap`.
+    #[error("the config file {path} is larger than {limit} bytes")]
+    TooLarge { path: PathBuf, limit: usize },
     /// A credential source failed to resolve.
     #[error("cannot resolve the credential \"{name}\": {message}")]
     Credential { name: String, message: String },
@@ -1168,6 +1174,18 @@ impl CredentialSource {
     }
 }
 
+/// The largest config file rho reads, in bytes.
+///
+/// A config file is a handful of keys. 1 MiB is generous for one, even with profiles, a
+/// credentials table, and an MCP table. It bounds the one layer whose size an attacker
+/// chooses: a project file arrives with a clone, and it is read **before** the trust gate
+/// runs, because the gate reads the parsed file to know what to strip.
+///
+/// The number is stated here and asserted in `a_file_over_the_cap_is_refused_and_names_the_limit`
+/// and `a_file_at_the_cap_is_accepted`, one on each side of the bound. See
+/// `D-a-config-file-is-read-under-a-cap`.
+const MAX_CONFIG_BYTES: usize = 1024 * 1024;
+
 /// The largest credential a helper may print, in bytes.
 ///
 /// A key is short. 64 KiB is generous for one, and it bounds a helper that streams without
@@ -1448,10 +1466,18 @@ impl Config {
     }
 
     /// Read one layer from a TOML file. A missing file is `Ok(None)`. An unreadable
-    /// file, a malformed file, or an unknown key is an `Err`.
+    /// file, a malformed file, an unknown key, or a file over the cap is an `Err`.
+    ///
+    /// The read is bounded. A project file arrives with a clone, so its size is
+    /// attacker-controlled, and `read_to_string` had no bound at all: a review measured a
+    /// 400 MB file into 428 MB of resident memory, and an 800 MB file into 848 MB, both
+    /// before any trust gate ran. The read stops one byte over the cap, so a file at the cap
+    /// is still read and the byte after it is refused. That is the same shape as the
+    /// credential cap below and the `bash` output cap. See
+    /// `D-a-config-file-is-read-under-a-cap`.
     pub fn read_file(path: &Path) -> Result<Option<ConfigLayer>, ConfigError> {
-        let contents = match std::fs::read_to_string(path) {
-            Ok(contents) => contents,
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => {
                 return Err(ConfigError::Read {
@@ -1460,6 +1486,24 @@ impl Config {
                 });
             }
         };
+        let mut contents = String::new();
+        // One byte over the cap. The extra byte is what tells a file at the cap from a file
+        // over it, without a second syscall and without trusting a stated length.
+        if let Err(error) = file
+            .take(MAX_CONFIG_BYTES as u64 + 1)
+            .read_to_string(&mut contents)
+        {
+            return Err(ConfigError::Read {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            });
+        }
+        if contents.len() > MAX_CONFIG_BYTES {
+            return Err(ConfigError::TooLarge {
+                path: path.to_path_buf(),
+                limit: MAX_CONFIG_BYTES,
+            });
+        }
         let layer = toml::from_str(&contents).map_err(|error| ConfigError::Parse {
             path: path.to_path_buf(),
             message: error.to_string(),

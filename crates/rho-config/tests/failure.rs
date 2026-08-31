@@ -170,3 +170,78 @@ fn a_merged_value_error_reads_as_a_sentence() {
         );
     }
 }
+
+/// A project file arrives with a clone, so its **size** is attacker-controlled.
+///
+/// `read_file` used `std::fs::read_to_string`, which has no bound. A review measured it: a
+/// 400 MB `.rho/config.toml` took 428 MB of resident memory, and an 800 MB one took 848 MB,
+/// both before any trust gate ran. That is the defect this crate already caps everywhere
+/// else, and the same family as the 8 MB of bash output that took 805 MB.
+///
+/// See `D-a-config-file-is-read-under-a-cap`.
+#[test]
+fn a_file_over_the_cap_is_refused_and_names_the_limit() {
+    let dir = temp_dir();
+    // One byte over. A cap tested far outside its window passes for a cap twice as large.
+    let over = "#".repeat(1024 * 1024 + 1);
+    let path = write_file(&dir, "config.toml", &over);
+    match Config::read_file(&path) {
+        Err(err @ ConfigError::TooLarge { .. }) => {
+            let text = err.to_string();
+            assert!(
+                text.contains("config.toml"),
+                "the error names the file: {text}"
+            );
+            assert!(
+                text.contains("1048576"),
+                "the error names the limit, so a user can act on it: {text}"
+            );
+        }
+        other => panic!("a file over the cap must be TooLarge, got {other:?}"),
+    }
+}
+
+/// The other side of the bound. A file **at** the cap is still a valid config, so the cap
+/// refuses one byte and not one byte less.
+#[test]
+fn a_file_at_the_cap_is_accepted() {
+    let dir = temp_dir();
+    let key = "sandbox = \"off\"\n";
+    let padding = "#".repeat(1024 * 1024 - key.len());
+    let path = write_file(&dir, "config.toml", &format!("{padding}{key}"));
+    let layer = Config::read_file(&path).expect("a file at the cap is still read");
+    assert!(
+        layer.is_some(),
+        "a file at the cap parses, or the cap refuses one byte too many"
+    );
+}
+
+/// The bound is on the **read**, and not on what the read kept.
+///
+/// This is the trap the bash line cap fell into: a test asserted the size of the kept
+/// output while the buffer still grew without limit. A file cannot prove the difference,
+/// because a test file is as small as the cap. A source with no end can: an unbounded read
+/// never returns, and a bounded one refuses at once.
+///
+/// The read runs on its own thread and the assertion waits with a timeout, so an unbounded
+/// read fails this test instead of hanging the suite.
+#[cfg(unix)]
+#[test]
+fn a_source_with_no_end_is_refused_and_the_read_ends() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = Config::read_file(std::path::Path::new("/dev/zero"));
+        // A closed receiver means the assertion already gave up. Say nothing.
+        let _ = tx.send(matches!(outcome, Err(ConfigError::TooLarge { .. })));
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(refused) => assert!(
+            refused,
+            "an endless source must be refused as TooLarge, not read to the end"
+        ),
+        Err(_) => panic!(
+            "the read did not end in ten seconds, so it is not bounded: \
+             `read_file` must cap the read itself, not the value it keeps"
+        ),
+    }
+}
