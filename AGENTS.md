@@ -276,9 +276,10 @@ doc, because somebody will trust it.
 
 - rho is the harness, unbundled. The core is a library. Frontends and providers
   are thin, optional crates.
-- The GitHub repository stays private until the first release. Do not publish the
-  website and do not announce the project before that. `docs/release-checklist.md`
-  holds the steps that make the repository public.
+- The GitHub repository is public, since 20260831. It went public before the first release,
+  to end an Actions blackout that failed every job for want of a runner. Do not publish the
+  website and do not announce the project before the release.
+  `docs/release-checklist.md` holds the remaining steps.
 - Speed and memory are features. Never claim a performance win without a
   measurement and the command that produced it.
 - No crate in `crates/` may depend on `rho-tui`, `rho-acp`, or `rho-cli`.
