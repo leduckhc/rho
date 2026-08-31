@@ -281,3 +281,46 @@ recorded so a later feature does not have to probe again. OpenRouter sends
 Tests: `openrouter_reads_the_nested_reasoning_count`,
 `azure_reads_the_nested_reasoning_count`, and
 `a_missing_completion_tokens_details_reads_as_none`.
+
+## Amendment: the request meant the reasoning text, and that already ships
+
+The person who asked for "thinking and reasoning tokens" meant the **reasoning text on
+screen**, and not a token count. This spec answered the wrong question, so the record must say
+so plainly.
+
+### What already works, driven live
+
+A drive against Bedrock with `--reasoning-effort high` exercised all four display modes. Every
+one behaved as its help text promises:
+
+| mode | what landed on screen |
+| --- | --- |
+| `summary`, the default | one row, `∴ thought for 0.8s` |
+| `full` | the same row, plus the whole reasoning text |
+| `live` | the text streamed during the turn, then collapsed to `∴ thought for 5.3s` |
+| `off` | no reasoning row at all |
+
+So the reasoning text and its duration are both delivered today. `F-reasoning-display` is
+correct, and no new work is needed for the text itself.
+
+### The real gap is reach, not rendering
+
+Three things keep a user from the text:
+
+1. The default is `summary`, so a new user sees a duration and never the text.
+2. There is no way to change the mode inside the session. It needs a restart with a flag.
+3. Nothing in the interface says the modes exist. The tour and the key help do not name them.
+
+The second gap belongs to `SPEC-choose-a-model-and-configure-a-run`, which already specifies a
+`/reasoning-display` command. The first is a one-line default and a product choice. The third is
+a guide and tour change.
+
+### The token count is parked, and not built
+
+The count is real. A probe measured it at
+`usage.completion_tokens_details.reasoning_tokens`: 64 on OpenRouter, 13 on Azure, and absent on
+Bedrock. See `docs/verification/provider-reasoning-probe.md`.
+
+But nobody asked for it. This project builds only what a failing test needs, so the count stays
+unbuilt and this spec stays a draft. The measurement is kept because it cost a probe, and a
+later feature should not have to repeat it.

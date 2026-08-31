@@ -85,3 +85,38 @@ placeholder key, because the proxy holds the real credential. The tunnel is an S
 rho does not need it. rho reached the real Azure resource directly with the same result. The
 proxy path works too, because rho appends `/openai/v1/responses` to the endpoint, and the proxy
 serves that path.
+
+## The reasoning text already reaches the screen, in all four modes
+
+The request that started this work asked for "thinking and reasoning tokens" in the terminal.
+It meant the reasoning **text**, and not a count. So this section records what the four display
+modes really draw. Every row came from a live Bedrock turn with `--reasoning-effort high`.
+
+```sh
+rho --provider bedrock --model us.anthropic.claude-haiku-4-5-20251001-v1:0 \
+    --reasoning <mode> --reasoning-effort high
+```
+
+| mode | what landed on screen |
+| --- | --- |
+| `summary`, the default | one row, `∴ thought for 0.8s` |
+| `full` | the same row, and the whole reasoning text under it |
+| `live` | the text streamed during the turn, then collapsed to `∴ thought for 5.3s` |
+| `off` | no reasoning row at all |
+
+`full` drew this, which is the feature the request wanted:
+
+```
+∴ thought for 0.8s
+The user is asking me to multiply 17 × 23 in my head and reply with only the number. Let me
+work this out: 17 × 23 = 17 × (20 + 3) = (17 × 20) + (17 × 3) = 340 + 51 = 391 Let me verify:
+17 × 23 = (10 + 7) × 23 = 230 + 161 = 391 Yes, that's correct.
+391
+```
+
+`live` was checked twice, because a single frame after the turn shows only the collapsed row. A
+mid-turn sample showed fourteen lines of streaming reasoning, so the mode works and the collapse
+is deliberate.
+
+So no work is needed for the rendering. The gaps are that `summary` is the default, that no
+command changes the mode inside a session, and that nothing in the interface names the modes.
