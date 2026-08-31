@@ -167,14 +167,14 @@ independent second opinion. Six findings changed the code, and every one is now 
 
 ## 4. Out of scope
 
-- **The missing bridge.** Nothing subscribes to `TaskRegistry::subscribe` in shipped rho,
-  and `ToolContext::agent_events` lives for one tool call while a background task outlives
-  the turn. So no task row can appear in a real session today, whatever it draws. That is a
-  sixth dead switch of the same family. The fix needs a session-lifetime event path in
-  `rho-core`, a call site in `rho-cli`, and a frontend stream that outlives one prompt. It is
-  three crates and a contract, so it is not this lane. `bench/tui_task_row_drive.py` supplies
-  the bridge inside the harness, which is how this row was driven at all. See
-  `docs/verification/task-row-progress.md`.
+- **The missing bridge. Closed by `SPEC-the-task-event-bridge`.** When this spec shipped,
+  nothing subscribed to `TaskRegistry::subscribe` in shipped rho, and
+  `ToolContext::agent_events` lived for one tool call while a background task outlived the
+  turn. So no task row could appear in a real session, whatever it drew. That was a sixth dead
+  switch of the same family, and it needed a session-lifetime event path in `rho-core`, a call
+  site in `rho-cli`, and a frontend stream that outlives one prompt.
+  `TaskRegistry::session_events` is that path, and `bench/tui_task_row_drive.py` now reads it
+  instead of supplying its own. See `docs/verification/task-event-bridge.md`.
 - **A task span.** The row reserves the duration slot and draws whatever the state holds.
   Nothing settles a duration for a task row yet, so the slot is blank in production today.
   Writing the span belongs to `F-duration-ladder`.

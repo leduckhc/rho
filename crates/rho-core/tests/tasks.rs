@@ -401,3 +401,42 @@ fn task_state_serialises_in_snake_case() {
     let json = serde_json::to_value(TaskState::TimedOut).unwrap();
     assert_eq!(json, serde_json::json!("timed_out"));
 }
+
+// --- The snapshot's wire form. The model reads this. ---
+
+#[tokio::test]
+async fn a_snapshot_names_its_enums_in_one_casing() {
+    // `TaskSnapshot` is serialised for the model by the `task` tool. `TaskState` was
+    // snake_case from the start, and `reason` arrived later with no casing attribute, so one
+    // object carried `"state": "running"` beside `"reason": "ModelRequested"`.
+    //
+    // The match is exhaustive on purpose. A new reason fails the build here, so the next
+    // variant cannot arrive with the wrong casing in silence.
+    for reason in [
+        BackgroundReason::ModelRequested,
+        BackgroundReason::KnownLongRunning,
+        BackgroundReason::LongTimeoutRequested,
+        BackgroundReason::AdoptedOnTimeout,
+    ] {
+        let expected = match reason {
+            BackgroundReason::ModelRequested => "model_requested",
+            BackgroundReason::KnownLongRunning => "known_long_running",
+            BackgroundReason::LongTimeoutRequested => "long_timeout_requested",
+            BackgroundReason::AdoptedOnTimeout => "adopted_on_timeout",
+        };
+        let registry = Arc::new(TaskRegistry::new(TaskLimits::default()));
+        let _handle = registry
+            .start("cargo build", reason)
+            .expect("the registry starts one task");
+        let snapshot = registry.list().await.remove(0);
+        let json = serde_json::to_value(&snapshot).expect("a snapshot serialises");
+        assert_eq!(
+            json["reason"], expected,
+            "the reason must be snake_case on the wire: {json}"
+        );
+        assert_eq!(
+            json["state"], "running",
+            "and the sibling enum keeps the same convention: {json}"
+        );
+    }
+}
