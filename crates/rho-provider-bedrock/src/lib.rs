@@ -3229,9 +3229,15 @@ mod merged_turn_tests {
         );
     }
 
-    /// A tool result still ends the run, so a long loop sends one trace.
+    /// An **earlier** tool result bounds the run, so a long loop sends one trace.
+    ///
+    /// The name and this line used to say a tool result "ends the run", which is the rule
+    /// this lane deleted: the trailing tool result **anchors** the run, and only an earlier
+    /// one stops the backward walk. A review found the wording contradicting the decision it
+    /// tests, and a reader who trusted it would rebuild the defect. See
+    /// `D-the-pending-run-includes-the-turn-a-tool-result-answers`.
     #[test]
-    fn a_tool_result_still_bounds_the_run() {
+    fn an_earlier_tool_result_bounds_the_run() {
         let messages = vec![
             Message {
                 role: Role::User,
@@ -3261,7 +3267,7 @@ mod merged_turn_tests {
         assert_eq!(
             sent(&messages),
             vec!["pending thought".to_string()],
-            "a separated turn is history, so a long loop stays at one trace"
+            "an earlier tool result stops the walk, so a long loop stays at one trace"
         );
     }
 }
