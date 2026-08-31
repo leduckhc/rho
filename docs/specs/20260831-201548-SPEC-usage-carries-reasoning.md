@@ -216,3 +216,45 @@ contract does not assert it. `rho-tui` tests assert the duration and the render.
   defect.
 - A token count estimated from text length or character count. `AGENTS.md` forbids it.
 - Wiring a caller for `run_all`. Its dead-surface state is a separate task.
+
+## Amendments after the contract review, binding
+
+A contract review read this spec before any code. These amendments answer it. Where an
+amendment and the text above disagree, the amendment wins.
+
+### 1. No cumulative reasoning total reaches the screen
+
+The review found a way for a measured number to become wrong rather than absent.
+
+`Usage::add` sums the field, so a session total is easy to build. But a session file drops an
+unknown field on read, and `fork` re-encodes each record, so a fork erases
+`reasoning_tokens` from the copy. A cumulative total shown after a fork would therefore
+shrink, and a shrinking measured number is worse than no number.
+
+So rho shows a reasoning token count **per turn only**. No header, footer, or session summary
+shows a cumulative reasoning total. If a later feature wants one, it recomputes from the turns
+of the live run and never from a file it read back.
+
+Test: `no_cumulative_reasoning_total_is_rendered`.
+
+### 2. The testkit check needs a caller, or it is theatre
+
+`rho_provider_testkit::contract::run_all` has no caller today, and
+`bench/check-dead-surface.py` reports it. Adding a check to a harness nobody runs proves
+nothing.
+
+So this feature either gives `run_all` its first caller, in a test that every provider crate
+runs, or it does not claim the check. The spec chooses the first. A provider crate gains a test
+that calls `run_all`, so the new check runs in the workspace suite.
+
+Test: `every_provider_runs_the_contract_harness`.
+
+### 3. Only Bedrock is verifiable here, and the spec says which providers are unproven
+
+Bedrock reports no reasoning token count, so its answer is `None`. That is verifiable, and a
+live drive proves it.
+
+OpenRouter and Azure report a count on the wire, and the field names in this spec are not
+verified against a live response. This project forbids a claim it cannot prove. So each of
+those two providers stays unimplemented until someone with a key probes the real response, and
+`docs/features.md` names them as unproven rather than delivered.

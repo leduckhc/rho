@@ -319,3 +319,57 @@ code. So the contract is open for extension and closed for modification.
 - Should this spec also fix the `fit_to_width` per-cluster defect, or leave it to a
   bug-fix lane? AGENTS.md says never leave a verified bug unfixed. The test
   `fit_to_width_splits_a_combining_cluster_today` records it either way.
+
+## Amendments after the contract review, binding
+
+A contract review read this spec before any code, and it rated this spec the one most likely
+to be regretted. These amendments answer it. Where an amendment and the text above disagree,
+the amendment wins.
+
+### 1. A tool declares its body kind. The renderer never guesses
+
+The review found the classification rule colours by content, across every tool. A `read` of a
+Markdown file that opens with `---` became a diff. So did a `cat` of a `.patch` file, and a
+`bash git diff` in a row that is not an edit.
+
+`Row::Tool` now carries a `body_kind`, and the producer sets it:
+
+```rust
+/// What a tool row's body holds. The tool that produced the body sets it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyKind {
+    /// Ordinary text. Every line draws in the text role.
+    Plain,
+    /// A unified diff. The renderer colours each line by its mark.
+    UnifiedDiff,
+}
+```
+
+The renderer colours a line by its mark only inside a body declared `UnifiedDiff`. A `Plain`
+body draws plain, whatever its text looks like. The default is `Plain`, which is the fail-safe
+direction.
+
+The renderer still matches on a kind and never on a tool name, so the goal of
+`D-diff-colour-by-line-kind-not-tool-name` survives. See `D-a-tool-declares-its-body-kind`.
+
+New tests: `a_read_of_markdown_frontmatter_is_not_a_diff`, `a_declared_diff_colours_its_marks`,
+and `an_undeclared_body_draws_plain`.
+
+### 2. Every test asserts on the real frame
+
+The review found that each level and diff test could pass while `render` still drew the old
+header, because the test could call a helper in `concise.rs` instead. That helper already
+ships with no caller, and that is how it became scaffolding.
+
+So every test named in this spec asserts against the frame that `render(state, frame)`
+produces, in the style of `crates/rho-tui/tests/frames.rs`. No test in this feature may assert
+on the return value of a helper alone.
+
+### 3. `tool_row_lines` is deleted, not wired
+
+`render.rs` owns drawing. A second implementation of the same job is what rotted the first
+time. So this feature deletes `concise::tool_row_lines` rather than giving it a caller, and it
+records the deletion in `bench/deleted-tests.txt` if a test named it.
+
+`initial_tool_fold`, `toggle_fold` and `fold_caret` stay, because the reducer and the renderer
+both need them, and they gain their first production callers here.

@@ -246,3 +246,51 @@ Each rule has a name and a test in the next section.
 - Azure deployment discovery. Azure returns `None`, and the user names the deployment.
 - A config-file model registry. `F-model-registry` covers that, and this spec does not build it.
 - Ranking or scoring the list. The picker shows the provider's order.
+
+## Amendments after the contract review, binding
+
+A contract review read this spec before any code. These amendments answer it. Where an
+amendment and the text above disagree, the amendment wins.
+
+### 1. The catalogue is bounded, in three places
+
+The review found the listing unbounded. A provider endpoint that is wrong, slow, or hostile
+could return a giant list, and rho would read it into memory and write it to disk. That is the
+shape of the defect that turned 8 MB of output into 805 MB of memory.
+
+Three bounds, each named and each tested:
+
+```rust
+/// The most models rho keeps from one listing.
+pub const MAX_MODELS: usize = 2_000;
+/// The most bytes rho writes to the catalogue cache.
+pub const MAX_CATALOG_BYTES: usize = 1024 * 1024;
+/// The longest rho waits for a listing.
+pub const LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+```
+
+A listing over `MAX_MODELS` is refused, and the refusal names both numbers. It is not
+truncated, because a silently shortened list makes a missing model look like a provider that
+does not offer it. See `D-a-limit-too-large-is-refused-not-clamped`.
+
+The cache write is capped by bytes, and the read is capped the same way, in the shape
+`Config::read_file` now uses. A listing that outruns `LIST_TIMEOUT` fails, and a failure never
+stops a session that already has a working model.
+
+New tests: `a_listing_over_the_cap_is_refused_and_names_both_numbers`,
+`a_catalogue_cache_over_the_cap_is_refused`, and `a_listing_that_outruns_its_bound_fails_open_to_the_session`.
+
+### 2. The cached list is advisory, and the spec says so
+
+The 24 hour lifetime is not measured, and no churn rate justifies it. So the spec states the
+consequence instead of defending the number: a model added in the last day may be missing from
+the picker, and a removed id may still appear.
+
+That is acceptable only because a typed id bypasses the list. `/model <id>` sends the id the
+user typed, and the provider decides. The picker is a convenience, never the authority.
+
+### 3. Effort and speed are not persisted, and that is written where a reader meets it
+
+A mid-session effort or speed change is lost on resume, because the session file records a
+model change and not a reasoning setting. The review asked whether that boundary is
+acceptable. It is, for now, and the guide must say so rather than leave a user to find out.

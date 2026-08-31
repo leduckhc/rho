@@ -260,3 +260,59 @@ uses the network. This obeys AGENTS.md step 5.
   at its end.
 - No configurable tick period. The period is a constant, tied to the sweep period.
 - No spinner for a background task row. That row settles by its own task events.
+
+## Amendments after the contract review, binding
+
+A contract review read this spec before any code. These amendments answer it. Where an
+amendment and the text above disagree, the amendment wins.
+
+### 1. The tick cost is measured, and the numbers live here
+
+The spec bounded the idle cost and never the running cost. This project does not accept a
+performance claim without its measurement, so here it is.
+
+A steady-state frame renders in 73.4 microseconds at the median, and 83.4 at the 99th
+percentile, at 100 by 30. Each frame allocates 526 times and 32.7 KB.
+
+```sh
+cargo run --release -p rho-tui --example frame_bench
+```
+
+A repaint is linear in the **total** transcript rows, not the visible ones, because
+`transcript_lines` wraps every row before `transcript_window` slices the window:
+
+| rows | one frame | cost at ten ticks a second |
+| --- | --- | --- |
+| 50 | 0.150 ms | 0.15 percent of one core |
+| 500 | 0.273 ms | 0.27 percent |
+| 2000 | 0.729 ms | 0.73 percent |
+| 5000 | 1.754 ms | 1.75 percent |
+
+So a 100 millisecond tick is affordable, and it stays affordable to a few thousand rows. The
+cost grows with the session, so a test pins the shape and the guide states the trade.
+
+### 2. A test must prove the loop calls the reducer
+
+This is the most important amendment, because it guards the defect this feature exists to fix.
+
+`state.tick` is correct today and never advances, because no caller advances it. A pure
+reducer test cannot see that. The tick arm also carries a guard, `if events.is_some()`, and a
+call bound to a boolean is exactly the shape the dead-surface guard admits it cannot see.
+
+So the spec requires an integration test that drives the real event loop with `tokio::time`
+paused, and asserts two things: the live duration grew, and a frame was drawn. A reducer test
+alone does not satisfy this requirement.
+
+Test: `the_event_loop_advances_the_clock_while_a_turn_runs`.
+
+### 3. The footer format is stated once
+
+`SPEC-a-queued-message-says-what-it-is` also edits `footer_line`. The two features share one
+format, so it is written here and both tasks keep it:
+
+```
+◈ working · {duration} · {n} waiting
+```
+
+The duration is live and turns amber past the threshold. The waiting count is absent when no
+message waits. The clock task lands first, and the steering task extends the same format.
