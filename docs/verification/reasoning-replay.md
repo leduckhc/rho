@@ -204,3 +204,92 @@ Proved by test only, and stated here so nobody reads more into the runs above:
   proof for either direction, so it guesses at neither.
 - **Encrypted reasoning.** `RedactedContent` is carried as base64 and replayed as a blob.
   Bedrock did not send one during these runs, so only the translation tests cover it.
+
+## 8. Re-driven on 20260829, when the drop report became data
+
+The drop report moved from a log line to returned data. See
+`D-a-drop-report-is-data-not-a-log-line`. The request path is untouched, so these runs check
+that claim rather than trust it. Same account, same region, same model, same two files.
+
+```sh
+cargo build --release -p rho-cli
+rho run "Use your tools. Read a.txt, then read b.txt, then print the two exact strings you \
+found, separated by a comma." --provider bedrock --model "$M" --reasoning-effort high
+```
+
+```text
+run 1 exit=0 -> zx9-quibble, kt4-marlow      439 bytes on stderr
+run 2 exit=0 -> zx9-quibble, kt4-marlow      439 bytes on stderr
+```
+
+A sequential three-step prompt with `--reasoning full` printed the reasoning and finished at
+exit 0, so a thinking turn inside a tool loop still works.
+
+### The corrupted-signature proof no longer reproduces, and the reason is a real defect
+
+Section 2 above broke the signature on 20260821 and Bedrock answered 400. The same break was
+applied again today, on top of this change:
+
+```rust
+// deliberate break, restored from /tmp after the run
+.signature("deliberately-wrong-signature")
+```
+
+```text
+exit=0 -> zx9-quibble, kt4-marlow
+```
+
+**A wrong signature was accepted.** So no signature travels any more. A unit probe on the
+exact shape rho sends after a tool result confirms it, and counts the blocks:
+
+```text
+PROBE: reasoning blocks in the request = 0
+PROBE: drops reported = []
+```
+
+The cause is the replay scope, not this change. `D-replay-only-the-current-loop` landed on
+20260822, one day **after** the 400 was measured. The scope is the trailing run of assistant
+turns, and a tool result ends that run. In a sequential loop the request always ends with a
+tool result, so the assistant turn that holds the pending call sits outside the scope, and its
+thinking is dropped as history.
+
+`a_separated_turn_in_a_loop_does_not_replay` pins the current rule with an assistant turn
+**after** the tool result. rho never builds that shape in a sequential loop, so no test covered
+the shape that ships.
+
+This change does not fix it, and it must not: the brief for this lane forbids changing what
+the provider sends on the wire. The fix moves the wire, so it needs its own decision, its own
+spec amendment, and its own live re-verification. `docs/features.md` now reports
+`F-bedrock-reasoning-replay` as `partial` and names what is not built.
+
+The break was restored from a copy in `/tmp`, never with `git checkout`, per
+`D-jcode-bash-lessons`. The restore was checked twice:
+
+```sh
+grep -c "deliberately-wrong" crates/rho-provider-bedrock/src/lib.rs   # 0
+diff -q /tmp/lib.rs.good crates/rho-provider-bedrock/src/lib.rs       # identical
+```
+
+### The failure path, driven twice
+
+A session was continued with a **different** model, so the stored payload's owner no longer
+matches the request:
+
+```sh
+rho run "Use your tools. Read a.txt, then tell me the exact string." --provider bedrock \
+  --model us.anthropic.claude-haiku-4-5-20251001-v1:0 --reasoning-effort high
+rho run --continue "Now say the word ok." --provider bedrock \
+  --model amazon.nova-micro-v1:0 --log info
+```
+
+```text
+exit=0 -> Ok.        no drop report on stderr
+```
+
+**No report, and that is correct.** The new prompt is a user message, so the stored payload is
+out of the current loop. Rule 12 drops history by design and reports nothing, which is what
+`an_out_of_loop_payload_is_not_reported_as_a_drop` asserts.
+
+So the owner refusal still cannot be driven live, for the same reason section 2's list already
+gave, plus the scope defect above. Four unit tests cover it, and they now assert data instead
+of a log line. This page claims no live proof of the refusal.

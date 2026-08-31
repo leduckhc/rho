@@ -340,7 +340,8 @@ fn build_messages_never_emits_two_messages_with_the_same_role_in_a_row() {
     let built = rho_provider_bedrock::build_messages_for_model(
         &two_tool_results_conversation(),
         THINKING_MODEL,
-    );
+    )
+    .messages;
     let roles: Vec<&ConversationRole> = built.iter().map(|message| message.role()).collect();
     for pair in roles.windows(2) {
         assert_ne!(
@@ -359,7 +360,8 @@ fn build_messages_merges_tool_results_into_one_user_message() {
     let built = rho_provider_bedrock::build_messages_for_model(
         &two_tool_results_conversation(),
         THINKING_MODEL,
-    );
+    )
+    .messages;
     assert_eq!(
         built.len(),
         3,
@@ -389,7 +391,8 @@ fn build_messages_keeps_a_single_tool_result_working() {
 
     let mut conversation = two_tool_results_conversation();
     conversation.pop();
-    let built = rho_provider_bedrock::build_messages_for_model(&conversation, THINKING_MODEL);
+    let built =
+        rho_provider_bedrock::build_messages_for_model(&conversation, THINKING_MODEL).messages;
     assert_eq!(built.len(), 3);
     assert_eq!(built[2].role(), &ConversationRole::User);
 }
@@ -425,7 +428,8 @@ fn every_content_block_has_an_explicit_arm() {
         ],
     }];
 
-    let built = rho_provider_bedrock::build_messages_for_model(&conversation, THINKING_MODEL);
+    let built =
+        rho_provider_bedrock::build_messages_for_model(&conversation, THINKING_MODEL).messages;
     assert_eq!(built.len(), 1, "the one assistant message survives");
 
     let text_blocks = built[0]
