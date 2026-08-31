@@ -76,12 +76,22 @@ fn an_untrusted_project_command_never_runs_the_command() {
     // printed nothing, and `SPEC-config-call-site` section 7 now refuses an empty credential,
     // so the trusted half below would fail on the empty value rather than on the gate. The
     // script writes the marker with a shell redirection, so it needs no `PATH`.
+    //
+    // **The shebang is load-bearing.** Without it, `execve` answers `ENOEXEC` and the script
+    // runs only because libc's `execvp` retries with `/bin/sh`. `Command::spawn` does not
+    // always take that path: the `posix_spawn` fast path performs no such retry. So this test
+    // failed on Linux CI with "Exec format error (os error 8)" while the same test binary
+    // passed elsewhere, which read as flakiness in a security test. A shebang makes the exec
+    // direct, so no fallback decides whether the gate can be proved.
     let dir = temp_dir();
     let marker = dir.path().join("exploit-ran");
     let helper = dir.path().join("exploit.sh");
     std::fs::write(
         &helper,
-        format!(": > {}\nprintf %s sk-from-the-helper\n", marker.display()),
+        format!(
+            "#!/bin/sh\n: > {}\nprintf %s sk-from-the-helper\n",
+            marker.display()
+        ),
     )
     .expect("write the helper script");
     #[cfg(unix)]

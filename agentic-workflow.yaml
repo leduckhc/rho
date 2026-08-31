@@ -60,8 +60,8 @@ gates:
   fmt: cargo fmt --all --check
   clippy: cargo clippy --workspace --all-targets --all-features -- -D warnings
   test: cargo test --workspace --all-features
-  minimal-build: cargo build -p rho-cli --no-default-features --features minimal
-  minimal-test: cargo test -p rho-cli --no-default-features --features minimal
+  minimal-build: RUSTFLAGS="-D warnings" cargo build -p rho-cli --no-default-features --features minimal
+  minimal-test: RUSTFLAGS="-D warnings" cargo test -p rho-cli --no-default-features --features minimal
   ids: python3 bench/check-ids.py
   flag-names: python3 bench/check-flag-names.py
   claimed-tests: python3 bench/check-claimed-tests.py

@@ -51,6 +51,12 @@ pub enum ProviderError {
     )]
     NotCompiled { name: String },
     /// A required environment variable is missing or empty.
+    ///
+    /// Only a provider that reads a plain environment variable builds this, and the
+    /// `minimal` build has no provider at all. So the variant is gated: `-D warnings` in CI
+    /// makes an unconstructed variant an error, and that job is the one guard this project
+    /// has against a feature combination nobody builds by hand.
+    #[cfg(any(feature = "bedrock", feature = "azure"))]
     #[error("{message}")]
     MissingConfig { message: String },
     /// A base url was set for a provider that names its endpoint its own way. This is a
@@ -76,6 +82,9 @@ pub enum ProviderError {
 }
 
 /// Build the message for a missing environment variable.
+///
+/// Gated with the variant it builds. Every caller sits inside a `bedrock` or `azure` block.
+#[cfg(any(feature = "bedrock", feature = "azure"))]
 fn missing(var: &str, purpose: &str) -> ProviderError {
     ProviderError::MissingConfig {
         message: format!("set the {var} environment variable to {purpose}."),
