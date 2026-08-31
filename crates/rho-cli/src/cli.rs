@@ -1342,10 +1342,10 @@ async fn run_interactive(cli: &Cli) -> i32 {
         tui_motion: loaded.tui_motion,
         stdout_is_terminal: std::io::IsTerminal::is_terminal(&std::io::stdout()),
     });
-    // Hold `_tasks` and `_extras` for the whole run. Dropping the task registry kills
+    // Hold `tasks` and `_extras` for the whole run. Dropping the task registry kills
     // every background task, and dropping the MCP pool stops every server, so an early
     // drop would end work the model is still waiting on.
-    let (session, _tasks, extras) = match build_session(cli, &loaded, config).await {
+    let (session, tasks, extras) = match build_session(cli, &loaded, config).await {
         Ok(triple) => triple,
         Err(error) => return fail(error),
     };
@@ -1365,6 +1365,10 @@ async fn run_interactive(cli: &Cli) -> i32 {
         // never drew. See `D-motion-answers-to-one-switch`.
         .with_motion(motion)
         .with_reasoning(reasoning)
+        // The task row had a reducer, a renderer, and no producer. Nothing in any shipped
+        // binary subscribed to the registry, so a background build drew nothing at all.
+        // This is that call site. See `SPEC-the-task-event-bridge`.
+        .with_task_events(tasks.session_events())
         .with_context(cwd, branch, provider_name)
         .with_notices(notices);
     let code = match app.run().await {
@@ -3814,6 +3818,36 @@ mod shutdown_tests {
         assert!(
             source.contains("pool.take_cache_notices()"),
             "drain_mcp must surface a cache write failure the handshake could not report"
+        );
+    }
+
+    #[test]
+    fn the_interface_reads_the_task_event_stream() {
+        // Six capabilities shipped with no call site, and a green suite saw none of them.
+        // The task row was the sixth: a reducer, a renderer, and no producer. No unit test
+        // can reach the interactive path, because it owns a real terminal and a real
+        // provider. So this reads the call site and states the rule where a contributor
+        // meets it. `bench/tui_task_row_drive.py` is the other half, on a real pty.
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli.rs"))
+            .expect("read the cli source");
+        // Read the production half only. The first draft searched the whole file, and the
+        // needle it looked for was written in this very assertion, so the guard passed with
+        // the call site deleted. A mutation run caught it. A guard that reads its own source
+        // must never look at itself.
+        let production = source
+            .split("mod shutdown_tests")
+            .next()
+            .expect("the file has a production half");
+        let code: String = production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<&str>>()
+            .join("\n");
+        // Built from parts for the same reason, so this needle is not a literal in the file.
+        let needle = format!(".with_task_events({}", "tasks.session_events())");
+        assert!(
+            code.contains(&needle),
+            "the interactive path must wire the task event bridge, or no task row ever draws"
         );
     }
 

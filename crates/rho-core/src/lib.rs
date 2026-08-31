@@ -71,8 +71,9 @@ pub use subagent::{
     collect_report, intersect_tools, narrow_sandbox,
 };
 pub use tasks::{
-    BackgroundReason, DEFAULT_FOREGROUND_LIMIT_MS, RunMode, TaskError, TaskHandle, TaskId,
-    TaskLimits, TaskProgress, TaskRegistry, TaskSnapshot, TaskState, WaitUntil, decide_run_mode,
+    BackgroundReason, DEFAULT_FOREGROUND_LIMIT_MS, RunMode, SessionEvents, TaskError, TaskHandle,
+    TaskId, TaskLimits, TaskProgress, TaskRegistry, TaskSnapshot, TaskState, WaitUntil,
+    decide_run_mode,
 };
 pub use thinking::{ThinkingPiece, ThinkingSplitter};
 pub use tool::{

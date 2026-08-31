@@ -33,17 +33,21 @@ Six scenarios, two widths:
 | `missing` | `cat /nope/nope/nope` | the absent file path, exit 1 |
 | `denied` | a file with mode `000` | the denied permission path, exit 126 |
 
-## One defect this step found, before any check ran
+## One defect this step found, before any check ran. Since fixed
 
-**Shipped rho cannot show a task row at all.** Nothing subscribes to
-`TaskRegistry::subscribe`, and `ToolContext::agent_events` lives for one tool call while a
-background task outlives the turn. So `TaskStart`, `TaskProgressed`, and `TaskEnd` reach no
-frontend. The harness subscribes itself, which is the only reason this row could be driven.
+**When this lane shipped, rho could not show a task row at all.** Nothing subscribed to
+`TaskRegistry::subscribe`, and `ToolContext::agent_events` lived for one tool call while a
+background task outlived the turn. So `TaskStart`, `TaskProgressed`, and `TaskEnd` reached no
+frontend. The harness subscribed itself, which was the only reason this row could be driven.
 
-This is the same family as the defect this lane fixes, and it is a sixth dead switch. The fix
-needs a session-lifetime event path in `rho-core`, a call site in `rho-cli`, and a frontend
-stream that outlives one prompt. That is three crates and a contract, so this lane reports it
-instead of half-building it. `rho-cli` also belongs to another lane this week.
+This was the same family as the defect this lane fixed, and it was a sixth dead switch. The
+fix needed a session-lifetime event path in `rho-core`, a call site in `rho-cli`, and a
+frontend stream that outlives one prompt. That is three crates and a contract, so this lane
+reported it instead of half-building it.
+
+**`SPEC-the-task-event-bridge` closed it.** The harness no longer supplies a bridge: it reads
+`TaskRegistry::session_events`, the same stream `rho-cli` gives the interface. A real session
+draws the row, and `docs/verification/task-event-bridge.md` holds that drive.
 
 ## Two defects the drive found in this change
 

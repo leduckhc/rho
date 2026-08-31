@@ -5,11 +5,12 @@
 //! real `TaskRegistry` broadcasts real events, the real reducer folds them, and the real
 //! renderer writes bytes to a real terminal.
 //!
-//! **It also supplies a bridge that shipped rho does not have.** Nothing subscribes to
-//! `TaskRegistry::subscribe` in production, and `ToolContext::agent_events` lives for one
-//! tool call while a background task outlives the turn. So a task row cannot appear in a
-//! real session today. This harness subscribes itself. See
-//! `docs/verification/task-row-progress.md`.
+//! **It now drives the shipped bridge.** It used to subscribe to the registry itself,
+//! because nothing in a binary did, and a task row could not appear in a real session at
+//! all. `SPEC-the-task-event-bridge` closed that, so this harness reads
+//! `TaskRegistry::session_events`, which is the exact stream `rho-cli` gives the interface.
+//! A harness that supplies the missing half proves nothing about the product. See
+//! `docs/verification/task-row-progress.md` and `docs/verification/task-event-bridge.md`.
 //!
 //! Run one scenario:
 //!
@@ -140,8 +141,9 @@ async fn run_one_task(
     command: &str,
     registry: &Arc<TaskRegistry>,
 ) {
-    // Subscribe before the task starts, or the start event is lost.
-    let mut events = registry.subscribe();
+    // The real bridge, the one `rho-cli` wires into the interface. It subscribes inside
+    // the call, so a task started right afterwards still reports its start.
+    let mut events = registry.session_events();
     let tool = BashTool::with_tasks(Arc::clone(registry));
     let (updates, mut updates_rx) = tokio::sync::mpsc::channel::<String>(64);
     let (agent_events, _agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
@@ -162,7 +164,7 @@ async fn run_one_task(
         eprintln!("the tool refused the command: {error}");
     }
     // Fold every event until the task reaches its final state.
-    while let Ok(event) = events.recv().await {
+    while let Some(event) = events.next().await {
         let final_event = matches!(event, AgentEvent::TaskEnd { .. });
         state.apply(&event, now_millis());
         draw(state, terminal);

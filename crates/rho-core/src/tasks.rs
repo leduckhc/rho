@@ -24,7 +24,7 @@ use tokio::sync::Notify;
 use crate::AgentEvent;
 
 /// A handle to one background task.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskId(pub String);
 
 impl std::fmt::Display for TaskId {
@@ -80,6 +80,14 @@ pub struct TaskSnapshot {
     pub command: String,
     pub state: TaskState,
     pub progress: TaskProgress,
+    /// Why the command runs in the background.
+    ///
+    /// A snapshot could not say this before, and the lag repair in `SessionEvents`
+    /// needs it: a repair rebuilds a `TaskStart`, and that event carries the reason.
+    /// It is additive on the wire the `task` tool writes for the model, so a reader
+    /// that ignores the field reads the same snapshot it read before. See
+    /// `D-a-lagged-frontend-is-resynced-not-told`.
+    pub reason: BackgroundReason,
     /// Output captured so far, bounded. See section 8.
     pub output_tail: String,
     /// Bytes dropped from the head of the output, if the cap was hit.
@@ -136,7 +144,12 @@ pub enum TaskError {
 
 /// Why a command runs in the background. Reported to the user, so the choice is
 /// never silent.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// The casing matches `TaskState`, because both are fields of one `TaskSnapshot` and the
+/// `task` tool serialises that snapshot for the model. Without this the model read
+/// `"state": "running"` beside `"reason": "ModelRequested"` in one object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BackgroundReason {
     /// The model asked for it.
     ModelRequested,
@@ -247,6 +260,9 @@ const EVENT_CHANNEL_CAPACITY: usize = 256;
 struct TaskShared {
     id: TaskId,
     command: String,
+    /// Why this command runs in the background. The snapshot reports it, and the
+    /// lag repair rebuilds a `TaskStart` from it.
+    reason: BackgroundReason,
     started_at_unix_ms: u64,
     /// Notified on every progress change and on the final state. A waiter wakes
     /// on this, so the registry never polls.
@@ -282,6 +298,7 @@ impl TaskShared {
             command: self.command.clone(),
             state: inner.state.clone(),
             progress: inner.progress.clone(),
+            reason: self.reason,
             output_tail: output_to_string(&inner.output),
             dropped_bytes: inner.dropped_bytes,
             started_at_unix_ms: self.started_at_unix_ms,
@@ -328,8 +345,33 @@ impl TaskRegistry {
     /// Subscribe to the task event stream. A subscriber sees `TaskStart`,
     /// `TaskProgressed`, and `TaskEnd` events. Subscribe before you start a task,
     /// so no start event is missed.
+    ///
+    /// A frontend wants `session_events` instead. This raw receiver makes the caller
+    /// handle a lag, and a caller that forgets leaves a row saying `running` after the
+    /// task ended. See `D-a-lagged-frontend-is-resynced-not-told`.
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<AgentEvent> {
         self.events.subscribe()
+    }
+
+    /// Bridge every task event onto a session-lifetime stream.
+    ///
+    /// This is the call a frontend makes. A background task outlives the tool call
+    /// that started it, and it outlives the run, so its events cannot travel on
+    /// `AgentEvents`. See `D-a-task-event-outlives-its-tool-call`.
+    ///
+    /// It subscribes inside this call, so a task started right afterwards still
+    /// delivers its `TaskStart`.
+    ///
+    /// The stream holds a weak reference to the registry, so it never keeps a killed
+    /// session's child processes alive.
+    pub fn session_events(self: &Arc<Self>) -> SessionEvents {
+        SessionEvents {
+            tasks: Arc::downgrade(self),
+            rx: self.events.subscribe(),
+            backlog: VecDeque::new(),
+            repair_due: false,
+            ended: std::collections::HashSet::new(),
+        }
     }
 
     /// Start a new task and return a handle to feed it. The caller owns the
@@ -361,6 +403,7 @@ impl TaskRegistry {
         let shared = Arc::new(TaskShared {
             id: id.clone(),
             command: command.clone(),
+            reason,
             started_at_unix_ms: now_unix_ms(),
             notify: Notify::new(),
             inner: Mutex::new(TaskInner {
@@ -622,4 +665,139 @@ fn now_unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|delta| delta.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Events that reach a frontend outside any one agent run.
+///
+/// A background task outlives the tool call that started it, and it outlives the run
+/// as well. So its events cannot travel on `AgentEvents`. A frontend holds this stream
+/// for as long as it owns the screen.
+///
+/// See `SPEC-the-task-event-bridge` and `D-a-task-event-outlives-its-tool-call`.
+pub struct SessionEvents {
+    /// Weak on purpose. Dropping the registry kills every running task, so a strong
+    /// reference here would tie a child process to a forgotten stream.
+    tasks: std::sync::Weak<TaskRegistry>,
+    rx: tokio::sync::broadcast::Receiver<AgentEvent>,
+    /// Repair events waiting for a reader, oldest first.
+    ///
+    /// This lives in the struct, and never in the future `next` returns. A `select!`
+    /// arm that loses a race must lose no event.
+    backlog: VecDeque<AgentEvent>,
+    /// A lag was seen, and its repair is not built yet.
+    ///
+    /// This lives in the struct for the same reason. A marker inside the future would
+    /// take the whole repair with it when the arm was dropped, and the row would stay
+    /// stale for the rest of the session.
+    repair_due: bool,
+    /// Every task this stream has already reported as ended.
+    ///
+    /// A lag repair reads the registry, so it can send a `TaskEnd` while the channel
+    /// still holds progress reports from before the lag. Those arrive afterwards. Without
+    /// this set the stream would report a finished task as running again, and the last
+    /// word on a task would be a stale percentage.
+    ///
+    /// It grows by one entry per finished task, which is the bound the registry's own
+    /// task list already has.
+    ended: std::collections::HashSet<TaskId>,
+}
+
+impl SessionEvents {
+    /// The next event to fold. `None` when the bridge has ended.
+    ///
+    /// The bridge ends when the task registry is dropped. Events already in the channel
+    /// arrive first, because a `broadcast` receiver drains before it closes.
+    ///
+    /// This is cancel-safe.
+    pub async fn next(&mut self) -> Option<AgentEvent> {
+        loop {
+            // A repair event already built goes out first. No await, so a lost race
+            // cannot drop one.
+            if let Some(event) = self.backlog.pop_front() {
+                if let Some(event) = self.forward(event) {
+                    return Some(event);
+                }
+                continue;
+            }
+            if self.repair_due {
+                // The marker stays set across this await. A `select!` arm that loses the
+                // race re-enters here and builds the repair on the next call.
+                match self.tasks.upgrade() {
+                    Some(registry) => {
+                        let snapshots = registry.list().await;
+                        // No await between the read and the clear, so the repair is
+                        // enqueued and the marker dropped as one step.
+                        self.backlog.extend(repair_events(&snapshots));
+                        self.repair_due = false;
+                        continue;
+                    }
+                    // The registry is gone, so there is nothing to read a state from.
+                    // Fall through and drain whatever the channel still holds.
+                    None => self.repair_due = false,
+                }
+            }
+            match self.rx.recv().await {
+                Ok(event) => {
+                    if let Some(event) = self.forward(event) {
+                        return Some(event);
+                    }
+                }
+                // A lag is repaired, and the frontend never learns one happened. See
+                // `D-a-lagged-frontend-is-resynced-not-told`.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    self.repair_due = true;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    }
+
+    /// Decide whether one event may leave the bridge, and record what it says.
+    ///
+    /// A task never goes back to running. A repair can send a `TaskEnd` before the
+    /// channel gives up the progress reports it held from before the lag, so this drops
+    /// a report that would contradict an end this stream already sent.
+    fn forward(&mut self, event: AgentEvent) -> Option<AgentEvent> {
+        match &event {
+            AgentEvent::TaskEnd { id, .. } => {
+                self.ended.insert(id.clone());
+                Some(event)
+            }
+            AgentEvent::TaskProgressed { id, .. } if self.ended.contains(id) => None,
+            _ => Some(event),
+        }
+    }
+}
+
+/// The events that repair a lagged reader, oldest task first.
+///
+/// Each task sends a `TaskStart` first, always. Only `on_task_start` in a reducer
+/// creates a row, and the lost window can hold the start event itself, so a state
+/// event alone would land on nothing. See `D-a-lagged-frontend-is-resynced-not-told`.
+fn repair_events(snapshots: &[TaskSnapshot]) -> Vec<AgentEvent> {
+    let mut events = Vec::new();
+    // `list` returns newest first. A frontend appends a row, so send the oldest task
+    // first and the rows keep the order a live session would have given them.
+    for snapshot in snapshots.iter().rev() {
+        events.push(AgentEvent::TaskStart {
+            id: snapshot.id.clone(),
+            command: snapshot.command.clone(),
+            reason: snapshot.reason,
+        });
+        if snapshot.state.is_final() {
+            events.push(AgentEvent::TaskEnd {
+                id: snapshot.id.clone(),
+                state: snapshot.state.clone(),
+                output_tail: snapshot.output_tail.clone(),
+            });
+        } else if snapshot.progress != TaskProgress::default() {
+            // A running task with nothing to report needs no progress event. The row
+            // already draws `running`, and an empty progress cell is the correct row.
+            events.push(AgentEvent::TaskProgressed {
+                id: snapshot.id.clone(),
+                progress: snapshot.progress.clone(),
+            });
+        }
+    }
+    events
 }
