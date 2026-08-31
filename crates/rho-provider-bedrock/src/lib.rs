@@ -1740,6 +1740,16 @@ mod replay_tests {
             state: None,
         });
         assert!(sent_reasoning(&messages, MODEL).is_empty());
+        // And it is not a refusal. Rule 11 gives that report to `rho-core`, so this crate
+        // stays quiet, and the drop list must stay empty. A review found the boundary
+        // unpinned: the test above proves nothing was sent, and a change that reported a
+        // no-state block as a drop would have survived it.
+        let built = build_messages_for_model(&messages, MODEL);
+        assert!(
+            built.dropped_replays.is_empty(),
+            "no payload means no refusal to report: {:?}",
+            built.dropped_replays
+        );
     }
 
     /// A payload with no signature is not a signed block, so it is dropped rather than
