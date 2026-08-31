@@ -90,9 +90,14 @@ function, so no two edit one hunk.
 
 Each one blocks a task. None is a matter of taste.
 
-1. **The repaint cost.** The clock spec bounds the idle cost and not the running cost. Ten
-   redraws a second against a measured 6.5 ms frame needs a number, per the rule that a
-   performance claim carries its measurement. Blocks T3.
+1. **The repaint cost. ANSWERED 20260831, and the number is negligible.** A steady-state
+   frame renders in 73.4 microseconds at the median and 83.4 at the 99th percentile, at
+   100 by 30, measured with `cargo run --release -p rho-tui --example frame_bench`. So a 100
+   millisecond tick costs 734 microseconds per second, which is 0.073 percent of one core
+   while a turn runs, and nothing while idle. Each frame allocates 526 times and 32.7 KB, so
+   the churn at ten frames a second is 327 KB per second. The 6.5 millisecond figure in
+   `docs/benchmarks.md` is the first frame, which includes setup. T3 is unblocked, and the
+   spec must carry this measurement and its command.
 2. **Reasoning tokens on two providers rho cannot test.** Only Bedrock credentials exist
    here, and Bedrock reports no reasoning count. The OpenRouter and Azure field names are
    unverified. rho must not claim a number it cannot prove, so decide: ship the contract with
