@@ -2740,7 +2740,12 @@ mod replay_scope_tests {
     #[test]
     fn a_separated_turn_in_a_loop_does_not_replay() {
         let messages = vec![
-            user("do it"),
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "do it".to_string(),
+                }],
+            },
             assistant(vec![replay("first thought")]),
             Message {
                 role: Role::Tool,
@@ -2810,7 +2815,12 @@ mod replay_scope_tests {
     #[test]
     fn the_turn_a_tool_result_answers_replays_its_reasoning() {
         let messages = vec![
-            user("do it"),
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "do it".to_string(),
+                }],
+            },
             assistant(vec![replay("the pending thought"), call("1")]),
             tool_result("1"),
         ];
@@ -2828,7 +2838,16 @@ mod replay_scope_tests {
             user("do both"),
             assistant(vec![replay("one thought"), call("1"), call("2")]),
             tool_result("1"),
-            tool_result("2"),
+            Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::ToolResult {
+                    tool_call_id: "2".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: "done".to_string(),
+                    }],
+                    is_error: false,
+                }],
+            },
         ];
         assert_eq!(
             sent(&messages),
@@ -2872,11 +2891,25 @@ mod replay_scope_tests {
     #[test]
     fn a_turn_whose_call_was_already_answered_does_not_replay() {
         let messages = vec![
-            user("do it"),
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "do it".to_string(),
+                }],
+            },
             assistant(vec![replay("old thought"), call("1")]),
             tool_result("1"),
             assistant(vec![replay("pending thought"), call("2")]),
-            tool_result("2"),
+            Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::ToolResult {
+                    tool_call_id: "2".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: "done".to_string(),
+                    }],
+                    is_error: false,
+                }],
+            },
         ];
         assert_eq!(
             sent(&messages),
@@ -3104,9 +3137,21 @@ mod merged_turn_tests {
     //! the very last assistant turn, the earlier turn's `tool_use` travels inside the merged
     //! message with **no** thinking in front of it, which Anthropic rejects when thinking is on.
     //!
-    //! The shape is not reachable from today's loop, because a cancelled turn writes its tool
-    //! results and a new prompt is a user message. A compaction step or a spliced transcript
-    //! would reach it, so the rule covers it rather than waiting.
+    //! **The shape is reachable from today's loop.** This module used to say it was not, and
+    //! that a compaction step or a spliced transcript would be needed to reach it. A probe
+    //! disproved it: `Driver::dispatch` over an **empty** call list appends nothing and returns
+    //! `Continue`, and `run_turn` returns `ToolCalls` for any `tool_use` stop, empty vector
+    //! included. So a provider that stops with `tool_use` and emits no call rho can parse makes
+    //! the loop append a second assistant message with nothing between. Measured: the context
+    //! goes `["user", "assistant", "assistant"]`.
+    //!
+    //! On that route the first turn carries thinking and no call, so the merged message is
+    //! `[thinking, thinking, tool_use]` and the refusal above does not arise. The spliced
+    //! shape is the one that would produce it, and the rule covers both.
+    //!
+    //! Two reviewers independently read the old claim and suggested deleting these tests as
+    //! dead surface. That would have removed a live branch, which is why the claim is corrected
+    //! here rather than left as a note.
 
     use super::*;
     use rho_core::{ContentBlock, Message, ProviderState, ReasoningOwner, Role};
@@ -3135,6 +3180,27 @@ mod merged_turn_tests {
         }
     }
 
+    fn user_message(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+        }
+    }
+
+    fn tool_result_message(id: &str) -> Message {
+        Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: id.to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "done".to_string(),
+                }],
+                is_error: false,
+            }],
+        }
+    }
     fn sent(messages: &[Message]) -> Vec<String> {
         use aws_sdk_bedrockruntime::types::{
             ContentBlock as SdkBlock, ReasoningContentBlock as SdkReasoning,
@@ -3227,6 +3293,75 @@ mod merged_turn_tests {
             vec!["first thought".to_string(), "second thought".to_string()],
             "a tool_use with no thinking in front of it is the request Anthropic refuses"
         );
+    }
+
+    /// No `tool_use` may travel before a thinking block in a merged message.
+    ///
+    /// This is the invariant this whole module exists for, and nothing asserted it. The
+    /// module doc names the failure: if the scope keeps only the last assistant turn, the
+    /// earlier turn's `tool_use` rides inside the merged message with no thinking in front
+    /// of it, and Anthropic refuses that when thinking is on. Every other test here reads
+    /// `sent()`, which extracts reasoning text and throws the block order away.
+    ///
+    /// It asserts the rule over both shapes that can produce a merged run, rather than one
+    /// example.
+    #[test]
+    fn no_tool_use_travels_before_a_thinking_block_in_a_merged_message() {
+        use aws_sdk_bedrockruntime::types::ContentBlock as SdkBlock;
+
+        let shapes: Vec<(&str, Vec<Message>)> = vec![
+            (
+                "an unparsed tool call, so the first turn carries thinking and no call",
+                vec![
+                    user_message("do it"),
+                    Message {
+                        role: Role::Assistant,
+                        content: vec![replay("first thought")],
+                    },
+                    Message {
+                        role: Role::Assistant,
+                        content: vec![replay("second thought"), call("2")],
+                    },
+                    tool_result_message("2"),
+                ],
+            ),
+            (
+                "two answered turns spliced together with no result between them",
+                vec![
+                    user_message("do it"),
+                    Message {
+                        role: Role::Assistant,
+                        content: vec![replay("first thought"), call("1")],
+                    },
+                    Message {
+                        role: Role::Assistant,
+                        content: vec![replay("second thought"), call("2")],
+                    },
+                    tool_result_message("2"),
+                ],
+            ),
+        ];
+
+        for (name, messages) in shapes {
+            let built = build_messages_for_model(&messages, MODEL);
+            for message in &built.messages {
+                let first_thinking = message
+                    .content()
+                    .iter()
+                    .position(|b| matches!(b, SdkBlock::ReasoningContent(_)));
+                let first_tool_use = message
+                    .content()
+                    .iter()
+                    .position(|b| matches!(b, SdkBlock::ToolUse(_)));
+                if let (Some(thinking), Some(tool_use)) = (first_thinking, first_tool_use) {
+                    assert!(
+                        thinking < tool_use,
+                        "{name}: a tool_use at {tool_use} travels before the thinking at \
+                         {thinking}, which Anthropic refuses when thinking is on"
+                    );
+                }
+            }
+        }
     }
 
     /// An **earlier** tool result bounds the run, so a long loop sends one trace.
