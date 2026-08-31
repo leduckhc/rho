@@ -667,6 +667,12 @@ Added while building it, each for a reason the list above did not hold:
   mirror directly, so only a test over the SDK types can see this.
 - `a_state_with_no_signature_is_dropped` — an unsigned payload is not a signed block, and an
   empty signature is a 400.
+- `a_state_with_an_empty_signature_is_dropped` and
+  `a_state_with_a_blank_signature_is_dropped` — the line above pinned the **key** and not the
+  **value**. A key holding `""` reads as `Some("")`, so the block travelled to Bedrock with an
+  empty signature and the refusal was never reported. Both tests assert the two halves: nothing
+  travelled, and the drop appears in `dropped_replays`. See
+  `D-an-empty-signature-is-no-signature`.
 - `every_request_builder_has_an_explicit_arm` — a source guard that reads each match over a
   content block, arm by arm. It also drops comments first, because one named arm quotes
   `_ => {}` to say what it avoids, and the first version of the guard failed the build for

@@ -978,7 +978,15 @@ fn replay_block(
             Err(_) => Err(ReplayDropReason::UndecodableRedaction),
         };
     }
-    let Some(signature) = value.get("signature").and_then(Value::as_str) else {
+    // An absent key and an empty value are the same thing to Bedrock, and both reject the
+    // whole turn. `Value::as_str` answers `Some("")` for a key holding `""`, so the filter
+    // is what makes the two cases meet. A signature of blanks is no signature either. See
+    // `D-an-empty-signature-is-no-signature`.
+    let Some(signature) = value
+        .get("signature")
+        .and_then(Value::as_str)
+        .filter(|signature| !signature.trim().is_empty())
+    else {
         return Err(ReplayDropReason::NoSignature);
     };
     match ReasoningTextBlock::builder()
@@ -1779,6 +1787,59 @@ mod replay_tests {
             state: Some(state),
         });
         assert!(sent_reasoning(&messages, MODEL).is_empty());
+    }
+
+    /// An **empty** signature is no signature either.
+    ///
+    /// The test above covers an absent `signature` key. A review found that a key holding
+    /// `""` took the other path: `Value::as_str` answers `Some("")`, the builder accepts the
+    /// empty string, and the block travelled to Bedrock, which rejects the whole turn. So
+    /// this pins the value and not only the key. It pins the drop report too, because a
+    /// silent drop is what made the defect invisible. See
+    /// `D-an-empty-signature-is-no-signature`.
+    #[test]
+    fn a_state_with_an_empty_signature_is_dropped() {
+        let messages = assistant(ContentBlock::ReasoningReplay {
+            text: "a plan".to_string(),
+            state: Some(owned_state("bedrock", MODEL, "")),
+        });
+        assert!(
+            sent_reasoning(&messages, MODEL).is_empty(),
+            "an empty signature must not travel: {:?}",
+            sent_reasoning(&messages, MODEL)
+        );
+        let built = build_messages_for_model(&messages, MODEL);
+        assert_eq!(
+            built.dropped_replays.len(),
+            1,
+            "the refusal is data, not a log line: {:?}",
+            built.dropped_replays
+        );
+        assert_eq!(
+            built.dropped_replays[0].reason,
+            ReplayDropReason::NoSignature,
+            "an empty signature reads as no signature"
+        );
+    }
+
+    /// A signature of blanks is no signature either. It is the same defect one step out.
+    #[test]
+    fn a_state_with_a_blank_signature_is_dropped() {
+        let messages = assistant(ContentBlock::ReasoningReplay {
+            text: "a plan".to_string(),
+            state: Some(owned_state("bedrock", MODEL, "   ")),
+        });
+        assert!(
+            sent_reasoning(&messages, MODEL).is_empty(),
+            "a blank signature must not travel"
+        );
+        assert_eq!(
+            build_messages_for_model(&messages, MODEL)
+                .dropped_replays
+                .len(),
+            1,
+            "and the refusal is reported"
+        );
     }
 
     /// The stream must capture the signature, or there is nothing to replay. rho parsed the
