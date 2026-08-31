@@ -39,8 +39,13 @@ The size of the `rho` binary, stripped, for two feature sets.
 
 | Feature set | Command | Size (bytes) | Size |
 | --- | --- | --- | --- |
-| default | `cargo build --release -p rho-cli` | 9,691,632 | 9.2 MiB |
-| minimal | `cargo build --release -p rho-cli --no-default-features --features minimal` | 6,274,400 | 6.0 MiB |
+| default | `cargo build --release -p rho-cli` | 11,083,280 | 10.57 MiB |
+| minimal | `cargo build --release -p rho-cli --no-default-features --features minimal` | 7,632,720 | 7.28 MiB |
+
+Measured 20260831 by `bash bench/footprint.sh`, on an Apple M5 Pro with rustc 1.95.0. This
+table held sprint 2's figures, 9,691,632 and 6,274,400, until then. It was two generations
+stale: the growth section below had already recorded a sprint-3 default of 10,221,504 bytes,
+and this table was never brought forward with it. A release checklist read caught it.
 
 The default set links the TUI, all three providers, and the plugin host. The
 minimal set is headless with one provider (OpenRouter) and no plugins.
@@ -156,7 +161,7 @@ Two numbers matter, and they answer different questions.
 
 | What | Peak RSS (bytes) | Peak RSS |
 | --- | --- | --- |
-| One idle session, default features | 8,727,000 | 8.3 MiB |
+| One idle session, default features | 8,830,976 | 8.4 MiB |
 
 ```sh
 cargo build --release -p rho-cli --example idle_session
@@ -170,13 +175,22 @@ intercept.
 
 | Sessions in one process | Peak RSS | Cost of one more session |
 | --- | --- | --- |
-| 1 | 8.32 MiB | — |
-| 51 | 9.73 MiB | 29,600 B (0.028 MiB) |
-| 101 | 10.75 MiB | 21,299 B (0.020 MiB) |
+| 1 | 8.4 MiB | — |
+| 51 | 9.9 MiB | about 31 KB |
+| 101 | 11.0 MiB | about 22 KB |
 
-Across the whole range, from 1 to 101, the cost is **25,450 bytes, or 0.024 MiB,
-per additional session**. The growth is linear. **101 idle sessions fit in
-10.75 MiB.**
+Across the whole range, from 1 to 101, the cost is **about 27 KB per additional session**.
+The growth is linear. **101 idle sessions fit in about 11.0 MiB.**
+
+Measured 20260831 on an Apple M5 Pro, rustc 1.95.0, by `bash bench/footprint.sh`. The page
+and the README used to say 0.024 MiB and 10.75 MiB, and the README's headline said 10.7 MiB,
+which had stopped being true.
+
+**The figures are rounded on purpose, because the measurement does not support more.** Two
+median-of-three runs of the same script on the same machine gave 101-session peaks of
+11,485,184 and 11,567,104 bytes, and slopes of 26,869 and 27,361 bytes. That is about 80 KB of
+spread on the total and 500 B on the slope. A number written to three significant figures here
+would be false precision, and the earlier 0.024 MiB was exactly that.
 
 ```sh
 cargo build --release -p rho-cli --example many_sessions
@@ -208,7 +222,7 @@ whole process against the other harnesses' *incremental* cost per session:
 
 | Harness | Number | What it measures |
 | --- | --- | --- |
-| rho | 8.3 MiB | **total** peak RSS of a whole process holding one session |
+| rho | 8.4 MiB | **total** peak RSS of a whole process holding one session |
 | jcode | ~10.4 MiB | extra PSS per additional session process |
 | Codex CLI | ~21.6 MiB | extra PSS per additional session process |
 | pi | ~76.5 MiB | extra PSS per additional session process |
@@ -219,7 +233,7 @@ Other harnesses: `https://jcode.sh` published benchmarks, sampled August 2026.
 
 Even on that conservative footing, rho's whole process costs less than the
 *marginal* session of every harness in the list. On its own ground, which is many
-sessions inside one host, the marginal session costs 0.024 MiB.
+sessions inside one host, the marginal session costs about 27 KB.
 
 ## Live concurrent sessions
 
@@ -312,6 +326,10 @@ Every other figure on this page is macOS on Apple Silicon. CI now runs
 `bench/footprint.sh` on `ubuntu-latest` and uploads the JSON as a build artifact,
 so Linux is measured too. Run 32051431230, 2026-08-17.
 
+**Both columns are that date's figures.** The macOS column does not match the current numbers
+higher up this page, and it should not: it is kept as the paired measurement that makes the
+Linux column meaningful. Re-running it needs a CI run, not a local one.
+
 | What | Linux x86_64 | macOS aarch64 |
 | --- | --- | --- |
 | Binary, default features | 12,747,104 B (12.2 MiB) | 9,708,160 B (9.3 MiB) |
@@ -342,8 +360,9 @@ format and different system libraries.
 - Any figure on Windows. Neither the script nor CI covers it.
 
 Resident memory during a live streamed turn is now measured. It is 14.8 MiB,
-recorded in `docs/verification/sprint-1.md`. A live turn costs about 6.5 MiB more
-than the 8.3 MiB idle session on this page.
+recorded in `docs/verification/sprint-1.md`. A live turn costs about 6.4 MiB more
+than the 8.4 MiB idle session on this page. The 14.8 MiB figure is from sprint 1 and has
+not been re-measured, so the difference is the weaker of the two numbers.
 
 ## JSONL codec, for the session log and the providers
 
@@ -383,29 +402,54 @@ more on the provider SSE path.
 
 ## Session log, append and resume
 
-Measured in sprint 2 on macOS on Apple Silicon (aarch64), rustc 1.95.0, release build with
-the workspace profile. The bench drives the real `SessionWriter` and the real
-`SessionReader`, not a copy of their logic.
+The bench drives the real `SessionWriter` and the real `SessionReader`, not a copy of their
+logic. It used to live outside the repository, so no reader could re-run it. It is in the
+tree now, because a number nobody can reproduce is a claim and not a measurement:
 
 ```sh
-# The scratch bench lives outside the repository, because it links rho-core by path.
-# Source: 20000 appends of a 150-byte assistant message, then one full read.
+cargo test --release -p rho-core --test session_log -- --nocapture an_append_and_resume_benchmark
 ```
+
+Three runs, 20260831, Apple M5 Pro, rustc 1.95.0, release build with the workspace profile:
 
 | Path | Result |
 | --- | --- |
-| Append, 20000 records | 35.2 ms total, 1762 ns per record |
-| Lines written | 20001 for 20000 appends, plus the header |
-| File size | 5977922 bytes |
-| Resume, full read | 20000 entries in 12.6 ms, 452.5 MiB per second |
+| Append, 20000 records | 54.8, 56.98, 61.80 ms total; 2.74 to 3.09 µs per record |
+| Lines written | 20002 for 20000 appends, plus the header and the model line |
+| File size | 5978086 bytes |
+| Resume, full read | 20001 entries in 29.27, 30.41, 29.35 ms; 187.5 to 194.8 MiB per second |
+
+**Three of those numbers moved, and one was simply wrong.** The page used to report 35.2 ms
+of append, 1762 ns per record, and a resume of 12.6 ms at 452.5 MiB per second, measured in
+sprint 2 by a harness that is gone. So those figures cannot be re-run and are not kept here.
+
+The line count was wrong rather than stale. The page said 20001 lines for 20000 appends. It
+is 20002, because `create` writes the header **and** a `ModelChange` record on the second
+line. `n_appends_yield_exactly_n_lines` states that rule, and this page contradicted it.
+
+**The path is slower than sprint 2, and it is not the same path.** Between the two
+measurements the write path gained id minting, a parent link, the `MAX_RECORD_BYTES` check
+and its spill, and a timestamp per record; the read path gained the orphan refusal and the
+duplicate-id check. Those arrived with `SPEC-session-store-wiring` on purpose. No attribution
+here is measured, so none is claimed: the honest statement is that the old numbers describe a
+path that no longer exists.
+
+Neither figure is near a budget. The only stated budget on this path is the session list, and
+it is met with a 5x margin below.
 
 The append cost includes the encode and the id. The write path holds one open sink and
 writes one record as one write.
 
-Two numbers explain the design, and both are measured. A reopen of the file per record
-costs 17567 ns, which is 17 times the held sink. An `fsync` per record costs 3076785 ns,
-which is about 3000 times the write. So the writer holds its sink and does not `fsync` per
-record. See decision D-writer-holds-one-sink and `SPEC-sessions` section 4a.
+Two numbers explain the design. A reopen of the file per record cost 17567 ns, which was 17
+times the held sink. An `fsync` per record cost 3076785 ns, which was about 3000 times the
+write. So the writer holds its sink and does not `fsync` per record. See decision
+D-writer-holds-one-sink and `SPEC-sessions` section 4a.
+
+**Both came from the sprint-2 harness that is gone, so neither can be re-run here.** They are
+kept because they are the reason for a shipped design decision, and they are labelled rather
+than presented as current. The ratios are what the decision rests on, and a ratio of 17 and
+one of 3000 do not turn over between two machines. Re-measuring them needs a bench that
+reopens and one that `fsync`s per record, and neither exists in the tree.
 
 ## Sprint 3: the cost of the TUI experience
 
@@ -522,18 +566,25 @@ alone, with no provider client and no session.
 kilobytes. The reporter converts by platform, so both mean bytes.
 
 The idle and streaming session figures are larger and separate. An idle session
-holds 8.3 MiB, measured in the idle-session section above. A live streamed turn
+holds 8.42 MiB, measured in the idle-session section above. A live streamed turn
 holds 14.8 MiB, recorded in `docs/verification/sprint-1.md`. Those hold a provider
 client and a context. The two figures here hold neither.
 
-### Binary size, sprint 3
+### Binary size over three sprints
 
-Both feature sets grew since sprint 2, by about the same amount.
+| Feature set | Sprint 2 | Sprint 3 | 20260831 | Command |
+| --- | --- | --- | --- | --- |
+| default | 9,691,632 B | 10,221,504 B | 11,083,280 B | `cargo build --release -p rho-cli` |
+| minimal | 6,274,400 B | 6,804,304 B | 7,632,736 B | `cargo build --release -p rho-cli --no-default-features --features minimal` |
 
-| Feature set | Sprint 2 | Sprint 3 | Command |
-| --- | --- | --- | --- |
-| default | 9,691,632 B | 10,221,504 B | `cargo build --release -p rho-cli` |
-| minimal | 6,274,400 B | 6,804,304 B | `cargo build --release -p rho-cli --no-default-features --features minimal` |
+**The binary grew again, and by more than the last time.** Default is up 861,776 bytes on
+sprint 3, and minimal is up 828,432. Sprint 4 shipped the JSONL frontend, the session store,
+the config tables, the MCP client, and the task event bridge, so growth is expected. It is
+recorded rather than explained, because no measurement here attributes bytes to a crate.
+
+Growth of 14 percent since sprint 2 is worth a reader's attention on a project that sells
+footprint. The per-session slope, which is the claim the README makes, is in the idle-memory
+section and it grew by about 1.4 KB.
 
 The default set grew by 529,872 bytes. The minimal set grew by 529,904 bytes. The
 two grew by almost the same amount. The minimal build has no TUI, so the growth is
@@ -577,12 +628,12 @@ are each project's own published claim, not a rho measurement.
 
 | Harness | First frame | Per session held | Ownership |
 | --- | --- | --- | --- |
-| rho | 6.1 ms | 8.3 MiB | rho measured it |
+| rho | 6.1 ms | 8.4 MiB | rho measured it |
 | jcode | 14 ms | 10.4 MiB | jcode's published claim |
 | pi | 591 ms | 76.5 MiB | pi's published claim |
 
 Read the comparison as an order of magnitude. The harnesses use different
-machines and different methods. rho's 8.3 MiB is a whole idle session. The other
+machines and different methods. rho's 8.4 MiB is a whole idle session. The other
 two figures are an incremental per-session cost. See the comparison section above
 for why that footing favours the other side.
 

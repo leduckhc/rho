@@ -463,3 +463,72 @@ fn encoding_an_unserializable_value_is_an_encode_error() {
         "a value the codec cannot encode must surface as SessionError::Encode, got {result:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The benchmark docs/benchmarks.md quotes. It lived outside the repository.
+// ---------------------------------------------------------------------------
+
+/// Measure the append and the resume, so `docs/benchmarks.md` can name a command.
+///
+/// The page carried five numbers for this path — the total append time, the per-record
+/// cost, the line count, the file size, and the full-read time — and its command block
+/// held two comments saying the bench "lives outside the repository". So the numbers
+/// could not be reproduced from the tree, which the release checklist forbids and which
+/// `AGENTS.md` step 13 calls a claim to delete or prove. This proves it.
+///
+/// It drives the real `SessionWriter` and the real `SessionReader`, never a copy of their
+/// logic. The shape matches the original: 20000 appends of a 150-byte assistant message,
+/// then one full read.
+///
+/// It asserts the invariants and prints the timings. A timing is not asserted, because a
+/// shared machine makes that flaky, and a flaky benchmark is worse than a slow one.
+#[test]
+fn an_append_and_resume_benchmark() {
+    const RECORDS: usize = 20_000;
+    const TEXT_BYTES: usize = 150;
+
+    let (dir, store) = temp_store();
+    let mut writer = store
+        .create(new_session(&sid(1), Path::new("/work"), "read-only", "off"))
+        .expect("create");
+    let path = writer.path().to_path_buf();
+    let text = "x".repeat(TEXT_BYTES);
+    let mut parent = writer.head();
+
+    let started = std::time::Instant::now();
+    for _ in 0..RECORDS {
+        parent = Some(
+            writer
+                .append(message_record(&text), parent.clone())
+                .expect("append"),
+        );
+    }
+    let append_elapsed = started.elapsed();
+
+    let bytes = fs::metadata(&path).expect("metadata").len();
+    let lines = fs::read_to_string(&path).expect("read").lines().count();
+
+    let started = std::time::Instant::now();
+    let read = SessionReader::read(&path).expect("read the session");
+    let read_elapsed = started.elapsed();
+
+    // The invariants. `create` writes the header and one `ModelChange` line, so the file
+    // holds two lines more than the appends. See `n_appends_yield_exactly_n_lines`.
+    assert_eq!(lines, RECORDS + 2, "every append is exactly one line");
+    assert_eq!(
+        read.entries.len(),
+        RECORDS + 1,
+        "the reader returns every entry after the header"
+    );
+
+    let per_record = append_elapsed / RECORDS as u32;
+    let mib_per_second = (bytes as f64 / 1_048_576.0) / read_elapsed.as_secs_f64();
+    println!("appends: {RECORDS} in {append_elapsed:?}, {per_record:?} per record");
+    println!("lines: {lines} for {RECORDS} appends, plus the header");
+    println!("file size: {bytes} bytes");
+    println!(
+        "resume: {} entries in {read_elapsed:?}, {mib_per_second:.1} MiB per second",
+        read.entries.len()
+    );
+    drop(dir);
+}

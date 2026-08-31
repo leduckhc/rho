@@ -27,8 +27,8 @@ Agent harnesses are heavy. A single session can cost more than 100 MB of residen
 memory. That cost makes many parallel sessions impractical. rho treats memory and
 start time as features, so it measures them.
 
-**101 idle sessions fit in 10.7 MiB.** One more session costs about 25 KB. A whole
-process holding one session peaks at 8.3 MiB. Every number, and the command that
+**101 idle sessions fit in about 11.0 MiB.** One more session costs about 27 KB. A
+whole process holding one session peaks at about 8.4 MiB. Every number, and the command that
 produced it, is in [docs/benchmarks.md](docs/benchmarks.md). Reproduce them with
 `bash bench/footprint.sh`.
 

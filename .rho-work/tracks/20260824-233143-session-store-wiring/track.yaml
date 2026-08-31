@@ -6,11 +6,22 @@
 # The frame phase is already complete. Its handovers sit beside this file, and each one
 # carries the evidence the template demands. The contract went through six reviews before
 # any code, which is step 9 run early and run hard.
+#
+# CLOSED 20260831. **This record lagged the work, and that is the lesson.** The handovers
+# stop after the first slice, because the controller moved the evidence into
+# `docs/verification/session-store-wiring.md` and never came back to the stage rows. So the
+# file said `open` with two stages `in-progress` while the work shipped in PR #9 and the
+# spec said `delivered` for three days. Nothing caught it: `bench/check-agentic-workflow.py`
+# checks a stage's id, kind, and item count, and never its status against its spec.
+#
+# Every stage below is closed against evidence that already existed, named per stage. No
+# status was flipped without one. The release checklist asks that every open track meet its
+# definition of done, and this is that check, run late.
 
 version: 2
 kind: task
 track: 20260824-233143-session-store-wiring
-status: open
+status: closed
 lane: feature
 spec: docs/specs/20260824-222153-SPEC-session-store-wiring.md
 
@@ -60,8 +71,8 @@ stages:
   - kind: red
     id: core-red
     role: tester
-    status: in-progress
-    progress: 'slice 1 of 4 done and verified. see handovers/core-red-keys.yaml'
+    status: done
+    closed_evidence: "every named test exists; each slice re-proved by mutation in docs/verification/session-store-wiring.md sections 1, 2, 4, 5"
     depends_on: [plan]
     crate: rho-core
     note: >
@@ -92,8 +103,8 @@ stages:
   - kind: green
     id: core-green
     role: developer
-    status: in-progress
-    progress: 'slice 1 of 4 done, verified, and mutated. see handovers/core-green-keys.yaml'
+    status: done
+    closed_evidence: "cargo test --workspace --all-features green; create_twice_with_one_id_never_truncates at crates/rho-core/tests/session_integrity.rs:1069; seed_ids is private at crates/rho-core/src/session/mod.rs:433"
     depends_on: [core-red]
     crate: rho-core
     gates: [rust]
@@ -112,7 +123,8 @@ stages:
   - kind: red
     id: cli-red
     role: tester
-    status: open
+    status: done
+    closed_evidence: "the_fork_flow_works_from_the_two_printed_commands at crates/rho-cli/tests/session_binary.rs:118, driven from the real printed output"
     depends_on: [core-green]
     crate: rho-cli
     slices:
@@ -137,7 +149,8 @@ stages:
   - kind: green
     id: cli-green
     role: developer
-    status: open
+    status: done
+    closed_evidence: "minimal build and its test build pass with RUSTFLAGS=-D warnings; no slash command was added, so nothing unbuilt is advertised"
     depends_on: [cli-red]
     crate: rho-cli
     gates: [rust, minimal-build]
@@ -157,10 +170,8 @@ stages:
   - kind: mutate
     id: mutate
     role: controller
-    status: in-progress
-    progress: >
-      slice 1 of 4 mutated early, while the slice was fresh. three breaks, three real
-      failures, nothing rewritten. see handovers/mutate-keys.yaml
+    status: done
+    closed_evidence: "docs/verification/session-store-wiring.md sections 1, 2, 4, 5, 9 and 12, each with the break, the command, the real failure, and the /tmp restore path"
     depends_on: [cli-green]
     gates: [rust]
     dod:
@@ -176,7 +187,8 @@ stages:
   - kind: sweep
     id: sweep
     role: controller
-    status: open
+    status: done
+    closed_evidence: "docs/verification/session-store-wiring.md section 10, the public items no test names; grep for todo!/unimplemented! in crates/*/src finds nothing"
     depends_on: [mutate]
     gates: [surface]
     dod:
@@ -192,7 +204,8 @@ stages:
   - kind: review
     id: review
     role: reviewer
-    status: open
+    status: done
+    closed_evidence: "12 reviews on PR #9, one blocker fixed; the security lens in section 16; the untested-surface list in section 10"
     depends_on: [sweep]
     reviewed_by: [reviewer, secops]
     gates: [full]
@@ -209,7 +222,8 @@ stages:
   - kind: measure
     id: measure
     role: devops
-    status: open
+    status: done
+    closed_evidence: "docs/benchmarks.md, The session list: 500 sessions at 21.88, 19.43 ms over three runs, with the command"
     depends_on: [review]
     gates: [docs]
     dod:
@@ -225,7 +239,8 @@ stages:
   - kind: drive
     id: drive
     role: controller
-    status: open
+    status: done
+    closed_evidence: "docs/verification/session-store-wiring.md sections 6, 11 and 13 on live Bedrock; section 7 names what the drive found that every test had missed; section 8 names what is not verified live"
     depends_on: [measure]
     gates: [full]
     dod:
@@ -241,7 +256,8 @@ stages:
   - kind: land
     id: land
     role: [devops, documenter]
-    status: open
+    status: done
+    closed_evidence: "spec says delivered; docs/guide/sessions.md; the five session features that are not finished stay `partial` in docs/features.md rather than claiming more"
     depends_on: [drive]
     gates: [full]
     dod:

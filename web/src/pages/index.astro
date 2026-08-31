@@ -152,7 +152,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
             <tbody>
               <tr class="rho-row">
                 <td>rho</td>
-                <td class="n">8.3 MiB<span class="note">&#8288;*</span></td>
+                <td class="n">8.4 MiB<span class="note">&#8288;*</span></td>
                 <td class="n">~2.2 ms<span class="note">&#8288;&#8224;</span></td>
               </tr>
               <tr><td>jcode (Rust)</td><td class="n">~10.4 MB</td><td class="n">~49 ms</td></tr>
@@ -168,9 +168,9 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
           <strong>* This is not the same measurement, and we will not pretend it
           is.</strong> The other rows are extra memory per additional session
           <em>process</em>, because those harnesses run one process per session.
-          rho&rsquo;s 8.3&nbsp;MiB is the <em>total</em> for a whole process that
+          rho&rsquo;s 8.4&nbsp;MiB is the <em>total</em> for a whole process that
           holds one session. We show the comparison that favours them. On rho&rsquo;s
-          own ground, one more session costs 0.024&nbsp;MiB.
+          own ground, one more session costs about 27&nbsp;KB.
         </p>
         <p class="attribution">
           &#8224; Time to first frame, rendered into a headless test backend, median
