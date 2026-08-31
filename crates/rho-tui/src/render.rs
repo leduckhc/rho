@@ -20,10 +20,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::bindings::{bindings, filter_slash_commands};
 use crate::concise::RowFold;
-use crate::duration::{duration_slot, format_duration};
+use crate::duration::{DURATION_SLOT_COLUMNS, duration_slot, format_duration};
 use crate::markdown::{MarkdownKind, has_inline_markup, scan_inline, scan_markdown};
 use crate::motion::{MotionCell, MotionInputs, motion_cell, motion_enabled, sweep_weight};
-use crate::sanitize::{sanitize_block, sanitize_line};
+use crate::sanitize::{fit_to_width, sanitize_block, sanitize_line};
 use crate::state::{
     ActivityState, Approval, HistorySearch, Panel, Row, SlashList, ToolRowStatus, TuiState,
     filter_history,
@@ -56,6 +56,36 @@ const HISTORY_MATCH_ROWS: usize = 5;
 
 /// The columns a footer or panel keeps clear at each edge.
 const EDGE_MARGIN: usize = 2;
+
+/// The columns a task row keeps between its text and its duration slot.
+///
+/// One column, so the progress and the duration never touch. Without it a progress string
+/// that ends where the slot begins would read as one word.
+const TASK_GAP_COLUMNS: usize = 1;
+
+/// The narrowest progress cell a task row draws.
+///
+/// Below it the row draws no progress at all. Three columns hold `4\u{2026}`, which says less
+/// than nothing, and the state word is what the reader needs first.
+const TASK_PROGRESS_MIN_COLUMNS: usize = 4;
+
+/// The narrowest command a task row keeps before it drops the progress instead.
+///
+/// A model writes the command, so it can be three hundred characters long. A live drive found
+/// one: the row drew the command alone, and the state word and the progress were both cut off
+/// the right edge. So the command is cut too, and it keeps at least this many columns.
+const TASK_COMMAND_MIN_COLUMNS: usize = 8;
+
+/// The share of the text columns a command may take while a progress draws beside it.
+///
+/// Two means half. A second live drive found the reason: a three hundred character command
+/// took every column the row could give it, and the progress then had four columns and read
+/// `100\u{2026}`, which says nothing. Half the row is enough command to tell two tasks apart,
+/// and it leaves the progress room to be read.
+const TASK_COMMAND_SHARE: usize = 2;
+
+/// The row label, with the space that follows it.
+const TASK_LABEL: &str = "task ";
 
 /// One glyph and its meaning. The glyph tier here is the UTF-8 tier from the design.
 const GLYPH_USER: &str = "❯";
@@ -585,7 +615,10 @@ fn push_row(
             ..
         } => {
             out.push(one((
-                tool_header(state, index, name, preview, *status, width),
+                // The measure, not the frame width, for the same reason the task row uses it:
+                // the rail takes the last column, and it took the last character of every
+                // tool duration when the transcript overflowed.
+                tool_header(state, index, name, preview, *status, measure),
                 text_style(),
             )));
             if row_fold(state, index) == RowFold::Expanded {
@@ -660,17 +693,35 @@ fn push_row(
             )));
         }
         Row::Task {
+            // The row identity. The reducer matches an event to a row with it, and it is not
+            // text for the reader, so the row does not draw it.
+            id: _,
             command,
-            state: task,
-            ..
+            state: task_state,
+            // The state word already says `done`, `failed (1)`, or `canceled`, so a second
+            // mark for `finished` would say it twice. It is named here, and not swept up by
+            // `..`, because `progress` hid behind a `..` and nothing failed. See
+            // `D-a-row-pattern-names-every-field`.
+            finished: _,
+            failed,
+            progress,
         } => {
-            out.push(one((
-                pad(
-                    &format!("task {} {}", sanitize_line(command), sanitize_line(task)),
-                    width,
-                ),
-                text_style(),
-            )));
+            // The duration slot is reserved, even though nothing settles a task span yet. A
+            // row that let the progress reach the right edge would move every text on the
+            // row on the day a span arrives. See `F-duration-slot`.
+            let right = duration_slot(row_duration(state, index));
+            let style = if *failed {
+                style_for(Role::Error)
+            } else {
+                text_style()
+            };
+            // The row is justified to the **measure**, not the frame width. The scroll rail
+            // draws over the last column of the transcript whenever it overflows, so a row
+            // that used the whole width lost the last character of its duration: `1m 12│`.
+            // `RAIL_COLUMN` reserves that column always, and this row must respect it. Found
+            // by review, then measured. See `D-text-fills-the-width`.
+            let text = task_row_text(command, task_state, progress, measure);
+            out.push(one((justify_slot(&text, &right, measure), style)));
         }
     }
 }
@@ -704,7 +755,104 @@ fn tool_header(
         sanitize_line(payload)
     );
     let right = duration_slot(row_duration(state, index));
-    justify(&left, &right, width)
+    justify_slot(&left, &right, width)
+}
+
+/// The label, the command cut to `command_columns`, and the state word.
+///
+/// A row too narrow for any command drops it and keeps the state word, because the state is
+/// the status. The space between the two goes with the command, so the row never grows a
+/// double space where the command used to be.
+fn task_head(command: &str, state_text: &str, command_columns: usize) -> String {
+    // One column can only hold the ellipsis itself, which is the bare marker the decision
+    // refuses for the progress. The same rule holds for the command, so it goes whole and the
+    // space that carried it goes with it. Found by review at width 22.
+    if command_columns <= 1 {
+        return format!("{TASK_LABEL}{state_text}");
+    }
+    let cut = fit_to_width(command, command_columns);
+    if cut.is_empty() {
+        return format!("{TASK_LABEL}{state_text}");
+    }
+    format!("{TASK_LABEL}{cut} {state_text}")
+}
+
+/// The text of a task row, left of the duration slot.
+///
+/// The order is the label, the command, the state word, then the progress. The progress is
+/// the part that changes most, so it goes last: a value that changes must not move a value
+/// that does not. That is the rule `F-duration-slot` states for a duration, so the row keeps
+/// one convention instead of inventing a second.
+///
+/// **The rank under pressure is the state, then the command, then the progress.** The state
+/// word is the status, so the row reserves it first. The command says which task the row is,
+/// so it comes next, and it is cut with a marked ellipsis rather than allowed to take the
+/// row. The progress is dropped whole when the command cannot keep
+/// `TASK_COMMAND_MIN_COLUMNS`, because a bare ellipsis teaches the reader nothing.
+///
+/// An empty progress draws nothing at all: no separator, and no gap. The separator belongs
+/// to the progress, so the two appear and vanish together.
+///
+/// **Every part is untrusted.** A model writes the command, and a task prints the progress.
+/// `Row` is public, so a frontend can build a task row directly, and this function filters at
+/// its own boundary rather than trusting the reducer. The tool row learnt the same lesson
+/// from a review. The cut keeps a hostile string inside the row and out of the duration slot.
+/// See `D-progress-follows-the-state-and-never-moves-it`.
+fn task_row_text(command: &str, task_state: &str, progress: &str, width: usize) -> String {
+    let command_text = sanitize_line(command);
+    let progress_text = sanitize_line(progress);
+    // The columns left of the duration slot and of the gap beside it.
+    let text_columns = width
+        .saturating_sub(DURATION_SLOT_COLUMNS)
+        .saturating_sub(TASK_GAP_COLUMNS);
+    // **The state word is bounded too.** `Row` is public, so the state is untrusted like the
+    // rest, and the row counted its width without ever cutting it. A five hundred character
+    // state took the reserved slot, which is the one thing this row exists to protect. Found
+    // by review. The bound leaves the label its columns, and nothing else.
+    let state_text = fit_to_width(
+        &sanitize_line(task_state),
+        text_columns.saturating_sub(TASK_LABEL.width()),
+    );
+    let lead = format!(" {GLYPH_SEPARATOR} ");
+    // The label, the space before the state word, and the state word itself.
+    let fixed = TASK_LABEL.width() + 1 + state_text.width();
+    if progress_text.is_empty() {
+        // No separator, and no gap. The separator belongs to the progress.
+        return task_head(
+            &command_text,
+            &state_text,
+            text_columns.saturating_sub(fixed),
+        );
+    }
+    let reserve = lead.width() + TASK_PROGRESS_MIN_COLUMNS;
+    let with_progress = text_columns.saturating_sub(fixed).saturating_sub(reserve);
+    // Either the command keeps a useful column count and the progress draws, or the command
+    // takes what is left and the progress goes.
+    let (command_columns, draw_progress) = if with_progress >= TASK_COMMAND_MIN_COLUMNS {
+        // The command takes what is left, and at most its share, so the progress is readable
+        // beside a long command. A command shorter than its share gives the rest back below.
+        let share = (text_columns / TASK_COMMAND_SHARE).max(TASK_COMMAND_MIN_COLUMNS);
+        (with_progress.min(share), true)
+    } else {
+        (text_columns.saturating_sub(fixed), false)
+    };
+    let head = task_head(&command_text, &state_text, command_columns);
+    if !draw_progress {
+        return head;
+    }
+    // The command is often shorter than its budget, so the progress takes every column that
+    // is really left. The budget cannot fall below the minimum here: the command took at most
+    // `with_progress` columns, and `with_progress` is `text_columns` less `fixed` and less the
+    // separator and the minimum together. A review found the guard this replaces unreachable,
+    // and unreachable code no test can pin is code this project deletes.
+    let budget = text_columns
+        .saturating_sub(head.width())
+        .saturating_sub(lead.width());
+    debug_assert!(
+        budget >= TASK_PROGRESS_MIN_COLUMNS,
+        "the progress budget fell to {budget} columns, which the arithmetic above forbids"
+    );
+    format!("{head}{lead}{}", fit_to_width(&progress_text, budget))
 }
 
 /// The expanded body lines of a tool row.
@@ -1349,6 +1497,19 @@ fn blank(width: usize) -> String {
 /// A full-width rule in the box-drawing dash.
 fn rule_line(width: usize) -> String {
     "─".repeat(width)
+}
+
+/// Place `left` and a fixed right-hand slot on a row, and drop the slot when both cannot fit.
+///
+/// A cut duration is misinformation: `1m 12s` clipped to `1m 12` reads as a different span. So
+/// the slot is drawn whole or not at all, which is the rule the progress cell already follows.
+/// Found by a second review pass at width 11, where the label and the slot alone exceed the
+/// measure.
+fn justify_slot(left: &str, slot: &str, width: usize) -> String {
+    if left.width() + slot.width() > width {
+        return pad(left, width);
+    }
+    justify(left, slot, width)
 }
 
 /// Place `left` at the start and `right` at the end of a `width` row, filling the

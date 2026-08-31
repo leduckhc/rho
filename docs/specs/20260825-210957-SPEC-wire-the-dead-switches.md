@@ -30,8 +30,9 @@ This spec closes four of the five, and adds a guard for the sub-class it can see
 capability. The guard would have caught three of the five. It cannot see the task-progress field
 that the renderer ignores, nor the `--no-skills` call bound to the wrong boolean, because
 neither is an uncalled function. Those two need a different guard, and this spec fixes one of
-them by hand. The task-progress row is out of scope; it needs a
-row-rendering decision this spec does not make.
+them by hand. The task-progress row was out of scope here, because it
+needed a row-rendering decision this spec did not make. That decision and the row are
+delivered now. See `SPEC-the-task-row-draws-its-progress`.
 
 ## 1a. What the review found, and why item zero is new
 

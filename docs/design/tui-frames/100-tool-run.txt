@@ -12,8 +12,8 @@
                                                                                                     
 Running the whole suite first, so the failures name themselves.                                     
                                                                                                     
-  ✓ read  crates/rho-tui/src/state.rs · 460 lines                                               0.2s
-  ● bash  cargo test --workspace --all-features                                               1m 12s
+  ✓ read  crates/rho-tui/src/state.rs · 460 lines                                              0.2s 
+  ● bash  cargo test --workspace --all-features                                              1m 12s 
     running 214 tests                                                                               
     test duration_ladder_rounds_once ... ok                                                         
     test duration_slot_stays_seven_columns ... ok                                                   

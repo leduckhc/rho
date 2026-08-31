@@ -1369,6 +1369,15 @@ fn stop_reason_label(reason: AgentStopReason) -> &'static str {
     }
 }
 
+/// The most display columns a stored task progress summary keeps.
+///
+/// The field says it is a short summary, and `Row` is public, so another frontend reads the
+/// same value. A bound in the data model keeps that promise for every reader, and it stops a
+/// task that prints four kilobytes of chatter from living in the state for the whole session.
+/// The row applies its own, narrower bound, because that one depends on the frame width. See
+/// `D-progress-follows-the-state-and-never-moves-it`.
+const PROGRESS_SUMMARY_COLUMNS: usize = 64;
+
 /// A one-line summary of a progress report, for the status column.
 ///
 /// A progress `message` is untrusted, because a child prints whatever it likes. So it
@@ -1387,7 +1396,8 @@ fn summarise_progress(progress: &TaskProgress) -> String {
             parts.push(clean);
         }
     }
-    parts.join(" ")
+    // The numbers lead, so the bound cuts the message and never the percent.
+    crate::fit_to_width(&parts.join(" "), PROGRESS_SUMMARY_COLUMNS)
 }
 
 /// A short word for a task state, for the status column.

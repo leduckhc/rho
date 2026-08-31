@@ -21,6 +21,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-a-record-id-is-minted-against-the-set](20260824-221848-D-a-record-id-is-minted-against-the-set.md) | 20260824 | A record id is minted against the set, because a counter mints a duplicate |
 | [D-a-rejected-definition-is-reported](20260826-184108-D-a-rejected-definition-is-reported.md) | 20260826 | A definition file that does not load says so |
 | [D-a-role-column-is-not-a-stack](20260818-181500-D-a-role-column-is-not-a-stack.md) | 20260818 | A theme role resolves in one mode, and the columns never stack |
+| [D-a-row-pattern-names-every-field](20260829-113201-D-a-row-pattern-names-every-field.md) | 20260829 | A renderer pattern over a row names every field, so the compiler catches the next one |
 | [D-a-second-writer-can-delete-a-test-in-silence](20260822-131500-D-a-second-writer-can-delete-a-test-in-silence.md) | 20260822 | A second writer can delete a test in silence, so a commit's claims are checked |
 | [D-a-session-file-is-private](20260824-223010-D-a-session-file-is-private.md) | 20260824 | The session store carries the transcript's mode bits |
 | [D-a-session-id-sorts-by-time](20260824-221846-D-a-session-id-sorts-by-time.md) | 20260824 | A session id is a stamp and four hex characters, so a list sorts with no read |
@@ -80,6 +81,7 @@ The reference form is `D-<slug>`. `docs/ids.md` maps every old numeric id.
 | [D-own-session-format](20260817-164906-D-own-session-format.md) | 20260817 | Session file format is rho's own, not pi's |
 | [D-plugin-does-not-classify-itself](20260817-190542-D-plugin-does-not-classify-itself.md) | 20260817 | A plugin does not classify itself |
 | [D-plugin-trust-policy](20260817-210307-D-plugin-trust-policy.md) | 20260817 | The plugin host states a trust policy, and refuses a plugin in the session root |
+| [D-progress-follows-the-state-and-never-moves-it](20260829-113200-D-progress-follows-the-state-and-never-moves-it.md) | 20260829 | The task row draws its progress last, and a value that changes never moves one that does not |
 | [D-project-skill-needs-trust](20260817-215003-D-project-skill-needs-trust.md) | 20260817 | A project skill is not loaded until the project is trusted |
 | [D-provider-contract-crate](20260817-175201-D-provider-contract-crate.md) | 20260817 | The provider contract suite is a real crate, not a private test file |
 | [D-provider-extension-verified-outside](20260817-200505-D-provider-extension-verified-outside.md) | 20260817 | The provider extension point is verified from outside the workspace |
