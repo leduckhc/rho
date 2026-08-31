@@ -13,7 +13,8 @@ Status: pre-release, version 0.1.0. The repository is private until the first re
 interface, configuration, providers, permissions, and
 [what is not built yet](docs/guide/status.md).
 
-1464 tests pass in the workspace. See
+2085 tests pass in the workspace, measured with
+`cargo test --workspace --all-features`. See
 [docs/verification/](docs/verification/) for what was actually run against real services.
 [agentic-workflow.yaml](agentic-workflow.yaml) holds the workflow that agents follow to
 build a feature.
