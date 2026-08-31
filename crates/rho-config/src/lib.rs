@@ -123,7 +123,8 @@ impl std::fmt::Display for BaseUrlRejection {
 /// exists. See `D-trust-is-provenance-not-a-field-list`.
 #[derive(Clone, Debug, Default)]
 struct Stripped {
-    /// Every `!command` credential found, by name, so each becomes a refusal.
+    /// Every credential value found, by name, so each becomes a refusal. Every form counts,
+    /// not only `!command`. See `D-an-untrusted-clone-supplies-no-credential`.
     refused: BTreeMap<String, BTreeSet<String>>,
     /// The keys that held a value and were cleared.
     cleared: Vec<&'static str>,
@@ -145,7 +146,6 @@ const MAX_PROFILE_DEPTH: usize = 16;
 trait Leaf {}
 impl Leaf for String {}
 impl Leaf for bool {}
-impl Leaf for SubagentLimitsLayer {}
 
 /// Keep a harmless field untouched. The `Leaf` bound is the gate: the compiler refuses a
 /// value that could carry a nested layer, so naming a field harmless and proving it grants
@@ -160,6 +160,22 @@ fn clear<T>(slot: &mut Option<T>, name: &'static str, cleared: &mut Vec<&'static
         cleared.push(name);
     }
 }
+
+/// A bound this crate narrows elsewhere, and not in the trust gate.
+///
+/// A bound is neither powerful nor harmless. A project file may lower one and never raise
+/// one, and that rule runs whether the project is trusted or not, so it cannot live in a gate
+/// that only fires when trust is absent.
+///
+/// The trait is the classification, exactly as `Leaf` is. It is implemented **only** for a
+/// type that `ConfigLayer::narrow_limits` really narrows. So routing a future field here does
+/// not compile until that field's type is narrowed too, and `bound` cannot become a shrug
+/// that lets a powerful field past with no gate at all. A review named that risk. See
+/// `D-a-project-file-only-lowers-a-limit`.
+trait Bounded {}
+impl Bounded for SubagentLimitsLayer {}
+
+fn bound<T: Bounded>(_value: &Option<T>) {}
 
 /// Strip every nested layer in a map, one level deeper. The recursion is structural: it
 /// descends into any `BTreeMap<String, ConfigLayer>`, so a later nesting level inherits the
@@ -244,6 +260,78 @@ pub struct SubagentLimitsLayer {
     pub child_timeout_secs: Option<u64>,
 }
 
+impl SubagentLimitsLayer {
+    /// Merge `over` onto `self`, field by field.
+    ///
+    /// A field set in `over` wins. A field absent from `over` keeps the value in `self`, so
+    /// a table that names one limit does not erase the others. `ConfigLayer::merge` used a
+    /// whole-table `.or()`, so one project table erased every limit the global file set.
+    /// That is defect C4's shape. See `D-a-project-file-only-lowers-a-limit`.
+    ///
+    /// This and `narrow_to` both open with an exhaustive `let Self { .. }` destructure, with
+    /// no `..` and no `_`. So a fifth limit field fails the build until both are updated. A
+    /// contract review named two hand-kept parallel field lists a blocker, because a
+    /// forgotten arm drops a limit here, or leaves a limit that never narrows there.
+    fn merge(self, over: SubagentLimitsLayer) -> SubagentLimitsLayer {
+        let Self {
+            max_depth,
+            max_children_per_parent,
+            max_live_total,
+            child_timeout_secs,
+        } = self;
+        SubagentLimitsLayer {
+            max_depth: over.max_depth.or(max_depth),
+            max_children_per_parent: over.max_children_per_parent.or(max_children_per_parent),
+            max_live_total: over.max_live_total.or(max_live_total),
+            child_timeout_secs: over.child_timeout_secs.or(child_timeout_secs),
+        }
+    }
+
+    /// Lower each limit to `ceiling`, and name each limit that asked for more.
+    ///
+    /// A limit is a bound, so the stricter value is the smaller one. A value at or below the
+    /// ceiling is kept untouched. A value above it becomes the ceiling.
+    ///
+    /// An unset field stays unset. An unset field states nothing, so pinning the ceiling
+    /// into it would name a limit the user never set, and it would beat a later layer that
+    /// states nothing.
+    fn narrow_to(&mut self, ceiling: &rho_core::SubagentLimits) -> Vec<&'static str> {
+        let Self {
+            max_depth,
+            max_children_per_parent,
+            max_live_total,
+            child_timeout_secs,
+        } = self;
+
+        let mut lowered: Vec<&'static str> = Vec::new();
+        if let Some(value) = max_depth
+            && *value > ceiling.max_depth
+        {
+            *value = ceiling.max_depth;
+            lowered.push("subagents.max-depth");
+        }
+        if let Some(value) = max_children_per_parent
+            && *value > ceiling.max_children_per_parent
+        {
+            *value = ceiling.max_children_per_parent;
+            lowered.push("subagents.max-children-per-parent");
+        }
+        if let Some(value) = max_live_total
+            && *value > ceiling.max_live_total
+        {
+            *value = ceiling.max_live_total;
+            lowered.push("subagents.max-live-total");
+        }
+        if let Some(value) = child_timeout_secs
+            && Duration::from_secs(*value) > ceiling.child_timeout
+        {
+            *value = ceiling.child_timeout.as_secs();
+            lowered.push("subagents.child-timeout-secs");
+        }
+        lowered
+    }
+}
+
 /// How the agent approves a tool call. It maps onto the built-in policies in
 /// `rho-core`. This type is new in `rho-config`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -287,13 +375,21 @@ pub enum CredentialSource {
         argv: Vec<String>,
         pass_env: Vec<String>,
     },
-    /// A credential the project file asked to run as a command, without trust.
+    /// A credential an untrusted project file asked for, in any form.
     ///
     /// It is a variant and not a dropped value, because dropping it would hand the
     /// provider an empty key and a 401, which reads as a broken account rather than a
     /// refusal. It fails when it is resolved, and the message names `--trust-project`.
-    /// See `SPEC-config-call-site` section 5.
-    RefusedProjectCommand { path: PathBuf },
+    ///
+    /// It was named `RefusedProjectCommand` and it covered the `!command` form alone. A
+    /// security review of the I15 contract found two more attacks that only became live
+    /// when a provider started resolving a credential: `env:AWS_SECRET_ACCESS_KEY` sends
+    /// the victim's own secret to the provider, and a literal attacker key sends the
+    /// victim's whole conversation to an account the attacker reads. A clone chooses
+    /// `provider` too, so it chooses which credential name resolves. See
+    /// `SPEC-config-call-site` section 5 and
+    /// `D-an-untrusted-clone-supplies-no-credential`.
+    RefusedProjectCredential { path: PathBuf },
 }
 
 /// A source of environment values. A test passes a map. Production passes the real
@@ -453,6 +549,56 @@ fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|text| !text.trim().is_empty())
 }
 
+/// Echo a url with any user and password replaced, so an error message holds no secret.
+///
+/// A url that parses keeps its scheme, host, port, and path, so the message still names the
+/// endpoint the user set.
+///
+/// **A url that does not parse is scrubbed by hand.** An earlier version returned it whole,
+/// and said a url that does not parse has no userinfo span to find. That was wrong.
+/// `https://user:secret@host:70000` fails on the port and still carries the password, so the
+/// password reached stderr. A security review found it. The fallback therefore cuts the span
+/// between `://` and the last `@` of the authority, where userinfo sits whether the parser
+/// accepted it or not.
+fn hide_userinfo(value: &str) -> String {
+    if let Ok(mut url) = url::Url::parse(value) {
+        if url.username().is_empty() && url.password().is_none() {
+            return value.to_string();
+        }
+        // `set_username` and `set_password` fail only for a url that cannot have a host, such
+        // as `mailto:`. Such a url carries no userinfo either, so the check above returned.
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
+        return url.to_string();
+    }
+    scrub_userinfo_by_hand(value)
+}
+
+/// Cut the userinfo span out of a string that is not a valid url.
+///
+/// Userinfo sits between `://` and the last `@` of the authority. With no `://`, or no `@` in
+/// the authority, the value is returned whole, because there is no span to cut.
+fn scrub_userinfo_by_hand(value: &str) -> String {
+    let Some(scheme_end) = value.find("://") else {
+        return value.to_string();
+    };
+    let authority_start = scheme_end + 3;
+    let authority_end = value[authority_start..]
+        .find(['/', '?', '#'])
+        .map(|offset| authority_start + offset)
+        .unwrap_or(value.len());
+    let authority = &value[authority_start..authority_end];
+    match authority.rfind('@') {
+        Some(at) => format!(
+            "{}{}{}",
+            &value[..authority_start],
+            &authority[at + 1..],
+            &value[authority_end..]
+        ),
+        None => value.to_string(),
+    }
+}
+
 /// Whether the user trusts the project file's powerful keys. `--trust-project` sets it.
 ///
 /// The default is `Untrusted`, because a project file arrives with a clone. This reuses
@@ -562,8 +708,23 @@ pub struct Config {
     pub reasoning_effort: Option<rho_core::ReasoningEffort>,
     pub mcp_config: Option<PathBuf>,
     pub subagents: rho_core::SubagentLimits,
-    /// Credential sources, by name. A value resolves through `resolve_credential`.
+    /// Credential sources, by name. A value resolves through `resolve_credential`, or
+    /// through `resolve_credential_or_env` when the caller carries a fallback variable.
     pub credentials: BTreeMap<String, CredentialSource>,
+    /// True when the `provider` came from a project file, and rho obeyed it.
+    ///
+    /// A clone chooses which of the user's credentials is exercised, and which vendor bills
+    /// them. It is not exfiltration, because an untrusted `base-url` is dropped, so the key
+    /// still travels only to that provider's own endpoint. It is consent and cost, so the caller
+    /// says so once. See `D-a-project-provider-choice-is-announced`.
+    pub provider_from_project: bool,
+    /// Every subagent limit a project file asked to raise, with the file that asked.
+    ///
+    /// A project file may lower a cap and never raise one. A silent refusal to obey a file
+    /// is its own confusion, so the caller names each one. It is separate from
+    /// `dropped_keys`, because that field's notice says "pass --trust-project to use them"
+    /// and trust does not lift this rule. See `D-a-project-file-only-lowers-a-limit`.
+    pub lowered_limits: Vec<String>,
 }
 
 impl ConfigLayer {
@@ -585,7 +746,14 @@ impl ConfigLayer {
         self.base_url = over.base_url.or(self.base_url);
         self.tui_motion = over.tui_motion.or(self.tui_motion);
         self.no_agents = over.no_agents.or(self.no_agents);
-        self.subagents = over.subagents.or(self.subagents);
+        // A limit table merges field by field, so a layer that names one limit states one
+        // limit. A whole-table `.or()` let a project table erase every limit the global file
+        // set, which is defect C4's shape one type down. See
+        // `D-a-project-file-only-lowers-a-limit`.
+        self.subagents = match (self.subagents.take(), over.subagents) {
+            (Some(base), Some(over)) => Some(base.merge(over)),
+            (base, over) => over.or(base),
+        };
         // Merge credentials per name, so a layer that defines one name does not erase the
         // others. A whole-map `.or()` let a project file redefine the user's credential
         // names wholesale: one project `[credentials]` table dropped every global name. A
@@ -682,8 +850,8 @@ impl ConfigLayer {
         clear(mcp_config, "mcp-config", &mut cleared);
         clear(base_url, "base-url", &mut cleared);
 
-        // Harmless. Each chooses a model, a display, or a limit, and grants nothing. The
-        // `Leaf` bound is the classification, so a nested table cannot join this group.
+        // Harmless. Each chooses a model or a display, and grants nothing. The `Leaf` bound
+        // is the classification, so a nested table cannot join this group.
         keep(provider);
         keep(model);
         keep(ephemeral);
@@ -695,17 +863,27 @@ impl ConfigLayer {
         keep(tui_motion);
         keep(tui_reasoning);
         keep(reasoning_effort);
-        keep(subagents);
+
+        // A limit is neither powerful nor harmless. It is a bound, and a project file may
+        // lower one and never raise one. `narrow_limits` holds that rule, and it runs on
+        // every project layer whether the project is trusted or not, so it does not belong
+        // in this trust gate. `SubagentLimitsLayer` no longer implements `Leaf`, so the
+        // compiler refuses to classify it harmless here. See
+        // `D-a-project-file-only-lowers-a-limit`.
+        bound(subagents);
 
         // A credential is kept as a refusal rather than dropped, so the user meets a message
-        // naming `--trust-project` instead of "no such name". Every `!command` value for a
-        // name is recorded, because two profiles may use one name while the merge keeps only
-        // the winner, and recording one value let the other slip past the check at the call
-        // site.
+        // naming `--trust-project` instead of "no such name". Every value for a name is
+        // recorded, because two profiles may use one name while the merge keeps only the
+        // winner, and recording one value let the other slip past the check at the call site.
+        //
+        // **Every form is refused, not only `!command`.** An `env:` value reads the victim's
+        // own environment, an interpolation does the same, and a literal sends the victim's
+        // whole conversation to an account the attacker reads. A clone chooses `provider`
+        // too, so it chooses which credential name resolves. See
+        // `D-an-untrusted-clone-supplies-no-credential`.
         for (name, raw) in credentials.iter().flatten() {
-            if raw.starts_with('!') {
-                refused.entry(name.clone()).or_default().insert(raw.clone());
-            }
+            refused.entry(name.clone()).or_default().insert(raw.clone());
         }
 
         // Recurse into every nested layer, so a nesting level a later format adds inherits
@@ -713,6 +891,52 @@ impl ConfigLayer {
         strip_nested(profiles, depth, &mut cleared, &mut refused);
 
         Stripped { refused, cleared }
+    }
+
+    /// Lower every subagent limit in this layer, and in every nested profile, to `ceiling`.
+    ///
+    /// A limit is a bound, so a project layer may lower one and never raise one. The
+    /// recursion is the one `strip_powerful_keys` uses, and it carries the same
+    /// `MAX_PROFILE_DEPTH` bound, for the same reason: a project profile once carried a
+    /// powerful key past a gate that read only the top layer. See
+    /// `docs/verification/profile-trust-bypass.md` and
+    /// `D-a-project-file-only-lowers-a-limit`.
+    ///
+    /// It returns the config key names it lowered, so the caller can name each one. A silent
+    /// refusal to obey a file is its own confusion.
+    fn narrow_limits(&mut self, ceiling: &rho_core::SubagentLimits) -> Vec<&'static str> {
+        self.narrow_limits_to_depth(ceiling, 0)
+    }
+
+    /// The recursion, with the same bound `strip_powerful_keys_to_depth` uses. Past the bound
+    /// the nested layers lose their limit tables wholesale, so nothing deeper can raise a cap.
+    fn narrow_limits_to_depth(
+        &mut self,
+        ceiling: &rho_core::SubagentLimits,
+        depth: usize,
+    ) -> Vec<&'static str> {
+        let mut lowered: Vec<&'static str> = Vec::new();
+        if let Some(limits) = self.subagents.as_mut() {
+            lowered.extend(limits.narrow_to(ceiling));
+        }
+        if depth >= MAX_PROFILE_DEPTH {
+            // Past the bound the nested layers lose their limit tables wholesale, so nothing
+            // deeper can raise a cap. The bound lives here and not in the parser, because a
+            // guard that leans on a dependency is not a guard.
+            for layer in self.profiles.values_mut() {
+                layer.profiles.clear();
+                layer.subagents = None;
+            }
+            return lowered;
+        }
+        for layer in self.profiles.values_mut() {
+            for name in layer.narrow_limits_to_depth(ceiling, depth + 1) {
+                if !lowered.contains(&name) {
+                    lowered.push(name);
+                }
+            }
+        }
+        lowered
     }
 
     /// Build a layer from the `RHO_*` variables. This maps every scalar config key,
@@ -784,7 +1008,11 @@ impl ConfigLayer {
 fn check_base_url(value: &str) -> Result<(), ConfigError> {
     let refuse = |reason: BaseUrlRejection| {
         Err(ConfigError::BaseUrl {
-            value: value.to_string(),
+            // The value is echoed with any user and password replaced. A url may carry
+            // `https://user:password@host`, and the old message printed it whole onto
+            // stderr, which breaks the no-secret-in-a-log rule. A review beside the I15
+            // credential work found it. See `SPEC-config-call-site` section 7.
+            value: hide_userinfo(value),
             reason,
         })
     };
@@ -915,11 +1143,11 @@ impl CredentialSource {
     ) -> Result<Secret, ConfigError> {
         match self {
             CredentialSource::Literal(secret) => Ok(secret.clone()),
-            CredentialSource::RefusedProjectCommand { path } => Err(ConfigError::Credential {
+            CredentialSource::RefusedProjectCredential { path } => Err(ConfigError::Credential {
                 name: name.to_string(),
                 message: format!(
-                    "the project file {} asks to run a command for this credential, and \
-                     the project is not trusted. Pass --trust-project to allow it.",
+                    "the project file {} names this credential, and the project is not \
+                     trusted. Pass --trust-project to allow it.",
                     path.display()
                 ),
             }),
@@ -939,6 +1167,17 @@ impl CredentialSource {
         }
     }
 }
+
+/// The largest credential a helper may print, in bytes.
+///
+/// A key is short. 64 KiB is generous for one, and it bounds a helper that streams without
+/// stopping: `read_to_string` had no bound but the pipe buffer and the 30-second timeout, and
+/// neither is a contract. It sits behind the trust gate, so an untrusted project cannot reach
+/// it, which is why this is a cap and not a refusal of the whole feature.
+///
+/// It is the same shape as two caps this project already argued through: the `bash` output cap,
+/// and the steering message that turned 8 MB into 805 MB. Both ended with a cap at the one door.
+const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
 
 /// The default timeout for a credential command. A hung helper fails after this.
 const DEFAULT_CREDENTIAL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -971,6 +1210,11 @@ fn resolve_command(
     command.env_clear();
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
+    // A helper's stderr is dropped, not inherited. A chatty helper that echoes its own
+    // argument, or a `set -x` in a wrapper script, would otherwise print a key onto rho's
+    // stderr. rho reads stdout for the value, so nothing is lost. See
+    // `SPEC-config-call-site` section 7.
+    command.stderr(Stdio::null());
 
     // The base names a command needs to run, plus the explicit allowlist.
     for var in ["PATH", "HOME"]
@@ -988,13 +1232,49 @@ fn resolve_command(
         message: format!("the credential command did not run: {error}"),
     })?;
 
-    // Wait for the child, but never longer than the timeout. A hung helper is killed
-    // and reaped, so it leaks no process and leaves no zombie. See SPEC-config section 5.
+    // Read the helper's stdout on a thread, bounded to the cap, while the main thread waits for
+    // the child. The two bounds are independent on purpose, and each is a stated contract:
+    //
+    //   * memory is bounded by `MAX_CREDENTIAL_BYTES`, whatever the OS pipe buffer happens to be
+    //   * time is bounded by `timeout`
+    //
+    // The reader must not run after the wait, and the wait must not run after the reader. A
+    // read-then-wait order hangs forever on a helper that writes nothing and never exits. A
+    // wait-then-read order lets a runaway fill the pipe, block on its own write, and stall until
+    // the timeout, so the cap would never bind and a 64 KiB payload would cost 30 seconds. A
+    // review named the cap; driving it is what showed the ordering matters.
+    let reader = child.stdout.take().map(|handle| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            // The read is one byte over the cap, so `stdout.len() > cap` is a deterministic
+            // overflow signal that does not depend on which of the child and the reader the
+            // poll loop notices first. A mutation showed no test separates it from a read of
+            // exactly the cap, because `over_cap` catches that case too. It stays as the
+            // race-free half of the pair, and the comment says so rather than claiming more.
+            let outcome = handle
+                .take(MAX_CREDENTIAL_BYTES as u64 + 1)
+                .read_to_string(&mut text);
+            (text, outcome.is_ok())
+        })
+    });
+
+    // Wait for the child, but never longer than the timeout, and never longer than it takes the
+    // reader to fill the cap. A hung helper is killed and reaped, so it leaks no process and
+    // leaves no zombie. See SPEC-config section 5.
     let start = Instant::now();
+    let mut over_cap = false;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
+                // The reader finishes only at EOF or at the cap. The child has not exited, so
+                // this is the cap: stop the helper now rather than wait out the timeout.
+                if reader.as_ref().is_some_and(|handle| handle.is_finished()) {
+                    over_cap = true;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break std::process::ExitStatus::default();
+                }
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -1015,20 +1295,31 @@ fn resolve_command(
             }
         }
     };
+
+    let (stdout, read_ok) = match reader {
+        Some(handle) => handle.join().unwrap_or_else(|_| (String::new(), false)),
+        None => (String::new(), true),
+    };
+    if !read_ok {
+        return Err(ConfigError::Credential {
+            name: name.to_string(),
+            message: "the credential command wrote invalid UTF-8".to_string(),
+        });
+    }
+    if over_cap || stdout.len() > MAX_CREDENTIAL_BYTES {
+        return Err(ConfigError::Credential {
+            name: name.to_string(),
+            message: format!(
+                "the credential command wrote more than {MAX_CREDENTIAL_BYTES} bytes. \
+                 A key is short, so this is a runaway helper."
+            ),
+        });
+    }
     if !status.success() {
         return Err(ConfigError::Credential {
             name: name.to_string(),
             message: format!("the credential command failed with status {status}"),
         });
-    }
-    let mut stdout = String::new();
-    if let Some(mut handle) = child.stdout.take() {
-        handle
-            .read_to_string(&mut stdout)
-            .map_err(|_| ConfigError::Credential {
-                name: name.to_string(),
-                message: "the credential command wrote invalid UTF-8".to_string(),
-            })?;
     }
     Ok(Secret::new(stdout.trim()))
 }
@@ -1094,20 +1385,52 @@ fn parse_reasoning(layer: &ConfigLayer) -> Result<rho_core::ReasoningDisplay, Co
     }
 }
 
+/// Turn the file's limit fields into the runtime limits, filling each gap with the default.
+///
+/// It opens with an exhaustive `let Self { .. }` destructure, with no `..` and no `_`, for the
+/// reason `merge` and `narrow_to` do. A review found the gap: a fifth field could be added to
+/// `merge` and `narrow_to`, where the compiler forces it, and forgotten **here**, where it
+/// would parse and narrow and still never reach `rho-core`. That is the dead-switch class this
+/// whole change exists to close.
+/// Turn the file's limit fields into the runtime limits, and refuse a value the runtime cannot
+/// accept.
+///
+/// `max-live-total` reached `Semaphore::new` unclamped, and tokio panics above `MAX_PERMITS`, so
+/// a config file aborted the binary with a tokio backtrace. The bound lives in `rho-core`,
+/// beside the code that calls the semaphore, and this is one of its two callers. See
+/// `D-a-limit-too-large-is-refused-not-clamped`.
+fn build_subagents_checked(
+    layer: Option<&SubagentLimitsLayer>,
+) -> Result<rho_core::SubagentLimits, ConfigError> {
+    let limits = build_subagents(layer);
+    limits.check().map_err(|error| ConfigError::Value {
+        key: error.key,
+        value: error.value.to_string(),
+        message: format!("the maximum is {}", error.maximum),
+    })?;
+    Ok(limits)
+}
+
 fn build_subagents(layer: Option<&SubagentLimitsLayer>) -> rho_core::SubagentLimits {
     let mut limits = rho_core::SubagentLimits::default();
     if let Some(source) = layer {
-        if let Some(value) = source.max_depth {
-            limits.max_depth = value;
+        let SubagentLimitsLayer {
+            max_depth,
+            max_children_per_parent,
+            max_live_total,
+            child_timeout_secs,
+        } = source;
+        if let Some(value) = max_depth {
+            limits.max_depth = *value;
         }
-        if let Some(value) = source.max_children_per_parent {
-            limits.max_children_per_parent = value;
+        if let Some(value) = max_children_per_parent {
+            limits.max_children_per_parent = *value;
         }
-        if let Some(value) = source.max_live_total {
-            limits.max_live_total = value;
+        if let Some(value) = max_live_total {
+            limits.max_live_total = *value;
         }
-        if let Some(secs) = source.child_timeout_secs {
-            limits.child_timeout = std::time::Duration::from_secs(secs);
+        if let Some(secs) = child_timeout_secs {
+            limits.child_timeout = std::time::Duration::from_secs(*secs);
         }
     }
     limits
@@ -1153,19 +1476,42 @@ impl Config {
             if let Some(layer) = Config::read_file(path)? {
                 merged = merged.merge(layer);
             }
-        } // The project file arrives with a clone, so three keys need `--trust-project`.
-        // See SPEC-config-call-site section 5, and the probe that proved the command path.
+        } // The project file arrives with a clone, so its powerful keys need `--trust-project`,
+        // and its subagent limits may only lower a cap.
+        // See SPEC-config-call-site section 5, SPEC-subagent-limits-are-a-floor, and the probe
+        // that proved the command path.
         let mut refused_commands: Option<(PathBuf, BTreeMap<String, BTreeSet<String>>)> = None;
         // Every powerful key an untrusted source lost. The caller names them, because a
         // silent drop leaves a user with no hint that `--trust-project` exists.
         let mut dropped_keys: Vec<String> = Vec::new();
+        // Every subagent limit a project layer asked to raise. It is separate from
+        // `dropped_keys`, because `--trust-project` does not lift this rule.
+        let mut lowered_limits: Vec<String> = Vec::new();
+        // The ceiling for a project limit: the built-in defaults, plus the user's own file.
+        // It is captured **here**, before the project file merges, because a ceiling taken
+        // after the merge would let the project layer pin its own ceiling. A home directory
+        // is not a clone, so the global file may raise a cap freely. A profile the user
+        // selects applies at layer 4, after the project layer, so their own profile still
+        // wins. See `D-a-project-file-only-lowers-a-limit`.
+        let ceiling = build_subagents(merged.subagents.as_ref());
         // Whether a project file was actually read. The environment gate keys off this, not
         // off trust alone: without a project file there is no cloned project to distrust.
         let mut project_file_read = false;
+        // The provider a project file named, if it named one. A clone that only sets `provider`
+        // needs no `credentials` entry to benefit: it chooses which of the user's keys is
+        // exercised, and which vendor bills them. See `D-a-project-provider-choice-is-announced`.
+        let mut project_provider: Option<String> = None;
         if let Some(path) = &sources.project_file
             && let Some(mut layer) = Config::read_file(path)?
         {
             project_file_read = true;
+            project_provider = layer.provider.clone();
+            // A limit narrows whether the project is trusted or not. `--trust-project` loads
+            // a capability, and a limit is not a capability a file adds; it is a bound a file
+            // relaxes. See `D-your-settings-are-a-floor`.
+            for name in layer.narrow_limits(&ceiling) {
+                lowered_limits.push(format!("{name} (from {})", path.display()));
+            }
             if sources.project_trust == ProjectTrust::Untrusted {
                 // `skill-paths` would load attacker skills, and that walks around
                 // `D-project-skill-needs-trust`, a gate this repository already ships.
@@ -1230,8 +1576,16 @@ impl Config {
                 refused_commands = Some((PathBuf::from("the environment"), stripped.refused));
             }
         }
+        // A project provider is reported only when no stronger layer overrode it. A notice that
+        // blames the project for the user's own flag is worse than no notice. A profile is caught
+        // by the value comparison below, because a profile that set another provider changes it.
+        let provider_from_a_stronger_layer =
+            env_layer.provider.is_some() || sources.flags.provider.is_some();
         merged = merged.merge(env_layer);
         merged = merged.merge(sources.flags.clone());
+        let provider_from_project = project_provider.is_some()
+            && !provider_from_a_stronger_layer
+            && merged.provider == project_provider;
 
         // The environment layer fails closed on an unaccepted boolean, before use.
         validate_env_booleans(&sources.env)?;
@@ -1258,7 +1612,7 @@ impl Config {
                 {
                     return (
                         name,
-                        CredentialSource::RefusedProjectCommand { path: path.clone() },
+                        CredentialSource::RefusedProjectCredential { path: path.clone() },
                     );
                 }
                 (name, CredentialSource::parse(&raw))
@@ -1287,12 +1641,17 @@ impl Config {
             reasoning,
             reasoning_effort,
             mcp_config: merged.mcp_config,
-            subagents: build_subagents(merged.subagents.as_ref()),
+            subagents: build_subagents_checked(merged.subagents.as_ref())?,
             credentials,
+            lowered_limits,
+            provider_from_project,
         })
     }
 
     /// Resolve one named credential to a `Secret`.
+    ///
+    /// An absent name is an error. A caller that carries a documented fallback variable
+    /// should call `resolve_credential_or_env` instead.
     pub fn resolve_credential(
         &self,
         name: &str,
@@ -1305,8 +1664,68 @@ impl Config {
                 name: name.to_string(),
                 message: "no credential source is defined by that name".to_string(),
             })?;
-        source.resolve(name, env)
+        non_empty_secret(name, source.resolve(name, env)?)
     }
+
+    /// Resolve a named credential, or fall back to one environment variable.
+    ///
+    /// A `[credentials]` entry named `name` wins. With no such entry, rho reads
+    /// `fallback_var` through the same `CredentialSource::Env` path, so the project trust
+    /// gate, the `Secret` type, and the error taxonomy all still hold.
+    ///
+    /// **The fallback fires only when no entry carries that name.** It never fires after a
+    /// resolve error. A `.or_else` on the result would turn a `RefusedProjectCredential`
+    /// into an environment read, and the gate would then teach the user nothing. That is the
+    /// U3(b) shape `D-a-provider-names-its-own-credential` rules out.
+    ///
+    /// An absent value is a `ConfigError::Credential` naming both the entry and the variable.
+    /// An empty value is the same error, because an empty key reaches the provider and
+    /// returns 401, which reads as a broken account rather than a missing key. It is never an
+    /// empty `Secret`.
+    ///
+    /// The provider builder supplies `fallback_var`, so a new provider names its own variable
+    /// and edits no shared code. See `D-a-provider-names-its-own-credential`.
+    pub fn resolve_credential_or_env(
+        &self,
+        name: &str,
+        fallback_var: &str,
+        env: &dyn EnvLookup,
+    ) -> Result<Secret, ConfigError> {
+        // **The lookup decides, and never the resolve result.** A `.or_else` on the result
+        // would turn a `RefusedProjectCredential` into an environment read.
+        if self.credentials.contains_key(name) {
+            return self.resolve_credential(name, env);
+        }
+        let value = env.get(fallback_var).unwrap_or_default();
+        if value.trim().is_empty() {
+            return Err(ConfigError::Credential {
+                name: name.to_string(),
+                message: format!(
+                    "no [credentials] entry names it, and the environment variable \
+                     \"{fallback_var}\" is not set. Set that variable, or add a \
+                     [credentials] entry named \"{name}\"."
+                ),
+            });
+        }
+        Ok(Secret::new(value))
+    }
+}
+
+/// Refuse an empty credential, and name it.
+///
+/// An empty key reaches the provider and returns 401, which reads as a broken account rather
+/// than a missing key. `unwrap_or_default()` in `provider.rs` produced exactly that for every
+/// user with no key. See `SPEC-config-call-site` section 7.
+fn non_empty_secret(name: &str, secret: Secret) -> Result<Secret, ConfigError> {
+    if secret.expose().trim().is_empty() {
+        return Err(ConfigError::Credential {
+            name: name.to_string(),
+            message: "the credential resolved to an empty value. An empty key reaches the \
+                      provider and returns 401. Set a real value."
+                .to_string(),
+        });
+    }
+    Ok(secret)
 }
 
 #[cfg(test)]
@@ -1391,5 +1810,156 @@ mod tests {
             "a nested powerful key is cleared within the bound, got {:?}",
             cursor.skill_paths
         );
+    }
+
+    #[test]
+    fn narrow_to_leaves_an_unset_field_unset() {
+        // An unset field states nothing, so narrowing must not write the ceiling into it. A
+        // pinned field would name a limit the user never set, and it would beat a later layer
+        // that states nothing.
+        //
+        // **This has to be a unit test.** Two attempts to prove it through `Config::load`
+        // failed, and a deliberate break passed both: `build_subagents` fills every gap with
+        // the same default the ceiling holds, so a pinned field and an unset field give the
+        // identical `Config` today. The invariant is real and it is only visible here. It will
+        // become visible through `load` the day a layer after the project file can set a limit,
+        // which is why it is pinned now rather than left to that day.
+        let ceiling = rho_core::SubagentLimits::new();
+        let mut layer = SubagentLimitsLayer {
+            max_live_total: Some(ceiling.max_live_total + 4000),
+            ..SubagentLimitsLayer::default()
+        };
+        let lowered = layer.narrow_to(&ceiling);
+
+        assert_eq!(lowered, vec!["subagents.max-live-total"]);
+        assert_eq!(layer.max_live_total, Some(ceiling.max_live_total));
+        assert_eq!(
+            layer.max_depth, None,
+            "a field the layer never set must stay unset"
+        );
+        assert_eq!(layer.max_children_per_parent, None, "the same, per field");
+        assert_eq!(layer.child_timeout_secs, None, "the same, per field");
+    }
+
+    #[test]
+    fn narrow_to_leaves_a_value_at_or_below_the_ceiling_untouched() {
+        // The other half. A value the ceiling allows is not rewritten, and it is not named, so a
+        // project file that asks for less is obeyed in silence.
+        //
+        // **Every field sits exactly at the ceiling**, which is the boundary. An earlier version
+        // put one field below the ceiling and one at it, and a break that changed a single arm
+        // from `>` to `>=` passed, because that arm's field was the one below. So each field is
+        // at the boundary here, and a wrong comparison in any arm fails.
+        let ceiling = rho_core::SubagentLimits::new();
+        let mut layer = SubagentLimitsLayer {
+            max_depth: Some(ceiling.max_depth),
+            max_children_per_parent: Some(ceiling.max_children_per_parent),
+            max_live_total: Some(ceiling.max_live_total),
+            child_timeout_secs: Some(ceiling.child_timeout.as_secs()),
+        };
+        let lowered = layer.narrow_to(&ceiling);
+        assert!(
+            lowered.is_empty(),
+            "a value at the ceiling asks for nothing more: {lowered:?}"
+        );
+        assert_eq!(layer.max_depth, Some(ceiling.max_depth));
+        assert_eq!(
+            layer.max_children_per_parent,
+            Some(ceiling.max_children_per_parent)
+        );
+        assert_eq!(layer.max_live_total, Some(ceiling.max_live_total));
+        assert_eq!(
+            layer.child_timeout_secs,
+            Some(ceiling.child_timeout.as_secs())
+        );
+
+        // And a value below the ceiling is kept as it is, per field.
+        let mut lower = SubagentLimitsLayer {
+            max_depth: Some(0),
+            max_children_per_parent: Some(1),
+            max_live_total: Some(3),
+            child_timeout_secs: Some(30),
+        };
+        assert!(lower.narrow_to(&ceiling).is_empty());
+        assert_eq!(lower.max_depth, Some(0));
+        assert_eq!(lower.max_children_per_parent, Some(1));
+        assert_eq!(lower.max_live_total, Some(3));
+        assert_eq!(lower.child_timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn the_depth_bound_also_truncates_a_nested_limit_table() {
+        // The limit floor recurses into a profile, and it carries the same bound the trust gate
+        // carries, for the same reason: a project profile once smuggled a powerful key past a
+        // gate that read only the top layer. See `docs/verification/profile-trust-bypass.md`.
+        //
+        // A review found this branch untested. Past the bound the nested limit tables are
+        // cleared wholesale, so nothing deeper can raise a cap.
+        let ceiling = rho_core::SubagentLimits::new();
+        let mut layer = nested_limit_chain(20, ceiling.max_live_total + 4000);
+        layer.narrow_limits(&ceiling);
+
+        let mut cursor = &layer;
+        for _ in 0..MAX_PROFILE_DEPTH {
+            cursor = cursor
+                .profiles
+                .get("p")
+                .expect("levels up to the bound remain");
+        }
+        let past_bound = cursor
+            .profiles
+            .get("p")
+            .expect("the level past the bound exists");
+        assert!(
+            past_bound.subagents.is_none(),
+            "past the bound a nested limit table is cleared, so it cannot raise a cap"
+        );
+        assert!(
+            past_bound.profiles.is_empty(),
+            "and nothing deeper survives either"
+        );
+    }
+
+    #[test]
+    fn a_nested_limit_table_within_the_bound_is_narrowed() {
+        // The other half. Shallower than the bound, the value is lowered rather than dropped,
+        // so a project profile that asks for less still works.
+        let ceiling = rho_core::SubagentLimits::new();
+        let mut layer = nested_limit_chain(3, ceiling.max_live_total + 4000);
+        let lowered = layer.narrow_limits(&ceiling);
+        assert!(
+            lowered.contains(&"subagents.max-live-total"),
+            "the nested raise is named: {lowered:?}"
+        );
+        let mut cursor = &layer;
+        for _ in 0..3 {
+            cursor = cursor.profiles.get("p").expect("levels remain");
+        }
+        assert_eq!(
+            cursor
+                .subagents
+                .as_ref()
+                .and_then(|limits| limits.max_live_total),
+            Some(ceiling.max_live_total),
+            "a nested limit is lowered to the ceiling within the bound"
+        );
+    }
+
+    /// A chain of profiles named `p`, `depth` levels deep, with a raised `max-live-total` at
+    /// the deepest level.
+    fn nested_limit_chain(depth: usize, live_total: usize) -> ConfigLayer {
+        let mut layer = ConfigLayer {
+            subagents: Some(SubagentLimitsLayer {
+                max_live_total: Some(live_total),
+                ..SubagentLimitsLayer::default()
+            }),
+            ..ConfigLayer::default()
+        };
+        for _ in 0..depth {
+            let mut parent = ConfigLayer::default();
+            parent.profiles.insert("p".to_string(), layer);
+            layer = parent;
+        }
+        layer
     }
 }

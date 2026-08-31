@@ -1,12 +1,19 @@
 //! Provider selection for the `rho` binary.
 //!
 //! A provider is a cargo feature. A build without a provider must fail with a
-//! clear message, not a panic. A missing API key must name the environment
-//! variable to set. Every function here states its choices, so no credential or
-//! session boundary is set by accident. See `SPEC-core-runtime` decisions D-session-config and D-no-four-argument-session-new.
+//! clear message, not a panic. A missing credential must name what to set. Every function
+//! here states its choices, so no credential or session boundary is set by accident. See
+//! `SPEC-core-runtime` decisions D-session-config and D-no-four-argument-session-new.
+//!
+//! **No function here reads the real process environment directly.** A credential comes from
+//! the merged configuration, through `Config::resolve_credential_or_env`, and every other
+//! value comes through an injected `&dyn EnvLookup`. So a test never depends on the machine it
+//! runs on, and `unwrap_or_default()` can never turn an absent key into an empty string again.
+//! See `SPEC-config-call-site` section 7.
 
 use std::sync::Arc;
 
+use rho_config::{Config, EnvLookup};
 use rho_core::Provider;
 
 /// The environment variable that holds the model id.
@@ -44,6 +51,12 @@ pub enum ProviderError {
     )]
     NotCompiled { name: String },
     /// A required environment variable is missing or empty.
+    ///
+    /// Only a provider that reads a plain environment variable builds this, and the
+    /// `minimal` build has no provider at all. So the variant is gated: `-D warnings` in CI
+    /// makes an unconstructed variant an error, and that job is the one guard this project
+    /// has against a feature combination nobody builds by hand.
+    #[cfg(any(feature = "bedrock", feature = "azure"))]
     #[error("{message}")]
     MissingConfig { message: String },
     /// A base url was set for a provider that names its endpoint its own way. This is a
@@ -59,12 +72,29 @@ pub enum ProviderError {
         "no provider was chosen. Set --provider or the {PROVIDER_ENV} variable to one of: openrouter, bedrock, azure."
     )]
     NoneChosen,
+    /// A credential could not be resolved.
+    ///
+    /// `rho-config` names the reason, and the reason may be a refusal rather than an absence,
+    /// so the message is passed through whole. No `ConfigError::Credential` message holds a
+    /// credential value, and `a_credential_error_never_holds_the_resolved_value` pins that.
+    #[error("{message}")]
+    Credential { message: String },
 }
 
 /// Build the message for a missing environment variable.
+///
+/// Gated with the variant it builds. Every caller sits inside a `bedrock` or `azure` block.
+#[cfg(any(feature = "bedrock", feature = "azure"))]
 fn missing(var: &str, purpose: &str) -> ProviderError {
     ProviderError::MissingConfig {
         message: format!("set the {var} environment variable to {purpose}."),
+    }
+}
+
+/// Turn a credential failure into a provider failure, with the message intact.
+fn credential_error(error: rho_config::ConfigError) -> ProviderError {
+    ProviderError::Credential {
+        message: error.to_string(),
     }
 }
 
@@ -139,11 +169,44 @@ pub fn resolve_provider_name(
         .ok_or(ProviderError::NoneChosen)
 }
 
-/// Build a provider by name. This reads the environment for credentials. It
-/// fails with a clear message when a credential is missing.
+/// Whether this build can use a provider name, with no credential work.
+///
+/// A caller that only needs to know whether a name is usable must not run a credential
+/// helper to find out. The JSONL frontend is that caller: it maps an unknown or absent
+/// provider onto one wire error, and it does that before the merged configuration exists.
+///
+/// `check_provider_name_agrees_with_build_provider` pins the two name lists together, so they
+/// cannot drift.
+pub fn check_provider_name(name: &str) -> Result<(), ProviderError> {
+    let compiled = match name {
+        "openrouter" => cfg!(feature = "openrouter"),
+        "bedrock" => cfg!(feature = "bedrock"),
+        "azure" => cfg!(feature = "azure"),
+        other => {
+            return Err(ProviderError::Unknown {
+                name: other.to_string(),
+            });
+        }
+    };
+    if compiled {
+        Ok(())
+    } else {
+        Err(ProviderError::NotCompiled {
+            name: name.to_string(),
+        })
+    }
+}
+
+/// Build a provider by name, and resolve its credential through the merged configuration.
+///
+/// It reads no environment variable directly. `env` is the lookup `rho-config` uses, so a
+/// test never touches the real process environment. `base_url` is no longer an argument,
+/// because it already lives in `Config`, so this call list got shorter and not longer. See
+/// `D-no-four-argument-session-new`.
 pub fn build_provider(
     name: &str,
-    base_url: Option<&str>,
+    config: &Config,
+    env: &dyn EnvLookup,
 ) -> Result<Arc<dyn Provider>, ProviderError> {
     // A base url belongs to the OpenAI-compatible client. Bedrock and Azure name their
     // endpoint their own way, so a base url with either is a mistake rho reports rather
@@ -155,9 +218,9 @@ pub fn build_provider(
     // `refuse_base_url`; it never edits this match. See D10, and the trait-method design
     // noted in `refuse_base_url`.
     match name {
-        "openrouter" => build_openrouter(base_url),
-        "bedrock" => build_bedrock(base_url),
-        "azure" => build_azure(base_url),
+        "openrouter" => build_openrouter(config, env),
+        "bedrock" => build_bedrock(config, env),
+        "azure" => build_azure(config, env),
         other if KNOWN_PROVIDERS.contains(&other) => Err(ProviderError::NotCompiled {
             name: other.to_string(),
         }),
@@ -201,67 +264,76 @@ pub fn accepts_base_url(name: &str) -> bool {
 }
 
 #[cfg(feature = "openrouter")]
-fn build_openrouter(base_url: Option<&str>) -> Result<Arc<dyn Provider>, ProviderError> {
-    let key = std::env::var(OPENROUTER_KEY_ENV).unwrap_or_default();
-    openrouter_from_key(&key, base_url)
-}
-
-/// Build the OpenRouter provider from a key value. A separate function, so a test
-/// can check the missing-key path without changing the process environment.
-#[cfg(feature = "openrouter")]
-fn openrouter_from_key(
-    key: &str,
-    base_url: Option<&str>,
+fn build_openrouter(
+    config: &Config,
+    env: &dyn EnvLookup,
 ) -> Result<Arc<dyn Provider>, ProviderError> {
     use rho_provider_openrouter::OpenRouterProvider;
-    Ok(Arc::new(OpenRouterProvider::new(
-        openrouter_config_from_key(key, base_url)?,
-    )))
+
+    Ok(Arc::new(OpenRouterProvider::new(openrouter_config_from(
+        config, env,
+    )?)))
 }
 
-/// Build the OpenRouter config from a key and an optional base url.
+/// Build the OpenRouter configuration from the merged config and the environment.
 ///
-/// This is the seam that applies the base url. It returns the config, not the boxed
-/// `Provider`, so a test can read the endpoint back and prove the base url reached it. A
-/// test that could only see `Arc<dyn Provider>` could not tell an applied host from a
-/// dropped one, which is the exact gap a critic found: deleting the two lines that apply
-/// the host sent the bearer token to `openrouter.ai` and no test failed. See D2.
+/// It returns the config, not the boxed `Provider`, so a test can read the key back and the
+/// endpoint back. A test that could only see `Arc<dyn Provider>` could not tell an applied
+/// host from a dropped one, and it could not tell a key from the file from a key from the
+/// environment. Both gaps were found by a deliberate break. See D2.
+///
+/// This is the only OpenRouter seam. Two helpers, `openrouter_from_key` and
+/// `openrouter_config_from_key`, used to sit beside it for the tests, and once the credential
+/// came from `Config` they had no production caller and carried an unreachable empty check.
 #[cfg(feature = "openrouter")]
-fn openrouter_config_from_key(
-    key: &str,
-    base_url: Option<&str>,
+fn openrouter_config_from(
+    config: &Config,
+    env: &dyn EnvLookup,
 ) -> Result<rho_provider_openrouter::OpenRouterConfig, ProviderError> {
-    use rho_core::Secret;
     use rho_provider_openrouter::OpenRouterConfig;
 
-    let secret = Secret::new(key);
-    if secret.is_empty() {
-        return Err(missing(OPENROUTER_KEY_ENV, "your OpenRouter API key"));
-    }
-    let mut config = OpenRouterConfig::new(secret);
+    // The credential name is the provider name, because `credentials` is a map from a
+    // provider name to a `CredentialSource`. The fallback variable is named here, in this
+    // builder, so a fourth provider names its own and edits no shared code and no table in
+    // `rho-config`. See `D-a-provider-names-its-own-credential`.
+    //
+    // `resolve_credential_or_env` refuses an absent and an empty credential, so no empty key
+    // can reach the wire and no check here is needed.
+    let secret = config
+        .resolve_credential_or_env("openrouter", OPENROUTER_KEY_ENV, env)
+        .map_err(credential_error)?;
+    let mut built = OpenRouterConfig::new(secret);
     // The client already carried a settable endpoint, and nothing reached it. That is the
     // whole defect. See `D-a-provider-base-url-is-a-config-key`.
-    if let Some(url) = base_url {
-        config = config.with_openai_host(url);
+    if let Some(url) = &config.base_url {
+        built = built.with_openai_host(url);
     }
-    Ok(config)
+    Ok(built)
 }
 
 #[cfg(not(feature = "openrouter"))]
-fn build_openrouter(_base_url: Option<&str>) -> Result<Arc<dyn Provider>, ProviderError> {
+fn build_openrouter(
+    _config: &Config,
+    _env: &dyn EnvLookup,
+) -> Result<Arc<dyn Provider>, ProviderError> {
     Err(ProviderError::NotCompiled {
         name: "openrouter".to_string(),
     })
 }
 
 #[cfg(feature = "bedrock")]
-fn build_bedrock(base_url: Option<&str>) -> Result<Arc<dyn Provider>, ProviderError> {
+fn build_bedrock(config: &Config, env: &dyn EnvLookup) -> Result<Arc<dyn Provider>, ProviderError> {
     use rho_provider_bedrock::{BedrockConfig, BedrockProvider};
 
     // Bedrock names its endpoint through the AWS region, so a base url is a conflict.
-    refuse_base_url("bedrock", base_url)?;
-    let region = std::env::var(AWS_REGION_ENV).unwrap_or_default();
-    if region.is_empty() {
+    refuse_base_url("bedrock", config.base_url.as_deref())?;
+
+    // **Bedrock resolves no credential, on purpose.** The AWS SDK owns its own chain:
+    // environment variables, a profile, the SSO cache, and IMDS. A region is not a secret,
+    // and wrapping it in a `Secret` would break the chain `F-aws-bedrock-provider` states.
+    // So this reads the region and nothing else. See `SPEC-config-call-site` section 7.
+    let region = env.get(AWS_REGION_ENV).unwrap_or_default();
+    if region.trim().is_empty() {
         return Err(missing(
             AWS_REGION_ENV,
             "your AWS region, for example us-east-1",
@@ -272,46 +344,78 @@ fn build_bedrock(base_url: Option<&str>) -> Result<Arc<dyn Provider>, ProviderEr
 }
 
 #[cfg(not(feature = "bedrock"))]
-fn build_bedrock(base_url: Option<&str>) -> Result<Arc<dyn Provider>, ProviderError> {
-    refuse_base_url("bedrock", base_url)?;
+fn build_bedrock(
+    config: &Config,
+    _env: &dyn EnvLookup,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    refuse_base_url("bedrock", config.base_url.as_deref())?;
     Err(ProviderError::NotCompiled {
         name: "bedrock".to_string(),
     })
 }
 
 #[cfg(feature = "azure")]
-fn build_azure(base_url: Option<&str>) -> Result<Arc<dyn Provider>, ProviderError> {
-    use rho_core::Secret;
-    use rho_provider_azure::{AzureAuth, AzureConfig, AzureProvider};
+fn build_azure(config: &Config, env: &dyn EnvLookup) -> Result<Arc<dyn Provider>, ProviderError> {
+    use rho_provider_azure::AzureProvider;
+
+    Ok(Arc::new(AzureProvider::new(azure_config_from(
+        config, env,
+    )?)))
+}
+
+/// Build the Azure configuration from the merged config and the environment.
+///
+/// It returns the config, not the boxed `Provider`, so a test can read the key back and prove
+/// it came from the config file. A test that could only see `Arc<dyn Provider>` could not tell
+/// a key from the file from a key from the environment: `AzureConfig::new` accepts any value,
+/// so a build succeeded either way. A mutation caught exactly that, and the same seam and the
+/// same reason already exist for OpenRouter. See `a_base_url_reaches_the_openrouter_endpoint`.
+#[cfg(feature = "azure")]
+fn azure_config_from(
+    config: &Config,
+    env: &dyn EnvLookup,
+) -> Result<rho_provider_azure::AzureConfig, ProviderError> {
+    use rho_provider_azure::{AzureAuth, AzureConfig};
 
     // Azure names its endpoint and deployment its own way, so a base url is a conflict.
-    refuse_base_url("azure", base_url)?;
-    let endpoint = std::env::var(AZURE_ENDPOINT_ENV).unwrap_or_default();
-    if endpoint.is_empty() {
+    refuse_base_url("azure", config.base_url.as_deref())?;
+
+    // The endpoint and the deployment are not secrets, so they stay environment reads and
+    // gain no config key. U1(a) of `.rho-work/i15-credential-expansion.md` chose that. They
+    // now go through the same `&dyn EnvLookup`, so a test isolates them.
+    let endpoint = env.get(AZURE_ENDPOINT_ENV).unwrap_or_default();
+    if endpoint.trim().is_empty() {
         return Err(missing(
             AZURE_ENDPOINT_ENV,
             "your Azure OpenAI endpoint, for example https://my-resource.openai.azure.com",
         ));
     }
-    let deployment = std::env::var(AZURE_DEPLOYMENT_ENV).unwrap_or_default();
-    if deployment.is_empty() {
+    let deployment = env.get(AZURE_DEPLOYMENT_ENV).unwrap_or_default();
+    if deployment.trim().is_empty() {
         return Err(missing(
             AZURE_DEPLOYMENT_ENV,
             "your Azure OpenAI deployment name",
         ));
     }
-    let key = std::env::var(AZURE_KEY_ENV).unwrap_or_default();
-    let secret = Secret::new(key);
-    if secret.is_empty() {
-        return Err(missing(AZURE_KEY_ENV, "your Azure OpenAI API key"));
-    }
-    let config = AzureConfig::new(endpoint, deployment, AzureAuth::ApiKey(secret));
-    Ok(Arc::new(AzureProvider::new(config)))
+    // The key is a credential, so it comes from the merged configuration. Azure spells its
+    // variable `AZURE_OPENAI_API_KEY`, and this builder is the only place that knows it.
+    //
+    // There is no second empty check here. `resolve_credential_or_env` refuses an empty
+    // credential, so a check here is unreachable: two deliberate breaks left it unreached by
+    // any test, and step 8 says delete a branch no test reaches.
+    let secret = config
+        .resolve_credential_or_env("azure", AZURE_KEY_ENV, env)
+        .map_err(credential_error)?;
+    Ok(AzureConfig::new(
+        endpoint,
+        deployment,
+        AzureAuth::ApiKey(secret),
+    ))
 }
 
 #[cfg(not(feature = "azure"))]
-fn build_azure(base_url: Option<&str>) -> Result<Arc<dyn Provider>, ProviderError> {
-    refuse_base_url("azure", base_url)?;
+fn build_azure(config: &Config, _env: &dyn EnvLookup) -> Result<Arc<dyn Provider>, ProviderError> {
+    refuse_base_url("azure", config.base_url.as_deref())?;
     Err(ProviderError::NotCompiled {
         name: "azure".to_string(),
     })
@@ -328,9 +432,57 @@ mod tests {
         }
     }
 
+    /// Load a `Config` from one global config file body.
+    ///
+    /// A global file is the user's own, so nothing is gated and a credential in it resolves.
+    /// The file is under a `tempfile::TempDir`, so no test reads a real config path. The
+    /// directory handle comes back, because dropping it removes the file.
+    fn config_from_global(body: &str) -> (Config, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("global.toml");
+        std::fs::write(&path, body).expect("write the global config");
+        let sources = rho_config::Sources::from_paths(rho_config::ConfigPaths {
+            global: Some(path),
+            project: None,
+            ..Default::default()
+        });
+        (
+            rho_config::Config::load(&sources).expect("the file is valid TOML"),
+            dir,
+        )
+    }
+
+    /// Load a `Config` from one **project** config file body, untrusted. That is the layer a
+    /// clone controls, so it is the one the trust gate has to stop.
+    fn config_from_untrusted_project(body: &str) -> (Config, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("project.toml");
+        std::fs::write(&path, body).expect("write the project config");
+        let sources = rho_config::Sources::from_paths(rho_config::ConfigPaths {
+            global: None,
+            project: Some(path),
+            ..Default::default()
+        })
+        .with_project_trust(rho_config::ProjectTrust::Untrusted);
+        (
+            rho_config::Config::load(&sources).expect("the file is valid TOML"),
+            dir,
+        )
+    }
+
+    /// An in-memory environment. No test mutates the process environment, so no test result
+    /// depends on the machine it runs on.
+    fn env(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
     #[test]
     fn unknown_provider_names_the_choices() {
-        let message = expect_err(build_provider("nope", None)).to_string();
+        let (config, _dir) = config_from_global("");
+        let message = expect_err(build_provider("nope", &config, &env(&[]))).to_string();
         assert!(message.contains("openrouter"), "message was: {message}");
         assert!(message.contains("--provider"), "message was: {message}");
     }
@@ -395,7 +547,11 @@ mod tests {
     #[cfg(feature = "openrouter")]
     #[test]
     fn missing_openrouter_key_names_the_variable() {
-        let message = expect_err(openrouter_from_key("", None)).to_string();
+        // It goes through the real seam now. The helper it used to call had no production
+        // caller once the credential came from `Config`, and it carried an empty check that
+        // two deliberate breaks left unreached.
+        let (config, _dir) = config_from_global("");
+        let message = expect_err(build_provider("openrouter", &config, &env(&[]))).to_string();
         assert!(
             message.contains(OPENROUTER_KEY_ENV),
             "message must name the variable: {message}"
@@ -405,7 +561,15 @@ mod tests {
     #[cfg(feature = "openrouter")]
     #[test]
     fn a_present_openrouter_key_builds_a_provider() {
-        assert!(openrouter_from_key("sk-test-key", None).is_ok());
+        let (config, _dir) = config_from_global("");
+        assert!(
+            build_provider(
+                "openrouter",
+                &config,
+                &env(&[(OPENROUTER_KEY_ENV, "sk-test-key")])
+            )
+            .is_ok()
+        );
     }
 
     // ---- D2: the base-url seam, tested where it can fail ----
@@ -413,19 +577,19 @@ mod tests {
     #[cfg(feature = "openrouter")]
     #[test]
     fn a_base_url_reaches_the_openrouter_endpoint() {
-        // The seam, not the helper beside it. `openrouter_from_key` returns `Arc<dyn
-        // Provider>`, which hides the endpoint, so a test that only saw the boxed provider
-        // could not tell an applied host from a dropped one. That is exactly why a critic
-        // could delete the two lines that apply the host and watch a green suite. This reads
-        // the config the seam produces, so deleting the apply lines fails it.
-        let config =
-            openrouter_config_from_key("sk-test-key", Some("https://models.example.com/v1"))
-                .expect("a present key builds a config");
+        // The seam, not the boxed provider. `build_provider` returns `Arc<dyn Provider>`,
+        // which hides the endpoint, so a test that only saw the boxed provider could not tell
+        // an applied host from a dropped one. That is exactly why a critic could delete the two
+        // lines that apply the host and watch a green suite. This reads the config the seam
+        // produces, so deleting the apply lines fails it.
+        let (config, _dir) = config_from_global("base-url = \"https://models.example.com/v1\"\n");
+        let built = openrouter_config_from(&config, &env(&[(OPENROUTER_KEY_ENV, "sk-test-key")]))
+            .expect("a present key builds a config");
         assert!(
-            config.chat_url().contains("models.example.com"),
+            built.chat_url().contains("models.example.com"),
             "the base url must reach the endpoint, or the bearer token goes to openrouter.ai; \
              endpoint was: {}",
-            config.chat_url()
+            built.chat_url()
         );
     }
 
@@ -434,11 +598,13 @@ mod tests {
     fn no_base_url_keeps_the_openrouter_default_endpoint() {
         // The other half: without a base url the default host stands. So the test above
         // proves the base url moved the host, not merely that a host exists.
-        let config = openrouter_config_from_key("sk-test-key", None).expect("a config");
+        let (config, _dir) = config_from_global("");
+        let built = openrouter_config_from(&config, &env(&[(OPENROUTER_KEY_ENV, "sk-test-key")]))
+            .expect("a config");
         assert!(
-            config.chat_url().contains("openrouter.ai"),
+            built.chat_url().contains("openrouter.ai"),
             "the default endpoint is OpenRouter's own: {}",
-            config.chat_url()
+            built.chat_url()
         );
     }
 
@@ -447,10 +613,8 @@ mod tests {
         // The refusal branch every production call skipped, because every call passed `None`.
         // Deleting the refusal makes rho silently ignore base-url for bedrock. This reaches
         // it, and it also pins D11: the error is the conflict variant, not `MissingConfig`.
-        let error = expect_err(build_provider(
-            "bedrock",
-            Some("https://models.example.com/v1"),
-        ));
+        let (config, _dir) = config_from_global("base-url = \"https://models.example.com/v1\"\n");
+        let error = expect_err(build_provider("bedrock", &config, &env(&[])));
         assert!(
             matches!(error, ProviderError::IncompatibleBaseUrl { .. }),
             "a base url with bedrock is a conflict, not a missing value: {error:?}"
@@ -469,13 +633,234 @@ mod tests {
     #[test]
     fn a_base_url_is_refused_for_azure_too() {
         // Every provider that names its endpoint its own way must refuse, not just bedrock.
-        let error = expect_err(build_provider(
-            "azure",
-            Some("https://models.example.com/v1"),
-        ));
+        let (config, _dir) = config_from_global("base-url = \"https://models.example.com/v1\"\n");
+        let error = expect_err(build_provider("azure", &config, &env(&[])));
         assert!(
             matches!(error, ProviderError::IncompatibleBaseUrl { ref name, .. } if name == "azure"),
             "azure must refuse a base url with the conflict variant: {error:?}"
         );
+    }
+
+    // ---- I15: a provider gets its credential from the config ----
+
+    #[cfg(feature = "openrouter")]
+    #[test]
+    fn the_openrouter_key_comes_from_the_config_file() {
+        // The whole point of half one. A `[credentials]` entry named after the provider
+        // reaches the provider, with no environment variable set at all.
+        //
+        // It reads the key back off the config, and does not merely check that a build
+        // succeeded. A mutation proved why: a build that read the environment directly still
+        // returned `Ok`, so an `is_ok()` assertion passed against the very bug it was
+        // written for.
+        let (config, _dir) =
+            config_from_global("[credentials]\nopenrouter = \"sk-from-the-config-file\"\n");
+        let built = openrouter_config_from(&config, &env(&[]))
+            .expect("a config file must be able to supply the key");
+        assert_eq!(
+            built.api_key.expose(),
+            "sk-from-the-config-file",
+            "the key must come from the file, and not from the environment"
+        );
+    }
+
+    #[cfg(feature = "azure")]
+    #[test]
+    fn the_azure_key_comes_from_the_config_file() {
+        // One provider is not every provider. Azure keeps its endpoint and deployment in the
+        // environment, because neither is a secret, and only the key comes from the config.
+        //
+        // The environment holds a **different** key here, so a build that read the
+        // environment directly fails this test rather than passing it.
+        let (config, _dir) =
+            config_from_global("[credentials]\nazure = \"sk-azure-from-the-file\"\n");
+        let vars = env(&[
+            (AZURE_ENDPOINT_ENV, "https://my-resource.openai.azure.com"),
+            (AZURE_DEPLOYMENT_ENV, "my-deployment"),
+            (AZURE_KEY_ENV, "sk-azure-from-the-environment"),
+        ]);
+        let built = azure_config_from(&config, &vars)
+            .expect("a config file must be able to supply the azure key");
+        let (header, value) = built.auth.header();
+        assert_eq!(header, "api-key");
+        assert_eq!(
+            value, "sk-azure-from-the-file",
+            "the file beats the environment, and the key really reaches the request header"
+        );
+        assert_eq!(built.deployment, "my-deployment");
+    }
+
+    #[cfg(feature = "openrouter")]
+    #[test]
+    fn a_missing_openrouter_credential_names_what_to_set() {
+        // `unwrap_or_default()` turned an absent key into an empty string, so the user read a
+        // provider 401 and blamed their account. The message must name the variable instead.
+        let (config, _dir) = config_from_global("");
+        let error = expect_err(build_provider("openrouter", &config, &env(&[])));
+        let message = error.to_string();
+        assert!(
+            matches!(error, ProviderError::Credential { .. }),
+            "an absent credential is a credential failure: {error:?}"
+        );
+        assert!(
+            message.contains(OPENROUTER_KEY_ENV),
+            "the message must name the variable to set: {message}"
+        );
+    }
+
+    #[cfg(feature = "azure")]
+    #[test]
+    fn a_missing_azure_credential_names_what_to_set() {
+        let (config, _dir) = config_from_global("");
+        let vars = env(&[
+            (AZURE_ENDPOINT_ENV, "https://my-resource.openai.azure.com"),
+            (AZURE_DEPLOYMENT_ENV, "my-deployment"),
+        ]);
+        let error = expect_err(build_provider("azure", &config, &vars));
+        let message = error.to_string();
+        assert!(
+            message.contains(AZURE_KEY_ENV),
+            "the message must name the variable to set: {message}"
+        );
+    }
+
+    #[cfg(feature = "openrouter")]
+    #[test]
+    fn an_empty_openrouter_credential_is_refused() {
+        // An exported-but-empty variable is not a key. It used to reach the provider and
+        // return 401, which reads as a broken account rather than a missing key.
+        let (config, _dir) = config_from_global("");
+        let error = expect_err(build_provider(
+            "openrouter",
+            &config,
+            &env(&[(OPENROUTER_KEY_ENV, "")]),
+        ));
+        assert!(
+            matches!(error, ProviderError::Credential { .. }),
+            "an empty key is a credential failure, not a provider 401: {error:?}"
+        );
+    }
+
+    #[cfg(feature = "openrouter")]
+    #[test]
+    fn an_untrusted_project_command_credential_fails_the_provider_build() {
+        // The gate finally runs at the call site. The fallback variable is **set** here, so an
+        // implementation that fell back after the refusal would build a provider and pass.
+        let (config, _dir) =
+            config_from_untrusted_project("[credentials]\nopenrouter = \"!echo leaked\"\n");
+        let error = expect_err(build_provider(
+            "openrouter",
+            &config,
+            &env(&[(OPENROUTER_KEY_ENV, "sk-from-the-env")]),
+        ));
+        let message = error.to_string();
+        assert!(
+            message.contains("--trust-project"),
+            "the refusal must name the flag that fixes it: {message}"
+        );
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn bedrock_needs_no_credential_entry() {
+        // The AWS SDK owns its own chain: environment variables, a profile, the SSO cache, and
+        // IMDS. So an empty `[credentials]` table must not stop a Bedrock build.
+        let (config, _dir) = config_from_global("[credentials]\n");
+        assert!(
+            build_provider("bedrock", &config, &env(&[(AWS_REGION_ENV, "us-east-1")])).is_ok(),
+            "bedrock resolves no credential through rho"
+        );
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn bedrock_still_reads_its_region_from_the_environment() {
+        // A region is not a secret, so it is not a credential. It stays an environment read,
+        // and an absent region still names the variable.
+        let (config, _dir) = config_from_global("");
+        let error = expect_err(build_provider("bedrock", &config, &env(&[])));
+        let message = error.to_string();
+        assert!(
+            message.contains(AWS_REGION_ENV),
+            "the message names the region variable: {message}"
+        );
+        assert!(
+            !matches!(error, ProviderError::Credential { .. }),
+            "a region is not a credential: {error:?}"
+        );
+    }
+
+    #[test]
+    fn no_provider_builder_reads_the_process_environment() {
+        // A source guard. Five `std::env::var` calls here turned an absent key into an empty
+        // string, and `SPEC-config-call-site` section 2 forbids a credential read that way. A
+        // sixth must not come back.
+        //
+        // A grep cannot catch an aliased import, such as `use std::env as sys; sys::var(...)`,
+        // so it is not the whole guard. `a_provider_builder_honours_the_injected_environment`
+        // is the behavioural half, and it cannot be walked around. A review named the bypass.
+        // The needle is built from two pieces, so this guard's own line does not match it.
+        let needle = concat!("std::env", "::var");
+        let source = include_str!("provider.rs");
+        let reads: Vec<&str> = source
+            .lines()
+            .filter(|line| line.contains(needle))
+            .filter(|line| !line.trim_start().starts_with("//"))
+            // The behavioural test above reads the real environment on purpose, to prove the
+            // value it injects is not already there.
+            .filter(|line| !line.contains("OPENROUTER_KEY_ENV).is_ok_and("))
+            .collect();
+        assert!(
+            reads.is_empty(),
+            "every production read goes through &dyn EnvLookup, got: {reads:?}"
+        );
+    }
+
+    #[cfg(feature = "openrouter")]
+    #[test]
+    fn a_provider_builder_honours_the_injected_environment() {
+        // The behavioural half of the guard above, and the one that cannot be walked around.
+        //
+        // A source grep catches the literal spelling `std::env::var`. It does not catch
+        // `use std::env as sys; sys::var(...)`, which reads the real process environment just
+        // as well. So this injects a value the real process environment does not hold, and
+        // asserts the builder used it. A builder that read the real environment sees nothing
+        // and fails.
+        let injected = "sk-only-in-the-injected-map";
+        assert!(
+            !std::env::var(OPENROUTER_KEY_ENV).is_ok_and(|value| value == injected),
+            "the real environment must not hold the injected value, or this proves nothing"
+        );
+        let (config, _dir) = config_from_global("");
+        let built = openrouter_config_from(&config, &env(&[(OPENROUTER_KEY_ENV, injected)]))
+            .expect("the injected key resolves");
+        assert_eq!(
+            built.api_key.expose(),
+            injected,
+            "the builder must read the lookup it was given, and not the real environment"
+        );
+    }
+
+    #[test]
+    fn check_provider_name_agrees_with_build_provider() {
+        // Two name lists exist: the `match` in `build_provider` and the `match` in
+        // `check_provider_name`. A drift would make the JSONL frontend report an unknown
+        // provider for a provider that works, or the reverse. This pins them together.
+        let (config, _dir) = config_from_global("");
+        for name in ["openrouter", "bedrock", "azure", "nope", ""] {
+            let checked = check_provider_name(name);
+            let built = build_provider(name, &config, &env(&[]));
+            let class = |error: &ProviderError| match error {
+                ProviderError::Unknown { .. } => "unknown",
+                ProviderError::NotCompiled { .. } => "not-compiled",
+                _ => "usable",
+            };
+            let checked_class = checked.as_ref().err().map_or("usable", class);
+            let built_class = built.as_ref().err().map_or("usable", class);
+            assert_eq!(
+                checked_class, built_class,
+                "the two name lists disagree about {name:?}"
+            );
+        }
     }
 }

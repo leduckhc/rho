@@ -44,12 +44,12 @@ This page describes rho as of 2026-08-26.
 |---|---|
 | `approval = "ask"` parses in the config. | rho refuses it with an error message. Use `--read-only` to block writes, or omit the flag to allow all. |
 | `rho run` records a session, and `--continue` resumes one. `session-file` and `ephemeral` both reach the run. | The terminal records nothing, and `/sessions` opens no picker. Use `rho run` when you want a session, and `rho sessions list` as the picker. See [sessions](sessions.md). |
-| The `[subagents]` table parses in the config. | No value from it reaches the agent. Pass the limits as flags: `--max-children-per-parent`, `--max-live-agents`, `--child-timeout-secs`, `--max-queued-per-parent`, `--max-queued-total`, `--queue-wait-secs`, `--max-agent-steer-bytes`, `--agent-grace-turns`, `--max-agent-tool-calls`. |
+| The `[subagents]` table sets four limits: `max-depth`, `max-children-per-parent`, `max-live-total`, and `child-timeout-secs`. A project file may only lower one. | Six limits have a flag and no config key: `--max-queued-per-parent`, `--max-queued-total`, `--queue-wait-secs`, `--max-agent-steer-bytes`, `--agent-grace-turns`, and `--max-agent-tool-calls`. Pass those as flags. No `RHO_*` variable sets a subagent limit. |
 | A subagent can be steered while it runs, with `steer_agent`. | You cannot steer your own turn. The terminal interface wires no queue for your session. A message you type mid-run never reaches the running turn, and Enter starts a new turn instead. |
 | A background task reports progress, and rho summarises it. | The terminal interface never draws the summary. The task row ignores the field, so a long build shows no percentage. |
 | The approval panel is drawn and its keys are unwired. | Nothing opens it in a real run. This is why `approval = "ask"` has nowhere to go, even in the terminal build. |
 | The terminal interface holds code for an image attachment. | No image reaches the provider. A pasted image is dropped at the send step, in silence. |
-| The `[credentials]` table parses into named sources. | Nothing resolves an entry and no provider asks for one, so the block changes nothing. Give a provider its key through the environment instead. |
+| The `[credentials]` table supplies a provider key. Each entry is named after its provider. An absent or empty key names what to set. | A project file's table needs `--trust-project`, in every form. Bedrock takes no entry, because the AWS SDK owns its chain. |
 | Azure OpenAI parses and has unit tests. | It has had no live run. Treat it as untested. |
 
 ## Not built yet

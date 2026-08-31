@@ -163,7 +163,7 @@ async fn retry_policy_never_retries_client_error() {
     // key would burn the user's rate limit.
     let error = rho_core::ProviderError::Client {
         status: 401,
-        message: "bad key".to_string(),
+        advice: "bad key",
     };
     assert!(!error.is_retryable(), "a client error must not retry");
 }
@@ -552,5 +552,55 @@ async fn a_loopback_request_bypasses_a_proxy_variable() {
         hits.len(),
         1,
         "the loopback server must receive the request directly"
+    );
+}
+
+/// A peer that reflects the request headers must not put the credential on rho's stderr.
+///
+/// A 4xx that is not 401 or 403 used to keep the response body in
+/// `ProviderError::Client { message }`, and rho prints that error. So a host echoing the
+/// `Authorization` header leaked the key. `base-url` exists to reach a local gateway, and a
+/// loopback host is allowed by the safety gate, so nothing warned the user.
+///
+/// See `D-a-client-error-carries-no-peer-body`.
+#[tokio::test]
+async fn a_reflected_header_cannot_reach_a_client_error() {
+    const SECRET: &str = "sk-SECRET-FROM-HELPER";
+
+    let host = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(CHAT_PATH))
+        .respond_with(ResponseTemplate::new(400).set_body_string(format!(
+            "{{\"error\": {{\"message\": \"bad request; your header was Bearer {SECRET}\"}}}}"
+        )))
+        .mount(&host)
+        .await;
+
+    let config = OpenRouterConfig::new(Secret::new(SECRET))
+        .with_base_url(host.uri())
+        .with_retry(RetryPolicy::none());
+    let provider = OpenRouterProvider::new(config);
+    // `expect_err` needs a `Debug` Ok type, and a boxed stream is not one, so the error comes
+    // out by hand. The neighbouring redirect test does the same.
+    let error = match provider.stream(sample_request(), CancelToken::new()).await {
+        Ok(_) => panic!("a 400 must be an error"),
+        Err(error) => error,
+    };
+
+    // The whole error, exactly as `rho run` prints it.
+    let printed = format!("{error}");
+    assert!(
+        !printed.contains(SECRET),
+        "a peer's body must never reach an error a user reads, got: {printed}"
+    );
+    assert!(
+        printed.contains("400"),
+        "the status still reaches the user: {printed}"
+    );
+    // And the Debug form too, because a panic or a `{:?}` log would print that.
+    let debugged = format!("{error:?}");
+    assert!(
+        !debugged.contains(SECRET),
+        "nor the Debug form, got: {debugged}"
     );
 }

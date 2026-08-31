@@ -124,20 +124,42 @@ Any other value stops the run.
 
 ### `[subagents]`
 
-> **Partly built.** rho reads the `[subagents]` table from a config file and no
-> code applies it. The run is silent. Pass `--max-children-per-parent`,
-> `--max-live-agents`, and `--child-timeout-secs` as flags instead. There is no
-> `--max-depth` flag, and a subagent cannot spawn one of its own.
-> See [cli](cli.md) for those flags.
+The table accepts four keys. All four reach the agent.
 
-The table accepts four keys:
+| Key | Type | Effect |
+|---|---|---|
+| `max-depth` | integer | How deep the tree may go. `0` forbids spawning. |
+| `max-children-per-parent` | integer | Children one parent runs at once. |
+| `max-live-total` | integer | Agents live in the whole process. |
+| `child-timeout-secs` | integer | How long a child may run. |
 
-| Key | Type |
-|---|---|
-| `max-depth` | integer |
-| `max-children-per-parent` | integer |
-| `max-live-total` | integer |
-| `child-timeout-secs` | integer |
+A flag beats the table. See [cli](cli.md) for the flags.
+
+**`max-depth` cannot go above 1 from the command line.** rho gives a child no spawn tool, so
+a grandchild cannot exist, and a higher value is lowered to 1. A lower value is honoured,
+because it is stricter.
+
+The six other subagent limits have a flag and no config key yet:
+`--max-agent-tool-calls`, `--agent-grace-turns`, `--max-queued-per-parent`,
+`--max-queued-total`, `--queue-wait-secs`, and `--max-agent-steer-bytes`.
+`--queue-wait-secs` follows `child-timeout-secs` when you do not pass it.
+
+#### A project file may only lower a limit
+
+A limit is a bound. So a project file may make a run stricter and never looser.
+
+rho takes the built-in defaults, then your own global file. That is the ceiling. A project
+file, and any profile a project file defines, is then lowered to that ceiling. A project value
+above the ceiling is refused, and rho names the limit on stderr:
+
+```
+rho: a project file may only lower a subagent limit, so rho kept your own value for
+subagents.max-live-total (from /repo/.rho/config.toml).
+```
+
+`--trust-project` does **not** lift this. That flag loads a capability, and a limit is not a
+capability a file adds. To raise a cap in one repository, pass the flag for that run, or set
+the value in your own global file.
 
 ### `session-file`
 
@@ -202,9 +224,8 @@ A display key such as `model` needs no trust, because it grants nothing.
 
 Pass `--trust-project` to restore those keys.
 
-A refused credential does not stop the run. rho marks it, and the error would appear only
-when something resolves it. Nothing resolves a credential today, so the run continues and the
-command never runs. A live probe confirmed both halves.
+A refused credential stops the run when the provider asks for it, which is before the first
+model turn. The command never runs. A live probe confirmed both halves.
 
 ## Profiles
 
@@ -228,10 +249,8 @@ It beats any plain file value, but environment variables and CLI flags beat a pr
 
 A credential value takes four forms.
 
-> **Partly built.** rho parses `[credentials]` and nothing resolves an entry, so the whole
-> table changes nothing today. Give a provider its key through the environment instead, as
-> [providers](providers.md) shows. The four forms below describe what the library does when a
-> caller resolves one, which no part of the `rho` command does yet.
+rho names each credential after its provider, so the entry for OpenRouter is `openrouter`
+and the entry for Azure is `azure`.
 
 | Form | Example | Effect |
 |---|---|---|
@@ -240,10 +259,34 @@ A credential value takes four forms.
 | `${VAR}` interpolation | `"Bearer ${TOKEN}"` | Fills each span from the environment |
 | `!command args` | `"!pass show rho/key"` | Runs the command; stdout is the value |
 
-The `!command` form is blocked in an untrusted project file, and it never runs there.
-A command helper would run with a minimal environment, inheriting only `PATH` and `HOME`.
-A command that exits non-zero, writes bad UTF-8, or runs over 30 seconds would fail the
-resolve.
+**With no entry, rho reads the provider's own variable.** OpenRouter reads
+`OPENROUTER_API_KEY` and Azure reads `AZURE_OPENAI_API_KEY`, so nothing changes if you already
+set one. An absent key stops the run with a sentence naming what to set:
+
+```
+rho: cannot resolve the credential "openrouter": no [credentials] entry names it, and the
+environment variable "OPENROUTER_API_KEY" is not set. Set that variable, or add a
+[credentials] entry named "openrouter".
+```
+
+An empty key stops the run the same way. An empty key reaches the provider and returns 401,
+which reads as a broken account rather than a missing key.
+
+**Bedrock takes no entry.** The AWS SDK reads its own chain: environment variables, a profile,
+the SSO cache, and IMDS. rho reads only `AWS_REGION` for it, and a region is not a secret.
+
+**A project file's whole `credentials` table needs `--trust-project`.** Every form is refused,
+not only `!command`. A project file arrives with a clone, and a clone chooses `provider` too,
+so it chooses which credential name resolves. Three attacks follow from that: `env:VAR` reads
+a variable you never meant to send, `${VAR}` does the same, and a literal sends your whole
+conversation to an account somebody else reads. A refused entry fails when it resolves, and
+the message names the flag.
+
+Your own global file is never gated, in any form. A home directory is not a clone.
+
+A command helper runs with a minimal environment, inheriting only `PATH` and `HOME`. Its
+stderr is dropped, so a chatty helper cannot print a key onto rho's stderr. A command that
+exits non-zero, writes bad UTF-8, or runs over 30 seconds fails the resolve.
 
 rho expands no `~` in any path. Write an absolute path, or rho creates a directory named `~`.
 
@@ -292,27 +335,27 @@ reasoning-effort = "medium"
 # Path to an MCP server file. No ~ expansion, so write it out in full.
 mcp-config = "/home/you/.rho/mcp.json"
 
-# [credentials] is partly built. Nothing resolves an entry, so this block does nothing.
+# Each entry is named after its provider: openrouter, azure. Bedrock takes none.
 [credentials]
-# Literal value (avoid in shared files).
-my-key = "sk-live-abc123"
+# Literal value (avoid in a file you share).
+openrouter = "sk-live-abc123"
 
 # Read from an environment variable.
-anthropic-key = "env:ANTHROPIC_API_KEY"
+azure = "env:MY_AZURE_KEY"
 
-# Fill a template from environment variables.
-bearer-token = "Bearer ${MY_TOKEN}"
+# Or fill a template from environment variables.
+# azure = "Bearer ${MY_TOKEN}"
 
-# Run a command; its stdout is the value. Blocked in untrusted project files.
-vault-key = "!pass show rho/anthropic"
+# Or run a command; its stdout is the value.
+# openrouter = "!pass show rho/openrouter"
 
-# [subagents] is partly built — these keys parse but have no effect today.
-# Use --max-children-per-parent, --max-live-agents, --child-timeout-secs instead.
-# [subagents]
-# max-depth = 3
-# max-children-per-parent = 5
-# max-live-total = 10
-# child-timeout-secs = 300
+# Subagent limits. A project file may lower one of these and never raise one.
+# max-depth above 1 is lowered to 1, because a child holds no spawn tool.
+[subagents]
+max-depth = 1
+max-children-per-parent = 5
+max-live-total = 10
+child-timeout-secs = 300
 
 [profiles.fast]
 # Override the model and the effort for quick runs.
@@ -329,6 +372,7 @@ approval = "read-only"
 
 | Key | Symptom |
 |---|---|
-| `[credentials]` table | Parses, and nothing resolves an entry. No provider asks for one. Use an environment variable. |
-| `[subagents]` table | Parses silently, no effect. Use CLI flags. |
+| `session-root` in a global file | It confines tools, and it does not move which project file rho reads. |
+| six subagent limits | `max-tool-calls`, `grace-turns`, `max-queued-per-parent`, `max-queued-total`, `queue-wait-secs`, and `max-steer-message-bytes` have a flag and no config key. |
+| a `[subagents]` limit from `RHO_*` | No environment variable sets a subagent limit. Use a file or a flag. |
 

@@ -68,6 +68,120 @@ pub const DEFAULT_QUEUE_WAIT: Duration = Duration::from_secs(600);
 /// would allow. See decision D-a-steering-message-is-bounded-by-bytes.
 pub const DEFAULT_AGENT_STEER_MESSAGE_BYTES: usize = 16 * 1024;
 
+/// A limit value the runtime cannot accept.
+///
+/// It names the config key, so every caller words its own message and no caller repeats the
+/// bound. `rho-config` reports it as a `ConfigError`, and `rho-cli` reports a flag the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LimitTooLarge {
+    /// The config key, such as `subagents.max-live-total`.
+    pub key: &'static str,
+    /// The value the user asked for.
+    pub value: usize,
+    /// The largest value rho can accept.
+    pub maximum: usize,
+}
+
+impl std::fmt::Display for LimitTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the {} value {} is too large. The maximum is {}.",
+            self.key, self.value, self.maximum
+        )
+    }
+}
+
+impl SubagentLimits {
+    /// The largest a count limit may be.
+    ///
+    /// Two limits become `tokio::sync::Semaphore` permits, and tokio **panics** above
+    /// `MAX_PERMITS`. So a config file could abort the binary with a tokio backtrace instead of
+    /// a sentence naming the key. A live run proved it. See
+    /// `D-a-limit-too-large-is-refused-not-clamped`.
+    pub const MAX_COUNT: usize = tokio::sync::Semaphore::MAX_PERMITS;
+
+    /// Refuse a limit the runtime cannot accept.
+    ///
+    /// The table below holds **every** numeric field, so a new limit cannot be added without
+    /// a decision about its bound. A field with no runtime bound is listed with `None` and
+    /// `every_numeric_limit_is_bounded_or_provably_safe` proves the extreme value is safe,
+    /// rather than assuming it.
+    pub fn check(&self) -> Result<(), LimitTooLarge> {
+        for (key, value, maximum) in self.bounds() {
+            if let Some(maximum) = maximum
+                && value > maximum
+            {
+                return Err(LimitTooLarge {
+                    key,
+                    value,
+                    maximum,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Every numeric limit, its value, and its maximum when it has one.
+    ///
+    /// The destructure is exhaustive, with no `..` and no `_`, so a new field fails the build
+    /// until it is given a bound or an explicit `None`.
+    fn bounds(&self) -> [(&'static str, usize, Option<usize>); 10] {
+        let Self {
+            max_depth,
+            max_children_per_parent,
+            max_live_total,
+            child_timeout,
+            max_tool_calls,
+            max_queued_per_parent,
+            max_queued_total,
+            queue_wait,
+            max_steer_message_bytes,
+            grace_turns,
+        } = self;
+        [
+            // A semaphore permit count. tokio panics above MAX_PERMITS.
+            (
+                "subagents.max-children-per-parent",
+                *max_children_per_parent,
+                Some(Self::MAX_COUNT),
+            ),
+            (
+                "subagents.max-live-total",
+                *max_live_total,
+                Some(Self::MAX_COUNT),
+            ),
+            // The rest are compared against a counter or a length, so no value overflows a
+            // runtime structure. Each is listed so a reader sees the decision, and the table
+            // test drives the extreme value to prove it.
+            ("subagents.max-depth", *max_depth as usize, None),
+            (
+                "subagents.child-timeout-secs",
+                child_timeout.as_secs() as usize,
+                None,
+            ),
+            ("subagents.max-tool-calls", *max_tool_calls as usize, None),
+            (
+                "subagents.max-queued-per-parent",
+                *max_queued_per_parent,
+                None,
+            ),
+            ("subagents.max-queued-total", *max_queued_total, None),
+            (
+                "subagents.queue-wait-secs",
+                queue_wait.as_secs() as usize,
+                None,
+            ),
+            (
+                "subagents.max-steer-message-bytes",
+                *max_steer_message_bytes,
+                None,
+            ),
+            ("subagents.grace-turns", *grace_turns as usize, None),
+        ]
+    }
+}
+
 impl SubagentLimits {
     /// The starting limits, stated here and not hidden. See decision D-no-four-argument-session-new.
     ///
@@ -120,6 +234,108 @@ mod tests {
         let queues = limits.max_queued_total + limits.max_live_total;
         let ceiling = queues * crate::STEER_QUEUE_CAPACITY * limits.max_steer_message_bytes;
         assert_eq!(ceiling, 80 * 1024 * 1024, "the stated ceiling is 80 MiB");
+    }
+
+    #[test]
+    fn every_numeric_limit_is_bounded_or_provably_safe() {
+        // The table test the review asked for, over the whole set rather than one field.
+        //
+        // Two limits become semaphore permits, and tokio panics above `MAX_PERMITS`. Every
+        // other numeric limit is compared against a counter or a length. This drives the
+        // extreme value of each one, so "no bound needed" is proved and not assumed.
+        let stated = SubagentLimits::new();
+        let table = stated.bounds();
+        assert_eq!(
+            table.len(),
+            10,
+            "every numeric field is listed, so a new one fails here"
+        );
+
+        let bounded: Vec<&str> = table
+            .iter()
+            .filter(|(_, _, maximum)| maximum.is_some())
+            .map(|(key, _, _)| *key)
+            .collect();
+        assert_eq!(
+            bounded,
+            vec![
+                "subagents.max-children-per-parent",
+                "subagents.max-live-total"
+            ],
+            "exactly the two semaphore counts carry a bound"
+        );
+
+        // Each bounded field, one over its maximum, is refused and names itself.
+        let over = SubagentLimits::MAX_COUNT + 1;
+        for (key, limits) in [
+            (
+                "subagents.max-live-total",
+                SubagentLimits {
+                    max_live_total: over,
+                    ..SubagentLimits::new()
+                },
+            ),
+            (
+                "subagents.max-children-per-parent",
+                SubagentLimits {
+                    max_children_per_parent: over,
+                    ..SubagentLimits::new()
+                },
+            ),
+        ] {
+            let error = limits
+                .check()
+                .expect_err("a value over the maximum is refused");
+            assert_eq!(error.key, key);
+            assert_eq!(error.maximum, SubagentLimits::MAX_COUNT);
+            assert!(
+                error.to_string().contains(key),
+                "the message names the key: {error}"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains(&SubagentLimits::MAX_COUNT.to_string()),
+                "and the maximum: {error}"
+            );
+        }
+
+        // Exactly at the maximum is allowed, so the comparison is strictly greater.
+        assert!(
+            SubagentLimits {
+                max_live_total: SubagentLimits::MAX_COUNT,
+                max_children_per_parent: SubagentLimits::MAX_COUNT,
+                ..SubagentLimits::new()
+            }
+            .check()
+            .is_ok(),
+            "a value at the maximum is accepted"
+        );
+
+        // Every unbounded field, at its extreme, still passes the check.
+        let extreme = SubagentLimits {
+            max_depth: u32::MAX,
+            child_timeout: Duration::from_secs(u64::MAX),
+            max_tool_calls: u32::MAX,
+            max_queued_per_parent: usize::MAX,
+            max_queued_total: usize::MAX,
+            queue_wait: Duration::from_secs(u64::MAX),
+            max_steer_message_bytes: usize::MAX,
+            grace_turns: u32::MAX,
+            ..SubagentLimits::new()
+        };
+        assert!(
+            extreme.check().is_ok(),
+            "an unbounded field has no maximum, so the extreme is accepted"
+        );
+    }
+
+    #[test]
+    fn the_stated_defaults_pass_their_own_check() {
+        // A default that its own check refuses would break every run.
+        SubagentLimits::new()
+            .check()
+            .expect("the defaults are valid");
     }
 
     #[test]
