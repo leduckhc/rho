@@ -293,3 +293,90 @@ keeps the match, because the choice is between an edit to one file per new proto
 dynamic registry the project does not need for three protocols today. When a fifth
 protocol arrives, the answer flips. The extension point is stated as such: adding a
 protocol edits one file at the CLI, not a shared trait.
+
+## Amendment: the pi azure-* pools, and the entries that reach them
+
+The user asked that rho reach every azure-* pool pi reaches, with the same models. A read of
+`~/.pi/agent/models.json` names five pools across three wire protocols. Every one maps to a
+protocol this spec already resolves, so no new crate and no new protocol string is needed.
+
+### The mapping table
+
+| pi pool | pi `api` | rho `protocol` | rho crate | base URL |
+| --- | --- | --- | --- | --- |
+| `azure-openai` | `openai-responses` | `openai-responses` | `rho-provider-azure` | `http://127.0.0.1:58788/chat/openai/v1` |
+| `azure-openai-dev1` | `openai-responses` | `openai-responses` | `rho-provider-azure` | `http://127.0.0.1:58788/dev1/openai/v1` |
+| `azure-claude` | `anthropic-messages` | `anthropic` | `rho-provider-anthropic` | `http://127.0.0.1:58788/dev1/anthropic` |
+| `azure-oss` | `openai-completions` | `openai-chat` | `rho-provider-openai-chat` | `http://127.0.0.1:58788/cus/openai/v1` |
+| `azure-oss-nc` | `openai-completions` | `openai-chat` | `rho-provider-openai-chat` | `http://127.0.0.1:58788/nc/openai/v1` |
+
+Twenty-three model ids across the five pools, from `gpt-5.5` and `gpt-5.3-codex` to
+`claude-opus-5` and `FW-Kimi-K2.6`, are then reachable as
+`--provider <entry-id> --model <model-id>`. The model id is the wire model, unchanged.
+
+### The concrete config that lands them
+
+The user hand-writes this once into `~/.config/rho/config.toml`, after which
+`rho --provider azure-openai --model gpt-5.5 "hi"` works:
+
+```toml
+[credentials.xdent-key]
+type = "literal"
+value = "dummy"          # the proxy holds the real credential; a dummy resolves the trust gate
+
+[[providers]]
+id = "azure-openai"
+protocol = "openai-responses"
+base-url = "http://127.0.0.1:58788/chat/openai/v1"
+credential = "xdent-key"
+
+[[providers]]
+id = "azure-openai-dev1"
+protocol = "openai-responses"
+base-url = "http://127.0.0.1:58788/dev1/openai/v1"
+credential = "xdent-key"
+
+[[providers]]
+id = "azure-claude"
+protocol = "anthropic"
+base-url = "http://127.0.0.1:58788/dev1/anthropic"
+credential = "xdent-key"
+
+[[providers]]
+id = "azure-oss"
+protocol = "openai-chat"
+base-url = "http://127.0.0.1:58788/cus/openai/v1"
+credential = "xdent-key"
+
+[[providers]]
+id = "azure-oss-nc"
+protocol = "openai-chat"
+base-url = "http://127.0.0.1:58788/nc/openai/v1"
+credential = "xdent-key"
+```
+
+### What the code already covers
+
+`AzureConfig::new(base_url, ...)` at `crates/rho-provider-azure/src/lib.rs:115` already takes a
+base URL. The current refusal comes from the CLI plumbing, `refuse_base_url("azure", ...)` at
+`crates/rho-cli/src/provider.rs:329`, which the named-entry path in §5 skips because it
+constructs the config directly. So `rho-provider-azure` needs no change to speak
+`openai-responses` against any base URL. This is why the mapping table names the existing
+crate.
+
+`rho-provider-anthropic` and `rho-provider-openai-chat` are the two new crates that this
+launch delivers. Both take a base URL by construction, per their specs.
+
+### Tests
+
+- `every_pi_azure_pool_is_reachable_by_a_named_entry` — the config above parses, and each of
+  the five entries builds its provider without an error.
+- `an_azure_openai_entry_calls_the_responses_api` — an `openai-responses` entry lands in
+  `rho-provider-azure` and posts to `<base-url>/openai/v1/responses`.
+- `an_azure_claude_entry_calls_the_messages_api` — an `anthropic` entry lands in
+  `rho-provider-anthropic` and posts to `<base-url>/v1/messages`.
+- `an_azure_oss_entry_calls_the_chat_completions_api` — an `openai-chat` entry lands in
+  `rho-provider-openai-chat` and posts to `<base-url>/chat/completions`.
+- `a_model_id_is_the_wire_model_unchanged` — a request built for
+  `--provider azure-openai --model DeepSeek-V4-Pro` carries `"model": "DeepSeek-V4-Pro"` on
+  the wire, with no rewrite.
