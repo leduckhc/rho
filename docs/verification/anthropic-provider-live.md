@@ -68,3 +68,38 @@ tests/wiremock_flow.rs    4 pass
 The wiremock tests cover the four boundaries the tunnel exercised: the request headers, the
 happy SSE flow, an empty credential never reaching the network, and the 401 and 503 status
 mappings. The tunnel drive proved they were sufficient, once the empty-frame case was fixed.
+
+## Tool calls, driven for real
+
+Same tunnel and model. One prompt asks for a file read, the other asks for two.
+
+```
+$ echo "the anthropic pass phrase is turquoise" > fact.txt
+$ rho run "Read fact.txt and reply with only the pass phrase" \
+    --provider anthropic \
+    --base-url http://127.0.0.1:58788/dev1/anthropic \
+    --model claude-sonnet-4-6 --no-skills --no-agents
+turquoise
+    4.12 real
+```
+
+Two calls in one assistant message. This is the sprint-1 killer defect on Bedrock, and it
+does not reproduce here.
+
+```
+$ echo "alpha line" > a.txt && echo "beta line" > b.txt
+$ rho run "Read a.txt and b.txt, then reply with both first lines separated by a comma" \
+    --provider anthropic \
+    --base-url http://127.0.0.1:58788/dev1/anthropic \
+    --model claude-sonnet-4-6 --no-skills --no-agents
+The first lines are:
+**alpha line**, **beta line**
+    4.88 real
+```
+
+The session file confirms the shape:
+
+```
+assistant message: content types = ['text', 'tool_call', 'tool_call']
+                   tool_call names = ['read', 'read']
+```

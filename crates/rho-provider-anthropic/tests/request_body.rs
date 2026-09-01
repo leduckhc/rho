@@ -82,3 +82,129 @@ fn max_tokens_is_required_and_absent_is_a_provider_default() {
     );
     assert_eq!(body["max_tokens"], 4096, "the spec's default is 4096");
 }
+
+// ---- tool calls ----
+
+use rho_core::{ToolKind, ToolSpec};
+
+fn read_tool() -> ToolSpec {
+    ToolSpec {
+        name: "read".into(),
+        description: "Read a file.".into(),
+        kind: ToolKind::Read,
+        input_schema: json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        }),
+    }
+}
+
+#[test]
+fn a_tools_list_carries_name_description_and_input_schema() {
+    let mut request = one_user_turn("read a file");
+    request.tools = vec![read_tool()];
+    let body = build_request_body(&request);
+    let tools = body["tools"].as_array().expect("tools is an array");
+    assert_eq!(tools.len(), 1);
+    let tool = &tools[0];
+    // Anthropic's shape: {name, description, input_schema}. NOT wrapped in a `function`
+    // object like OpenAI. NO `type: "function"` field either. A silent nesting is a defect.
+    assert_eq!(tool["name"], "read");
+    assert_eq!(tool["description"], "Read a file.");
+    assert_eq!(tool["input_schema"]["type"], "object");
+    assert!(tool.get("type").is_none(), "no `type` wrapper: {tool}");
+    assert!(
+        tool.get("function").is_none(),
+        "no `function` wrapper (that is OpenAI, not Anthropic): {tool}"
+    );
+}
+
+#[test]
+fn a_tool_call_in_an_assistant_message_reads_as_tool_use() {
+    let request = CompletionRequest {
+        model: "claude-sonnet-4-6".to_string(),
+        system: None,
+        messages: vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolCall {
+                id: "call-1".to_string(),
+                name: "read".to_string(),
+                arguments: json!({"path": "fact.txt"}),
+                state: None,
+            }],
+        }],
+        tools: vec![read_tool()],
+        max_tokens: Some(200),
+        temperature: None,
+        reasoning: None,
+    };
+    let body = build_request_body(&request);
+    let block = &body["messages"][0]["content"][0];
+    assert_eq!(block["type"], "tool_use");
+    assert_eq!(block["id"], "call-1");
+    assert_eq!(block["name"], "read");
+    // The parsed JSON `arguments` become the `input` field verbatim.
+    assert_eq!(block["input"], json!({"path": "fact.txt"}));
+}
+
+#[test]
+fn a_tool_result_rides_on_a_user_turn_as_tool_result() {
+    let request = CompletionRequest {
+        model: "claude-sonnet-4-6".to_string(),
+        system: None,
+        messages: vec![Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: "call-1".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "the pass phrase is turquoise".to_string(),
+                }],
+                is_error: false,
+            }],
+        }],
+        tools: Vec::new(),
+        max_tokens: Some(200),
+        temperature: None,
+        reasoning: None,
+    };
+    let body = build_request_body(&request);
+    // The role is `user` on Anthropic. A `tool` role would 400.
+    assert_eq!(body["messages"][0]["role"], "user");
+    let block = &body["messages"][0]["content"][0];
+    assert_eq!(block["type"], "tool_result");
+    assert_eq!(block["tool_use_id"], "call-1");
+    assert_eq!(
+        block["content"],
+        json!([{"type": "text", "text": "the pass phrase is turquoise"}])
+    );
+    assert!(
+        block.get("is_error").is_none() || block["is_error"] == false,
+        "a happy tool result carries no error flag or a false one: {block}"
+    );
+}
+
+#[test]
+fn a_failed_tool_result_reports_is_error_true() {
+    let request = CompletionRequest {
+        model: "claude-sonnet-4-6".to_string(),
+        system: None,
+        messages: vec![Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: "call-1".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "No such file".to_string(),
+                }],
+                is_error: true,
+            }],
+        }],
+        tools: Vec::new(),
+        max_tokens: Some(200),
+        temperature: None,
+        reasoning: None,
+    };
+    let body = build_request_body(&request);
+    let block = &body["messages"][0]["content"][0];
+    assert_eq!(block["is_error"], true);
+}

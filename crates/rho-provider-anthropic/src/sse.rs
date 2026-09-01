@@ -15,12 +15,22 @@ use std::collections::HashMap;
 
 /// What a currently-open content block holds. The block's `content_block_start` picked
 /// this, and every `content_block_delta` on the same index dispatches by it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum OpenBlock {
     Text,
-    // Placeholder arms grow with the tests. A new arm is a compile error at the delta
-    // match, which the launch amendment on fail-open events requires.
+    /// A tool call. The id and name arrived on the start event; the input JSON arrives as
+    /// `partial_json` deltas that this variant accumulates. On stop the accumulator is
+    /// parsed as JSON and reported as `ToolCallEnd.arguments`.
+    ToolUse {
+        id: String,
+        name: String,
+        input_buf: String,
+    },
 }
+
+/// The largest tool_use input JSON the decoder assembles before it refuses the block. See
+/// the amendment on `SPEC-anthropic-messages-provider` and the 8 MB->805 MB defect family.
+pub const MAX_TOOL_INPUT_BYTES: usize = 1024 * 1024;
 
 /// Anthropic SSE decoder.
 ///
@@ -108,6 +118,31 @@ impl Decoder {
                 self.open.insert(index, OpenBlock::Text);
                 Ok(vec![StreamEvent::TextStart { index }])
             }
+            "tool_use" => {
+                let id = data
+                    .pointer("/content_block/id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        ProviderError::Decode("tool_use content_block has no id".to_string())
+                    })?
+                    .to_string();
+                let name = data
+                    .pointer("/content_block/name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        ProviderError::Decode("tool_use content_block has no name".to_string())
+                    })?
+                    .to_string();
+                self.open.insert(
+                    index,
+                    OpenBlock::ToolUse {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input_buf: String::new(),
+                    },
+                );
+                Ok(vec![StreamEvent::ToolCallStart { index, id, name }])
+            }
             other => Err(ProviderError::Decode(format!(
                 "content_block_start type not yet supported: {other}"
             ))),
@@ -116,13 +151,14 @@ impl Decoder {
 
     fn on_content_block_delta(&mut self, data: &Value) -> Result<Vec<StreamEvent>, ProviderError> {
         let index = require_index(data)?;
-        let open = self.open.get(&index).copied().ok_or_else(|| {
-            ProviderError::Decode(format!("content_block_delta for closed index {index}"))
-        })?;
         let delta_kind = data
             .pointer("/delta/type")
             .and_then(Value::as_str)
             .ok_or_else(|| ProviderError::Decode("delta has no type".to_string()))?;
+        // A `&mut` borrow lets the ToolUse variant grow in place.
+        let open = self.open.get_mut(&index).ok_or_else(|| {
+            ProviderError::Decode(format!("content_block_delta for closed index {index}"))
+        })?;
         match (open, delta_kind) {
             (OpenBlock::Text, "text_delta") => {
                 let text = data
@@ -132,6 +168,24 @@ impl Decoder {
                 Ok(vec![StreamEvent::TextDelta {
                     index,
                     delta: text.to_string(),
+                }])
+            }
+            (OpenBlock::ToolUse { input_buf, .. }, "input_json_delta") => {
+                let partial = data
+                    .pointer("/delta/partial_json")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        ProviderError::Decode("input_json_delta has no partial_json".to_string())
+                    })?;
+                if input_buf.len() + partial.len() > MAX_TOOL_INPUT_BYTES {
+                    return Err(ProviderError::Decode(format!(
+                        "tool_use input over the {MAX_TOOL_INPUT_BYTES} byte cap"
+                    )));
+                }
+                input_buf.push_str(partial);
+                Ok(vec![StreamEvent::ToolCallDelta {
+                    index,
+                    delta: partial.to_string(),
                 }])
             }
             (open, delta) => Err(ProviderError::Decode(format!(
@@ -147,6 +201,22 @@ impl Decoder {
         })?;
         match open {
             OpenBlock::Text => Ok(vec![StreamEvent::TextEnd { index }]),
+            OpenBlock::ToolUse { input_buf, .. } => {
+                // An empty buf means the model sent a tool call with no arguments. Empty
+                // object matches that meaning.
+                let arguments: Value = if input_buf.is_empty() {
+                    Value::Object(serde_json::Map::new())
+                } else {
+                    serde_json::from_str(&input_buf).map_err(|error| {
+                        ProviderError::Decode(format!("tool_use input did not parse: {error}"))
+                    })?
+                };
+                Ok(vec![StreamEvent::ToolCallEnd {
+                    index,
+                    arguments,
+                    state: None,
+                }])
+            }
         }
     }
 

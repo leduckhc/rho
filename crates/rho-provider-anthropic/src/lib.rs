@@ -80,7 +80,22 @@ pub fn build_request_body(request: &CompletionRequest) -> Value {
     }
     let messages: Vec<Value> = request.messages.iter().map(message_to_json).collect();
     body.insert("messages".into(), Value::Array(messages));
+    if !request.tools.is_empty() {
+        let tools: Vec<Value> = request.tools.iter().map(tool_to_json).collect();
+        body.insert("tools".into(), Value::Array(tools));
+    }
     Value::Object(body)
+}
+
+/// One tool spec, in the Anthropic wire shape: `{name, description, input_schema}`. No
+/// wrapping `type: "function"`, and no `function: {...}` container. That is OpenAI's
+/// shape, not Anthropic's.
+fn tool_to_json(tool: &rho_core::ToolSpec) -> Value {
+    serde_json::json!({
+        "name": tool.name,
+        "description": tool.description,
+        "input_schema": tool.input_schema,
+    })
 }
 
 /// One conversation message, in the Anthropic wire shape.
@@ -97,7 +112,13 @@ fn message_to_json(message: &rho_core::Message) -> Value {
         // `SPEC-anthropic-messages-provider` section 4.
         Role::Tool => "user",
     };
-    let content: Vec<Value> = message.content.iter().map(content_block_to_json).collect();
+    let content: Vec<Value> = message
+        .content
+        .iter()
+        .map(content_block_to_json)
+        // A reasoning trace maps to `Value::Null` and is dropped from the wire.
+        .filter(|value| !value.is_null())
+        .collect();
     serde_json::json!({
         "role": role,
         "content": content,
@@ -105,13 +126,50 @@ fn message_to_json(message: &rho_core::Message) -> Value {
 }
 
 /// One content block, in the Anthropic wire shape.
+///
+/// The `state` field on ToolCall carries the provider's replay payload. Anthropic does not
+/// use it: the model's own signature travels on a `thinking` block, not on a tool call.
+/// So the state is dropped here, matching the spec.
 fn content_block_to_json(block: &rho_core::ContentBlock) -> Value {
     use rho_core::ContentBlock as B;
     match block {
         B::Text { text } => serde_json::json!({ "type": "text", "text": text }),
-        // Every arm the rest of the flow will fill lives here as a placeholder, so a new
-        // arm is a compile error instead of a silent drop. Section 4 of the spec fills
-        // each one in the next test round.
+        B::ToolCall {
+            id,
+            name,
+            arguments,
+            state: _,
+        } => serde_json::json!({
+            "type": "tool_use",
+            "id": id,
+            "name": name,
+            "input": arguments,
+        }),
+        B::ToolResult {
+            tool_call_id,
+            content,
+            is_error,
+        } => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("type".into(), Value::String("tool_result".into()));
+            obj.insert("tool_use_id".into(), Value::String(tool_call_id.clone()));
+            obj.insert(
+                "content".into(),
+                Value::Array(content.iter().map(content_block_to_json).collect()),
+            );
+            // A happy tool result omits `is_error`, so the wire matches the shape a live
+            // probe recorded. Only a failing result sends the flag as true.
+            if *is_error {
+                obj.insert("is_error".into(), Value::Bool(true));
+            }
+            Value::Object(obj)
+        }
+        // A reasoning trace never reaches a provider: the trace is for the reader. See
+        // `ContentBlock::ReasoningTrace`. So drop it here, and drop it silently, because
+        // this is the block's contract.
+        B::ReasoningTrace { .. } => Value::Null,
+        // Reasoning replay lands in the thinking round. Image lands in a later round. Every
+        // unmapped arm is a compile error at the next test round, not a silent drop.
         other => {
             let _ = other;
             todo!("content block kind not yet mapped: see section 4")
