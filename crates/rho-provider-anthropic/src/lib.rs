@@ -230,10 +230,15 @@ impl Provider for AnthropicProvider {
                 let Some(item) = next else { break };
                 match item {
                     Ok(event) => {
-                        // A default `Event` from eventsource-stream has no name.
-                        // Anthropic always names its events, but be defensive.
+                        // Anthropic always names its events. The SSE spec says a data
+                        // line without an `event:` line takes the default name
+                        // `message`, and some proxies emit trailing empty frames. Skip
+                        // an empty name, an empty data body, and a default-named event
+                        // with no name we would recognise. See the live drive record.
                         if event.event.is_empty() { continue; }
+                        if event.data.trim().is_empty() { continue; }
                         let name = event.event.as_str();
+                        if name == "message" { continue; }
                         // `error` is a stream-level fatal signal.
                         if name == "error" {
                             // A stream-level error. Do not put the peer body in the error
