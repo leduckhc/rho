@@ -48,7 +48,7 @@ pub use styled::StyledLine;
 
 pub use bindings::{
     Binding, SlashCommand, SlashOutcome, bindings, filter_slash_commands, help_rows,
-    run_slash_command, slash_commands,
+    run_slash_command, slash_argument, slash_commands,
 };
 pub use concise::{
     CONCISE_MODE_DEFAULT, RowFold, fold_caret, initial_tool_fold, toggle_fold, tool_row_lines,

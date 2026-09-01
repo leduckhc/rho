@@ -1281,6 +1281,24 @@ impl TuiState {
                 self.open_guide();
                 KeyAction::None
             }
+            "/model" => {
+                let arg = crate::slash_argument(&list.query, "/model");
+                if arg.is_empty() {
+                    // No argument: report the current model and the current provider, so a
+                    // user knows what they are running now. This is the smallest useful
+                    // build of the command.
+                    self.push_notice(format!("model: {} on {}", self.model, self.provider,));
+                } else {
+                    // A model change mid-session needs a mutable path through
+                    // `SessionConfig`, which is behind `Arc`, so it is deferred to a
+                    // dedicated commit. Say so, and say what to do today.
+                    self.push_notice(format!(
+                        "picking a model mid-session is not built yet. Restart rho with \
+                         `--model {arg}` for now."
+                    ));
+                }
+                KeyAction::None
+            }
             other => {
                 self.push_error(format!(
                     "{other} is not built yet. See F-slash-commands in docs/features.md."

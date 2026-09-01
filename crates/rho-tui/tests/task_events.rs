@@ -301,3 +301,39 @@ fn the_event_loop_reads_the_task_stream() {
         "the event loop must have an arm for the task event stream, or no row ever draws"
     );
 }
+
+// The `/model` slash command carries an argument. These tests pin the two branches: alone,
+// it reports the current model; with an argument, it explains the deferred write path.
+#[test]
+fn model_is_marked_built_and_shown_in_the_list() {
+    use rho_tui::slash_commands;
+    let names: Vec<&str> = slash_commands().iter().map(|c| c.name).collect();
+    assert!(names.contains(&"/model"), "\"/model\" is in the list");
+    let model = slash_commands()
+        .iter()
+        .find(|c| c.name == "/model")
+        .expect("in list");
+    assert!(model.built, "/model is now built");
+}
+
+#[test]
+fn a_command_matches_when_it_has_an_argument() {
+    use rho_tui::filter_slash_commands;
+    let hits = filter_slash_commands("/model claude-sonnet-4-6");
+    let names: Vec<&str> = hits.iter().map(|c| c.name).collect();
+    assert!(
+        names.contains(&"/model"),
+        "/model matches with an argument: {names:?}"
+    );
+}
+
+#[test]
+fn slash_argument_extracts_a_bare_argument() {
+    use rho_tui::slash_argument;
+    assert_eq!(
+        slash_argument("/model claude-sonnet-4-6", "/model"),
+        "claude-sonnet-4-6"
+    );
+    assert_eq!(slash_argument("/model", "/model"), "");
+    assert_eq!(slash_argument("/model   spacey  ", "/model"), "spacey");
+}

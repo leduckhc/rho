@@ -187,8 +187,8 @@ pub fn slash_commands() -> &'static [SlashCommand] {
     const COMMANDS: &[SlashCommand] = &[
         SlashCommand {
             name: "/model",
-            summary: "pick the model for this session",
-            built: false,
+            summary: "show the current model, or pick one for this session",
+            built: true,
         },
         SlashCommand {
             name: "/sessions",
@@ -217,10 +217,29 @@ pub fn slash_commands() -> &'static [SlashCommand] {
 /// The slash commands whose name starts with the typed query, so the list filters
 /// as the user types. The query carries its leading slash, for example `/g`.
 pub fn filter_slash_commands(query: &str) -> Vec<&'static SlashCommand> {
+    // Two match modes:
+    //  - the command name starts with the query (`/g` → `/guide`), for filtering as the
+    //    user types the name
+    //  - the query is the command name followed by a space and an argument
+    //    (`/model claude-sonnet-4-6`), for commands that take one
+    //
+    // A future extension is `--flag` style options, and this predicate is where it lands.
+    let first_word = query.split_whitespace().next().unwrap_or(query);
     slash_commands()
         .iter()
-        .filter(|command| command.name.starts_with(query))
+        .filter(|command| command.name.starts_with(query) || command.name == first_word)
         .collect()
+}
+
+/// Extract the argument that follows a slash command in the draft. Returns an empty
+/// string when there is no argument.
+///
+/// A `/model  gpt-5.5` (with several spaces) becomes `gpt-5.5`. Trailing spaces are
+/// trimmed. A caller decides what an empty argument means for its command; `/model` alone
+/// shows the current model.
+pub fn slash_argument<'a>(query: &'a str, name: &str) -> &'a str {
+    let rest = query.strip_prefix(name).unwrap_or("").trim_start();
+    rest.trim_end()
 }
 
 /// What running a typed slash command does.
