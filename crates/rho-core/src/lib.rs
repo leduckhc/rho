@@ -28,7 +28,9 @@ mod tool;
 mod transcript;
 mod usage;
 
-pub use agent::{AgentConfig, AgentEvent, AgentEvents, AgentStopReason, Session, SessionConfig};
+pub use agent::{
+    AgentConfig, AgentEvent, AgentEvents, AgentStopReason, ModelSelection, Session, SessionConfig,
+};
 pub use agent_task::{
     Acceptance, AgentTask, ArtifactChecker, ArtifactSpec, CheckOutcome, CheckResult, ChildClaims,
     CommandRunner, DefaultGate, Gate, GateContext, GateReport,

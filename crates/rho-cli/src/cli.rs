@@ -1359,12 +1359,31 @@ async fn run_interactive(cli: &Cli) -> i32 {
     // around three empty fields, because nothing ever wrote them.
     let cwd = display_cwd();
     let branch = git_branch();
+    // Read the starred model list at startup, so the `/model` picker draws the user's
+    // favourites without a first-open delay. A missing file returns an empty list; a
+    // parse error turns into one notice, and the picker still opens with the current
+    // model. See `D-starred-models-live-in-their-own-file`.
+    let starred = match rho_tui::starred::default_path() {
+        Some(path) => match rho_tui::starred::load(&path) {
+            Ok(list) => list,
+            Err(message) => {
+                notices.push(message);
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
+    // Mirror the initial effort into the TUI so the header, the `/effort` notice, and the
+    // picker header all agree with `Session::selection` from the first frame.
+    let initial_effort = session.selection().reasoning_effort;
     let mut app = rho_tui::App::new(session, model)
         .with_mouse(mouse)
         // The renderer read `state.animate` and nothing ever assigned it, so the sweep
         // never drew. See `D-motion-answers-to-one-switch`.
         .with_motion(motion)
         .with_reasoning(reasoning)
+        .with_reasoning_effort(initial_effort)
+        .with_starred_models(starred)
         // The task row had a reducer, a renderer, and no producer. Nothing in any shipped
         // binary subscribed to the registry, so a background build drew nothing at all.
         // This is that call site. See `SPEC-the-task-event-bridge`.

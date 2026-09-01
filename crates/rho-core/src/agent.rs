@@ -295,6 +295,30 @@ impl SessionConfig {
     }
 }
 
+/// The mutable slice of the session config.
+///
+/// A `ModelSelection` is what `Session::selection` reads and `set_selection` writes. The
+/// running turn is not affected: `Driver::build_request` reads the pair at the start of
+/// every turn, so the change takes effect at the next turn. See
+/// `D-model-selection-is-mutable-behind-a-mutex`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelSelection {
+    /// The provider-specific model id, exactly as `--model` accepts it.
+    pub model: String,
+    /// How hard the model should think. `None` means the provider's own default.
+    pub reasoning_effort: Option<crate::ReasoningEffort>,
+}
+
+impl ModelSelection {
+    /// Build a selection from a model id and an optional effort.
+    pub fn new(model: impl Into<String>, reasoning_effort: Option<crate::ReasoningEffort>) -> Self {
+        Self {
+            model: model.into(),
+            reasoning_effort,
+        }
+    }
+}
+
 pub struct Session {
     inner: Arc<SessionInner>,
 }
@@ -305,6 +329,10 @@ struct SessionInner {
     hooks: Arc<HookChain>,
     context: tokio::sync::Mutex<Context>,
     config: SessionConfig,
+    /// The mutable slice of the config: the model id and the reasoning effort. Read at
+    /// the start of every turn by `Driver::build_request`, and swapped by
+    /// `Session::set_selection`. See `D-model-selection-is-mutable-behind-a-mutex`.
+    selection: std::sync::Mutex<ModelSelection>,
     /// Messages that arrived while a turn ran. The driver drains it at a turn
     /// boundary. See `SPEC-steering`.
     queue: crate::MessageQueue,
@@ -324,6 +352,13 @@ impl Session {
         // `SessionConfig::with_queue`, so a caller that set a queue there had every
         // steering message silently dropped. A review found it.
         let config_queue = config.queue.clone();
+        // Prime the mutable slice from the config. From here the mutex is the one source
+        // of truth for the running model and effort, and `SessionConfig::model` records
+        // only the initial value.
+        let selection = std::sync::Mutex::new(ModelSelection {
+            model: config.model.clone(),
+            reasoning_effort: config.reasoning_effort,
+        });
         Self {
             inner: Arc::new(SessionInner {
                 provider,
@@ -331,9 +366,35 @@ impl Session {
                 hooks,
                 context: tokio::sync::Mutex::new(context),
                 config,
+                selection,
                 queue: config_queue,
             }),
         }
+    }
+
+    /// Read the current model and effort. Cheap; the lock is uncontended.
+    ///
+    /// The value is a snapshot. A later `set_selection` never mutates the returned value.
+    /// See `D-model-selection-is-mutable-behind-a-mutex`.
+    pub fn selection(&self) -> ModelSelection {
+        self.inner
+            .selection
+            .lock()
+            .expect("the selection lock is never poisoned")
+            .clone()
+    }
+
+    /// Replace the current model and effort. Takes effect at the next turn boundary.
+    ///
+    /// The running turn is unaffected: `Driver::build_request` reads the mutex once at
+    /// the start of a turn. The write is synchronous, and the lock is uncontended.
+    /// See `D-model-selection-is-mutable-behind-a-mutex`.
+    pub fn set_selection(&self, selection: ModelSelection) {
+        *self
+            .inner
+            .selection
+            .lock()
+            .expect("the selection lock is never poisoned") = selection;
     }
 
     /// Build a session with a test configuration. The config confines paths to
@@ -1022,14 +1083,24 @@ impl Driver {
     /// the tool list form the stable prefix. The messages grow by appending.
     async fn build_request(&self) -> CompletionRequest {
         let context = self.inner.context.lock().await;
+        // Read the model and the effort from the mutex. This is the one source of truth
+        // for the running turn, so a `Session::set_selection` between turns is picked up
+        // here and a running turn is left alone. See
+        // `D-model-selection-is-mutable-behind-a-mutex`.
+        let selection = self
+            .inner
+            .selection
+            .lock()
+            .expect("the selection lock is never poisoned")
+            .clone();
         CompletionRequest {
-            model: self.inner.config.model.clone(),
+            model: selection.model,
             system: context.system().map(str::to_string),
             messages: context.messages().to_vec(),
             tools: self.inner.tools.specs(),
             max_tokens: None,
             temperature: None,
-            reasoning: self.inner.config.reasoning_effort,
+            reasoning: selection.reasoning_effort,
         }
     }
 

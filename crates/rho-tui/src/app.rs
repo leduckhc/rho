@@ -17,7 +17,7 @@ use crossterm::event::{Event, EventStream, KeyEventKind, MouseButton, MouseEvent
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use rho_core::{AgentEvent, AgentEvents, CancelToken, ContentBlock, Session};
+use rho_core::{AgentEvent, AgentEvents, CancelToken, ContentBlock, ModelSelection, Session};
 
 use crate::editor::{editor_argv, editor_command};
 use crate::render::{STARTUP_MIN_ROWS, composer_text_width, render, transcript_metrics};
@@ -155,6 +155,20 @@ impl App {
         self
     }
 
+    /// Seed the starred model list, from the file the frontend read at startup. See
+    /// `D-starred-models-live-in-their-own-file`.
+    pub fn with_starred_models(mut self, starred: Vec<String>) -> Self {
+        self.state.set_starred_models(starred);
+        self
+    }
+
+    /// Set the initial reasoning effort, mirroring `Session::selection`. Without this,
+    /// the header would draw a stale value while the wire uses the mutex.
+    pub fn with_reasoning_effort(mut self, effort: Option<rho_core::ReasoningEffort>) -> Self {
+        self.state.reasoning_effort = effort;
+        self
+    }
+
     /// Seed the startup notices into the transcript, in the order the caller gives them.
     ///
     /// The caller used to print a notice to the terminal, and rho then opened the
@@ -263,6 +277,20 @@ impl App {
                                 // result. The screen leaves for the editor and returns.
                                 KeyAction::EditDraft(text) => {
                                     run_editor(terminal, guard, state, &text)?;
+                                }
+                                // A model or effort change from the picker or the slash
+                                // command. Apply and mirror into the state, so the header
+                                // shows the new model at once. The running turn (if any)
+                                // keeps its old selection; the next turn uses the new
+                                // one. See `D-model-selection-is-mutable-behind-a-mutex`.
+                                KeyAction::ApplySelection(selection) => {
+                                    apply_selection(session, state, selection);
+                                }
+                                // A picker star toggle. Persist to the file the state
+                                // now agrees with, so an app crash cannot lose a star.
+                                // See `D-starred-models-live-in-their-own-file`.
+                                KeyAction::PersistStarred(list) => {
+                                    persist_starred(state, &list);
                                 }
                             }
                             draw_frame(terminal, state)?;
@@ -375,6 +403,30 @@ impl App {
 /// The milliseconds since the session started. The one clock read in this crate.
 fn elapsed_millis(started: &Instant) -> i64 {
     i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
+}
+
+/// Apply a new model selection to the session, and mirror it into the TUI state so the
+/// header and the picker agree with the mutex. See
+/// `D-model-selection-is-mutable-behind-a-mutex`.
+fn apply_selection(session: &Session, state: &mut TuiState, selection: ModelSelection) {
+    session.set_selection(selection.clone());
+    state.set_current_selection(&selection);
+}
+
+/// Persist the starred list to `~/.rho/starred-models.toml`. A write failure pushes one
+/// error row; the in-memory list already agrees with what a next-open would show. See
+/// `D-starred-models-live-in-their-own-file`.
+fn persist_starred(state: &mut TuiState, list: &[String]) {
+    let Some(path) = crate::starred::default_path() else {
+        state.push_error("starred-models: HOME is unset, so nothing was saved");
+        return;
+    };
+    if let Err(error) = crate::starred::save(&path, list) {
+        state.push_error(format!(
+            "starred-models: cannot write {}: {error}",
+            path.display()
+        ));
+    }
 }
 
 /// Write the frame geometry into the state, so the reducer clamps a scroll key against the

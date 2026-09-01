@@ -187,7 +187,12 @@ pub fn slash_commands() -> &'static [SlashCommand] {
     const COMMANDS: &[SlashCommand] = &[
         SlashCommand {
             name: "/model",
-            summary: "show the current model, or pick one for this session",
+            summary: "open the model picker · `/model <id>` sets one directly",
+            built: true,
+        },
+        SlashCommand {
+            name: "/effort",
+            summary: "show the reasoning effort · `/effort <level>` sets it",
             built: true,
         },
         SlashCommand {

@@ -6,8 +6,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rho_core::{
-    AgentEvent, AgentStopReason, ReasoningDisplay, StreamEvent, TaskId, TaskProgress, TaskState,
-    ThinkingPiece, ThinkingSplitter, ToolKind,
+    AgentEvent, AgentStopReason, ModelSelection, ReasoningDisplay, ReasoningEffort, StreamEvent,
+    TaskId, TaskProgress, TaskState, ThinkingPiece, ThinkingSplitter, ToolKind,
 };
 
 use crate::concise::RowFold;
@@ -112,6 +112,32 @@ pub enum Panel {
     HistorySearch(HistorySearch),
     /// The paged tour, opened by `/guide`.
     Guide(crate::Guide),
+    /// The model picker, opened by `/model` with no argument. See
+    /// `SPEC-model-selection-in-tui` and `D-the-model-picker-is-a-panel`.
+    ModelPicker(ModelPicker),
+}
+
+/// The model picker panel state: the rows to draw and the highlighted row.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ModelPicker {
+    /// The rows the picker draws. The current model is first; every other row is a
+    /// starred model. See `D-the-model-picker-is-a-panel`.
+    pub rows: Vec<PickerRow>,
+    /// The highlighted row index into `rows`.
+    pub selected: usize,
+}
+
+/// One row of the model picker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PickerRow {
+    /// The provider-scoped model id.
+    pub id: String,
+    /// True when this row is the current model of the session.
+    pub is_current: bool,
+    /// True when this row is in the starred file.
+    pub starred: bool,
+    /// The preview effort. `None` keeps the session's current effort. Cycled by `e`.
+    pub effort: Option<ReasoningEffort>,
 }
 
 /// The approval prompt content. The command is verbatim, so the user sees exactly
@@ -190,6 +216,13 @@ pub struct TuiState {
     pub status: String,
     /// The model id, shown on the status line.
     pub model: String,
+    /// The current reasoning effort of the session. Mirrors `Session::selection`.
+    /// Read by the `/effort` slash command and by the picker header. Set by
+    /// `set_current_selection` when the frontend applies a new selection.
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// The starred model ids, in file order. Loaded once at startup, and after every
+    /// picker toggle. See `D-starred-models-live-in-their-own-file`.
+    pub starred_models: Vec<String>,
     /// True after a first Ctrl-C while idle. A second Ctrl-C then exits.
     pub exit_armed: bool,
     /// Set when the run ends. Drives the status line.
@@ -274,6 +307,13 @@ pub enum KeyAction {
     Exit,
     /// Edit this text in the editor, then replace the draft with the result.
     EditDraft(String),
+    /// Apply this model selection to the session. The event loop calls
+    /// `Session::set_selection`. See `SPEC-model-selection-in-tui` and
+    /// `D-model-selection-is-mutable-behind-a-mutex`.
+    ApplySelection(ModelSelection),
+    /// Persist this starred list to `~/.rho/starred-models.toml`. The event loop
+    /// writes the file. See `D-starred-models-live-in-their-own-file`.
+    PersistStarred(Vec<String>),
 }
 
 impl TuiState {
@@ -952,6 +992,9 @@ impl TuiState {
                 return self.handle_search_key(key.code, search.clone());
             }
             Panel::Guide(_) => return self.handle_guide_key(key.code),
+            Panel::ModelPicker(picker) => {
+                return self.handle_model_picker_key(key.code, picker.clone());
+            }
             // An approval prompt answers its own keys, which stage U6 wires.
             Panel::Approval(_) | Panel::None => {}
         }
@@ -1248,6 +1291,109 @@ impl TuiState {
         self.panel = Panel::Guide(crate::Guide::default());
     }
 
+    /// Seed the starred list. The frontend calls it at startup and after every write,
+    /// so the picker always draws what the file says. See
+    /// `D-starred-models-live-in-their-own-file`.
+    pub fn set_starred_models(&mut self, starred: Vec<String>) {
+        self.starred_models = starred;
+    }
+
+    /// Sync the current selection into the state. The frontend calls it after every
+    /// `Session::set_selection`, so the header and the picker header agree with the
+    /// mutex. See `SPEC-model-selection-in-tui` section 2.
+    pub fn set_current_selection(&mut self, selection: &ModelSelection) {
+        self.model = selection.model.clone();
+        self.reasoning_effort = selection.reasoning_effort;
+    }
+
+    /// Open the model picker. The rows are the current model plus every starred id, with
+    /// duplicates of the current dropped.
+    pub fn open_model_picker(&mut self) {
+        let mut rows: Vec<PickerRow> = Vec::new();
+        rows.push(PickerRow {
+            id: self.model.clone(),
+            is_current: true,
+            starred: self.starred_models.iter().any(|id| id == &self.model),
+            effort: self.reasoning_effort,
+        });
+        for id in &self.starred_models {
+            if id == &self.model {
+                continue;
+            }
+            rows.push(PickerRow {
+                id: id.clone(),
+                is_current: false,
+                starred: true,
+                // A starred row carries no effort. Enter with this row keeps the current
+                // effort, unless the user pressed `e` to preview one first.
+                effort: None,
+            });
+        }
+        self.panel = Panel::ModelPicker(ModelPicker { rows, selected: 0 });
+    }
+
+    /// Route a key while the model picker is open. See
+    /// `D-the-model-picker-is-a-panel`.
+    fn handle_model_picker_key(&mut self, code: KeyCode, mut picker: ModelPicker) -> KeyAction {
+        match code {
+            KeyCode::Esc => {
+                self.panel = Panel::None;
+                KeyAction::None
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                picker.selected = picker.selected.saturating_sub(1);
+                self.panel = Panel::ModelPicker(picker);
+                KeyAction::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let last = picker.rows.len().saturating_sub(1);
+                picker.selected = (picker.selected + 1).min(last);
+                self.panel = Panel::ModelPicker(picker);
+                KeyAction::None
+            }
+            KeyCode::Enter => {
+                let Some(row) = picker.rows.get(picker.selected).cloned() else {
+                    self.panel = Panel::None;
+                    return KeyAction::None;
+                };
+                let selection = ModelSelection {
+                    model: row.id,
+                    reasoning_effort: row.effort.or(self.reasoning_effort),
+                };
+                self.panel = Panel::None;
+                KeyAction::ApplySelection(selection)
+            }
+            KeyCode::Char('e') => {
+                if let Some(row) = picker.rows.get_mut(picker.selected) {
+                    row.effort = next_effort_in_cycle(row.effort);
+                }
+                self.panel = Panel::ModelPicker(picker);
+                KeyAction::None
+            }
+            KeyCode::Char('*') => {
+                let Some(row) = picker.rows.get_mut(picker.selected) else {
+                    self.panel = Panel::ModelPicker(picker);
+                    return KeyAction::None;
+                };
+                row.starred = !row.starred;
+                let id = row.id.clone();
+                let now_starred = row.starred;
+                if now_starred {
+                    if !self.starred_models.iter().any(|existing| existing == &id) {
+                        self.starred_models.push(id);
+                    }
+                } else {
+                    self.starred_models.retain(|existing| existing != &id);
+                }
+                let list = self.starred_models.clone();
+                self.panel = Panel::ModelPicker(picker);
+                KeyAction::PersistStarred(list)
+            }
+            // Any other key is ignored on purpose. See `D-the-model-picker-is-a-panel`.
+            _ => KeyAction::None,
+        }
+    }
+
     /// Run the selected row of the slash list. A command never reaches the model, and
     /// a command that does nothing yet says so, because silence reads as a defect.
     fn run_selected_command(&mut self, list: &SlashList) -> KeyAction {
@@ -1282,22 +1428,56 @@ impl TuiState {
                 KeyAction::None
             }
             "/model" => {
-                let arg = crate::slash_argument(&list.query, "/model");
+                let arg = crate::slash_argument(&list.query, "/model").to_string();
                 if arg.is_empty() {
-                    // No argument: report the current model and the current provider, so a
-                    // user knows what they are running now. This is the smallest useful
-                    // build of the command.
-                    self.push_notice(format!("model: {} on {}", self.model, self.provider,));
+                    // No argument opens the picker. See `D-the-model-picker-is-a-panel`.
+                    self.open_model_picker();
+                    KeyAction::None
                 } else {
-                    // A model change mid-session needs a mutable path through
-                    // `SessionConfig`, which is behind `Arc`, so it is deferred to a
-                    // dedicated commit. Say so, and say what to do today.
-                    self.push_notice(format!(
-                        "picking a model mid-session is not built yet. Restart rho with \
-                         `--model {arg}` for now."
-                    ));
+                    // A typed id is the confirmation, and the effort stays. See
+                    // `D-model-arg-bypasses-the-picker`.
+                    let selection = ModelSelection {
+                        model: arg.clone(),
+                        reasoning_effort: self.reasoning_effort,
+                    };
+                    self.push_notice(format!("model set to {arg}"));
+                    KeyAction::ApplySelection(selection)
                 }
-                KeyAction::None
+            }
+            "/effort" => {
+                let arg = crate::slash_argument(&list.query, "/effort");
+                if arg.is_empty() {
+                    // No argument: report the current level, or `unset` for none. See
+                    // `D-model-arg-bypasses-the-picker`.
+                    let name = self
+                        .reasoning_effort
+                        .map(|effort| effort.as_str().to_string())
+                        .unwrap_or_else(|| "unset".to_string());
+                    self.push_notice(format!("effort: {name}"));
+                    KeyAction::None
+                } else if arg == "unset" {
+                    // Clear the effort, so the provider uses its own default.
+                    self.push_notice("effort: unset".to_string());
+                    KeyAction::ApplySelection(ModelSelection {
+                        model: self.model.clone(),
+                        reasoning_effort: None,
+                    })
+                } else {
+                    use std::str::FromStr;
+                    match ReasoningEffort::from_str(arg) {
+                        Ok(effort) => {
+                            self.push_notice(format!("effort: {}", effort.as_str()));
+                            KeyAction::ApplySelection(ModelSelection {
+                                model: self.model.clone(),
+                                reasoning_effort: Some(effort),
+                            })
+                        }
+                        Err(message) => {
+                            self.push_error(message);
+                            KeyAction::None
+                        }
+                    }
+                }
             }
             other => {
                 self.push_error(format!(
@@ -1497,5 +1677,19 @@ fn outcome_label(outcome: &rho_core::AgentOutcome) -> (String, bool) {
             let names: Vec<String> = failed.iter().map(|one| crate::sanitize_line(one)).collect();
             (format!("rejected: {}", names.join(", ")), true)
         }
+    }
+}
+
+/// The next preview effort in the picker's cycle, driven by the `e` key. The order is
+/// `None → Off → Low → Medium → High → XHigh → None`. See
+/// `D-the-model-picker-is-a-panel`.
+pub fn next_effort_in_cycle(effort: Option<ReasoningEffort>) -> Option<ReasoningEffort> {
+    match effort {
+        None => Some(ReasoningEffort::Off),
+        Some(ReasoningEffort::Off) => Some(ReasoningEffort::Low),
+        Some(ReasoningEffort::Low) => Some(ReasoningEffort::Medium),
+        Some(ReasoningEffort::Medium) => Some(ReasoningEffort::High),
+        Some(ReasoningEffort::High) => Some(ReasoningEffort::XHigh),
+        Some(ReasoningEffort::XHigh) => None,
     }
 }

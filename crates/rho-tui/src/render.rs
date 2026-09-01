@@ -993,6 +993,10 @@ fn panel_demand(state: &TuiState) -> (usize, usize) {
             let rows = pages.get(guide.page).map_or(0, |page| page.rows.len() + 1);
             (rows, 0)
         }
+        // One row per picker row, plus one header (`model:`). Yields on a short
+        // screen: the picker is a preference and not a safety row. See
+        // `D-the-model-picker-is-a-panel`.
+        Panel::ModelPicker(picker) => (picker.rows.len() + 1, 0),
     }
 }
 
@@ -1010,6 +1014,7 @@ fn panel_lines(state: &TuiState, width: usize, budget: usize) -> Vec<StyledLine>
         Panel::Help => help_panel(width),
         Panel::HistorySearch(search) => history_search_panel(search, &state.history, width),
         Panel::Guide(guide) => guide_panel(state, guide.page, width),
+        Panel::ModelPicker(picker) => model_picker_panel(picker, width),
     };
     // A panel never overruns its grant. This is the backstop that keeps the arithmetic
     // honest when the screen is short.
@@ -1119,6 +1124,32 @@ fn slash_panel(list: &SlashList, width: usize) -> Vec<StyledLine> {
             text_style()
         } else {
             style_for(Role::Muted)
+        };
+        lines.push(one((pad(&body, width), style)));
+    }
+    lines
+}
+
+/// The model-picker panel: a header naming the current model, then one row per picker
+/// row. Each row draws the star column, the id, and the preview effort at the end. See
+/// `D-the-model-picker-is-a-panel`.
+fn model_picker_panel(picker: &crate::state::ModelPicker, width: usize) -> Vec<StyledLine> {
+    let mut lines = Vec::new();
+    let muted = style_for(Role::Muted);
+    let header = "model:";
+    lines.push(one((pad(header, width), muted)));
+    for (index, row) in picker.rows.iter().enumerate() {
+        let star = if row.starred { "★" } else { "☆" };
+        let effort_suffix = match row.effort {
+            Some(effort) => format!(" [effort={}]", effort.as_str()),
+            None => String::new(),
+        };
+        let tag = if row.is_current { " (current)" } else { "" };
+        let body = format!("  {star} {}{effort_suffix}{tag}", row.id);
+        let style = if index == picker.selected {
+            text_style().add_modifier(Modifier::REVERSED)
+        } else {
+            text_style()
         };
         lines.push(one((pad(&body, width), style)));
     }
@@ -1357,6 +1388,9 @@ fn footer_hints(state: &TuiState, width: usize) -> Cow<'static, str> {
         Panel::Guide(guide) => {
             let pages = crate::guide_pages(&state.model, &state.provider).len();
             Cow::Owned(crate::guide_footer_hint(guide.page, pages))
+        }
+        Panel::ModelPicker(_) => {
+            Cow::Borrowed("↑ ↓ choose · enter apply · e effort · * star · esc close")
         }
         Panel::None => {
             if state.activity == ActivityState::Running {
