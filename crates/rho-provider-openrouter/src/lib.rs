@@ -101,6 +101,11 @@ pub struct OpenRouterConfig {
     /// The chat path appended to `base_url`. OpenRouter's own path by default, and the
     /// standard OpenAI one when a caller set a base url.
     chat_path: String,
+    /// True when this config targets OpenRouter itself. False when it targets a plain
+    /// OpenAI-compatible host. This gates the OpenRouter-only fields on the request body,
+    /// such as `usage: {include: true}`, that a Fireworks or Ollama host rejects. See
+    /// `D-a-provider-base-url-is-a-config-key`.
+    is_openrouter: bool,
 }
 
 impl OpenRouterConfig {
@@ -111,6 +116,7 @@ impl OpenRouterConfig {
             chat_path: CHAT_PATH.to_string(),
             api_key,
             retry: RetryPolicy::default(),
+            is_openrouter: true,
         }
     }
 
@@ -134,6 +140,8 @@ impl OpenRouterConfig {
         let root = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
         self.base_url = root.to_string();
         self.chat_path = OPENAI_CHAT_PATH.to_string();
+        // A plain OpenAI-compatible host does not accept OpenRouter-only fields.
+        self.is_openrouter = false;
         self
     }
 
@@ -187,7 +195,7 @@ impl Provider for OpenRouterProvider {
             ));
         }
         let url = self.config.chat_url();
-        let body = build_request_body(&request);
+        let body = build_request_body(&request, self.config.is_openrouter);
 
         // Retry only before the first event. Once the response head arrives, a
         // mid-stream error ends the stream and is never retried.
@@ -681,7 +689,7 @@ fn reasoning_field(effort: Option<rho_core::ReasoningEffort>) -> Option<Value> {
     }
 }
 
-pub fn build_request_body(request: &CompletionRequest) -> Value {
+pub fn build_request_body(request: &CompletionRequest, is_openrouter: bool) -> Value {
     let mut messages = Vec::new();
     if let Some(system) = &request.system {
         messages.push(json!({ "role": "system", "content": system }));
@@ -694,16 +702,22 @@ pub fn build_request_body(request: &CompletionRequest) -> Value {
         "model": request.model,
         "messages": messages,
         "stream": true,
-        // Ask for the accounting, or none arrives.
+    });
+    let map = body.as_object_mut().expect("the body is an object");
+    if is_openrouter {
+        // Ask OpenRouter for the accounting, or none arrives.
         //
         // OpenRouter omits `usage` from a streamed response unless the request opts in.
         // So rho parsed the cache and cost fields correctly and never received them. A
         // live run of fifty sessions reported zero tokens and no cost, which is what
         // exposed it. This is the same shape as the timeout guidance that never fired:
         // the code was right and unreachable. See decision D-measured-cost-and-cache.
-        "usage": { "include": true },
-    });
-    let map = body.as_object_mut().expect("the body is an object");
+        //
+        // A plain OpenAI-compatible host such as Fireworks (the xdent OSS route) rejects
+        // this field as `Extra inputs are not permitted`, so it only ships when this config
+        // targets OpenRouter itself.
+        map.insert("usage".to_string(), json!({ "include": true }));
+    }
     if let Some(reasoning) = reasoning_field(request.reasoning) {
         map.insert("reasoning".to_string(), reasoning);
     }

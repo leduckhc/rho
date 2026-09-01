@@ -250,7 +250,7 @@ fn request_asks_for_usage_accounting() {
     //
     // This test guards the opt-in, because nothing else would notice its absence: every
     // fixture supplies a usage chunk regardless of the request.
-    let body = rho_provider_openrouter::build_request_body(&common::sample_request());
+    let body = rho_provider_openrouter::build_request_body(&common::sample_request(), true);
     assert_eq!(
         body["usage"]["include"],
         serde_json::json!(true),
@@ -365,7 +365,7 @@ async fn an_empty_reasoning_delta_starts_no_block() {
 fn the_request_body_carries_the_effort() {
     let mut request = common::sample_request();
     request.reasoning = Some(rho_core::ReasoningEffort::High);
-    let body = rho_provider_openrouter::build_request_body(&request);
+    let body = rho_provider_openrouter::build_request_body(&request, true);
     assert_eq!(
         body["reasoning"]["effort"], "high",
         "the level reaches the wire: {body}"
@@ -377,7 +377,7 @@ fn the_request_body_carries_the_effort() {
 fn an_off_effort_disables_reasoning_on_the_wire() {
     let mut request = common::sample_request();
     request.reasoning = Some(rho_core::ReasoningEffort::Off);
-    let body = rho_provider_openrouter::build_request_body(&request);
+    let body = rho_provider_openrouter::build_request_body(&request, true);
     assert_eq!(
         body["reasoning"]["enabled"], false,
         "off is an instruction, not a silence: {body}"
@@ -389,7 +389,7 @@ fn an_off_effort_disables_reasoning_on_the_wire() {
 #[test]
 fn an_absent_effort_sends_no_reasoning_field() {
     let request = common::sample_request();
-    let body = rho_provider_openrouter::build_request_body(&request);
+    let body = rho_provider_openrouter::build_request_body(&request, true);
     assert!(
         body.get("reasoning").is_none(),
         "unset must not send a field: {body}"
@@ -402,7 +402,7 @@ fn an_absent_effort_sends_no_reasoning_field() {
 fn xhigh_maps_to_the_highest_accepted_level() {
     let mut request = common::sample_request();
     request.reasoning = Some(rho_core::ReasoningEffort::XHigh);
-    let body = rho_provider_openrouter::build_request_body(&request);
+    let body = rho_provider_openrouter::build_request_body(&request, true);
     assert_eq!(body["reasoning"]["effort"], "high");
 }
 
@@ -424,7 +424,7 @@ fn every_level_maps_to_its_own_wire_value() {
     for (effort, expected) in cases {
         let mut request = common::sample_request();
         request.reasoning = Some(effort);
-        let body = rho_provider_openrouter::build_request_body(&request);
+        let body = rho_provider_openrouter::build_request_body(&request, true);
         match expected {
             Some(word) => assert_eq!(
                 body["reasoning"]["effort"],
@@ -602,5 +602,23 @@ async fn a_reflected_header_cannot_reach_a_client_error() {
     assert!(
         !debugged.contains(SECRET),
         "nor the Debug form, got: {debugged}"
+    );
+}
+
+#[test]
+fn the_body_omits_the_openrouter_usage_field_for_a_plain_openai_host() {
+    // The xdent OSS route (Fireworks) rejects the OpenRouter-only `usage: {include: true}`
+    // as "Extra inputs are not permitted". A live drive against Kimi-K2.6 caught it. So
+    // the body must omit that field when the caller set an OpenAI-compatible host.
+    let request = common::sample_request();
+    let openrouter_body = rho_provider_openrouter::build_request_body(&request, true);
+    let plain_body = rho_provider_openrouter::build_request_body(&request, false);
+    assert!(
+        openrouter_body["usage"].get("include").is_some(),
+        "OpenRouter path opts into usage: {openrouter_body}"
+    );
+    assert!(
+        plain_body.get("usage").is_none(),
+        "A plain OpenAI host must not receive `usage: {{include}}`: {plain_body}"
     );
 }

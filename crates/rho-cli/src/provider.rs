@@ -220,18 +220,28 @@ pub fn build_provider(
     // OpenAI-compatible provider adds its own builder and either uses the base url or calls
     // `refuse_base_url`; it never edits this match. See D10, and the trait-method design
     // noted in `refuse_base_url`.
+    // Built-ins first. A named entry cannot shadow a built-in; the parser rejects a
+    // collision by name. See `D-a-built-in-is-never-shadowed`.
     match name {
-        "openrouter" => build_openrouter(config, env),
-        "bedrock" => build_bedrock(config, env),
-        "azure" => build_azure(config, env),
-        "anthropic" => build_anthropic(config, env),
-        other if KNOWN_PROVIDERS.contains(&other) => Err(ProviderError::NotCompiled {
-            name: other.to_string(),
-        }),
-        other => Err(ProviderError::Unknown {
-            name: other.to_string(),
-        }),
+        "openrouter" => return build_openrouter(config, env),
+        "bedrock" => return build_bedrock(config, env),
+        "azure" => return build_azure(config, env),
+        "anthropic" => return build_anthropic(config, env),
+        _ => {}
     }
+    // A named entry from `[[providers]]`.
+    if let Some(entry) = config.providers.iter().find(|entry| entry.id == name) {
+        return build_named_provider(entry, config, env);
+    }
+    // A known name the build does not include.
+    if KNOWN_PROVIDERS.contains(&name) {
+        return Err(ProviderError::NotCompiled {
+            name: name.to_string(),
+        });
+    }
+    Err(ProviderError::Unknown {
+        name: name.to_string(),
+    })
 }
 
 /// Refuse a base url for a provider that names its endpoint its own way.
@@ -356,6 +366,62 @@ fn build_bedrock(
     Err(ProviderError::NotCompiled {
         name: "bedrock".to_string(),
     })
+}
+
+/// Build a provider from a named `[[providers]]` entry. It looks up the credential in the
+/// merged table and dispatches by protocol.
+fn build_named_provider(
+    entry: &rho_config::ProviderEntry,
+    config: &Config,
+    env: &dyn EnvLookup,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    // The credential is a name that resolves in the merged credentials table. No env
+    // fallback here: a named entry must name a real credential. See
+    // `SPEC-named-provider-profiles` amendment 2.
+    let secret = config
+        .resolve_credential(&entry.credential, env)
+        .map_err(|error| ProviderError::Credential {
+            message: format!(
+                "named provider entry \"{}\" references credential \"{}\": {}",
+                entry.id, entry.credential, error
+            ),
+        })?;
+
+    match entry.protocol.as_str() {
+        #[cfg(feature = "anthropic")]
+        "anthropic" => {
+            use rho_provider_anthropic::{AnthropicConfig, AnthropicProvider};
+            Ok(Arc::new(AnthropicProvider::new(AnthropicConfig::new(
+                entry.base_url.clone(),
+                secret,
+            ))))
+        }
+        #[cfg(feature = "openrouter")]
+        "openai-chat" => {
+            use rho_provider_openrouter::{OpenRouterConfig, OpenRouterProvider};
+            // The OpenRouter crate speaks OpenAI Chat Completions against any base URL,
+            // per `with_openai_host`. A `plain` OpenAI host and Ollama land here today; a
+            // dedicated `rho-provider-openai-chat` lands in a later commit.
+            let config = OpenRouterConfig::new(secret).with_openai_host(&entry.base_url);
+            Ok(Arc::new(OpenRouterProvider::new(config)))
+        }
+        "openai-responses" => Err(ProviderError::Credential {
+            message: format!(
+                "named provider entry \"{}\" uses `openai-responses`, which is not yet \
+                 available through a named entry. Use the built-in `azure` provider with \
+                 `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, and \
+                 `AZURE_OPENAI_API_KEY` for now. A named-entry path lands in a follow-up.",
+                entry.id
+            ),
+        }),
+        protocol => Err(ProviderError::Credential {
+            message: format!(
+                "named provider entry \"{}\" uses unknown protocol \"{}\". \
+                 Choose one of: anthropic, openai-chat, openai-responses.",
+                entry.id, protocol
+            ),
+        }),
+    }
 }
 
 /// Build the Anthropic provider.

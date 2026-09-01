@@ -59,6 +59,22 @@ pub enum ConfigError {
     /// A credential source failed to resolve.
     #[error("cannot resolve the credential \"{name}\": {message}")]
     Credential { name: String, message: String },
+    /// A named `[[providers]]` entry uses a protocol the build does not know.
+    #[error(
+        "the provider entry \"{id}\" names an unknown protocol \"{protocol}\". Choose one of: anthropic, openai-chat, openai-responses."
+    )]
+    UnknownProtocol { id: String, protocol: String },
+    /// A named `[[providers]]` entry names a credential that no `[credentials.*]` block
+    /// resolves.
+    #[error(
+        "the provider entry \"{id}\" names the credential \"{credential}\", but no `[credentials.{credential}]` block sets it."
+    )]
+    MissingCredential { id: String, credential: String },
+    /// A named `[[providers]]` entry collides with a built-in provider id.
+    #[error(
+        "the provider entry \"{id}\" collides with a built-in of the same name. Rename the entry."
+    )]
+    BuiltinCollision { id: String },
 }
 
 /// Why a base url was refused. A caller reads the reason, so it can tell a refusal that
@@ -253,6 +269,31 @@ pub struct ConfigLayer {
     /// Named profiles. A profile is a nested layer.
     #[serde(default)]
     pub profiles: BTreeMap<String, ConfigLayer>,
+    /// Named provider entries. Each maps an id like `xdent-claude` to a `(protocol,
+    /// base_url, credential)` triple. See `SPEC-named-provider-profiles`.
+    #[serde(default)]
+    pub providers: Vec<ProviderEntry>,
+}
+
+/// One named provider entry, as read from `[[providers]]` in the config.
+///
+/// The credential field is a **name** that resolves through `Config::credentials`, not a
+/// literal secret. So a project-level entry cannot smuggle a new credential; it names one
+/// the user already trusts.
+///
+/// See `SPEC-named-provider-profiles` and
+/// `D-a-provider-is-named-by-its-wire-protocol`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ProviderEntry {
+    /// The provider id, for example `xdent-claude`. Passed as `--provider <id>`.
+    pub id: String,
+    /// The wire protocol, one of `anthropic`, `openai-chat`, `openai-responses`.
+    pub protocol: String,
+    /// The base URL to reach.
+    pub base_url: String,
+    /// The credential name, resolving in the merged credentials table.
+    pub credential: String,
 }
 
 /// The subagent limits, as optional file fields. It mirrors `rho_core::SubagentLimits`,
@@ -717,6 +758,9 @@ pub struct Config {
     /// Credential sources, by name. A value resolves through `resolve_credential`, or
     /// through `resolve_credential_or_env` when the caller carries a fallback variable.
     pub credentials: BTreeMap<String, CredentialSource>,
+    /// Named provider entries, resolved from every layer. Consumed by
+    /// `rho_cli::provider::build_provider`. See `SPEC-named-provider-profiles`.
+    pub providers: Vec<ProviderEntry>,
     /// True when the `provider` came from a project file, and rho obeyed it.
     ///
     /// A clone chooses which of the user's credentials is exercised, and which vendor bills
@@ -774,6 +818,12 @@ impl ConfigLayer {
         // A profile is a named block, not a merged value. Keep the union, so a
         // profile defined in either file is reachable by name.
         self.profiles.extend(over.profiles);
+        // Concatenate provider entries across layers. A later id wins by taking precedence
+        // in the resolution pass, per `SPEC-named-provider-profiles` section 5. A wholesale
+        // `.or()` here would let a project file erase every entry the global file set,
+        // which is the shape D-a-project-file-only-lowers-a-limit already ruled out for
+        // subagent limits.
+        self.providers.extend(over.providers);
         self
     }
 
@@ -832,6 +882,7 @@ impl ConfigLayer {
             base_url,
             credentials,
             profiles,
+            providers,
             provider,
             model,
             ephemeral,
@@ -847,6 +898,15 @@ impl ConfigLayer {
         } = self;
 
         let mut cleared: Vec<&'static str> = Vec::new();
+
+        // A named provider entry is powerful (it names an endpoint and a credential), and
+        // an untrusted source has no way to trust one. So an untrusted layer drops every
+        // entry and records a notice, exactly like `base-url`. See
+        // `SPEC-named-provider-profiles` section 3.
+        if !providers.is_empty() {
+            providers.clear();
+            cleared.push("providers");
+        }
         let mut refused: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
         // Powerful. Cleared and recorded in one statement each.
@@ -1687,6 +1747,7 @@ impl Config {
             mcp_config: merged.mcp_config,
             subagents: build_subagents_checked(merged.subagents.as_ref())?,
             credentials,
+            providers: merged.providers,
             lowered_limits,
             provider_from_project,
         })
