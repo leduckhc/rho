@@ -21,6 +21,9 @@ pub const MODEL_ENV: &str = "RHO_MODEL";
 /// The environment variable that names the provider.
 pub const PROVIDER_ENV: &str = "RHO_PROVIDER";
 
+/// The Anthropic API key variable.
+#[cfg(feature = "anthropic")]
+pub const ANTHROPIC_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 /// The OpenRouter API key variable.
 #[cfg(feature = "openrouter")]
 pub const OPENROUTER_KEY_ENV: &str = "OPENROUTER_API_KEY";
@@ -42,7 +45,7 @@ pub const AWS_REGION_ENV: &str = "AWS_REGION";
 pub enum ProviderError {
     /// The provider name is not known.
     #[error(
-        "the provider \"{name}\" is not known. Choose one of: openrouter, bedrock, azure. Set it with --provider or the {PROVIDER_ENV} variable."
+        "the provider \"{name}\" is not known. Choose one of: openrouter, bedrock, azure, anthropic. Set it with --provider or the {PROVIDER_ENV} variable."
     )]
     Unknown { name: String },
     /// The provider name is valid, but this build does not include it.
@@ -99,7 +102,7 @@ fn credential_error(error: rho_config::ConfigError) -> ProviderError {
 }
 
 /// The set of known provider names, whether compiled in or not.
-const KNOWN_PROVIDERS: [&str; 3] = ["openrouter", "bedrock", "azure"];
+const KNOWN_PROVIDERS: [&str; 4] = ["openrouter", "bedrock", "azure", "anthropic"];
 
 /// The default provider name for this build, or `None` when no provider feature
 /// is present. OpenRouter wins when it is compiled in.
@@ -221,6 +224,7 @@ pub fn build_provider(
         "openrouter" => build_openrouter(config, env),
         "bedrock" => build_bedrock(config, env),
         "azure" => build_azure(config, env),
+        "anthropic" => build_anthropic(config, env),
         other if KNOWN_PROVIDERS.contains(&other) => Err(ProviderError::NotCompiled {
             name: other.to_string(),
         }),
@@ -351,6 +355,42 @@ fn build_bedrock(
     refuse_base_url("bedrock", config.base_url.as_deref())?;
     Err(ProviderError::NotCompiled {
         name: "bedrock".to_string(),
+    })
+}
+
+/// Build the Anthropic provider.
+///
+/// A base URL is optional. The default is `https://api.anthropic.com`. The xdent tunnel and
+/// any Anthropic-compatible proxy pass through `--base-url`. The credential name is the
+/// provider name, so `[credentials.anthropic]` in the config sets it, and
+/// `ANTHROPIC_API_KEY` is the env-var fallback. See
+/// `D-a-provider-names-its-own-credential` and `SPEC-anthropic-messages-provider`.
+#[cfg(feature = "anthropic")]
+fn build_anthropic(
+    config: &Config,
+    env: &dyn EnvLookup,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    use rho_provider_anthropic::{AnthropicConfig, AnthropicProvider, DEFAULT_BASE_URL};
+
+    let secret = config
+        .resolve_credential_or_env("anthropic", ANTHROPIC_KEY_ENV, env)
+        .map_err(credential_error)?;
+    let base_url = config
+        .base_url
+        .clone()
+        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+    Ok(Arc::new(AnthropicProvider::new(AnthropicConfig::new(
+        base_url, secret,
+    ))))
+}
+
+#[cfg(not(feature = "anthropic"))]
+fn build_anthropic(
+    _config: &Config,
+    _env: &dyn EnvLookup,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Err(ProviderError::NotCompiled {
+        name: "anthropic".to_string(),
     })
 }
 
