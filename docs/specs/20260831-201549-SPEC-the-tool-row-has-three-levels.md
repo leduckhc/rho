@@ -373,3 +373,42 @@ records the deletion in `bench/deleted-tests.txt` if a test named it.
 
 `initial_tool_fold`, `toggle_fold` and `fold_caret` stay, because the reducer and the renderer
 both need them, and they gain their first production callers here.
+
+## Amendment: the detail model covers a thinking row too
+
+The requester asked for the reasoning text by default, with one key to collapse it. That is the
+same gesture this spec gives a tool row, so the two share one model rather than growing two.
+
+`RowDetail` now applies to any row that has a body. For a thinking row the levels read:
+
+| level | what shows |
+| --- | --- |
+| `Line` | `∴ thought for 1.1s` |
+| `Short` | the summary row, the first body lines, then `… +N more` |
+| `Full` | the summary row and the whole reasoning text |
+
+Three consequences follow, and each one is a change to this spec.
+
+**The key works on both row kinds.** `ctrl-o` cycles the newest row that has a body, whether it
+is a tool row or a thinking row. A user learns one gesture. The key help stops saying `not built
+yet`.
+
+**A thinking row gains per-row state.** Today `crates/rho-tui/src/render.rs` draws a thinking row
+from the global `state.reasoning_display`, so nothing can collapse one block and leave another
+open. A tool row already reads `row_fold(state, index)` at line 625. The thinking arm now reads
+the same per-row detail, and the global setting only chooses the level a new row starts at.
+
+**The default becomes `Full` for a thinking row.** A short question cost eight transcript rows at
+`Full` and one at `Line`, measured live. The requester chose to pay that.
+
+`Live` is not a level, and it is not deleted. It says what happens while a row still streams, and
+a measurement proves the axes are separate: a settled `Live` row and a settled `Summary` row draw
+identically, so the only difference is what a watcher saw. `Live` becomes "stream the text, then
+settle to `Line`".
+
+One more finding from that measurement belongs here. While a `Live` row streams, the muted colour
+is the only thing marking the text as reasoning, because the `∴` glyph appears only once the row
+settles. This spec already forbids colour as the sole carrier of meaning for a diff, and the same
+rule applies here. A streaming thinking row draws the glyph.
+
+See `D-one-detail-model-for-every-row`.
