@@ -9,6 +9,8 @@
 //! merged credentials table or the `ANTHROPIC_API_KEY` fallback, per
 //! `D-a-provider-names-its-own-credential`.
 
+pub mod sse;
+
 use async_trait::async_trait;
 use rho_core::{CancelToken, CompletionRequest, Provider, ProviderError, ProviderStream, Secret};
 use serde_json::Value;
