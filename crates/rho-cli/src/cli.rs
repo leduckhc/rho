@@ -1427,6 +1427,16 @@ fn wiring_notices(loaded: &rho_config::Config, provider_name: &str) -> Vec<Strin
             loaded.dropped_keys.join(", ")
         ));
     }
+    if let Some(legacy) = &loaded.legacy_config_path {
+        // The user tracked the pre-launch branch and their config still lives at the XDG
+        // location. Read from it, then say so. A silent read would leave a user unaware
+        // that a `.rho/config.toml` on their next machine will not be read.
+        notices.push(format!(
+            "read config from {}. Move it to ~/.rho/config.toml so it sits with the \
+             session store, and rho reads one directory.",
+            legacy.display()
+        ));
+    }
     if loaded.provider_from_project {
         // A clone that names only `provider` chooses which of the user's keys is exercised, and
         // which vendor bills them. The endpoint is not moved, because an untrusted `base-url` is

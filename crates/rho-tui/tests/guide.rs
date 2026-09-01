@@ -434,17 +434,18 @@ fn the_guide_never_sends_a_prompt() {
 #[test]
 fn the_slash_list_marks_an_unbuilt_command() {
     // The help screen already marks an unwired key. The command list said nothing, so a
-    // user spent a keystroke to learn that `/model` does nothing.
+    // user spent a keystroke to learn that a command does nothing. `/sessions` is the
+    // current unbuilt example.
     let mut state = state_with_context();
     state.handle_key(key(KeyCode::Char('/')));
     let text = frame_text(&state, 100, 30);
     assert!(
-        text.contains("/model"),
+        text.contains("/sessions"),
         "the list draws the command: {text}"
     );
     let marked: Vec<&str> = text
         .lines()
-        .filter(|line| line.contains("/model") && line.contains("not built yet"))
+        .filter(|line| line.contains("/sessions") && line.contains("not built yet"))
         .collect();
     assert!(
         !marked.is_empty(),

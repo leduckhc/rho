@@ -254,11 +254,13 @@ fn backspace_past_the_slash_closes_the_list() {
 
 #[test]
 fn a_command_that_is_not_built_reports_instead_of_doing_nothing() {
+    // Silence reads as a defect. So an unbuilt command still lands on screen. `/sessions`
+    // is the current unbuilt example; it used to be `/model`, which is now the read half.
     let mut state = TuiState::default();
-    typed(&mut state, "/model");
+    typed(&mut state, "/sessions");
     state.handle_key(key(KeyCode::Enter));
     let reported = state.rows.iter().any(|row| match row {
-        rho_tui::Row::Error { message, .. } => message.contains("/model"),
+        rho_tui::Row::Error { message, .. } => message.contains("/sessions"),
         _ => false,
     });
     assert!(

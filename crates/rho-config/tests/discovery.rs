@@ -28,25 +28,46 @@ fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 }
 
 #[test]
-fn xdg_config_home_wins_over_home() {
+fn the_global_path_lives_under_dot_rho() {
+    // rho keeps every user-scoped file under one directory. So the config lives at
+    // ~/.rho/config.toml, next to sessions and the MCP cache.
+    let paths = ConfigPaths::discover(&env(&[("HOME", "/home/le")]), &PathBuf::from("/work"));
+    assert_eq!(
+        paths.global,
+        Some(PathBuf::from("/home/le/.rho/config.toml")),
+        "the global path is ~/.rho/config.toml"
+    );
+}
+
+#[test]
+fn xdg_config_home_reaches_the_legacy_slot() {
+    // rho reads the XDG location only as a fallback for anyone who tracked the pre-launch
+    // branch. The new path wins when both exist.
     let paths = ConfigPaths::discover(
         &env(&[("XDG_CONFIG_HOME", "/xdg"), ("HOME", "/home/le")]),
         &PathBuf::from("/work"),
     );
     assert_eq!(
         paths.global,
+        Some(PathBuf::from("/home/le/.rho/config.toml")),
+        "the new path is the primary"
+    );
+    assert_eq!(
+        paths.global_legacy,
         Some(PathBuf::from("/xdg/rho/config.toml")),
-        "XDG_CONFIG_HOME is the stated override, so it wins over HOME"
+        "XDG_CONFIG_HOME feeds the legacy fallback slot"
     );
 }
 
 #[test]
-fn home_supplies_the_global_path() {
+fn home_alone_seeds_the_legacy_fallback_too() {
+    // With no XDG variable the fallback still exists, at ~/.config/rho/config.toml, so a
+    // user who left their config there does not lose it on the first run.
     let paths = ConfigPaths::discover(&env(&[("HOME", "/home/le")]), &PathBuf::from("/work"));
     assert_eq!(
-        paths.global,
+        paths.global_legacy,
         Some(PathBuf::from("/home/le/.config/rho/config.toml")),
-        "with no XDG variable the global path sits under HOME"
+        "the fallback path sits under HOME when XDG_CONFIG_HOME is unset"
     );
 }
 
@@ -83,15 +104,22 @@ fn an_empty_home_value_yields_no_global_path() {
 
 #[test]
 fn an_empty_xdg_value_falls_back_to_home() {
-    // The empty check must not throw away a usable HOME beside an empty XDG variable.
+    // The empty check must not throw away a usable HOME beside an empty XDG variable. This
+    // now applies to the legacy fallback slot, because the primary path is under
+    // ~/.rho/config.toml regardless of XDG_CONFIG_HOME.
     let paths = ConfigPaths::discover(
         &env(&[("XDG_CONFIG_HOME", ""), ("HOME", "/home/le")]),
         &PathBuf::from("/work"),
     );
     assert_eq!(
         paths.global,
+        Some(PathBuf::from("/home/le/.rho/config.toml")),
+        "the primary path is under ~/.rho, and it takes HOME"
+    );
+    assert_eq!(
+        paths.global_legacy,
         Some(PathBuf::from("/home/le/.config/rho/config.toml")),
-        "an empty XDG value is unset, so HOME still supplies the path"
+        "an empty XDG value is unset, so HOME supplies the fallback slot"
     );
 }
 
@@ -114,7 +142,7 @@ fn discovery_names_a_path_that_does_not_exist() {
     );
     assert_eq!(
         paths.global,
-        Some(PathBuf::from("/no/such/home/.config/rho/config.toml"))
+        Some(PathBuf::from("/no/such/home/.rho/config.toml"))
     );
     assert_eq!(
         paths.project,

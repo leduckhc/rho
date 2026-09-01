@@ -552,6 +552,10 @@ fn every_field_is_classified_as_powerful_or_harmless() {
         "mcp_config",
         "base_url",
         "credentials",
+        // A named provider entry carries a base URL and a credential name. Both are
+        // powerful, so an untrusted layer's entries are cleared wholesale. See
+        // `SPEC-named-provider-profiles` section 3.
+        "providers",
     ];
     const HARMLESS: &[&str] = &[
         "provider",

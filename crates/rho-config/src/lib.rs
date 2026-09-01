@@ -467,10 +467,15 @@ impl EnvLookup for BTreeMap<String, String> {
 /// See `SPEC-config-call-site` section 2.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConfigPaths {
-    /// `$XDG_CONFIG_HOME/rho/config.toml`, else `$HOME/.config/rho/config.toml`.
-    /// `None` when neither variable is set. Discovery does not fail, and the caller
-    /// reports the absence, because a lost global file loses a hardened setting.
+    /// `$HOME/.rho/config.toml`. rho keeps every user-scoped file under one directory, so
+    /// data (sessions, MCP cache) and config sit side by side. `None` when `HOME` is unset.
+    /// Discovery does not fail, and the caller reports the absence.
     pub global: Option<PathBuf>,
+    /// `$XDG_CONFIG_HOME/rho/config.toml`, else `$HOME/.config/rho/config.toml`. This is
+    /// the pre-launch XDG path, kept as a **fallback** for anyone who tracked the branch.
+    /// `Config::load` reads it only when the new path holds no file, and it prints a notice
+    /// naming the new location.
+    pub global_legacy: Option<PathBuf>,
     /// `<bootstrap_root>/.rho/config.toml`.
     pub project: Option<PathBuf>,
     /// Candidate paths of files that can inject environment variables: `.envrc` for direnv,
@@ -556,27 +561,28 @@ fn env_injecting_candidates(project_root: &Path, home: Option<&Path>) -> Vec<Pat
 
 impl ConfigPaths {
     /// Discover both config-file paths, and the candidate env-injecting file paths. `env`
-    /// supplies `XDG_CONFIG_HOME` and `HOME`, so a test never reads the real home directory.
+    /// supplies `HOME`, so a test never reads the real home directory.
     ///
     /// The config-file paths are pure joins. The env-injecting candidate list walks the
     /// filesystem upward from `bootstrap_root` to the git root, so this function stats `.git`
     /// along the way. It reads no config file, and it never reads an env-injecting file.
+    ///
+    /// The global config lives at `~/.rho/config.toml`. The old XDG location
+    /// `~/.config/rho/config.toml` is read as a fallback for anyone who tracked the
+    /// pre-launch branch, and rho prints a notice pointing at the new path.
     pub fn discover(env: &dyn EnvLookup, bootstrap_root: &Path) -> ConfigPaths {
-        // `XDG_CONFIG_HOME` is the stated override, so it wins. An empty value counts as
-        // unset, because an exported-but-empty variable is a common shell accident and
-        // `/rho/config.toml` at the filesystem root is never what the user meant.
-        let global = non_empty(env.get("XDG_CONFIG_HOME"))
+        // One directory for everything under `~/.rho/`, so a user never guesses whether
+        // config or data lives where. The old XDG location is a fallback, and only that.
+        let home = non_empty(env.get("HOME")).map(PathBuf::from);
+        let global = home
+            .clone()
+            .map(|home| home.join(".rho").join("config.toml"));
+        let global_legacy = non_empty(env.get("XDG_CONFIG_HOME"))
             .map(|base| PathBuf::from(base).join("rho").join("config.toml"))
-            .or_else(|| {
-                non_empty(env.get("HOME")).map(|home| {
-                    PathBuf::from(home)
-                        .join(".config")
-                        .join("rho")
-                        .join("config.toml")
-                })
-            });
+            .or_else(|| home.map(|home| home.join(".config").join("rho").join("config.toml")));
         ConfigPaths {
             global,
+            global_legacy,
             project: Some(bootstrap_root.join(".rho").join("config.toml")),
             // The upward scan is bounded by the git root and by the home directory, so a
             // parent `.envrc` inside the clone gates but neither `~/.envrc` nor a file above
@@ -666,6 +672,9 @@ pub enum ProjectTrust {
 #[derive(Clone, Debug, Default)]
 pub struct Sources {
     pub(crate) global_file: Option<PathBuf>,
+    /// The pre-launch XDG config path, kept as a fallback. `Config::load` reads it only
+    /// when `global_file` holds no file. See `ConfigPaths::global_legacy`.
+    pub(crate) global_legacy_file: Option<PathBuf>,
     pub(crate) project_file: Option<PathBuf>,
     pub(crate) profile: Option<String>,
     /// The `RHO_*` variables, by name and value. The CLI collects them.
@@ -686,6 +695,7 @@ impl Sources {
     pub fn from_paths(paths: ConfigPaths) -> Sources {
         Sources {
             global_file: paths.global,
+            global_legacy_file: paths.global_legacy,
             project_file: paths.project,
             profile: None,
             env: Vec::new(),
@@ -775,6 +785,10 @@ pub struct Config {
     /// `dropped_keys`, because that field's notice says "pass --trust-project to use them"
     /// and trust does not lift this rule. See `D-a-project-file-only-lowers-a-limit`.
     pub lowered_limits: Vec<String>,
+    /// The pre-launch XDG path the config was read from, when it was. `Some` means rho
+    /// read the old location and skipped the new one because the new one held no file. The
+    /// CLI reads this to print a migration notice. See `D-one-directory-for-rho-state`.
+    pub legacy_config_path: Option<PathBuf>,
 }
 
 impl ConfigLayer {
@@ -1574,12 +1588,23 @@ impl Config {
     /// Load, merge, and resolve. This is the one entry point.
     pub fn load(sources: &Sources) -> Result<Config, ConfigError> {
         let mut merged = Config::defaults();
-        if let Some(path) = &sources.global_file {
-            // A global file sits in the user's own home directory. A home directory is
-            // not a clone, so it is never gated.
-            if let Some(layer) = Config::read_file(path)? {
-                merged = merged.merge(layer);
-            }
+        // Try the new path (~/.rho/config.toml) first. If it holds no file, try the XDG
+        // fallback for anyone who tracked the pre-launch branch. A home directory is not a
+        // clone, so either path is trusted; the fallback only exists to migrate.
+        let mut read_from_global = false;
+        if let Some(path) = &sources.global_file
+            && let Some(layer) = Config::read_file(path)?
+        {
+            merged = merged.merge(layer);
+            read_from_global = true;
+        }
+        let mut legacy_config_path: Option<PathBuf> = None;
+        if !read_from_global
+            && let Some(path) = &sources.global_legacy_file
+            && let Some(layer) = Config::read_file(path)?
+        {
+            merged = merged.merge(layer);
+            legacy_config_path = Some(path.clone());
         } // The project file arrives with a clone, so its powerful keys need `--trust-project`,
         // and its subagent limits may only lower a cap.
         // See SPEC-config-call-site section 5, SPEC-subagent-limits-are-a-floor, and the probe
@@ -1750,6 +1775,7 @@ impl Config {
             providers: merged.providers,
             lowered_limits,
             provider_from_project,
+            legacy_config_path,
         })
     }
 
