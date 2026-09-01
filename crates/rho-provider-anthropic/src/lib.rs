@@ -28,6 +28,10 @@ pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// turn; a measurement takes precedence.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// The path segment appended to the base URL for a completion. `/v1/messages` is the
+/// stable Anthropic URL; the base URL provides the host and any route prefix.
+pub const MESSAGES_PATH: &str = "/v1/messages";
+
 /// Configuration for one Anthropic provider instance.
 ///
 /// Every field is set at construction time. The credential is already resolved: this crate
@@ -134,12 +138,26 @@ impl AnthropicConfig {
 
 /// The Anthropic Messages provider.
 pub struct AnthropicProvider {
-    _config: AnthropicConfig,
+    config: AnthropicConfig,
+    http: reqwest::Client,
 }
 
 impl AnthropicProvider {
     pub fn new(config: AnthropicConfig) -> Self {
-        Self { _config: config }
+        let http = reqwest::Client::builder()
+            .timeout(config.timeout)
+            .build()
+            .expect("reqwest client builds under a valid config");
+        Self { config, http }
+    }
+
+    /// The URL for a completion request. Public so a test can assert it.
+    pub fn messages_url(&self) -> String {
+        format!(
+            "{}{}",
+            self.config.base_url.trim_end_matches('/'),
+            MESSAGES_PATH
+        )
     }
 }
 
@@ -151,9 +169,130 @@ impl Provider for AnthropicProvider {
 
     async fn stream(
         &self,
-        _request: CompletionRequest,
-        _cancel: CancelToken,
+        request: CompletionRequest,
+        cancel: CancelToken,
     ) -> Result<ProviderStream, ProviderError> {
-        todo!("build the request, POST /v1/messages, and map SSE onto StreamEvent")
+        use async_stream::stream;
+        use eventsource_stream::Eventsource;
+        use futures::StreamExt;
+
+        if self.config.credential.expose().is_empty() {
+            return Err(ProviderError::Auth(
+                "the Anthropic API key is empty. Set `ANTHROPIC_API_KEY` or add \
+                 `[credentials.anthropic]` to your config."
+                    .to_string(),
+            ));
+        }
+
+        let url = self.messages_url();
+        let body = build_request_body(&request);
+
+        let mut builder = self
+            .http
+            .post(&url)
+            .header("x-api-key", self.config.credential.expose())
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream");
+        for (name, value) in &self.config.headers {
+            builder = builder.header(name, value);
+        }
+        let request_future = builder.json(&body).send();
+
+        // Cancel a pending connection cleanly. Once the response head arrives, the stream
+        // arm below owns cancel.
+        let response = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ProviderError::Canceled),
+            result = request_future => result.map_err(|error| {
+                ProviderError::Transport(error.to_string())
+            })?,
+        };
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(map_status_error(status));
+        }
+
+        let byte_stream = response.bytes_stream();
+        let stream = stream! {
+            let mut decoder = sse::Decoder::new();
+            let mut events = byte_stream.eventsource();
+            loop {
+                let next = tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {
+                        yield Err(ProviderError::Canceled);
+                        return;
+                    }
+                    item = events.next() => item,
+                };
+                let Some(item) = next else { break };
+                match item {
+                    Ok(event) => {
+                        // A default `Event` from eventsource-stream has no name.
+                        // Anthropic always names its events, but be defensive.
+                        if event.event.is_empty() { continue; }
+                        let name = event.event.as_str();
+                        // `error` is a stream-level fatal signal.
+                        if name == "error" {
+                            // A stream-level error. Do not put the peer body in the error
+                            // message: it may reflect a credential. See
+                            // `D-a-client-error-carries-no-peer-body`.
+                            yield Err(ProviderError::Server { status: 0 });
+                            return;
+                        }
+                        let data: Value = match serde_json::from_str(&event.data) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                yield Err(ProviderError::Decode(format!(
+                                    "anthropic {name} event did not parse: {error}"
+                                )));
+                                return;
+                            }
+                        };
+                        match decoder.on_event(name, &data) {
+                            Ok(out) => for stream_event in out { yield Ok(stream_event); }
+                            Err(error) => {
+                                yield Err(error);
+                                return;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        yield Err(ProviderError::Transport(error.to_string()));
+                        return;
+                    }
+                }
+            }
+        };
+        Ok(Box::pin(stream))
+    }
+}
+
+/// Map an HTTP status to a `ProviderError`. The body is not read, per
+/// `D-a-client-error-carries-no-peer-body`. `advice` is `&'static str`, so a runtime
+/// string that could carry a peer body cannot land here by construction.
+fn map_status_error(status: reqwest::StatusCode) -> ProviderError {
+    let code = status.as_u16();
+    match code {
+        401 => ProviderError::Auth(
+            "anthropic rejected the API key (status 401). Set `ANTHROPIC_API_KEY` or add \
+             `[credentials.anthropic]` to your config."
+                .to_string(),
+        ),
+        403 => ProviderError::Auth(
+            "anthropic refused the request (status 403). The credential is not authorised \
+             for this endpoint."
+                .to_string(),
+        ),
+        429 => ProviderError::RateLimited {
+            retry_after_ms: None,
+        },
+        400..=499 => ProviderError::Client {
+            status: code,
+            advice: "anthropic refused the request. Check the model id and the prompt.",
+        },
+        _ => ProviderError::Server { status: code },
     }
 }
