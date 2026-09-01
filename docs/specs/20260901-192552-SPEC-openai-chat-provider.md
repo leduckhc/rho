@@ -170,3 +170,58 @@ Audio, image, structured outputs, Azure Responses API.
 ```
 | F-openai-provider | OpenAI provider | rho reaches `api.openai.com` and xdent OpenAI routes with a new `Provider` impl in `rho-provider-openrouter`. Wire: OpenAI Chat Completions API. Reasoning effort sends `reasoning_effort: low/medium/high`. No reasoning text streams; only token counts. Cost is `None`. Config: `OpenAiConfig { base_url, api_key, retry }`. | `rho-provider-openrouter`, `rho-core` | `draft` | Wire client exists. New `impl` changes `Provider::id`, `base_url` default, credential variable. |
 ```
+
+## Amendments after the contract review, binding
+
+A contract review found three blockers and one major here, and named this spec the one most
+likely to be regretted. Where an amendment disagrees with the text above, the amendment
+wins.
+
+### 1. The crate is renamed to `rho-provider-openai-chat`
+
+`D-one-openai-client-two-providers` rested on a false premise: that the wire code was 600
+shared lines with a 3-line difference. `build_request_body` at
+`crates/rho-provider-openrouter/src/lib.rs:684` hardcodes `"max_tokens"`, which is the one
+wire difference this spec names. And `stream`/`send_with_retry`/`send_once` are
+`impl OpenRouterProvider` methods that read `self.config: OpenRouterConfig`, so a second
+impl cannot share them without a refactor. The crate name `rho-provider-openrouter` also
+lies the moment it hosts an `OpenAi` provider, which is the shape the parent decision
+`D-a-provider-is-named-by-its-wire-protocol` was written to prevent.
+
+So the crate is **renamed** `rho-provider-openai-chat`, and `OpenRouterProvider` becomes
+one impl inside it. See `D-provider-openai-chat-owns-the-wire`. `OpenRouterProvider`'s id
+stays `"openrouter"`, so no user-visible change follows the rename.
+
+### 2. The wire refactor precedes the second impl
+
+Order matters. The `build_request_body`, `stream`, `send_with_retry` and `send_once` sites
+must move to free functions or a shared inner type first. Only then does `OpenAiProvider`
+land. Any other order is copy-paste, and the "shared" story is a lie the reader can measure.
+
+Tests: `both_providers_share_the_request_builder`,
+`the_openai_provider_sends_max_completion_tokens`,
+`the_openrouter_provider_still_sends_max_tokens`.
+
+### 3. Reasoning tokens do not reach `Usage`
+
+The reviewer noted `Usage.reasoning_tokens` does not exist. `SPEC-usage-carries-reasoning`
+is draft and its `F-reasoning-token-count` row sits at `considered`, not `planned`, because
+the user asked for reasoning **text**, not a count, and the text already ships.
+
+So this spec does not populate `Usage.reasoning_tokens`, and it does not name a test that
+reads that field. If a later feature builds the counter, it can add the mapping at
+`usage.completion_tokens_details.reasoning_tokens`. The wire path is measured, in
+`docs/verification/provider-reasoning-probe.md`, so the follow-up does not re-probe.
+
+### 4. Cost stays `None`, even where the wire carries a cost
+
+The xdent proxy returns `usage.cost_details.upstream_inference_cost`, and OpenRouter
+returns `usage.cost`. `OpenAiProvider` sees the OpenAI path only, which reports no cost,
+so `Usage.cost_usd` is `None`. `OpenRouterProvider` keeps its existing cost read, because
+that is a measured number and this spec must not lose it.
+
+### 5. Persisted shape is not widened
+
+`TranscriptBody::Usage` carries `input` and `output`. So reasoning tokens and cost details
+are display-only, exactly as they are on the Anthropic side. A future feature widens the
+persisted record with a migration.

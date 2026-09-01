@@ -270,3 +270,101 @@ No edit to `rho-provider-anthropic` is needed. The provider already reads
 - **Does it report reasoning tokens?** No. Live probe found none.
 - **How does it handle cache counts?** Sum the two ephemeral fields. Default absent to zero.
 - **Empty signature?** Dropped, matching `D-an-empty-signature-is-no-signature`.
+
+## Amendments after the contract review, binding
+
+A contract review returned two blockers and three majors against this spec, plus one
+independent finding on the cache mapping. Where an amendment and the text above disagree,
+the amendment wins.
+
+### 1. The credential type is `Secret`, not `Credential`
+
+`rho_core::Credential` does not exist. The real types are `rho_core::Secret` (a resolved
+value) and `rho_config::CredentialSource` (an unresolved reference). The provider takes an
+already-resolved secret:
+
+```rust
+pub struct AnthropicConfig {
+    pub base_url: String,
+    pub credential: rho_core::Secret,
+    pub headers: Vec<(String, String)>,
+    pub timeout: std::time::Duration,
+}
+```
+
+The named-entry lookup, in `SPEC-named-provider-profiles`, is the one place that resolves.
+A built-in caller still uses `Config::resolve_credential_or_env("anthropic", "ANTHROPIC_API_KEY")`
+against the merged credentials, and hands the resolved `Secret` to this config. That is one
+resolution site, not two.
+
+### 2. Cache counts map straight through, no sum
+
+`D-anthropic-cache-fields-sum` shipped the wrong direction: it assigned Anthropic's **write**
+breakdown to rho's **read** field. See `D-anthropic-cache-fields-map` for the correction.
+The mapping is:
+
+```rust
+usage.cache_read_tokens  = anthropic_usage.cache_read_input_tokens;
+usage.cache_write_tokens = anthropic_usage.cache_creation_input_tokens;
+```
+
+Both default to zero. The ephemeral breakdown is out of scope.
+
+### 3. Cache and reasoning are display-only at launch
+
+`TranscriptBody::Usage` at `crates/rho-core/src/transcript.rs:68` carries only `input` and
+`output`. So cache counts, cost, and any reasoning-token count are display-only. A fork or a
+resume writes the record without them. This launch does not widen the persisted shape; a
+later feature does that with a migration.
+
+The spec states this out loud, per the rule that a claim rho cannot prove is not made.
+`docs/guide/status.md` may not say cache counts persist.
+
+### 4. An unknown SSE event fails closed for content
+
+Section 4 said "unknown event type → log at debug, ignore". A future content-bearing event
+would vanish silently, which is the `ToolKind::Other` family. The rule is now split by
+purpose:
+
+- **Framing events** (`ping`, `error` at stream-scope, any future non-content event) may be
+  ignored, and only for these the log-and-continue rule applies. Named as a closed set.
+- **Any other unknown event** returns `ProviderError::Decode`, with the event name in the
+  message. rho does not guess whether a new event carries content.
+
+Test: `an_unknown_content_event_fails_decode`.
+
+### 5. The tool_use input accumulator has a byte cap
+
+Section 4 said "assemble them into one string, then parse". The `input_json_delta`
+accumulator was unbounded. A large or hostile `tool_use.input` grew a string without limit,
+which is the 8 MB → 805 MB family.
+
+The accumulator is capped at 1 MiB, the same shape as `MAX_CONFIG_BYTES`:
+
+```rust
+pub const MAX_TOOL_INPUT_BYTES: usize = 1024 * 1024;
+```
+
+An overflow returns `ProviderError::Decode`, with the tool name in the message. The
+`content` array itself gains a count cap of 256 blocks per turn, refused rather than
+truncated.
+
+Tests: `a_tool_use_input_over_the_cap_fails_decode`,
+`a_content_array_over_the_cap_fails_decode`.
+
+### 6. The extension-point claim was wrong
+
+The earlier "extension point" said a third party implements `rho_core::CredentialSource`.
+That type is a concrete enum in `rho-config`, not a trait in `rho-core`. There is nothing
+to implement.
+
+The real extension point of this crate is the same as every provider: a fourth crate
+implements `rho_core::Provider`, and named profiles carry the new protocol string. Nothing
+in this crate is a trait a third party plugs into.
+
+### 7. Numbers marked provisional
+
+The 90 second timeout is unmeasured. A first-byte p99 for `api.anthropic.com` under a
+reasoning turn is the number the spec needs, and it is not in hand. So the value is
+provisional, and a later measurement takes precedence. Same for `MAX_TOOL_INPUT_BYTES` and
+the 256-block content cap.

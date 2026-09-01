@@ -212,3 +212,84 @@ Each test name states its assertion.
 - Per-provider retry overrides. Retry policy is global.
 - A default model field on the entry. A model is a CLI flag.
 - Custom headers. A future addition, when a real proxy needs one.
+
+## Amendments after the contract review, binding
+
+A contract review returned two blockers here, tied to reconciliation with the other two
+specs in this batch. Where an amendment disagrees with the text above, the amendment wins.
+
+### 1. Load-time errors go in `ConfigError`
+
+The spec named `BuiltinCollision`, `UnknownProtocol`, `TooManyProviders`, and four others as
+new `ProviderError` variants. That contradicts the spec's own decision
+`D-a-built-in-is-never-shadowed`, which says the error is a `ConfigError`. It also invents
+a third `ProviderError` type where two already sit at load, and it edits a shared exhaustive
+enum for every new load-time defect.
+
+These are load-time errors on the config layer, so they belong on `ConfigError`, in
+`rho-config`. `ProviderError` stays the wire taxonomy. The reuse rule holds: `Unknown{name}`
+on `rho-cli::ProviderError` already covers the runtime lookup.
+
+The load-time variants added to `ConfigError`:
+
+```rust
+BuiltinCollision   { id: String }
+UnknownProtocol    { protocol: String }
+MissingBaseUrl     { id: String }
+MissingCredential  { id: String, credential: String }
+UntrustedProjectProvider { id: String }
+TooManyProviders   { limit: usize, seen: usize }
+FieldTooLong       { field: &'static str, limit: usize, seen: usize }
+```
+
+### 2. The credential resolution site is the named-entry lookup, once
+
+The reviewer found two resolution paths and no precedence rule. Rewritten as one:
+
+- A **built-in** provider (`bedrock`, `azure`, `openrouter`, `anthropic`, `openai-chat`,
+  and whatever the built-in list is when a launcher runs) resolves through
+  `Config::resolve_credential_or_env(name, env_var)`. The env var is the fallback.
+- A **named-entry** provider resolves through `Config::credentials.get(entry.credential)`.
+  The env var is **not** a fallback. A named entry must name a real credential.
+
+So precedence is: `--provider xdent-claude` goes through the named lookup; `--provider anthropic`
+goes through the built-in path with env fallback. A user who wants an env fallback for their
+named entry adds a `[credentials.xdent-key] type = "env" name = "XDENT_API_KEY"` block, per
+the existing shape.
+
+Both providers then take an already-resolved `rho_core::Secret`, matching the amendment on
+`SPEC-anthropic-messages-provider`.
+
+### 3. The crate reference names `rho-provider-openai-chat`
+
+Section 5 step 4 now reads:
+
+```
+"anthropic"        -> rho_provider_anthropic with (entry.base_url, secret)
+"openai-chat"      -> rho_provider_openai_chat with (entry.base_url, secret)
+"openai-responses" -> rho_provider_azure with (entry.base_url, secret)
+```
+
+`rho-provider-openai-chat` is the renamed `rho-provider-openrouter`, per
+`D-provider-openai-chat-owns-the-wire`.
+
+### 4. The shadow precedence test is replaced
+
+Test 2, `a_built_in_is_found_before_a_named_entry`, was vacuous: test 3 already refuses a
+same-named entry at load, so the precedence branch it tests can never be constructed. It is
+replaced with `a_named_entry_with_a_builtin_id_is_refused_at_load`, which asserts the load
+failure directly.
+
+### 5. Numbers marked provisional
+
+The 64 max entries, the 2048-byte URL cap, and the 128-byte id cap are provisional. The 2048
+number came from a browser URL limit that does not apply to a proxy path. A later
+measurement takes precedence.
+
+### 6. The extension point stays a shared match arm, for now
+
+The reviewer flagged step 4 as a shared-code edit per new protocol. That is real. This spec
+keeps the match, because the choice is between an edit to one file per new protocol and a
+dynamic registry the project does not need for three protocols today. When a fifth
+protocol arrives, the answer flips. The extension point is stated as such: adding a
+protocol edits one file at the CLI, not a shared trait.
