@@ -30,17 +30,19 @@ Contents, top to bottom:
 4. When the starred list is empty and the current model is the only row, no notice needs
    to say so; the header is proof.
 
-Keys inside the panel:
+Keys inside the panel are stated in `D-model-picker-allows-fuzzy-search-and-typed-fallback`,
+which amended this decision to add fuzzy filtering. The panel takes `↑ ↓ Enter Tab
+Shift+Tab Esc Backspace` as controls, and every printable character types into a fuzzy
+query. The one-line summary:
 
-- `↑ / ↓ / j / k` move the selection. The selection wraps neither end.
-- `Enter` applies the highlighted model. If the row has an effort, apply it too. Otherwise
-  keep the current effort.
-- `e` cycles the highlighted row's effort through `unset → off → low → medium → high →
+- `↑ / ↓` move the selection over the filtered rows. The selection wraps neither end.
+- `Enter` applies the highlighted filtered row, or the query verbatim when no row matches.
+- `Tab` cycles the highlighted row's effort through `unset → off → low → medium → high →
   xhigh → unset`. The change is preview only. `Enter` is what applies.
-- `*` toggles the star on the highlighted row. The write persists at once, so quitting the
-  panel with esc does not throw a star away.
-- `esc` closes with no change.
-- Any other key is ignored.
+- `Shift+Tab` toggles the star on the highlighted row. The write persists at once.
+- `Esc` closes with no change.
+- `Backspace` removes the last query character.
+- Any other printable character appends to the query.
 
 ## What this rules out
 
@@ -49,12 +51,8 @@ Keys inside the panel:
   arm of the slash key handler.
 - A full-screen picker. rho draws a transcript, and the transcript stays on screen while
   a user picks. It is context.
-- A `/model` list that grows as the user types. Filtering a five-row list adds keys, and
-  the picker is short by design. A user with more than a handful of favourites edits the
-  file directly.
 - A picker that lists every model the provider knows. Listing is a later feature, per
   D-a-listing-failure-never-stops-a-session, and v1 has no `Provider::list_models`.
-- A picker with a text field. There is no filter, so there is no text field.
 
 ## Why
 

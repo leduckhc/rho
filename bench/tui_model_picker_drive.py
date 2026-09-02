@@ -119,6 +119,55 @@ def main():
         )
         findings.append("Enter applied starred-a; banner updated")
 
+        # 2b. Fuzzy filter: `/model`, type `b`, Enter picks starred-b. See
+        # `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
+        os.write(fd, b"/model\r")
+        pump(fd, stream, 1.0)
+        os.write(fd, b"b")   # type into query
+        pump(fd, stream, 0.4)
+        r2b = rows(screen)
+        assert any("> b" in row for row in r2b), (
+            f"the query prompt draws `> b`: {r2b}"
+        )
+        # Picker rows carry a `☆` or `★` glyph, so a filter check reads only picker
+        # rows and not the banner (where the current id is drawn without a glyph).
+        picker_rows = [row for row in r2b if "☆" in row or "★" in row]
+        assert any("starred-b" in row for row in picker_rows), (
+            f"starred-b survives the filter: {picker_rows}"
+        )
+        assert not any("starred-a" in row for row in picker_rows), (
+            f"starred-a drops from the filter: {picker_rows}"
+        )
+        os.write(fd, b"\r")   # apply
+        pump(fd, stream, 1.2)
+        r2c = rows(screen)
+        assert any("starred-b" in row and "·" in row for row in r2c), (
+            f"banner switched to starred-b: {r2c}"
+        )
+        findings.append(
+            "fuzzy typing `b` filtered to starred-b and Enter applied it"
+        )
+
+        # 2c. Typed fallback: a query that matches nothing still applies on Enter.
+        os.write(fd, b"/model\r")
+        pump(fd, stream, 1.0)
+        for ch in b"vendor/unknown-model":
+            os.write(fd, bytes([ch]))
+        pump(fd, stream, 0.6)
+        os.write(fd, b"\r")
+        pump(fd, stream, 1.0)
+        r2d = rows(screen)
+        assert any("vendor/unknown-model" in row for row in r2d), (
+            f"a no-match query applied verbatim: {r2d}"
+        )
+        findings.append(
+            "a query with no match applied verbatim as the model id"
+        )
+
+        # Reset to a starred model so the star toggle probe uses one we can find.
+        os.write(fd, b"/model starred-a\r")
+        pump(fd, stream, 1.0)
+
         # 3. `/model direct-id` applies immediately.
         os.write(fd, b"/model direct-id\r")
         pump(fd, stream, 1.2)
@@ -158,27 +207,24 @@ def main():
         )
         findings.append("/effort loud pushed an error naming the valid levels")
 
-        # 7. Star toggle. Open the picker, press `*` on the second row, esc, reopen,
-        #    the row is no longer starred.
+        # 7. Star toggle. Open the picker, filter to `starred-b`, press Shift+Tab to
+        #    unstar it, esc, reopen and confirm the file no longer names it.
         os.write(fd, b"/model\r")
         pump(fd, stream, 1.0)
-        # Move to the first starred row (`direct-id` is now current; `starred-a` and
-        # `starred-b` follow).
-        os.write(fd, b"\x1b[B")
-        pump(fd, stream, 0.3)
-        os.write(fd, b"*")   # unstar starred-a
-        pump(fd, stream, 0.6)
+        os.write(fd, b"b")   # filter to the one starred-b row
+        pump(fd, stream, 0.4)
+        os.write(fd, b"\x1b[Z")   # Shift+Tab (BackTab) toggles star
+        pump(fd, stream, 0.8)
         os.write(fd, b"\x1b")
         pump(fd, stream, 0.4)
         with open(os.path.join(home, ".rho/starred-models.toml")) as f:
             body = f.read()
-        assert "starred-a" not in body, (
-            f"file no longer lists starred-a: {body!r}"
+        assert "starred-b" not in body, (
+            f"file no longer lists starred-b after Shift+Tab: {body!r}"
         )
-        assert "starred-b" in body, (
-            f"file still lists starred-b: {body!r}"
+        findings.append(
+            "Shift+Tab on a filtered row removed starred-b from the file"
         )
-        findings.append("* removed starred-a from ~/.rho/starred-models.toml")
 
         # Quit with ctrl-c twice.
         os.write(fd, b"\x03")

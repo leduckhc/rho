@@ -117,14 +117,58 @@ pub enum Panel {
     ModelPicker(ModelPicker),
 }
 
-/// The model picker panel state: the rows to draw and the highlighted row.
+/// The model picker panel state: the rows to draw, the highlighted row, and the fuzzy
+/// query typed since the panel opened. See
+/// `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ModelPicker {
     /// The rows the picker draws. The current model is first; every other row is a
     /// starred model. See `D-the-model-picker-is-a-panel`.
     pub rows: Vec<PickerRow>,
-    /// The highlighted row index into `rows`.
+    /// The highlighted row index into the **filtered** rows, not `rows`. See
+    /// `ModelPicker::filtered_indices`.
     pub selected: usize,
+    /// The fuzzy query. Empty means no filter, so every row of `rows` is shown.
+    pub query: String,
+}
+
+impl ModelPicker {
+    /// The indices of `self.rows` that pass the fuzzy filter. See `fuzzy_match`.
+    ///
+    /// An empty query returns every index in original order. A non-empty query keeps the
+    /// row order the picker started with, so the current row stays first. See
+    /// `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
+    pub fn filtered_indices(&self) -> Vec<usize> {
+        if self.query.is_empty() {
+            return (0..self.rows.len()).collect();
+        }
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| fuzzy_match(&self.query, &row.id))
+            .map(|(index, _)| index)
+            .collect()
+    }
+}
+
+/// Case-insensitive subsequence match: every character of `query` appears in `target` in
+/// order, not necessarily contiguous. `sn45` matches `claude-sonnet-4-5`. See
+/// `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
+pub fn fuzzy_match(query: &str, target: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let target_lower = target.to_lowercase();
+    let mut haystack = target_lower.chars();
+    'outer: for needle in query.chars().flat_map(|c| c.to_lowercase()) {
+        for candidate in haystack.by_ref() {
+            if candidate == needle {
+                continue 'outer;
+            }
+        }
+        return false;
+    }
+    true
 }
 
 /// One row of the model picker.
@@ -1329,49 +1373,84 @@ impl TuiState {
                 effort: None,
             });
         }
-        self.panel = Panel::ModelPicker(ModelPicker { rows, selected: 0 });
+        self.panel = Panel::ModelPicker(ModelPicker {
+            rows,
+            selected: 0,
+            query: String::new(),
+        });
     }
 
     /// Route a key while the model picker is open. See
-    /// `D-the-model-picker-is-a-panel`.
+    /// `D-the-model-picker-is-a-panel` and
+    /// `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
+    ///
+    /// `j`, `k`, `e`, and `*` are legitimate id characters, so they type into the query.
+    /// Tab cycles effort; BackTab (Shift+Tab) toggles a star. Enter on an empty filter
+    /// applies the query verbatim, so a typed id always reaches the provider.
     fn handle_model_picker_key(&mut self, code: KeyCode, mut picker: ModelPicker) -> KeyAction {
         match code {
             KeyCode::Esc => {
                 self.panel = Panel::None;
                 KeyAction::None
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 picker.selected = picker.selected.saturating_sub(1);
                 self.panel = Panel::ModelPicker(picker);
                 KeyAction::None
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                let last = picker.rows.len().saturating_sub(1);
+            KeyCode::Down => {
+                let last = picker.filtered_indices().len().saturating_sub(1);
                 picker.selected = (picker.selected + 1).min(last);
                 self.panel = Panel::ModelPicker(picker);
                 KeyAction::None
             }
             KeyCode::Enter => {
-                let Some(row) = picker.rows.get(picker.selected).cloned() else {
-                    self.panel = Panel::None;
-                    return KeyAction::None;
-                };
-                let selection = ModelSelection {
-                    model: row.id,
-                    reasoning_effort: row.effort.or(self.reasoning_effort),
-                };
+                let filtered = picker.filtered_indices();
                 self.panel = Panel::None;
-                KeyAction::ApplySelection(selection)
+                if filtered.is_empty() {
+                    // No match: apply the query verbatim, per
+                    // `D-model-picker-allows-fuzzy-search-and-typed-fallback` and
+                    // `D-a-listing-failure-never-stops-a-session`. A blank query with no
+                    // rows is impossible; the current model is always a row.
+                    if picker.query.is_empty() {
+                        return KeyAction::None;
+                    }
+                    let query = picker.query.clone();
+                    self.push_notice(format!("model set to {query}"));
+                    return KeyAction::ApplySelection(ModelSelection {
+                        model: query,
+                        reasoning_effort: self.reasoning_effort,
+                    });
+                }
+                let selected = picker.selected.min(filtered.len() - 1);
+                let row_index = filtered[selected];
+                let row = &picker.rows[row_index];
+                KeyAction::ApplySelection(ModelSelection {
+                    model: row.id.clone(),
+                    reasoning_effort: row.effort.or(self.reasoning_effort),
+                })
             }
-            KeyCode::Char('e') => {
-                if let Some(row) = picker.rows.get_mut(picker.selected) {
-                    row.effort = next_effort_in_cycle(row.effort);
+            KeyCode::Tab => {
+                let filtered = picker.filtered_indices();
+                if !filtered.is_empty() {
+                    let selected = picker.selected.min(filtered.len() - 1);
+                    let row_index = filtered[selected];
+                    if let Some(row) = picker.rows.get_mut(row_index) {
+                        row.effort = next_effort_in_cycle(row.effort);
+                    }
                 }
                 self.panel = Panel::ModelPicker(picker);
                 KeyAction::None
             }
-            KeyCode::Char('*') => {
-                let Some(row) = picker.rows.get_mut(picker.selected) else {
+            KeyCode::BackTab => {
+                let filtered = picker.filtered_indices();
+                if filtered.is_empty() {
+                    self.panel = Panel::ModelPicker(picker);
+                    return KeyAction::None;
+                }
+                let selected = picker.selected.min(filtered.len() - 1);
+                let row_index = filtered[selected];
+                let Some(row) = picker.rows.get_mut(row_index) else {
                     self.panel = Panel::ModelPicker(picker);
                     return KeyAction::None;
                 };
@@ -1389,7 +1468,21 @@ impl TuiState {
                 self.panel = Panel::ModelPicker(picker);
                 KeyAction::PersistStarred(list)
             }
-            // Any other key is ignored on purpose. See `D-the-model-picker-is-a-panel`.
+            KeyCode::Backspace => {
+                picker.query.pop();
+                // A filter that shrinks may leave the selection past the new last row.
+                // Reset to zero so the highlighted row is always visible.
+                picker.selected = 0;
+                self.panel = Panel::ModelPicker(picker);
+                KeyAction::None
+            }
+            KeyCode::Char(ch) if !ch.is_control() => {
+                picker.query.push(ch);
+                picker.selected = 0;
+                self.panel = Panel::ModelPicker(picker);
+                KeyAction::None
+            }
+            // Any other key is ignored on purpose.
             _ => KeyAction::None,
         }
     }

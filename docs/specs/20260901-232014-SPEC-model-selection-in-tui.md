@@ -27,6 +27,7 @@ The decisions this spec obeys, in order:
 - D-starred-models-live-in-their-own-file
 - D-the-model-picker-is-a-panel
 - D-model-arg-bypasses-the-picker
+- D-model-picker-allows-fuzzy-search-and-typed-fallback
 - D-a-model-descriptor-carries-no-capability-claim
 - D-a-listing-failure-never-stops-a-session
 
@@ -69,9 +70,21 @@ impl Session {
 pub struct ModelPicker {
     /// The rows the picker draws, current first, starred after.
     pub rows: Vec<PickerRow>,
-    /// The highlighted row index.
+    /// The highlighted row index into the **filtered** rows.
     pub selected: usize,
+    /// The fuzzy query. Empty means no filter. See
+    /// `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
+    pub query: String,
 }
+
+impl ModelPicker {
+    /// The indices of `rows` that pass the fuzzy filter, in original order.
+    pub fn filtered_indices(&self) -> Vec<usize>;
+}
+
+/// Case-insensitive subsequence match: every character of `query` appears in `target`
+/// in order, not necessarily contiguous. `sn45` matches `claude-sonnet-4-5`.
+pub fn fuzzy_match(query: &str, target: &str) -> bool;
 
 /// One row of the model picker.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,19 +139,32 @@ inside `App`) can write the mutex from the app loop. See the decision.
 
 - The picker opens only through `/model` with no argument. It never opens on any other
   key.
-- Every row shows the id. A star column is `★` when starred, `☆` when not. `[effort=<name>]`
-  is drawn at the end of a row when the row has a preview effort. The current row also
-  reads `(current)` at the end.
-- `Enter` on the highlighted row calls `Session::set_selection` with `ModelSelection { id,
-  effort_override.or(session.selection.reasoning_effort) }` and closes the panel. The old
-  selection is not restored on close.
-- `e` cycles the highlighted row's `effort` field. It never calls `Session::set_selection`
-  on its own. The order is `None → Off → Low → Medium → High → XHigh → None`.
-- `*` toggles the row's `starred` flag, updates the state's starred list, and returns
-  `KeyAction::PersistStarred(list)`.
-- `esc` closes the panel and leaves the session's selection untouched, even if `e` was
+- The top row draws `> <query>`, or an instructive hint when the query is empty. Every
+  filtered row shows the id, a star column (`★` starred, `☆` not), an optional
+  `[effort=<name>]` when the row has a preview effort, and `(current)` at the end when it
+  is the current model.
+- **Fuzzy filter.** As the user types, rows filter by
+  case-insensitive subsequence. `selected` indexes into the filtered rows only. See
+  `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
+- `Enter` on a filtered row calls `Session::set_selection` with
+  `ModelSelection { id, effort_override.or(session.selection.reasoning_effort) }` and
+  closes the panel.
+- **Typed fallback.** `Enter` when the filter matches nothing applies the query verbatim
+  as the model id, and pushes a `model set to <query>` notice. A typed id always reaches
+  the provider, per `D-a-listing-failure-never-stops-a-session`.
+- `Tab` cycles the highlighted row's `effort` field. It never calls
+  `Session::set_selection` on its own. The order is `None → Off → Low → Medium → High →
+  XHigh → None`.
+- `Shift+Tab` toggles the row's `starred` flag, updates the state's starred list, and
+  returns `KeyAction::PersistStarred(list)`.
+- `Backspace` removes the last query character and resets `selected` to zero. When the
+  query is empty it is a no-op; `Esc` is what closes the panel.
+- Any other printable character appends to the query and resets `selected` to zero. `j`,
+  `k`, `e`, `*`, and every other letter type into the query.
+- `esc` closes the panel and leaves the session's selection untouched, even if `Tab` was
   pressed.
-- The panel never wraps: `↑` at row 0 stays at 0; `↓` at the last row stays there.
+- The panel never wraps: `↑` at row 0 stays at 0; `↓` at the last filtered row stays
+  there.
 - `/model <id>` sets the model to `<id>`, keeps the current effort, and pushes one notice
   `model set to <id>`. No picker.
 - `/effort` alone pushes a notice `effort: <name>`, where `<name>` is one of `unset`,
@@ -197,7 +223,10 @@ inside `App`) can write the mutex from the app loop. See the decision.
   and the descriptor carries no capability claim.
 - **Writing the model change back to the session file.** The session file records the
   turns; the selection is not a turn. A later spec may add a `ModelChange` record.
-- **Filtering as the user types.** The picker has no text field.
+- **Ranking matches by score.** The picker keeps the original row order, so the current
+  row stays first. A score column would move the anchor on every keystroke, and the
+  anchor is more useful than the score. See
+  `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
 - **A `*` key that stars something the picker did not show.** The starred file is edited
   in place for that case.
 
@@ -247,11 +276,32 @@ row lists the file the test lives in and the assertion the test proves.
 - `esc_closes_the_picker_with_no_change` — `crates/rho-tui/tests/model_picker.rs`. Returns
   `KeyAction::None`, sets `Panel::None`, and the session's selection would not change (the
   test never calls `set_selection`).
-- `e_cycles_the_highlighted_rows_effort_but_does_not_apply_until_enter` —
+- `tab_cycles_the_highlighted_rows_effort_but_does_not_apply_until_enter` —
   `crates/rho-tui/tests/model_picker.rs`. Six presses walk the whole cycle.
-- `star_toggles_and_returns_a_persistence_action` —
+- `shift_tab_toggles_the_star_and_returns_a_persistence_action` —
   `crates/rho-tui/tests/model_picker.rs`. Returns
   `KeyAction::PersistStarred(new_list)`.
+
+### `rho-tui` — the fuzzy filter
+
+- `fuzzy_match_matches_a_scattered_subsequence_case_insensitively` —
+  `crates/rho-tui/tests/model_picker.rs`. `sn45` matches `claude-sonnet-4-5`, `NoVa`
+  matches `amazon.nova-micro-v1:0`, an empty query matches every string.
+- `fuzzy_match_rejects_a_query_not_present` —
+  `crates/rho-tui/tests/model_picker.rs`. Order matters; `54` does not match
+  `claude-sonnet-4-5`.
+- `typing_filters_the_picker_by_fuzzy_subsequence` —
+  `crates/rho-tui/tests/model_picker.rs`. Typing `sonnet` drops every row that fails the
+  match, and the query field holds `sonnet`.
+- `typing_a_letter_that_is_also_a_key_binds_to_the_query_not_the_shortcut` —
+  `crates/rho-tui/tests/model_picker.rs`. `j`, `k`, `e`, and `*` are typed into the
+  query, not routed as picker shortcuts.
+- `enter_on_an_empty_filter_applies_the_query_verbatim` —
+  `crates/rho-tui/tests/model_picker.rs`. Returns
+  `KeyAction::ApplySelection(ModelSelection { model: query, … })`.
+- `backspace_removes_a_query_char_and_resets_the_selection` —
+  `crates/rho-tui/tests/model_picker.rs`. Also asserts that a backspace on an empty
+  query is a no-op.
 
 ### `rho-tui` — the starred file
 

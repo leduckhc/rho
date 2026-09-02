@@ -993,10 +993,12 @@ fn panel_demand(state: &TuiState) -> (usize, usize) {
             let rows = pages.get(guide.page).map_or(0, |page| page.rows.len() + 1);
             (rows, 0)
         }
-        // One row per picker row, plus one header (`model:`). Yields on a short
+        // One row per filtered picker row, plus one query row. A query with no match
+        // still draws its prompt, so the user sees what they typed. Yields on a short
         // screen: the picker is a preference and not a safety row. See
-        // `D-the-model-picker-is-a-panel`.
-        Panel::ModelPicker(picker) => (picker.rows.len() + 1, 0),
+        // `D-the-model-picker-is-a-panel` and
+        // `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
+        Panel::ModelPicker(picker) => (picker.filtered_indices().len() + 1, 0),
     }
 }
 
@@ -1130,15 +1132,23 @@ fn slash_panel(list: &SlashList, width: usize) -> Vec<StyledLine> {
     lines
 }
 
-/// The model-picker panel: a header naming the current model, then one row per picker
-/// row. Each row draws the star column, the id, and the preview effort at the end. See
-/// `D-the-model-picker-is-a-panel`.
+/// The model-picker panel: a `> <query>` prompt, then one row per filtered picker row.
+/// Each row draws the star column, the id, and the preview effort at the end. See
+/// `D-the-model-picker-is-a-panel` and
+/// `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
 fn model_picker_panel(picker: &crate::state::ModelPicker, width: usize) -> Vec<StyledLine> {
     let mut lines = Vec::new();
     let muted = style_for(Role::Muted);
-    let header = "model:";
-    lines.push(one((pad(header, width), muted)));
-    for (index, row) in picker.rows.iter().enumerate() {
+    let query_display = if picker.query.is_empty() {
+        "type to filter · empty shows the current and starred".to_string()
+    } else {
+        picker.query.clone()
+    };
+    let prompt = format!("> {query_display}");
+    lines.push(one((pad(&prompt, width), muted)));
+    let filtered = picker.filtered_indices();
+    for (position, row_index) in filtered.iter().enumerate() {
+        let row = &picker.rows[*row_index];
         let star = if row.starred { "★" } else { "☆" };
         let effort_suffix = match row.effort {
             Some(effort) => format!(" [effort={}]", effort.as_str()),
@@ -1146,7 +1156,7 @@ fn model_picker_panel(picker: &crate::state::ModelPicker, width: usize) -> Vec<S
         };
         let tag = if row.is_current { " (current)" } else { "" };
         let body = format!("  {star} {}{effort_suffix}{tag}", row.id);
-        let style = if index == picker.selected {
+        let style = if position == picker.selected {
             text_style().add_modifier(Modifier::REVERSED)
         } else {
             text_style()
@@ -1389,9 +1399,9 @@ fn footer_hints(state: &TuiState, width: usize) -> Cow<'static, str> {
             let pages = crate::guide_pages(&state.model, &state.provider).len();
             Cow::Owned(crate::guide_footer_hint(guide.page, pages))
         }
-        Panel::ModelPicker(_) => {
-            Cow::Borrowed("↑ ↓ choose · enter apply · e effort · * star · esc close")
-        }
+        Panel::ModelPicker(_) => Cow::Borrowed(
+            "type filter · ↑ ↓ choose · enter apply · tab effort · shift-tab star · esc close",
+        ),
         Panel::None => {
             if state.activity == ActivityState::Running {
                 Cow::Borrowed("ctrl-c cancel · / commands · ? help")

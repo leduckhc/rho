@@ -42,7 +42,7 @@ pub use screen::{ScreenGuard, enter_sequences};
 pub use scroll::{PAGE_ROWS_MARGIN, Scroll, WHEEL_ROWS};
 pub use state::{
     ActivityState, Approval, HistorySearch, KeyAction, ModelPicker, Panel, PickerRow, Row,
-    SlashList, ToolRowStatus, TuiState, filter_history, next_effort_in_cycle,
+    SlashList, ToolRowStatus, TuiState, filter_history, fuzzy_match, next_effort_in_cycle,
 };
 
 pub mod starred;

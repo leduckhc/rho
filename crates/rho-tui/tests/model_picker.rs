@@ -7,7 +7,9 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rho_core::{ModelSelection, ReasoningEffort};
-use rho_tui::{KeyAction, Panel, TuiState, filter_slash_commands, next_effort_in_cycle};
+use rho_tui::{
+    KeyAction, Panel, TuiState, filter_slash_commands, fuzzy_match, next_effort_in_cycle,
+};
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -196,7 +198,7 @@ fn arrow_keys_move_the_picker_selection_and_never_wrap() {
     let last = match &state.panel {
         Panel::ModelPicker(picker) => {
             assert_eq!(picker.selected, 2, "at the last row");
-            picker.rows.len() - 1
+            picker.filtered_indices().len() - 1
         }
         other => panic!("picker not open: {other:?}"),
     };
@@ -248,16 +250,19 @@ fn esc_closes_the_picker_with_no_change() {
 }
 
 #[test]
-fn e_cycles_the_highlighted_rows_effort_but_does_not_apply_until_enter() {
+fn tab_cycles_the_highlighted_rows_effort_but_does_not_apply_until_enter() {
     let mut state = seeded_state();
     state.open_model_picker();
     // Move to a starred row (its effort starts unset).
     state.handle_key(key(KeyCode::Down));
     let seen: Vec<Option<ReasoningEffort>> = (0..6)
         .map(|_| {
-            state.handle_key(key(KeyCode::Char('e')));
+            state.handle_key(key(KeyCode::Tab));
             match &state.panel {
-                Panel::ModelPicker(picker) => picker.rows[picker.selected].effort,
+                Panel::ModelPicker(picker) => {
+                    let filtered = picker.filtered_indices();
+                    picker.rows[filtered[picker.selected]].effort
+                }
                 _ => panic!("picker closed unexpectedly"),
             }
         })
@@ -294,12 +299,12 @@ fn e_cycles_the_highlighted_rows_effort_but_does_not_apply_until_enter() {
 }
 
 #[test]
-fn star_toggles_and_returns_a_persistence_action() {
+fn shift_tab_toggles_the_star_and_returns_a_persistence_action() {
     let mut state = seeded_state();
     state.open_model_picker();
-    // Un-star the currently-starred `starred-a` row: move down and press `*`.
+    // Un-star the currently-starred `starred-a` row: move down and press Shift+Tab.
     state.handle_key(key(KeyCode::Down));
-    let action = state.handle_key(key(KeyCode::Char('*')));
+    let action = state.handle_key(key(KeyCode::BackTab));
     let list = match action {
         KeyAction::PersistStarred(list) => list,
         other => panic!("expected PersistStarred, got {other:?}"),
@@ -309,7 +314,7 @@ fn star_toggles_and_returns_a_persistence_action() {
         "unstarred id is gone: {list:?}"
     );
     // Toggle back on.
-    let action = state.handle_key(key(KeyCode::Char('*')));
+    let action = state.handle_key(key(KeyCode::BackTab));
     let list = match action {
         KeyAction::PersistStarred(list) => list,
         other => panic!("expected PersistStarred, got {other:?}"),
@@ -320,6 +325,127 @@ fn star_toggles_and_returns_a_persistence_action() {
     );
     // The panel is still open.
     assert!(matches!(state.panel, Panel::ModelPicker(_)));
+}
+
+#[test]
+fn fuzzy_match_matches_a_scattered_subsequence_case_insensitively() {
+    // The classic fzf shape.
+    assert!(fuzzy_match("sn45", "claude-sonnet-4-5"));
+    assert!(fuzzy_match("NoVa", "amazon.nova-micro-v1:0"));
+    assert!(fuzzy_match("", "anything"), "an empty query matches");
+    assert!(fuzzy_match("h", "anthropic/claude-haiku-4.5"));
+}
+
+#[test]
+fn fuzzy_match_rejects_a_query_not_present() {
+    assert!(!fuzzy_match("zzz", "claude-sonnet-4-5"));
+    // Order matters: `54` is not a subsequence of `claude-sonnet-4-5`.
+    assert!(!fuzzy_match("54", "claude-sonnet-4-5"));
+    assert!(!fuzzy_match("abcd", "a-b-c"));
+}
+
+#[test]
+fn typing_filters_the_picker_by_fuzzy_subsequence() {
+    let mut state = seeded_state();
+    state.set_starred_models(vec![
+        "anthropic/claude-sonnet-4-5".to_string(),
+        "amazon.nova-micro-v1:0".to_string(),
+        "openai/gpt-5".to_string(),
+    ]);
+    state.model = "anthropic/claude-haiku-4.5".to_string();
+    state.open_model_picker();
+    // Type `sonnet`. Only the sonnet row matches; the current haiku row must drop.
+    for ch in "sonnet".chars() {
+        state.handle_key(key(KeyCode::Char(ch)));
+    }
+    let picker = match &state.panel {
+        Panel::ModelPicker(picker) => picker.clone(),
+        other => panic!("picker not open: {other:?}"),
+    };
+    let filtered_ids: Vec<String> = picker
+        .filtered_indices()
+        .iter()
+        .map(|i| picker.rows[*i].id.clone())
+        .collect();
+    assert_eq!(
+        filtered_ids,
+        vec!["anthropic/claude-sonnet-4-5".to_string()],
+        "only sonnet passes: {filtered_ids:?}"
+    );
+    assert_eq!(
+        picker.query, "sonnet",
+        "the query field carries the typed text"
+    );
+    assert_eq!(picker.selected, 0, "filter reset the selection to zero");
+}
+
+#[test]
+fn typing_a_letter_that_is_also_a_key_binds_to_the_query_not_the_shortcut() {
+    // The old picker used `j`, `k`, `e`, and `*` as shortcuts. Model ids carry those
+    // letters, so they must type into the query now. See
+    // `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
+    let mut state = seeded_state();
+    state.set_starred_models(vec!["openai/gpt-4o-mini".to_string()]);
+    state.model = "seed".to_string();
+    state.open_model_picker();
+    for ch in "gpt".chars() {
+        state.handle_key(key(KeyCode::Char(ch)));
+    }
+    let query = match &state.panel {
+        Panel::ModelPicker(picker) => picker.query.clone(),
+        other => panic!("picker not open: {other:?}"),
+    };
+    assert_eq!(query, "gpt", "letters reach the query field");
+}
+
+#[test]
+fn enter_on_an_empty_filter_applies_the_query_verbatim() {
+    // `D-a-listing-failure-never-stops-a-session`: a typed id always runs.
+    let mut state = seeded_state();
+    state.open_model_picker();
+    for ch in "vendor/unknown-model".chars() {
+        state.handle_key(key(KeyCode::Char(ch)));
+    }
+    let filtered_len = match &state.panel {
+        Panel::ModelPicker(picker) => picker.filtered_indices().len(),
+        _ => panic!("picker not open"),
+    };
+    assert_eq!(filtered_len, 0, "the query matches no starred row");
+    let action = state.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        action,
+        KeyAction::ApplySelection(ModelSelection {
+            model: "vendor/unknown-model".to_string(),
+            reasoning_effort: Some(ReasoningEffort::Medium),
+        }),
+        "enter with no match applies the query verbatim"
+    );
+    assert!(matches!(state.panel, Panel::None));
+}
+
+#[test]
+fn backspace_removes_a_query_char_and_resets_the_selection() {
+    let mut state = seeded_state();
+    state.open_model_picker();
+    for ch in "star".chars() {
+        state.handle_key(key(KeyCode::Char(ch)));
+    }
+    state.handle_key(key(KeyCode::Backspace));
+    match &state.panel {
+        Panel::ModelPicker(picker) => {
+            assert_eq!(picker.query, "sta", "backspace removes the last char");
+            assert_eq!(picker.selected, 0, "backspace resets the selection");
+        }
+        other => panic!("picker not open: {other:?}"),
+    }
+    // Backspace at empty is a no-op. The panel stays open.
+    for _ in 0..10 {
+        state.handle_key(key(KeyCode::Backspace));
+    }
+    match &state.panel {
+        Panel::ModelPicker(picker) => assert_eq!(picker.query, ""),
+        other => panic!("picker closed after too many backspaces: {other:?}"),
+    }
 }
 
 #[test]
