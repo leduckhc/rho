@@ -162,6 +162,13 @@ impl App {
         self
     }
 
+    /// Seed the provider suggestion list, from the small hard-coded table in `rho-cli`.
+    /// See `D-the-picker-seeds-from-a-per-provider-suggestion-list`.
+    pub fn with_suggested_models(mut self, suggested: Vec<String>) -> Self {
+        self.state.set_suggested_models(suggested);
+        self
+    }
+
     /// Set the initial reasoning effort, mirroring `Session::selection`. Without this,
     /// the header would draw a stale value while the wire uses the mutex.
     pub fn with_reasoning_effort(mut self, effort: Option<rho_core::ReasoningEffort>) -> Self {

@@ -214,8 +214,10 @@ inside `App`) can write the mutex from the app loop. See the decision.
 - **Provider switching mid-session.** A different provider needs new credentials, a new
   tool set, and a new system prompt. The provider stays fixed.
 - **Listing from the provider.** rho does not add `Provider::list_models` in this spec.
-  The picker's rows are the current model and the starred list only. When listing exists,
-  it appends to the rows.
+  The picker's rows are, in order and deduped: the current model, the starred list, and
+  a small per-provider suggestion list hard-coded in `rho-cli`. When listing exists, it
+  appends to the rows. See
+  `D-the-picker-seeds-from-a-per-provider-suggestion-list`.
 - **`/speed fast|normal`.** The alias is spec'd in
   D-a-model-descriptor-carries-no-capability-claim but is a separate command; it is not
   built here. Effort is the concrete dimension this spec covers.
@@ -302,6 +304,20 @@ row lists the file the test lives in and the assertion the test proves.
 - `backspace_removes_a_query_char_and_resets_the_selection` —
   `crates/rho-tui/tests/model_picker.rs`. Also asserts that a backspace on an empty
   query is a no-op.
+
+### `rho-cli` — provider suggestions
+
+- `openrouter_suggestions_are_non_empty_and_unique` —
+  `crates/rho-cli/src/provider.rs`. The `openrouter` suggestion list has at least one id
+  and no duplicates.
+- `azure_has_no_suggestions_because_it_names_deployments` —
+  `crates/rho-cli/src/provider.rs`. `azure` returns an empty suggestion list.
+
+### `rho-tui` — footer regression
+
+- `the_model_picker_footer_hits_a_space_between_status_and_hint` —
+  `crates/rho-tui/tests/render.rs`. On an 88-column terminal the footer keeps at least one
+  blank cell between `ready` and the picker hint.
 
 ### `rho-tui` — the starred file
 

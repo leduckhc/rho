@@ -113,6 +113,9 @@ and the sibling decisions.
 | Enter on an empty filter returns `None` | `crates/rho-tui/src/state.rs` | Enter applies the query verbatim | `enter_on_an_empty_filter_applies_the_query_verbatim` |
 | Printable char routes as ignored | `crates/rho-tui/src/state.rs` | Every printable key appends to the query | `typing_filters_the_picker_by_fuzzy_subsequence` |
 | Backspace is a no-op | `crates/rho-tui/src/state.rs` | Backspace pops a query char and resets the selection | `backspace_removes_a_query_char_and_resets_the_selection` |
+| openrouter suggestions empty | `crates/rho-cli/src/provider.rs` | A first-time picker has seed rows | `openrouter_suggestions_are_non_empty_and_unique` |
+| openrouter suggestions duplicate | `crates/rho-cli/src/provider.rs` | The list has no duplicates | `openrouter_suggestions_are_non_empty_and_unique` |
+| Long footer hint collides with `ready` | `crates/rho-tui/src/render.rs` | The picker hint is short enough to leave a space | `the_model_picker_footer_hits_a_space_between_status_and_hint` |
 | Keep duplicate current in starred rows | `crates/rho-tui/src/state.rs` | The picker drops duplicates of the current | `the_picker_shows_the_current_model_first_and_then_the_starred` |
 | Save writes an empty array | `crates/rho-tui/src/starred.rs` | The file mirrors the in-memory list | `starred_read_and_write_round_trip` |
 
@@ -122,8 +125,11 @@ Every mutation was watched to fail its named test, and every restored file was
 ## Test count
 
 - `crates/rho-core/tests/selection.rs`: 3 tests.
-- `crates/rho-tui/tests/model_picker.rs`: 20 tests (6 for the picker keys, 5 for the
+- `crates/rho-tui/tests/model_picker.rs`: 21 tests (6 for the picker keys, 6 for the
   fuzzy filter, 6 for the slash commands, 3 for the panel layout).
 - `crates/rho-tui/tests/starred.rs`: 3 tests.
+- `crates/rho-cli/src/provider.rs`: 2 tests (gated behind `feature = "tui"`) for the
+  provider suggestion list.
+- `crates/rho-tui/tests/render.rs`: 1 regression test for the footer overflow.
 - One updated golden fixture: `docs/design/tui-frames/100-slash-list.txt` (adds the
   `/effort` row and re-widens `/model`'s summary).

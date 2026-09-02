@@ -267,6 +267,11 @@ pub struct TuiState {
     /// The starred model ids, in file order. Loaded once at startup, and after every
     /// picker toggle. See `D-starred-models-live-in-their-own-file`.
     pub starred_models: Vec<String>,
+    /// A short suggestion list for the current provider, used only to seed the picker
+    /// on a first open. Every id here shows in the picker as an unstarred row, unless
+    /// it is already the current model or already starred. See
+    /// `D-the-picker-seeds-from-a-per-provider-suggestion-list`.
+    pub suggested_models: Vec<String>,
     /// True after a first Ctrl-C while idle. A second Ctrl-C then exits.
     pub exit_armed: bool,
     /// Set when the run ends. Drives the status line.
@@ -1342,6 +1347,13 @@ impl TuiState {
         self.starred_models = starred;
     }
 
+    /// Seed the suggestion list. The frontend calls it once at startup with the
+    /// provider's small hard-coded list. See
+    /// `D-the-picker-seeds-from-a-per-provider-suggestion-list`.
+    pub fn set_suggested_models(&mut self, suggested: Vec<String>) {
+        self.suggested_models = suggested;
+    }
+
     /// Sync the current selection into the state. The frontend calls it after every
     /// `Session::set_selection`, so the header and the picker header agree with the
     /// mutex. See `SPEC-model-selection-in-tui` section 2.
@@ -1350,18 +1362,27 @@ impl TuiState {
         self.reasoning_effort = selection.reasoning_effort;
     }
 
-    /// Open the model picker. The rows are the current model plus every starred id, with
-    /// duplicates of the current dropped.
+    /// Open the model picker. The rows are, in order and deduped by id:
+    ///
+    /// 1. the current model,
+    /// 2. every starred id from `~/.rho/starred-models.toml`,
+    /// 3. every id in the provider's suggestion list.
+    ///
+    /// A duplicate id later in the list is dropped, so the current stays at row zero and
+    /// a starred id keeps its `starred` flag when it also appears in the suggestion list.
+    /// See `D-the-picker-seeds-from-a-per-provider-suggestion-list`.
     pub fn open_model_picker(&mut self) {
         let mut rows: Vec<PickerRow> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         rows.push(PickerRow {
             id: self.model.clone(),
             is_current: true,
             starred: self.starred_models.iter().any(|id| id == &self.model),
             effort: self.reasoning_effort,
         });
+        seen.insert(self.model.clone());
         for id in &self.starred_models {
-            if id == &self.model {
+            if !seen.insert(id.clone()) {
                 continue;
             }
             rows.push(PickerRow {
@@ -1369,7 +1390,18 @@ impl TuiState {
                 is_current: false,
                 starred: true,
                 // A starred row carries no effort. Enter with this row keeps the current
-                // effort, unless the user pressed `e` to preview one first.
+                // effort, unless the user pressed Tab to preview one first.
+                effort: None,
+            });
+        }
+        for id in &self.suggested_models {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            rows.push(PickerRow {
+                id: id.clone(),
+                is_current: false,
+                starred: false,
                 effort: None,
             });
         }

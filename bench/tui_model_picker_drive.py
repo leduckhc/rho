@@ -76,8 +76,11 @@ def main():
     home = tempfile.mkdtemp(prefix="rho-mp-")
     os.makedirs(os.path.join(home, ".rho"), exist_ok=True)
     # Pre-seed a starred file so the picker has more than one row.
+    # Start with an empty starred file so the drive proves that the picker still shows
+    # rows from the provider suggestion list. See
+    # D-the-picker-seeds-from-a-per-provider-suggestion-list.
     with open(os.path.join(home, ".rho/starred-models.toml"), "w") as f:
-        f.write('starred = ["starred-a", "starred-b"]\n')
+        f.write("starred = []\n")
 
     pid, fd = spawn(home)
     screen = pyte.Screen(COLS, ROWS)
@@ -87,25 +90,36 @@ def main():
         pump(fd, stream, 2.5)
         assert any("seed-model" in r for r in rows(screen)), "banner names the seed model"
 
-        # 1. `/model` opens the picker with three rows.
+        # 1. `/model` opens the picker with the current model and openrouter suggestions.
         os.write(fd, b"/model\r")
         pump(fd, stream, 1.2)
         r1 = rows(screen)
         assert any("seed-model" in row and "current" in row for row in r1), (
             f"picker header shows the current row: {r1}"
         )
-        assert any("starred-a" in row for row in r1), f"starred-a row shows: {r1}"
-        assert any("starred-b" in row for row in r1), f"starred-b row shows: {r1}"
-        # Footer hint names the picker keys.
-        assert any("choose" in row and "star" in row for row in r1), (
-            f"picker footer hint drew: {r1}"
+        # The openrouter suggestion list should include a couple of well-known ids.
+        assert any("claude-sonnet-4.5" in row for row in r1), (
+            f"a suggestion row (sonnet) shows: {r1}"
         )
-        findings.append("picker opened with current + 2 starred rows")
+        assert any("gpt-5" in row for row in r1), (
+            f"a suggestion row (gpt-5) shows: {r1}"
+        )
+        # Footer hint names the picker keys and has a space after `ready`.
+        footer = next((row for row in r1 if "ready" in row), "")
+        assert "ready " in footer, (
+            f"footer separates `ready` from the hint with a space: {footer!r}"
+        )
+        assert "enter pick" in footer or "tab effort" in footer, (
+            f"picker footer hint drew: {footer!r}"
+        )
+        findings.append(
+            "picker opened with current + openrouter suggestions on an empty starred file"
+        )
         # esc closes.
         os.write(fd, b"\x1b")
         pump(fd, stream, 0.6)
 
-        # 2. Move selection and Enter applies. Down to starred-a and Enter.
+        # 2. Move selection and Enter applies. Down to a suggestion row and Enter.
         os.write(fd, b"/model\r")
         pump(fd, stream, 1.0)
         os.write(fd, b"\x1b[B")  # Down
@@ -113,39 +127,46 @@ def main():
         os.write(fd, b"\r")     # Enter
         pump(fd, stream, 1.2)
         r2 = rows(screen)
-        # The banner reports the new model.
-        assert any("starred-a" in row for row in r2), (
-            f"banner switched to starred-a: {r2}"
+        # The banner reports the new model (whichever suggestion was at row 1).
+        new_model = None
+        for line in r2:
+            if " · openrouter" in line:
+                # Banner format: "... · <model> · openrouter"
+                parts = [p.strip() for p in line.split("·")]
+                if len(parts) >= 3:
+                    new_model = parts[-2]
+                    break
+        assert new_model is not None and new_model != "seed-model", (
+            f"banner switched to a suggestion: {r2}"
         )
-        findings.append("Enter applied starred-a; banner updated")
+        findings.append(f"Enter applied suggestion {new_model}; banner updated")
 
-        # 2b. Fuzzy filter: `/model`, type `b`, Enter picks starred-b. See
-        # `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
+        # 2b. Fuzzy filter: `/model`, type `sonnet`, Enter picks the sonnet suggestion.
+        # See `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
         os.write(fd, b"/model\r")
         pump(fd, stream, 1.0)
-        os.write(fd, b"b")   # type into query
+        os.write(fd, b"sonnet")   # type into query
         pump(fd, stream, 0.4)
         r2b = rows(screen)
-        assert any("> b" in row for row in r2b), (
-            f"the query prompt draws `> b`: {r2b}"
+        assert any("> sonnet" in row for row in r2b), (
+            f"the query prompt draws `> sonnet`: {r2b}"
         )
-        # Picker rows carry a `☆` or `★` glyph, so a filter check reads only picker
-        # rows and not the banner (where the current id is drawn without a glyph).
+        # Picker rows carry a `☆` or `★` glyph, so a filter check reads only picker rows.
         picker_rows = [row for row in r2b if "☆" in row or "★" in row]
-        assert any("starred-b" in row for row in picker_rows), (
-            f"starred-b survives the filter: {picker_rows}"
+        assert any("claude-sonnet-4.5" in row for row in picker_rows), (
+            f"sonnet survives the filter: {picker_rows}"
         )
-        assert not any("starred-a" in row for row in picker_rows), (
-            f"starred-a drops from the filter: {picker_rows}"
+        assert not any("gpt-5" in row for row in picker_rows), (
+            f"gpt-5 drops from the filter: {picker_rows}"
         )
         os.write(fd, b"\r")   # apply
         pump(fd, stream, 1.2)
         r2c = rows(screen)
-        assert any("starred-b" in row and "·" in row for row in r2c), (
-            f"banner switched to starred-b: {r2c}"
+        assert any("claude-sonnet-4.5" in row and "·" in row for row in r2c), (
+            f"banner switched to claude-sonnet-4.5: {r2c}"
         )
         findings.append(
-            "fuzzy typing `b` filtered to starred-b and Enter applied it"
+            "fuzzy typing `sonnet` filtered to claude-sonnet-4.5 and Enter applied it"
         )
 
         # 2c. Typed fallback: a query that matches nothing still applies on Enter.
@@ -163,10 +184,6 @@ def main():
         findings.append(
             "a query with no match applied verbatim as the model id"
         )
-
-        # Reset to a starred model so the star toggle probe uses one we can find.
-        os.write(fd, b"/model starred-a\r")
-        pump(fd, stream, 1.0)
 
         # 3. `/model direct-id` applies immediately.
         os.write(fd, b"/model direct-id\r")
@@ -207,11 +224,11 @@ def main():
         )
         findings.append("/effort loud pushed an error naming the valid levels")
 
-        # 7. Star toggle. Open the picker, filter to `starred-b`, press Shift+Tab to
-        #    unstar it, esc, reopen and confirm the file no longer names it.
+        # 7. Star toggle. Open the picker, filter to the sonnet suggestion, press
+        #    Shift+Tab to star it, esc, reopen and confirm the file now names it.
         os.write(fd, b"/model\r")
         pump(fd, stream, 1.0)
-        os.write(fd, b"b")   # filter to the one starred-b row
+        os.write(fd, b"sonnet")   # filter to claude-sonnet-4.5
         pump(fd, stream, 0.4)
         os.write(fd, b"\x1b[Z")   # Shift+Tab (BackTab) toggles star
         pump(fd, stream, 0.8)
@@ -219,11 +236,11 @@ def main():
         pump(fd, stream, 0.4)
         with open(os.path.join(home, ".rho/starred-models.toml")) as f:
             body = f.read()
-        assert "starred-b" not in body, (
-            f"file no longer lists starred-b after Shift+Tab: {body!r}"
+        assert "claude-sonnet-4.5" in body, (
+            f"file now lists claude-sonnet-4.5 after Shift+Tab: {body!r}"
         )
         findings.append(
-            "Shift+Tab on a filtered row removed starred-b from the file"
+            "Shift+Tab on a suggestion starred claude-sonnet-4.5 in the file"
         )
 
         # Quit with ctrl-c twice.

@@ -1399,9 +1399,9 @@ fn footer_hints(state: &TuiState, width: usize) -> Cow<'static, str> {
             let pages = crate::guide_pages(&state.model, &state.provider).len();
             Cow::Owned(crate::guide_footer_hint(guide.page, pages))
         }
-        Panel::ModelPicker(_) => Cow::Borrowed(
-            "type filter · ↑ ↓ choose · enter apply · tab effort · shift-tab star · esc close",
-        ),
+        Panel::ModelPicker(_) => {
+            Cow::Borrowed("↑ ↓ move · enter pick · tab effort · shift-tab star · esc close")
+        }
         Panel::None => {
             if state.activity == ActivityState::Running {
                 Cow::Borrowed("ctrl-c cancel · / commands · ? help")

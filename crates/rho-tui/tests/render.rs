@@ -234,6 +234,34 @@ fn a_mouse_row_maps_to_the_command_under_it() {
 }
 
 #[test]
+fn the_model_picker_footer_hits_a_space_between_status_and_hint() {
+    // Regression: a long hint string butted into `ready` as `readytype filter` on an
+    // 88-column terminal. The left side is `ready` plus margins and separators, and the
+    // right side is the hint. There must be at least one blank cell between them.
+    let mut state = TuiState::default();
+    state.model = "seed".to_string();
+    state.provider = "openrouter".to_string();
+    state.open_model_picker();
+    let lines = render_to_lines(&state, 88, 24);
+    let footer = lines.last().expect("a frame has a footer");
+    let left_part = footer.find("ready").map(|start| &footer[start..]);
+    assert!(
+        left_part.is_some(),
+        "the footer names the idle state: {footer}"
+    );
+    let left_text = left_part.unwrap();
+    // There must be a space before the hint begins, i.e. before the first word of it.
+    assert!(
+        left_text.contains("ready "),
+        "the footer separates `ready` from the hint with a space: {footer}"
+    );
+    assert!(
+        footer.contains("enter pick") || footer.contains("tab effort"),
+        "the picker hint is on the footer: {footer}"
+    );
+}
+
+#[test]
 fn the_footer_stops_saying_canceling_when_the_run_dies_without_an_end_event() {
     let mut state = TuiState::default();
     state.apply(&AgentEvent::TurnStart, 0);

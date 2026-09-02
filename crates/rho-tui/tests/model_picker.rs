@@ -154,6 +154,39 @@ fn slash_effort_with_an_unknown_level_pushes_an_error() {
 }
 
 #[test]
+fn the_picker_appends_suggested_models_after_the_starred_and_dedupes() {
+    let mut state = seeded_state();
+    // The current is `seed-model`. Starred contains `starred-a`, and suggestions contain
+    // both `starred-a` and `new-suggested`. The dedupe should keep `starred-a` as starred,
+    // and only add `new-suggested` once.
+    state.set_starred_models(vec!["starred-a".to_string()]);
+    state.set_suggested_models(vec!["starred-a".to_string(), "new-suggested".to_string()]);
+    state.open_model_picker();
+    let picker = match &state.panel {
+        Panel::ModelPicker(picker) => picker.clone(),
+        other => panic!("picker not open: {other:?}"),
+    };
+    let ids: Vec<String> = picker.rows.iter().map(|row| row.id.clone()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            "seed-model".to_string(),
+            "starred-a".to_string(),
+            "new-suggested".to_string(),
+        ],
+        "current, then starred, then new suggestions, deduped: {ids:?}"
+    );
+    // A duplicated suggestion does not appear twice.
+    assert_eq!(picker.rows.len(), 3, "no duplicate rows");
+    assert!(picker.rows[0].is_current, "row 0 is current");
+    assert!(picker.rows[1].starred, "row 1 is starred");
+    assert!(
+        !picker.rows[2].starred,
+        "row 2 is a suggestion, not starred yet"
+    );
+}
+
+#[test]
 fn the_picker_shows_the_current_model_first_and_then_the_starred() {
     let mut state = seeded_state();
     // A duplicate of the current in the starred list. It must not appear twice.

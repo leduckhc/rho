@@ -1301,6 +1301,22 @@ fn explain_config_error(error: rho_config::ConfigError) -> anyhow::Error {
     }
 }
 
+/// Resolve the suggestion key for the model picker.
+///
+/// A named provider entry has a protocol, not a built-in name. We match it by protocol so
+/// `xdent-claude` on the `anthropic` protocol gets the Anthropic suggestions. See
+/// `D-the-picker-seeds-from-a-per-provider-suggestion-list`.
+#[cfg(feature = "tui")]
+fn provider_suggestions_for(config: &rho_config::Config, provider_name: &str) -> Vec<String> {
+    let key = config
+        .providers
+        .iter()
+        .find(|entry| entry.id == provider_name)
+        .map(|entry| entry.protocol.as_str())
+        .unwrap_or(provider_name);
+    crate::provider::provider_suggestions(key)
+}
+
 /// Whether the TUI captures the mouse.
 ///
 /// The merge decides it now: the flag, then the variable, then the file, then off. The old
@@ -1376,6 +1392,11 @@ async fn run_interactive(cli: &Cli) -> i32 {
     // Mirror the initial effort into the TUI so the header, the `/effort` notice, and the
     // picker header all agree with `Session::selection` from the first frame.
     let initial_effort = session.selection().reasoning_effort;
+    // Seed the picker with a provider-specific suggestion list when the starred file is
+    // empty, so a first-time user sees more than the current model. A named provider
+    // entry is matched by its protocol. See
+    // `D-the-picker-seeds-from-a-per-provider-suggestion-list`.
+    let suggestions = provider_suggestions_for(&loaded, &provider_name);
     let mut app = rho_tui::App::new(session, model)
         .with_mouse(mouse)
         // The renderer read `state.animate` and nothing ever assigned it, so the sweep
@@ -1384,6 +1405,7 @@ async fn run_interactive(cli: &Cli) -> i32 {
         .with_reasoning(reasoning)
         .with_reasoning_effort(initial_effort)
         .with_starred_models(starred)
+        .with_suggested_models(suggestions)
         // The task row had a reducer, a renderer, and no producer. Nothing in any shipped
         // binary subscribed to the registry, so a background build drew nothing at all.
         // This is that call site. See `SPEC-the-task-event-bridge`.

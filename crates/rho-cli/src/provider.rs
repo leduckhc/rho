@@ -21,6 +21,36 @@ pub const MODEL_ENV: &str = "RHO_MODEL";
 /// The environment variable that names the provider.
 pub const PROVIDER_ENV: &str = "RHO_PROVIDER";
 
+/// The provider-specific suggestion list for the model picker. These ids are not a claim
+/// that every id works for every task; they are the small set a first-time user should see
+/// when the starred file is empty. See
+/// `D-the-picker-seeds-from-a-per-provider-suggestion-list`.
+#[cfg(feature = "tui")]
+pub fn provider_suggestions(name_or_protocol: &str) -> Vec<String> {
+    match name_or_protocol {
+        "openrouter" => vec![
+            "anthropic/claude-haiku-4.5".to_string(),
+            "anthropic/claude-sonnet-4.5".to_string(),
+            "openai/gpt-5".to_string(),
+            "openai/gpt-4o-mini".to_string(),
+            "google/gemini-2.5-pro".to_string(),
+        ],
+        "bedrock" => vec![
+            "amazon.nova-micro-v1:0".to_string(),
+            "amazon.nova-pro-v1:0".to_string(),
+            "anthropic.claude-3-5-sonnet-20241022-v2:0".to_string(),
+        ],
+        "anthropic" => vec![
+            "claude-haiku-4-5".to_string(),
+            "claude-sonnet-4-5".to_string(),
+            "claude-opus-4-5".to_string(),
+        ],
+        // Azure names deployments, not models, and only the account owner knows the
+        // deployment names. So we suggest nothing. See `docs/verification/models.md`.
+        _ => Vec::new(),
+    }
+}
+
 /// The Anthropic API key variable.
 #[cfg(feature = "anthropic")]
 pub const ANTHROPIC_KEY_ENV: &str = "ANTHROPIC_API_KEY";
@@ -944,6 +974,28 @@ mod tests {
             built.api_key.expose(),
             injected,
             "the builder must read the lookup it was given, and not the real environment"
+        );
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn openrouter_suggestions_are_non_empty_and_unique() {
+        let ids = provider_suggestions("openrouter");
+        assert!(!ids.is_empty(), "a first-time picker needs seed rows");
+        let unique: std::collections::HashSet<_> = ids.iter().cloned().collect();
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "the suggestion list has no duplicates: {ids:?}"
+        );
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn azure_has_no_suggestions_because_it_names_deployments() {
+        assert!(
+            provider_suggestions("azure").is_empty(),
+            "azure suggestions stay empty"
         );
     }
 
