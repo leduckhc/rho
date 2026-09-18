@@ -151,18 +151,33 @@ pub struct ModelPicker {
 /// The most model rows the picker draws at once.
 pub const PICKER_MAX_MODEL_ROWS: usize = 10;
 
+/// The three sections of the picker, in display order. See
+/// `D-the-picker-draws-a-starred-section`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct PickerSections {
+    /// The leading display rows that are the current model. It is 0 or 1.
+    pub current: usize,
+    /// The display rows of the starred section, after the current model.
+    pub starred: usize,
+    /// The display rows of the catalog section, after the starred section.
+    pub catalog: usize,
+}
+
 impl ModelPicker {
-    /// The rows as they appear on screen: current first, then a duplicate of every
-    /// starred catalog model, then every catalog row. A starred catalog model therefore
-    /// appears twice: once at the top and once in its catalog position. Starred models
-    /// that are not in the catalog appear only at the top. See `D-the-model-picker-is-a-panel`.
-    pub fn display_rows(&self, starred: &[String]) -> Vec<PickerRow> {
+    /// Build the display rows once, and count each section in the same pass.
+    ///
+    /// This is the one source of the display order. `display_rows` and `sections` both
+    /// read it, so a change to the order updates both. The counting matches the pushes,
+    /// row for row. The order is current first, then a duplicate of every starred model,
+    /// then every catalog row. See `D-the-picker-draws-a-starred-section`.
+    fn build_display(&self, starred: &[String]) -> (Vec<PickerRow>, PickerSections) {
         let mut display = Vec::new();
         let starred_set: std::collections::HashSet<&str> =
             starred.iter().map(|id| id.as_str()).collect();
         let row_by_id: std::collections::HashMap<&str, &PickerRow> =
             self.rows.iter().map(|row| (row.id.as_str(), row)).collect();
         let current = self.rows.iter().find(|row| row.is_current).cloned();
+        let current_count = usize::from(current.is_some());
         if let Some(current) = &current {
             display.push(current.clone());
         }
@@ -171,6 +186,7 @@ impl ModelPicker {
         // starred id that has no row at all. A malformed file may list the same id twice;
         // the picker shows it once.
         let mut starred_seen = std::collections::HashSet::new();
+        let mut starred_count = 0usize;
         for id in starred {
             if current.as_ref().map(|row| &row.id) == Some(id) {
                 continue;
@@ -196,8 +212,10 @@ impl ModelPicker {
                     catalog: false,
                 });
             }
+            starred_count += 1;
         }
         // Catalog section after the starred section.
+        let mut catalog_count = 0usize;
         for row in &self.rows {
             if row.is_current || !row.catalog {
                 continue;
@@ -206,15 +224,59 @@ impl ModelPicker {
             shown.starred = starred_set.contains(row.id.as_str());
             shown.is_current = false;
             display.push(shown);
+            catalog_count += 1;
         }
-        display
+        let sections = PickerSections {
+            current: current_count,
+            starred: starred_count,
+            catalog: catalog_count,
+        };
+        (display, sections)
+    }
+
+    /// The rows as they appear on screen: current first, then a duplicate of every
+    /// starred catalog model, then every catalog row. A starred catalog model therefore
+    /// appears twice: once at the top and once in its catalog position. Starred models
+    /// that are not in the catalog appear only at the top. See `D-the-model-picker-is-a-panel`.
+    pub fn display_rows(&self, starred: &[String]) -> Vec<PickerRow> {
+        self.build_display(starred).0
+    }
+
+    /// The row counts of the three display sections, in display order.
+    ///
+    /// The sum equals `self.display_rows(starred).len()`, because both come from one build.
+    /// See `D-the-picker-draws-a-starred-section`.
+    pub fn sections(&self, starred: &[String]) -> PickerSections {
+        self.build_display(starred).1
+    }
+
+    /// The number of section header lines the picker draws for the current filter.
+    ///
+    /// It is 0, 1, or 2. The starred section and the catalog section each add one header
+    /// when the filter keeps at least one of that section's rows. The current model row
+    /// never draws a header. Every budget site reserves this count. See
+    /// `D-the-picker-draws-a-starred-section`.
+    pub fn header_rows(&self, starred: &[String]) -> usize {
+        let sec = self.sections(starred);
+        let starred_end = sec.current + sec.starred;
+        let mut starred_has = false;
+        let mut catalog_has = false;
+        for display_index in self.filtered_indices(starred) {
+            if display_index >= sec.current && display_index < starred_end {
+                starred_has = true;
+            } else if display_index >= starred_end {
+                catalog_has = true;
+            }
+        }
+        usize::from(starred_has) + usize::from(catalog_has)
     }
 
     /// The indices of the displayed rows that pass the fuzzy filter. See `fuzzy_match`.
     ///
-    /// An empty query returns every display index in order. A non-empty query keeps the
-    /// display order, so the current row and starred duplicates stay at the top. See
-    /// `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
+    /// An empty query returns every display index in order. A non-empty query keeps a row
+    /// when the query matches the shown model name or the vendor label. It no longer
+    /// matches the full id, because the vendor part is now shown and matched on its own.
+    /// See `D-a-picker-row-labels-its-vendor`.
     pub fn filtered_indices(&self, starred: &[String]) -> Vec<usize> {
         let display = self.display_rows(starred);
         if self.query.is_empty() {
@@ -223,7 +285,10 @@ impl ModelPicker {
         display
             .iter()
             .enumerate()
-            .filter(|(_, row)| fuzzy_match(&self.query, &row.id))
+            .filter(|(_, row)| {
+                fuzzy_match(&self.query, model_label(&row.id))
+                    || fuzzy_match(&self.query, vendor_label(&row.id))
+            })
             .map(|(index, _)| index)
             .collect()
     }
@@ -277,6 +342,68 @@ pub fn fuzzy_match(query: &str, target: &str) -> bool {
         return false;
     }
     true
+}
+
+/// The vendor prefix of a model id, for a dim label and for the fuzzy filter.
+///
+/// The result borrows from `model_id`, so it allocates nothing. A model id is untrusted,
+/// so the renderer passes the result through `sanitize_line` before it draws. An empty
+/// return means the id has no vendor prefix. See `D-a-picker-row-labels-its-vendor`.
+pub fn vendor_label(model_id: &str) -> &str {
+    let id = model_id.trim();
+    if id.is_empty() {
+        return "";
+    }
+    if let Some(index) = id.find('/') {
+        return &id[..index];
+    }
+    if let Some(first_dot) = id.find('.') {
+        let first = &id[..first_dot];
+        if is_region_prefix(first) {
+            let rest = &id[first_dot + 1..];
+            let end = rest.find('.').unwrap_or(rest.len());
+            return &rest[..end];
+        }
+        return first;
+    }
+    ""
+}
+
+/// The model name of a model id, with the vendor prefix and any region prefix removed.
+///
+/// This is the name the row shows and the fuzzy filter matches. The full id is what
+/// `Enter` applies, so this transform never reaches the provider. The id is untrusted, so
+/// the renderer passes this result through `sanitize_line` too. The result borrows from
+/// `model_id`. See `D-a-picker-row-labels-its-vendor`.
+pub fn model_label(model_id: &str) -> &str {
+    let id = model_id.trim();
+    if id.is_empty() {
+        return "";
+    }
+    if let Some(index) = id.find('/') {
+        return &id[index + 1..];
+    }
+    if let Some(first_dot) = id.find('.') {
+        let first = &id[..first_dot];
+        if is_region_prefix(first) {
+            if let Some(second_dot) = id[first_dot + 1..].find('.') {
+                return &id[first_dot + 1 + second_dot + 1..];
+            }
+            return "";
+        }
+        return &id[first_dot + 1..];
+    }
+    id
+}
+
+/// True when a dot segment is a Bedrock cross-region prefix, such as `us` in
+/// `us.anthropic.claude-3-5-sonnet`. This is a display heuristic. It is never a wire value.
+/// See `D-a-picker-row-labels-its-vendor`.
+fn is_region_prefix(segment: &str) -> bool {
+    matches!(
+        segment,
+        "us" | "eu" | "apac" | "ap" | "ca" | "sa" | "me" | "af" | "us-gov"
+    )
 }
 
 /// One row of the model picker.

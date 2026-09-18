@@ -34,15 +34,16 @@ pub use paste::{
     paste_chip_label, route_burst,
 };
 pub use render::{
-    STARTUP_MIN_ROWS, ScreenLayout, banner_line, plan_screen, render, slash_row_index,
-    transcript_metrics,
+    STARTUP_MIN_ROWS, ScreenLayout, banner_line, picker_viewport_rows, plan_screen, render,
+    slash_row_index, transcript_metrics,
 };
 pub use sanitize::{fit_to_width, sanitize_line};
 pub use screen::{ScreenGuard, enter_sequences};
 pub use scroll::{PAGE_ROWS_MARGIN, Scroll, WHEEL_ROWS};
 pub use state::{
-    ActivityState, Approval, HistorySearch, KeyAction, ModelPicker, Panel, PickerRow, Row,
-    SlashList, ToolRowStatus, TuiState, filter_history, fuzzy_match, next_effort_in_cycle,
+    ActivityState, Approval, HistorySearch, KeyAction, ModelPicker, Panel, PickerRow,
+    PickerSections, Row, SlashList, ToolRowStatus, TuiState, filter_history, fuzzy_match,
+    model_label, next_effort_in_cycle, vendor_label,
 };
 
 pub mod starred;

@@ -36,6 +36,19 @@ def rows(screen):
     return [line.rstrip() for line in screen.display if line.strip()]
 
 
+def find_cell(screen, needle, inner=None):
+    """Find the first (y, x) where `needle` (or `inner` inside it) begins."""
+    target = inner or needle
+    for y, line in enumerate(screen.display):
+        outer = line.find(needle)
+        if outer == -1:
+            continue
+        x = line.find(target, outer)
+        if x != -1:
+            return y, x
+    return None, None
+
+
 def pump(fd, stream, seconds):
     end = time.time() + seconds
     while time.time() < end:
@@ -242,6 +255,28 @@ def main():
         findings.append(
             "Shift+Tab on a suggestion starred claude-sonnet-4.5 in the file"
         )
+
+        # 8. Reopen the picker. A starred row now exists, so a `starred` header draws. A
+        #    suggestion row draws its vendor dim. See
+        #    `SPEC-the-model-picker-groups-and-labels-rows` sections 3 and 4.
+        os.write(fd, b"/model\r")
+        pump(fd, stream, 1.0)
+        r8 = rows(screen)
+        assert any(row.strip() == "starred" for row in r8), (
+            f"a starred header draws after a star: {r8}"
+        )
+        # The vendor `anthropic` on the sonnet row draws dim, not the default colour.
+        y, x = find_cell(screen, "claude-sonnet-4.5", inner="anthropic")
+        assert y is not None, f"a sonnet suggestion row with a vendor draws: {r8}"
+        vendor_fg = screen.buffer[y][x].fg
+        assert vendor_fg != "default", (
+            f"the vendor cell draws dim, not the default colour: fg={vendor_fg!r}, row={r8}"
+        )
+        findings.append(
+            f"reopened picker drew a `starred` header and a dim vendor (fg={vendor_fg})"
+        )
+        os.write(fd, b"\x1b")
+        pump(fd, stream, 0.4)
 
         # Quit with ctrl-c twice.
         os.write(fd, b"\x03")

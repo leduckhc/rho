@@ -8,7 +8,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rho_core::{ModelDescriptor, ModelSelection, ReasoningEffort};
 use rho_tui::{
-    KeyAction, Panel, TuiState, filter_slash_commands, fuzzy_match, next_effort_in_cycle,
+    KeyAction, ModelPicker, Panel, PickerRow, PickerSections, TuiState, filter_slash_commands,
+    fuzzy_match, model_label, next_effort_in_cycle, vendor_label,
 };
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -806,5 +807,255 @@ fn a_click_never_maps_the_model_picker_through_slash_row_index() {
     assert!(
         rho_tui::slash_row_index(&state, 80, 24, 5).is_none(),
         "a click while the model picker is open does not route through the slash-list seam"
+    );
+}
+
+// ---- The vendor and model labels. -----------------------------------------
+//
+// See `SPEC-the-model-picker-groups-and-labels-rows` section 2 and
+// `D-a-picker-row-labels-its-vendor`.
+
+/// Build a catalog picker row with the given id.
+fn catalog_row(id: &str) -> PickerRow {
+    PickerRow {
+        id: id.to_string(),
+        is_current: false,
+        starred: false,
+        effort: None,
+        stale: false,
+        catalog: true,
+    }
+}
+
+#[test]
+fn vendor_label_reads_the_slash_prefix() {
+    assert_eq!(vendor_label("anthropic/claude-3.5-sonnet"), "anthropic");
+    assert_eq!(vendor_label("openai/gpt-4o-mini"), "openai");
+}
+
+#[test]
+fn vendor_label_reads_the_dot_prefix() {
+    assert_eq!(
+        vendor_label("anthropic.claude-3-5-sonnet-20241022-v2:0"),
+        "anthropic"
+    );
+}
+
+#[test]
+fn vendor_label_skips_a_bedrock_region_prefix() {
+    assert_eq!(vendor_label("us.anthropic.claude-3-5-sonnet"), "anthropic");
+}
+
+#[test]
+fn vendor_label_is_empty_without_a_vendor() {
+    assert_eq!(vendor_label("gpt-4o"), "");
+    assert_eq!(vendor_label(""), "");
+    assert_eq!(vendor_label("/"), "");
+    assert_eq!(vendor_label("."), "");
+}
+
+#[test]
+fn vendor_label_returns_the_raw_unsafe_segment() {
+    // A model id is untrusted. `vendor_label` returns the raw bytes, so the renderer must
+    // sanitize them before it draws. See `SPEC-the-model-picker-groups-and-labels-rows`
+    // section 4.
+    assert_eq!(
+        vendor_label("anthropic\u{1b}[31m/claude"),
+        "anthropic\u{1b}[31m"
+    );
+}
+
+#[test]
+fn model_label_strips_the_vendor_and_region() {
+    assert_eq!(
+        model_label("anthropic/claude-3.5-sonnet"),
+        "claude-3.5-sonnet"
+    );
+    assert_eq!(model_label("openai/gpt-4o-mini"), "gpt-4o-mini");
+    assert_eq!(
+        model_label("anthropic.claude-3-5-sonnet-20241022-v2:0"),
+        "claude-3-5-sonnet-20241022-v2:0"
+    );
+    assert_eq!(
+        model_label("us.anthropic.claude-3-5-sonnet"),
+        "claude-3-5-sonnet"
+    );
+    assert_eq!(model_label("gpt-4o"), "gpt-4o");
+    assert_eq!(model_label(""), "");
+    assert_eq!(model_label("/"), "");
+    assert_eq!(model_label("."), "");
+    assert_eq!(model_label("foo.bar.baz"), "bar.baz");
+}
+
+// ---- The fuzzy filter. ----------------------------------------------------
+
+#[test]
+fn filtered_indices_matches_the_vendor_label() {
+    // The query `anthropic` matches the vendor label, even though the model name lacks it.
+    let picker = ModelPicker {
+        rows: vec![
+            catalog_row("anthropic/claude-sonnet"),
+            catalog_row("openai/gpt-4o"),
+        ],
+        query: "anthropic".to_string(),
+        ..Default::default()
+    };
+    let starred: Vec<String> = vec![];
+    let display = picker.display_rows(&starred);
+    let ids: Vec<String> = picker
+        .filtered_indices(&starred)
+        .iter()
+        .map(|i| display[*i].id.clone())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["anthropic/claude-sonnet".to_string()],
+        "only the anthropic vendor row matches: {ids:?}"
+    );
+}
+
+#[test]
+fn filtered_indices_matches_the_model_name() {
+    let picker = ModelPicker {
+        rows: vec![
+            catalog_row("anthropic/claude-sonnet"),
+            catalog_row("openai/gpt-4o"),
+        ],
+        query: "sonnet".to_string(),
+        ..Default::default()
+    };
+    let starred: Vec<String> = vec![];
+    let display = picker.display_rows(&starred);
+    let ids: Vec<String> = picker
+        .filtered_indices(&starred)
+        .iter()
+        .map(|i| display[*i].id.clone())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["anthropic/claude-sonnet".to_string()],
+        "only the sonnet model name matches: {ids:?}"
+    );
+}
+
+#[test]
+fn filtered_indices_drops_a_full_id_only_match() {
+    // `c/c` is a subsequence of the full id `anthropic/claude`, but of neither the model
+    // name `claude` nor the vendor `anthropic`. A revert to a full-id match makes this
+    // test fail. See `D-a-picker-row-labels-its-vendor`.
+    let picker = ModelPicker {
+        rows: vec![
+            catalog_row("anthropic/claude"),
+            catalog_row("openai/gpt-4o"),
+        ],
+        query: "c/c".to_string(),
+        ..Default::default()
+    };
+    let starred: Vec<String> = vec![];
+    assert!(
+        picker.filtered_indices(&starred).is_empty(),
+        "a full-id-only match returns nothing"
+    );
+}
+
+// ---- The sections and the budget. -----------------------------------------
+
+#[test]
+fn sections_pins_each_section_boundary() {
+    // A picker with a current model, two starred-only rows, and two catalog rows.
+    let picker = ModelPicker {
+        rows: vec![
+            PickerRow {
+                id: "cur".to_string(),
+                is_current: true,
+                starred: false,
+                effort: None,
+                stale: false,
+                catalog: true,
+            },
+            catalog_row("cat-x"),
+            catalog_row("cat-y"),
+            PickerRow {
+                id: "star-a".to_string(),
+                is_current: false,
+                starred: true,
+                effort: None,
+                stale: false,
+                catalog: false,
+            },
+            PickerRow {
+                id: "star-b".to_string(),
+                is_current: false,
+                starred: true,
+                effort: None,
+                stale: false,
+                catalog: false,
+            },
+        ],
+        ..Default::default()
+    };
+    let starred = vec!["star-a".to_string(), "star-b".to_string()];
+    let sec = picker.sections(&starred);
+    assert_eq!(
+        sec,
+        PickerSections {
+            current: 1,
+            starred: 2,
+            catalog: 2,
+        },
+        "the three section counts: {sec:?}"
+    );
+    let display = picker.display_rows(&starred);
+    assert_eq!(
+        sec.current + sec.starred + sec.catalog,
+        display.len(),
+        "the counts sum to the display length"
+    );
+    // The first `current` rows are the current model.
+    assert!(display[0].is_current, "row 0 is the current model");
+    // The next `starred` rows are the starred ids in order.
+    assert_eq!(display[1].id, "star-a", "the starred section is first star");
+    assert_eq!(display[2].id, "star-b", "then the second star");
+    // The rest are the catalog rows.
+    assert_eq!(display[3].id, "cat-x", "the catalog section follows");
+    assert_eq!(display[4].id, "cat-y", "then the second catalog row");
+}
+
+#[test]
+fn header_rows_counts_only_non_empty_sections() {
+    let mut picker = ModelPicker {
+        rows: vec![
+            PickerRow {
+                id: "cur".to_string(),
+                is_current: true,
+                starred: false,
+                effort: None,
+                stale: false,
+                catalog: true,
+            },
+            catalog_row("cat-x"),
+            PickerRow {
+                id: "star-a".to_string(),
+                is_current: false,
+                starred: true,
+                effort: None,
+                stale: false,
+                catalog: false,
+            },
+        ],
+        ..Default::default()
+    };
+    let starred = vec!["star-a".to_string()];
+    assert_eq!(
+        picker.header_rows(&starred),
+        2,
+        "an empty query keeps both the starred and the catalog headers"
+    );
+    // A filter that keeps only the starred section drops the catalog header.
+    picker.query = "star".to_string();
+    assert_eq!(
+        picker.header_rows(&starred),
+        1,
+        "a filter that empties the catalog drops its header"
     );
 }

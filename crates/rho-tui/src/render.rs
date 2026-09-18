@@ -28,7 +28,7 @@ use crate::motion::{MotionCell, MotionInputs, motion_cell, motion_enabled, sweep
 use crate::sanitize::{fit_to_width, sanitize_block, sanitize_line};
 use crate::state::{
     ActivityState, Approval, HistorySearch, Panel, Row, SlashList, ToolRowStatus, TuiState,
-    filter_history,
+    filter_history, model_label, vendor_label,
 };
 use crate::styled::{StyledLine, one};
 use crate::theme::{Role, role_16, role_256, role_bg_256};
@@ -421,8 +421,87 @@ pub fn picker_viewport_rows(state: &TuiState, width: u16, height: u16) -> Option
         return None;
     }
     let status_rows = usize::from(picker.loading || picker.error.is_some());
-    // Header, query row, scroll-progress footer, and an optional status row.
-    Some(layout.panel_rows.saturating_sub(3 + status_rows))
+    // Provider header, query row, an optional status row, and the scroll-progress footer.
+    // The section headers share the model-row budget, so `picker_window` accounts for them
+    // per scroll offset. See `SPEC-the-model-picker-groups-and-labels-rows` section 3.
+    let content_budget = layout.panel_rows.saturating_sub(2 + status_rows + 1);
+    Some(picker_window(picker, &state.starred_models, content_budget).visible_count)
+}
+
+/// The number of section headers a sticky-header window draws.
+///
+/// It counts the header-bearing sections, starred and catalog, that keep a filtered row
+/// inside the window. The current model section draws no header. The count is 0, 1, or 2.
+/// See `SPEC-the-model-picker-groups-and-labels-rows` section 3.
+fn headers_in_window(
+    sec: &crate::state::PickerSections,
+    filtered: &[usize],
+    offset: usize,
+    count: usize,
+) -> usize {
+    let starred_end = sec.current + sec.starred;
+    let start = offset.min(filtered.len());
+    let end = (offset + count).min(filtered.len());
+    let window = &filtered[start..end];
+    let has_starred = window
+        .iter()
+        .any(|&index| index >= sec.current && index < starred_end);
+    let has_catalog = window.iter().any(|&index| index >= starred_end);
+    usize::from(has_starred) + usize::from(has_catalog)
+}
+
+/// The rows, sections, visible count, and scroll offset the picker draws for one budget.
+///
+/// One computation serves the budget and the draw, so the model-row count and the header
+/// count agree at every scroll offset. See `SPEC-the-model-picker-groups-and-labels-rows`.
+pub(crate) struct PickerWindow {
+    filtered: Vec<usize>,
+    sections: crate::state::PickerSections,
+    visible_count: usize,
+    offset: usize,
+}
+
+/// Fit the model rows and their sticky headers into `content_budget`.
+///
+/// We chose sticky headers over exact accounting. A sticky header always names the section
+/// of the top visible row, so section context stays at every scroll offset. Exact
+/// accounting would drop the header once the section's first row scrolls off the top, so a
+/// long list loses its `models` label exactly when the user needs it. See
+/// `SPEC-the-model-picker-groups-and-labels-rows` section 3.
+///
+/// The header count depends on the window, and the window depends on the header count. We
+/// break that loop by shrinking the model-row count until the rows plus their headers fit.
+/// The header count only falls as the count shrinks, so this converges. It keeps no cached
+/// state, so nothing can go stale.
+pub(crate) fn picker_window(
+    picker: &crate::state::ModelPicker,
+    starred: &[String],
+    content_budget: usize,
+) -> PickerWindow {
+    let filtered = picker.filtered_indices(starred);
+    let sections = picker.sections(starred);
+    let total = filtered.len();
+    let mut visible_count = total
+        .min(crate::state::PICKER_MAX_MODEL_ROWS)
+        .min(content_budget);
+    let mut offset = 0;
+    while visible_count > 0 {
+        offset = picker.scroll_offset.min(total - visible_count);
+        let headers = headers_in_window(&sections, &filtered, offset, visible_count);
+        if visible_count + headers <= content_budget {
+            break;
+        }
+        visible_count -= 1;
+    }
+    if visible_count == 0 {
+        offset = 0;
+    }
+    PickerWindow {
+        filtered,
+        sections,
+        visible_count,
+        offset,
+    }
 }
 
 /// Draw the scroll rail in the last column, muted, with a plain thumb for the view.
@@ -1046,7 +1125,13 @@ fn panel_demand(state: &TuiState) -> (usize, usize) {
                 .min(crate::state::PICKER_MAX_MODEL_ROWS);
             // Reserve the scroll-progress footer only when at least one model row fits.
             let footer_rows = usize::from(visible_rows > 0);
-            (visible_rows + 2 + footer_rows + status_rows, 0)
+            // Reserve the section headers too, so the demand matches the draw. See
+            // `SPEC-the-model-picker-groups-and-labels-rows` section 3.
+            let header_rows = picker.header_rows(&state.starred_models);
+            (
+                visible_rows + 2 + footer_rows + status_rows + header_rows,
+                0,
+            )
         }
     }
 }
@@ -1218,56 +1303,71 @@ fn model_picker_panel(
     if picker.loading {
         lines.push(one((pad("  loading…", width), muted)));
     } else if let Some(error) = &picker.error {
-        let body = format!("  ⚠ {error}");
+        // The error comes from a provider failure, so it is untrusted. Sanitize it like
+        // every other column on this panel. See `SPEC-the-model-picker-groups-and-labels-rows`
+        // section 4.
+        let body = format!("  ⚠ {}", sanitize_line(error));
         lines.push(one((pad(&body, width), warn)));
     }
 
+    // One computation feeds the budget and the draw. `picker_window` reserves the section
+    // headers inside the model-row budget, so the drawn rows and the reserved rows agree at
+    // every scroll offset. See `D-a-picker-row-labels-its-vendor` and section 3.
     let display = picker.display_rows(starred);
-    let filtered: Vec<usize> = display
-        .iter()
-        .enumerate()
-        .filter(|(_, row)| {
-            picker.query.is_empty() || crate::state::fuzzy_match(&picker.query, &row.id)
-        })
-        .map(|(index, _)| index)
-        .collect();
+    // Reserve the scroll-progress footer, then fit rows and their sticky headers.
+    let content_budget = budget.saturating_sub(lines.len() + 1);
+    let window = picker_window(picker, starred, content_budget);
+    let filtered = &window.filtered;
+    let sec = window.sections;
+    let visible_count = window.visible_count;
+    let offset = window.offset;
     let total_rows = filtered.len();
-    let fixed_lines = lines.len() + 1; // reserve one line for the scroll-progress footer
-    let visible_count = total_rows
-        .min(budget.saturating_sub(fixed_lines))
-        .min(crate::state::PICKER_MAX_MODEL_ROWS);
+
+    // The section boundaries, so a header draws before the first filtered row of a section.
+    // A header is render-only and never a filtered row, so it can never take the selection.
+    // See `D-the-picker-draws-a-starred-section`.
+    let starred_end = sec.current + sec.starred;
+    let first_starred_pos = filtered
+        .iter()
+        .position(|&index| index >= sec.current && index < starred_end);
+    let first_catalog_pos = filtered.iter().position(|&index| index >= starred_end);
 
     if total_rows > 0 && visible_count > 0 {
-        // Defensive clamp: a resize can leave the old offset pointing past the list.
-        let offset = picker
-            .scroll_offset
-            .min(total_rows.saturating_sub(visible_count));
+        let selected_display_index = filtered.get(picker.selected).copied().unwrap_or(0);
         for window_position in 0..visible_count {
-            let display_index = filtered[offset + window_position];
-            let row = &display[display_index];
-            let star = if row.starred { "★" } else { "☆" };
-            let effort_suffix = match row.effort {
-                Some(effort) => format!(" [effort={}]", effort.as_str()),
-                None => String::new(),
-            };
-            let tag = if row.is_current { " (current)" } else { "" };
-            let stale_tag = if row.stale { " (stale)" } else { "" };
-            let body = format!("  {star} {}{effort_suffix}{tag}{stale_tag}", row.id);
-            let selected_display_index = filtered.get(picker.selected).copied().unwrap_or(0);
-            let style = if display_index == selected_display_index {
-                text_style().add_modifier(Modifier::REVERSED)
+            let filtered_pos = offset + window_position;
+            let display_index = filtered[filtered_pos];
+            // A sticky header names the section of the top visible row, even when that row
+            // is not the section's first filtered row. Below the top, a header draws at a
+            // real section boundary. So section context stays at every scroll offset.
+            let (in_starred, in_catalog) = (
+                display_index >= sec.current && display_index < starred_end,
+                display_index >= starred_end,
+            );
+            let draw_starred = if window_position == 0 {
+                in_starred
             } else {
-                text_style()
+                first_starred_pos == Some(filtered_pos)
             };
-            lines.push(one((pad(&body, width), style)));
+            let draw_catalog = if window_position == 0 {
+                in_catalog
+            } else {
+                first_catalog_pos == Some(filtered_pos)
+            };
+            if draw_starred {
+                lines.push(one((pad("  starred", width), muted)));
+            }
+            if draw_catalog {
+                lines.push(one((pad("  models", width), muted)));
+            }
+            let row = &display[display_index];
+            let selected = display_index == selected_display_index;
+            lines.push(picker_row_line(row, width, selected, muted));
         }
     }
 
     // Scroll progress footer, dimmed, indented and right-aligned like the pi list.
     if total_rows > 0 && visible_count > 0 {
-        let offset = picker
-            .scroll_offset
-            .min(total_rows.saturating_sub(visible_count));
         let last_visible = (offset + visible_count).min(total_rows);
         let progress = format!("{}-{} / {}", offset + 1, last_visible, total_rows);
         let field_width = width.saturating_sub(2);
@@ -1278,6 +1378,69 @@ fn model_picker_panel(
 
     lines.truncate(budget);
     lines
+}
+
+/// One model-picker row: the star, the model name, a dim vendor, the effort, and the
+/// state tags.
+///
+/// Both text columns pass through `sanitize_line`, because a model id is untrusted. The
+/// vendor is the first part to yield when the width runs out, so a narrow row keeps the
+/// model name. See `SPEC-the-model-picker-groups-and-labels-rows` section 4 and
+/// `D-a-picker-row-labels-its-vendor`.
+fn picker_row_line(
+    row: &crate::state::PickerRow,
+    width: usize,
+    selected: bool,
+    muted: Style,
+) -> StyledLine {
+    let star = if row.starred { "★" } else { "☆" };
+    // The region-prefix rule can strip an id down to nothing, as in `us.anthropic`. A row
+    // must never draw an empty name. Fall back to the full id then, because the full id is
+    // what `Enter` applies. See `SPEC-the-model-picker-groups-and-labels-rows` section 4.
+    let derived_name = model_label(&row.id);
+    let name_source = if derived_name.trim().is_empty() {
+        row.id.as_str()
+    } else {
+        derived_name
+    };
+    let name = sanitize_line(name_source);
+    let vendor = sanitize_line(vendor_label(&row.id));
+    let effort_suffix = match row.effort {
+        Some(effort) => format!(" [effort={}]", effort.as_str()),
+        None => String::new(),
+    };
+    let current_tag = if row.is_current { " (current)" } else { "" };
+    let stale_tag = if row.stale { " (stale)" } else { "" };
+
+    let name_run = format!("  {star} {name}");
+    let tail_run = format!("{effort_suffix}{current_tag}{stale_tag}");
+    // Measure the whole row. Drop the vendor and its two spaces when the row does not fit.
+    let vendor_block = if vendor.is_empty() {
+        0
+    } else {
+        2 + vendor.width()
+    };
+    let include_vendor =
+        !vendor.is_empty() && name_run.width() + vendor_block + tail_run.width() <= width;
+
+    let apply = |style: Style| {
+        if selected {
+            style.add_modifier(Modifier::REVERSED)
+        } else {
+            style
+        }
+    };
+
+    let mut spans: StyledLine = Vec::new();
+    spans.push((name_run, apply(text_style())));
+    if include_vendor {
+        spans.push(("  ".to_string(), apply(text_style())));
+        spans.push((vendor, apply(muted)));
+    }
+    if !tail_run.is_empty() {
+        spans.push((tail_run, apply(text_style())));
+    }
+    spans
 }
 
 /// The help panel: the whole binding table, one row per key.
