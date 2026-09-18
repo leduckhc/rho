@@ -389,7 +389,16 @@ effort draws no suffix. Effort is the only per-row option. See
 
 - An id with an escape sequence in either column: `sanitize_line` drops the sequence whole.
 - A degenerate id such as `/` or `.`: the vendor label and the model name are both empty.
-  The row draws the star and no name. `Enter` still applies the full id.
+  The row then falls back to the full id. So `/` draws `☆ /`, and a row never draws a bare
+  star. `Enter` applies the same full id. See `a_region_only_id_never_draws_an_empty_name`.
+- **A crafted id can forge a state tag. This is not fixed.** rho draws ` (current)` and
+  ` (stale)` after the name. `sanitize_line` keeps a space and a bracket, so an id may end
+  with the same text. Measured: the id `gpt-4o (current)` draws `☆ gpt-4o (current)`, and the
+  real current row draws `☆ seed  openai (current)`. Text alone cannot tell them apart.
+  The harm is confusion, not access, because `Enter` applies the id the row names. A fix
+  needs the tag in a reserved right-aligned slot, where untrusted text cannot reach. That
+  slot changes the row arithmetic this spec settled, so it needs its own decision. See
+  `F-duration-slot` for the reserved-slot pattern this project already uses.
 - A full-id query no longer matches its own row. A user who types a full slash id gets no
   match, so `Enter` takes the typed-fallback path at `handle_model_picker_key`. That path
   applies `self.reasoning_effort`, not a row's previewed effort. A Tab preview is then lost.
