@@ -402,6 +402,29 @@ pub fn transcript_metrics(state: &TuiState, width: u16, height: u16) -> (usize, 
     (total, visible)
 }
 
+/// The number of model rows the model picker can actually draw in the current panel
+/// budget. The app loop writes this into the picker so `scroll_to_selection` keeps the
+/// selection visible even when the panel yields rows to the transcript.
+pub fn picker_viewport_rows(state: &TuiState, width: u16, height: u16) -> Option<usize> {
+    let width = width as usize;
+    if width == 0 {
+        return None;
+    }
+    let Panel::ModelPicker(picker) = &state.panel else {
+        return None;
+    };
+    let composer = composer_lines(state, width);
+    let input_rows = composer.len().saturating_sub(2);
+    let (panel_want, panel_floor) = panel_demand(state);
+    let layout = plan_screen(height, input_rows, panel_want, panel_floor);
+    if layout.panel_rows == 0 {
+        return None;
+    }
+    let status_rows = usize::from(picker.loading || picker.error.is_some());
+    // Header, query row, scroll-progress footer, and an optional status row.
+    Some(layout.panel_rows.saturating_sub(3 + status_rows))
+}
+
 /// Draw the scroll rail in the last column, muted, with a plain thumb for the view.
 fn draw_rail(
     state: &TuiState,
@@ -1006,18 +1029,24 @@ fn panel_demand(state: &TuiState) -> (usize, usize) {
             let rows = pages.get(guide.page).map_or(0, |page| page.rows.len() + 1);
             (rows, 0)
         }
-        // One row per filtered picker row, plus one query row, plus at most one status
-        // row for loading or error. A query with no match still draws its prompt, so
-        // the user sees what they typed. Yields on a short screen: the picker is a
-        // preference and not a safety row. See `D-the-model-picker-is-a-panel` and
-        // `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
+        // One header row (provider), one query row, at most ten filtered picker rows,
+        // one scroll-progress footer, plus at most one status row for loading or error.
+        // A query with no match still draws its prompt, so the user sees what they typed.
+        // Yields on a short screen: the picker is a preference and not a safety row. See
+        // `D-the-model-picker-is-a-panel` and `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
         Panel::ModelPicker(picker) => {
             let status_rows = if picker.loading || picker.error.is_some() {
                 1
             } else {
                 0
             };
-            (picker.filtered_indices().len() + 1 + status_rows, 0)
+            let visible_rows = picker
+                .filtered_indices(&state.starred_models)
+                .len()
+                .min(crate::state::PICKER_MAX_MODEL_ROWS);
+            // Reserve the scroll-progress footer only when at least one model row fits.
+            let footer_rows = usize::from(visible_rows > 0);
+            (visible_rows + 2 + footer_rows + status_rows, 0)
         }
     }
 }
@@ -1036,7 +1065,13 @@ fn panel_lines(state: &TuiState, width: usize, budget: usize) -> Vec<StyledLine>
         Panel::Help => help_panel(width),
         Panel::HistorySearch(search) => history_search_panel(search, &state.history, width),
         Panel::Guide(guide) => guide_panel(state, guide.page, width),
-        Panel::ModelPicker(picker) => model_picker_panel(picker, width),
+        Panel::ModelPicker(picker) => model_picker_panel(
+            picker,
+            &state.provider,
+            &state.starred_models,
+            width,
+            budget,
+        ),
     };
     // A panel never overruns its grant. This is the backstop that keeps the arithmetic
     // honest when the screen is short.
@@ -1152,14 +1187,26 @@ fn slash_panel(list: &SlashList, width: usize) -> Vec<StyledLine> {
     lines
 }
 
-/// The model-picker panel: a `> <query>` prompt, then one row per filtered picker row.
-/// Each row draws the star column, the id, and the preview effort at the end. See
-/// `D-the-model-picker-is-a-panel` and
+/// The model-picker panel: a dimmed provider header, a `> <query>` prompt, then at most
+/// ten visible filtered rows with scroll indicators. Each row draws the star column, the
+/// id, and the preview effort at the end. See `D-the-model-picker-is-a-panel` and
 /// `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
-fn model_picker_panel(picker: &crate::state::ModelPicker, width: usize) -> Vec<StyledLine> {
+fn model_picker_panel(
+    picker: &crate::state::ModelPicker,
+    provider: &str,
+    starred: &[String],
+    width: usize,
+    budget: usize,
+) -> Vec<StyledLine> {
     let mut lines = Vec::new();
     let muted = style_for(Role::Muted);
     let warn = style_for(Role::Warn);
+
+    // Header: provider name, dimmed. Sanitise it the same way the banner does, because
+    // it can come from flags or config.
+    let header = format!("  provider: {}", sanitize_line(provider));
+    lines.push(one((pad(&header, width), muted)));
+
     let query_display = if picker.query.is_empty() {
         "type to filter · empty shows the current and starred".to_string()
     } else {
@@ -1167,30 +1214,69 @@ fn model_picker_panel(picker: &crate::state::ModelPicker, width: usize) -> Vec<S
     };
     let prompt = format!("> {query_display}");
     lines.push(one((pad(&prompt, width), muted)));
+
     if picker.loading {
         lines.push(one((pad("  loading…", width), muted)));
     } else if let Some(error) = &picker.error {
         let body = format!("  ⚠ {error}");
         lines.push(one((pad(&body, width), warn)));
     }
-    let filtered = picker.filtered_indices();
-    for (position, row_index) in filtered.iter().enumerate() {
-        let row = &picker.rows[*row_index];
-        let star = if row.starred { "★" } else { "☆" };
-        let effort_suffix = match row.effort {
-            Some(effort) => format!(" [effort={}]", effort.as_str()),
-            None => String::new(),
-        };
-        let tag = if row.is_current { " (current)" } else { "" };
-        let stale_tag = if row.stale { " (stale)" } else { "" };
-        let body = format!("  {star} {}{effort_suffix}{tag}{stale_tag}", row.id);
-        let style = if position == picker.selected {
-            text_style().add_modifier(Modifier::REVERSED)
-        } else {
-            text_style()
-        };
-        lines.push(one((pad(&body, width), style)));
+
+    let display = picker.display_rows(starred);
+    let filtered: Vec<usize> = display
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            picker.query.is_empty() || crate::state::fuzzy_match(&picker.query, &row.id)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let total_rows = filtered.len();
+    let fixed_lines = lines.len() + 1; // reserve one line for the scroll-progress footer
+    let visible_count = total_rows
+        .min(budget.saturating_sub(fixed_lines))
+        .min(crate::state::PICKER_MAX_MODEL_ROWS);
+
+    if total_rows > 0 && visible_count > 0 {
+        // Defensive clamp: a resize can leave the old offset pointing past the list.
+        let offset = picker
+            .scroll_offset
+            .min(total_rows.saturating_sub(visible_count));
+        for window_position in 0..visible_count {
+            let display_index = filtered[offset + window_position];
+            let row = &display[display_index];
+            let star = if row.starred { "★" } else { "☆" };
+            let effort_suffix = match row.effort {
+                Some(effort) => format!(" [effort={}]", effort.as_str()),
+                None => String::new(),
+            };
+            let tag = if row.is_current { " (current)" } else { "" };
+            let stale_tag = if row.stale { " (stale)" } else { "" };
+            let body = format!("  {star} {}{effort_suffix}{tag}{stale_tag}", row.id);
+            let selected_display_index = filtered.get(picker.selected).copied().unwrap_or(0);
+            let style = if display_index == selected_display_index {
+                text_style().add_modifier(Modifier::REVERSED)
+            } else {
+                text_style()
+            };
+            lines.push(one((pad(&body, width), style)));
+        }
     }
+
+    // Scroll progress footer, dimmed, indented and right-aligned like the pi list.
+    if total_rows > 0 && visible_count > 0 {
+        let offset = picker
+            .scroll_offset
+            .min(total_rows.saturating_sub(visible_count));
+        let last_visible = (offset + visible_count).min(total_rows);
+        let progress = format!("{}-{} / {}", offset + 1, last_visible, total_rows);
+        let field_width = width.saturating_sub(2);
+        let right = format!("{progress:>field_width$}", field_width = field_width);
+        let footer = format!("  {right}");
+        lines.push(one((pad(&footer, width), muted)));
+    }
+
+    lines.truncate(budget);
     lines
 }
 

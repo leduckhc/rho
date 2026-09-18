@@ -330,6 +330,38 @@ fn stale_picker_rows_render_with_a_stale_tag() {
 }
 
 #[test]
+fn model_picker_draws_provider_header_and_scroll_progress() {
+    let mut state = TuiState::default();
+    state.model = "seed".to_string();
+    state.provider = "openrouter".to_string();
+    let models: Vec<ModelDescriptor> = (0..12)
+        .map(|i| ModelDescriptor {
+            id: format!("model-{i:02}"),
+            display_name: None,
+        })
+        .collect();
+    state.set_starred_models(vec![]);
+    state.open_model_picker();
+    state.append_catalog_models(&models);
+    // The panel has a header, a query row, ten visible rows, and a scroll-progress footer.
+    let lines = render_to_lines(&state, 60, 30);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("provider: openrouter")),
+        "the provider header is dimmed in the picker: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.trim() == "1-10 / 13"),
+        "the footer shows the visible range and total: {lines:?}"
+    );
+    assert!(
+        lines.iter().filter(|line| line.contains("model-")).count() <= 10,
+        "the picker never draws more than ten model rows: {lines:?}"
+    );
+}
+
+#[test]
 fn the_footer_stops_saying_canceling_when_the_run_dies_without_an_end_event() {
     let mut state = TuiState::default();
     state.apply(&AgentEvent::TurnStart, 0);

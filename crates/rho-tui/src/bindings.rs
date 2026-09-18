@@ -126,6 +126,11 @@ pub fn bindings() -> &'static [Binding] {
             built: true,
         },
         Binding {
+            keys: "ctrl+s",
+            summary: "star the selected model in the picker",
+            built: true,
+        },
+        Binding {
             keys: "pageup",
             summary: "scroll the transcript one screen up",
             built: true,

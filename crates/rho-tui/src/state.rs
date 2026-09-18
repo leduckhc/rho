@@ -125,36 +125,137 @@ pub enum Panel {
 /// `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ModelPicker {
-    /// The rows the picker draws. The current model is first; every other row is a
-    /// starred model. See `D-the-model-picker-is-a-panel`.
+    /// The catalog rows in provider order, deduped by id. The current model is one of
+    /// these rows. The display order is built on demand: current first, then starred
+    /// duplicates, then every non-current row. See `D-the-model-picker-is-a-panel`.
     pub rows: Vec<PickerRow>,
-    /// The highlighted row index into the **filtered** rows, not `rows`. See
-    /// `ModelPicker::filtered_indices`.
+    /// The highlighted row index into the **displayed** rows. See
+    /// `ModelPicker::display_rows` and `ModelPicker::filtered_indices`.
     pub selected: usize,
+    /// The first filtered row that is visible on screen. The picker shows at most ten
+    /// rows at once, so the selection can scroll a long catalog. This indexes the
+    /// *filtered* result set, not the full display order. See `D-the-model-picker-is-a-panel`.
+    pub scroll_offset: usize,
     /// The fuzzy query. Empty means no filter, so every row of `rows` is shown.
     pub query: String,
     /// True while a catalog load is in flight. The renderer draws one loading row.
     pub loading: bool,
     /// The error from a failed catalog load, if any. It draws as one line.
     pub error: Option<String>,
+    /// The number of model rows that can actually be drawn in the current panel budget.
+    /// `None` means "not measured yet"; `scroll_to_selection` falls back to the ten-row
+    /// cap. `Some(0)` means the panel has no room for model rows.
+    pub viewport_rows: Option<usize>,
 }
 
+/// The most model rows the picker draws at once.
+pub const PICKER_MAX_MODEL_ROWS: usize = 10;
+
 impl ModelPicker {
-    /// The indices of `self.rows` that pass the fuzzy filter. See `fuzzy_match`.
-    ///
-    /// An empty query returns every index in original order. A non-empty query keeps the
-    /// row order the picker started with, so the current row stays first. See
-    /// `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
-    pub fn filtered_indices(&self) -> Vec<usize> {
-        if self.query.is_empty() {
-            return (0..self.rows.len()).collect();
+    /// The rows as they appear on screen: current first, then a duplicate of every
+    /// starred catalog model, then every catalog row. A starred catalog model therefore
+    /// appears twice: once at the top and once in its catalog position. Starred models
+    /// that are not in the catalog appear only at the top. See `D-the-model-picker-is-a-panel`.
+    pub fn display_rows(&self, starred: &[String]) -> Vec<PickerRow> {
+        let mut display = Vec::new();
+        let starred_set: std::collections::HashSet<&str> =
+            starred.iter().map(|id| id.as_str()).collect();
+        let row_by_id: std::collections::HashMap<&str, &PickerRow> =
+            self.rows.iter().map(|row| (row.id.as_str(), row)).collect();
+        let current = self.rows.iter().find(|row| row.is_current).cloned();
+        if let Some(current) = &current {
+            display.push(current.clone());
         }
-        self.rows
+        // Starred section at the top. Use the stored row when one exists (catalog or
+        // starred-only) so effort cycling is preserved. Synthesise a row only for a
+        // starred id that has no row at all. A malformed file may list the same id twice;
+        // the picker shows it once.
+        let mut starred_seen = std::collections::HashSet::new();
+        for id in starred {
+            if current.as_ref().map(|row| &row.id) == Some(id) {
+                continue;
+            }
+            if !starred_seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(row) = row_by_id.get(id.as_str()) {
+                let mut dup = (*row).clone();
+                dup.starred = true;
+                dup.is_current = false;
+                // Keep the original stale marker; a cached row is stale even when shown at
+                // the top of the picker.
+                display.push(dup);
+            } else {
+                // Synthesise a row for a starred id that has no catalog or starred-only row.
+                display.push(PickerRow {
+                    id: id.clone(),
+                    is_current: false,
+                    starred: true,
+                    effort: None,
+                    stale: false,
+                    catalog: false,
+                });
+            }
+        }
+        // Catalog section after the starred section.
+        for row in &self.rows {
+            if row.is_current || !row.catalog {
+                continue;
+            }
+            let mut shown = row.clone();
+            shown.starred = starred_set.contains(row.id.as_str());
+            shown.is_current = false;
+            display.push(shown);
+        }
+        display
+    }
+
+    /// The indices of the displayed rows that pass the fuzzy filter. See `fuzzy_match`.
+    ///
+    /// An empty query returns every display index in order. A non-empty query keeps the
+    /// display order, so the current row and starred duplicates stay at the top. See
+    /// `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
+    pub fn filtered_indices(&self, starred: &[String]) -> Vec<usize> {
+        let display = self.display_rows(starred);
+        if self.query.is_empty() {
+            return (0..display.len()).collect();
+        }
+        display
             .iter()
             .enumerate()
             .filter(|(_, row)| fuzzy_match(&self.query, &row.id))
             .map(|(index, _)| index)
             .collect()
+    }
+
+    /// Adjust `scroll_offset` so `selected` is inside the visible window. The window is
+    /// the measured panel budget when available, capped at ten rows.
+    pub fn scroll_to_selection(&mut self, starred: &[String]) {
+        let filtered_count = self.filtered_indices(starred).len();
+        if filtered_count == 0 {
+            self.scroll_offset = 0;
+            self.selected = 0;
+            return;
+        }
+        let window = match self.viewport_rows {
+            None => PICKER_MAX_MODEL_ROWS,
+            Some(0) => {
+                // The panel has no room for model rows; keep the offset at zero and only
+                // clamp the selection so navigation resumes cleanly once the terminal grows.
+                self.selected = self.selected.min(filtered_count - 1);
+                return;
+            }
+            Some(rows) => rows.min(PICKER_MAX_MODEL_ROWS),
+        };
+        self.selected = self.selected.min(filtered_count - 1);
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        } else if self.selected >= self.scroll_offset + window {
+            self.scroll_offset = self.selected.saturating_sub(window - 1);
+        }
+        self.scroll_offset = self
+            .scroll_offset
+            .min(filtered_count.saturating_sub(window));
     }
 }
 
@@ -192,6 +293,10 @@ pub struct PickerRow {
     /// True when this row came from a stale cache entry and has not been confirmed by a
     /// fresh listing yet.
     pub stale: bool,
+    /// True when this row came from the provider catalog or suggestion list. Starred
+    /// ids that are not in the catalog are added with `catalog = false` so the display
+    /// order knows not to duplicate them in the catalog section.
+    pub catalog: bool,
 }
 
 /// The approval prompt content. The command is verbatim, so the user sees exactly
@@ -1079,7 +1184,7 @@ impl TuiState {
             }
             Panel::Guide(_) => return self.handle_guide_key(key.code),
             Panel::ModelPicker(picker) => {
-                return self.handle_model_picker_key(key.code, picker.clone());
+                return self.handle_model_picker_key(key, picker.clone());
             }
             // An approval prompt answers its own keys, which stage U6 wires.
             Panel::Approval(_) | Panel::None => {}
@@ -1205,6 +1310,16 @@ impl TuiState {
                 KeyAction::None
             }
             KeyCode::Char('g') if ctrl => KeyAction::EditDraft(self.draft.model_text()),
+            // Ctrl+S stars (or unstars) the selected row of the model picker. A panel owns
+            // the keyboard, so the chord dispatch runs it instead of the draft handler.
+            KeyCode::Char('s') if ctrl => {
+                if let Panel::ModelPicker(picker) = &self.panel {
+                    let mut picker = picker.clone();
+                    self.toggle_star_for_selected(&mut picker, &self.starred_models.clone())
+                } else {
+                    KeyAction::None
+                }
+            }
             // Ctrl-R opens the reverse search. It keeps the draft, so Esc can restore it.
             KeyCode::Char('r') if ctrl => {
                 self.panel = Panel::HistorySearch(HistorySearch::default());
@@ -1406,15 +1521,11 @@ impl TuiState {
         self.reasoning_effort = selection.reasoning_effort;
     }
 
-    /// Open the model picker. The rows are, in order and deduped by id:
-    ///
-    /// 1. the current model,
-    /// 2. every starred id from `~/.rho/starred-models.toml`,
-    /// 3. every id in the provider's suggestion list.
-    ///
-    /// A duplicate id later in the list is dropped, so the current stays at row zero and
-    /// a starred id keeps its `starred` flag when it also appears in the suggestion list.
-    /// See `D-the-picker-seeds-from-a-per-provider-suggestion-list`.
+    /// Open the model picker. The rows are every unique model id that can appear: the
+    /// current model, every suggestion, and every starred id not already covered.
+    /// Starred catalog models are duplicated at the top of the display order by
+    /// `ModelPicker::display_rows`, so they appear both at the top and in their catalog
+    /// position. See `D-the-picker-seeds-from-a-per-provider-suggestion-list`.
     pub fn open_model_picker(&mut self) -> KeyAction {
         let mut rows: Vec<PickerRow> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1424,8 +1535,24 @@ impl TuiState {
             starred: self.starred_models.iter().any(|id| id == &self.model),
             effort: self.reasoning_effort,
             stale: false,
+            catalog: true,
         });
         seen.insert(self.model.clone());
+        for id in &self.suggested_models {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            rows.push(PickerRow {
+                id: id.clone(),
+                is_current: false,
+                starred: self.starred_models.iter().any(|starred| starred == id),
+                effort: None,
+                stale: false,
+                catalog: true,
+            });
+        }
+        // Keep starred ids that are not in the catalog list as rows too, so effort
+        // cycling and display have a row to mutate.
         for id in &self.starred_models {
             if !seen.insert(id.clone()) {
                 continue;
@@ -1434,30 +1561,19 @@ impl TuiState {
                 id: id.clone(),
                 is_current: false,
                 starred: true,
-                // A starred row carries no effort. Enter with this row keeps the current
-                // effort, unless the user pressed Tab to preview one first.
                 effort: None,
                 stale: false,
-            });
-        }
-        for id in &self.suggested_models {
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            rows.push(PickerRow {
-                id: id.clone(),
-                is_current: false,
-                starred: false,
-                effort: None,
-                stale: false,
+                catalog: false,
             });
         }
         self.panel = Panel::ModelPicker(ModelPicker {
             rows,
             selected: 0,
+            scroll_offset: 0,
             query: String::new(),
             loading: false,
             error: None,
+            viewport_rows: None,
         });
         KeyAction::OpenModelPicker
     }
@@ -1475,38 +1591,117 @@ impl TuiState {
         picker.loading = loading;
     }
 
-    /// Append catalog models to an open picker, dropping ids that already appear.
-    /// A model that was previously shown as stale is now confirmed fresh, so its stale
-    /// flag clears.
+    /// Append catalog models to an open picker. The catalog section is rebuilt in
+    /// provider order, so a fresh listing places every id in its correct position. A
+    /// previously-stale row is confirmed fresh. Catalog rows the provider did not return
+    /// stay visible (still stale if they came from cache). Starred-only rows are kept at
+    /// the end, so a starred custom id does not vanish.
     pub fn append_catalog_models(&mut self, models: &[rho_core::ModelDescriptor]) {
         let Panel::ModelPicker(picker) = &mut self.panel else {
             return;
         };
         picker.loading = false;
         picker.error = None;
+
+        // Remember the id and approximate display position the user had highlighted, so
+        // a rebuild does not move the selection to a different model at the same
+        // filtered index. A starred catalog model has two occurrences; the closest
+        // occurrence keeps the user's place.
+        let old_display = picker.display_rows(&self.starred_models);
+        let old_filtered = picker.filtered_indices(&self.starred_models);
+        let selected_occurrence = old_filtered.get(picker.selected).map(|&index| {
+            let id = old_display[index].id.clone();
+            (id, index)
+        });
+
+        let old_rows: Vec<PickerRow> = picker.rows.drain(..).collect();
+        let mut old_by_id: std::collections::HashMap<String, PickerRow> = old_rows
+            .iter()
+            .map(|row| (row.id.clone(), row.clone()))
+            .collect();
+        let starred_set: std::collections::HashSet<&str> =
+            self.starred_models.iter().map(|id| id.as_str()).collect();
         let mut seen: std::collections::HashSet<String> =
-            picker.rows.iter().map(|r| r.id.clone()).collect();
+            std::collections::HashSet::with_capacity(models.len() + 1);
+        let mut new_rows: Vec<PickerRow> = Vec::with_capacity(models.len() + old_rows.len());
+
+        // The current model is always a catalog row.
+        let current_id = self.model.clone();
+        if seen.insert(current_id.clone()) {
+            let mut current = old_by_id.remove(&current_id).unwrap_or(PickerRow {
+                id: current_id.clone(),
+                is_current: true,
+                starred: self.starred_models.iter().any(|id| id == &current_id),
+                effort: self.reasoning_effort,
+                stale: false,
+                catalog: true,
+            });
+            current.is_current = true;
+            current.catalog = true;
+            current.starred = starred_set.contains(current_id.as_str());
+            new_rows.push(current);
+        }
+
+        // Catalog rows in the order the provider returned them.
         for model in models {
-            if seen.contains(&model.id) {
-                // A fresh listing confirms this id, so clear any stale marker.
-                if let Some(row) = picker.rows.iter_mut().find(|r| r.id == model.id) {
-                    row.stale = false;
-                }
+            if !seen.insert(model.id.clone()) {
                 continue;
             }
-            seen.insert(model.id.clone());
-            picker.rows.push(PickerRow {
+            let mut row = old_by_id.remove(&model.id).unwrap_or(PickerRow {
                 id: model.id.clone(),
                 is_current: false,
                 starred: false,
                 effort: None,
                 stale: false,
+                catalog: true,
             });
+            row.is_current = false;
+            row.catalog = true;
+            // A fresh listing confirms this id, so any stale marker clears.
+            row.stale = false;
+            row.starred = starred_set.contains(model.id.as_str());
+            new_rows.push(row);
         }
+
+        // Any row that is still unseen is kept. Rows that were already catalog (including
+        // suggestions and stale-cache entries that the provider did not return) stay
+        // catalog and keep their stale flag. Rows that were not catalog must be
+        // starred-only fallbacks. Iterate the original order so retained rows stay in
+        // their previous position.
+        for row in old_rows {
+            if old_by_id.remove(&row.id).is_none() {
+                continue;
+            }
+            let mut row = row;
+            row.is_current = false;
+            if !row.catalog {
+                row.starred = true;
+            }
+            new_rows.push(row);
+        }
+
+        picker.rows = new_rows;
+        // Restore the selection to the closest occurrence of the same id, so a starred
+        // catalog model stays on whichever duplicate the user had highlighted.
+        if let Some((id, old_index)) = selected_occurrence {
+            let display = picker.display_rows(&self.starred_models);
+            let filtered = picker.filtered_indices(&self.starred_models);
+            picker.selected = filtered
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(_, index)| display[*index].id == id)
+                .min_by_key(|(_, index)| index.abs_diff(old_index))
+                .map(|(filtered_index, _)| filtered_index)
+                .unwrap_or(0);
+        }
+        picker.scroll_to_selection(&self.starred_models);
     }
 
     /// Seed an open picker with cached models while a fresh list loads. Rows from the
-    /// cache are marked stale until `append_catalog_models` confirms them.
+    /// cache are marked stale until `append_catalog_models` confirms them. A cached id
+    /// that already lives in the picker as a starred-only fallback is promoted to a stale
+    /// catalog row so it also appears in provider order.
     pub fn seed_picker_with_cached_models(&mut self, models: &[rho_core::ModelDescriptor]) {
         let Panel::ModelPicker(picker) = &mut self.panel else {
             return;
@@ -1515,14 +1710,28 @@ impl TuiState {
             picker.rows.iter().map(|r| r.id.clone()).collect();
         for model in models {
             if !seen.insert(model.id.clone()) {
+                // Promote a starred-only fallback to a stale catalog row. A row that is
+                // already catalog (including the current model) keeps its existing state.
+                if let Some(row) = picker
+                    .rows
+                    .iter_mut()
+                    .find(|r| r.id == model.id && !r.catalog)
+                {
+                    row.catalog = true;
+                    row.stale = true;
+                }
                 continue;
             }
             picker.rows.push(PickerRow {
                 id: model.id.clone(),
                 is_current: false,
-                starred: false,
+                starred: self
+                    .starred_models
+                    .iter()
+                    .any(|starred| starred == &model.id),
                 effort: None,
                 stale: true,
+                catalog: true,
             });
         }
     }
@@ -1541,9 +1750,18 @@ impl TuiState {
     /// `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
     ///
     /// `j`, `k`, `e`, and `*` are legitimate id characters, so they type into the query.
-    /// Tab cycles effort; BackTab (Shift+Tab) toggles a star. Enter on an empty filter
-    /// applies the query verbatim, so a typed id always reaches the provider.
-    fn handle_model_picker_key(&mut self, code: KeyCode, mut picker: ModelPicker) -> KeyAction {
+    /// Tab cycles effort; BackTab (Shift+Tab) or ctrl+s toggles a star. Enter on an empty
+    /// filter applies the query verbatim, so a typed id always reaches the provider.
+    fn handle_model_picker_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        mut picker: ModelPicker,
+    ) -> KeyAction {
+        let code = key.code;
+        let ctrl = key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL);
+        let starred = self.starred_models.clone();
         match code {
             KeyCode::Esc => {
                 self.panel = Panel::None;
@@ -1551,17 +1769,19 @@ impl TuiState {
             }
             KeyCode::Up => {
                 picker.selected = picker.selected.saturating_sub(1);
+                picker.scroll_to_selection(&starred);
                 self.panel = Panel::ModelPicker(picker);
                 KeyAction::None
             }
             KeyCode::Down => {
-                let last = picker.filtered_indices().len().saturating_sub(1);
+                let last = picker.filtered_indices(&starred).len().saturating_sub(1);
                 picker.selected = (picker.selected + 1).min(last);
+                picker.scroll_to_selection(&starred);
                 self.panel = Panel::ModelPicker(picker);
                 KeyAction::None
             }
             KeyCode::Enter => {
-                let filtered = picker.filtered_indices();
+                let filtered = picker.filtered_indices(&starred);
                 self.panel = Panel::None;
                 if filtered.is_empty() {
                     // No match: apply the query verbatim, per
@@ -1579,68 +1799,92 @@ impl TuiState {
                     });
                 }
                 let selected = picker.selected.min(filtered.len() - 1);
-                let row_index = filtered[selected];
-                let row = &picker.rows[row_index];
+                let display = picker.display_rows(&starred);
+                let row = &display[filtered[selected]];
                 KeyAction::ApplySelection(ModelSelection {
                     model: row.id.clone(),
                     reasoning_effort: row.effort.or(self.reasoning_effort),
                 })
             }
             KeyCode::Tab => {
-                let filtered = picker.filtered_indices();
+                let filtered = picker.filtered_indices(&starred);
                 if !filtered.is_empty() {
                     let selected = picker.selected.min(filtered.len() - 1);
-                    let row_index = filtered[selected];
-                    if let Some(row) = picker.rows.get_mut(row_index) {
+                    let display = picker.display_rows(&starred);
+                    let id = display[filtered[selected]].id.clone();
+                    if let Some(row) = picker.rows.iter_mut().find(|r| r.id == id) {
                         row.effort = next_effort_in_cycle(row.effort);
                     }
                 }
+                picker.scroll_to_selection(&starred);
                 self.panel = Panel::ModelPicker(picker);
                 KeyAction::None
             }
-            KeyCode::BackTab => {
-                let filtered = picker.filtered_indices();
-                if filtered.is_empty() {
-                    self.panel = Panel::ModelPicker(picker);
-                    return KeyAction::None;
-                }
-                let selected = picker.selected.min(filtered.len() - 1);
-                let row_index = filtered[selected];
-                let Some(row) = picker.rows.get_mut(row_index) else {
-                    self.panel = Panel::ModelPicker(picker);
-                    return KeyAction::None;
-                };
-                row.starred = !row.starred;
-                let id = row.id.clone();
-                let now_starred = row.starred;
-                if now_starred {
-                    if !self.starred_models.iter().any(|existing| existing == &id) {
-                        self.starred_models.push(id);
-                    }
-                } else {
-                    self.starred_models.retain(|existing| existing != &id);
-                }
-                let list = self.starred_models.clone();
-                self.panel = Panel::ModelPicker(picker);
-                KeyAction::PersistStarred(list)
-            }
+            KeyCode::BackTab => self.toggle_star_for_selected(&mut picker, &starred),
+            KeyCode::Char('s') if ctrl => self.toggle_star_for_selected(&mut picker, &starred),
             KeyCode::Backspace => {
                 picker.query.pop();
                 // A filter that shrinks may leave the selection past the new last row.
                 // Reset to zero so the highlighted row is always visible.
                 picker.selected = 0;
+                picker.scroll_offset = 0;
                 self.panel = Panel::ModelPicker(picker);
                 KeyAction::None
             }
             KeyCode::Char(ch) if !ch.is_control() => {
                 picker.query.push(ch);
                 picker.selected = 0;
+                picker.scroll_offset = 0;
                 self.panel = Panel::ModelPicker(picker);
                 KeyAction::None
             }
             // Any other key is ignored on purpose.
             _ => KeyAction::None,
         }
+    }
+
+    /// Toggle the star on the selected display row, update the in-memory starred list,
+    /// and return a `PersistStarred` action so the file is written. A starred catalog
+    /// model stays in the catalog list and is duplicated at the top of the display order.
+    fn toggle_star_for_selected(
+        &mut self,
+        picker: &mut ModelPicker,
+        starred: &[String],
+    ) -> KeyAction {
+        let filtered = picker.filtered_indices(starred);
+        if filtered.is_empty() {
+            return KeyAction::None;
+        }
+        let selected = picker.selected.min(filtered.len() - 1);
+        let display = picker.display_rows(starred);
+        let id = display[filtered[selected]].id.clone();
+        let now_starred = !self.starred_models.iter().any(|existing| existing == &id);
+        if now_starred {
+            self.starred_models.push(id.clone());
+        } else {
+            self.starred_models.retain(|existing| existing != &id);
+        }
+        // Keep the underlying row flags in sync with the file list.
+        for row in picker.rows.iter_mut() {
+            if row.id == id {
+                row.starred = now_starred;
+            }
+        }
+        let list = self.starred_models.clone();
+        // Keep the selection on the same id when possible, so a star toggle does not
+        // jump the highlight to a different model. `selected` is an index into the
+        // filtered result set, so the position must be computed through `filtered_indices`.
+        let new_display = picker.display_rows(&list);
+        let new_filtered = picker.filtered_indices(&list);
+        // Prefer the catalog occurrence (the later match) so a newly-starred catalog row
+        // does not jump the highlight to the top duplicate.
+        picker.selected = new_filtered
+            .iter()
+            .rposition(|&index| new_display[index].id == id)
+            .unwrap_or(0);
+        picker.scroll_to_selection(&list);
+        self.panel = Panel::ModelPicker(picker.clone());
+        KeyAction::PersistStarred(list)
     }
 
     /// Run the selected row of the slash list. A command never reaches the model, and

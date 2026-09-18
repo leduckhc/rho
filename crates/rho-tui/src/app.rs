@@ -24,11 +24,13 @@ use rho_core::{
 };
 
 use crate::editor::{editor_argv, editor_command};
-use crate::render::{STARTUP_MIN_ROWS, composer_text_width, render, transcript_metrics};
+use crate::render::{
+    STARTUP_MIN_ROWS, composer_text_width, picker_viewport_rows, render, transcript_metrics,
+};
 use crate::screen::ScreenGuard;
 use crate::scroll::WHEEL_ROWS;
 use crate::slash_row_index;
-use crate::state::{KeyAction, Row, TuiState};
+use crate::state::{KeyAction, Panel, Row, TuiState};
 
 /// A terminal backed by standard output.
 type Term = Terminal<CrosstermBackend<Stdout>>;
@@ -384,6 +386,11 @@ impl App {
                                         *catalog_cancel = Some(load_cancel);
                                         state.set_picker_loading(true);
                                     }
+                                    // The picker now exists, so measure its viewport before
+                                    // the first draw. `draw_frame` will repeat this, but an
+                                    // explicit call keeps the first frame honest if the panel
+                                    // was just opened without a resize/catalog event.
+                                    update_metrics(terminal, state)?;
                                 }
                             }
                             // A key that closed the picker (Esc, Enter, or a slash command
@@ -577,6 +584,14 @@ fn update_metrics(terminal: &Term, state: &mut TuiState) -> Result<(), TuiError>
     let (total, visible) = transcript_metrics(state, size.width, size.height);
     state.transcript_total = total;
     state.transcript_visible = visible;
+    let picker_viewport = picker_viewport_rows(state, size.width, size.height);
+    if let Panel::ModelPicker(picker) = &mut state.panel {
+        picker.viewport_rows = picker_viewport;
+        // A resize or first measurement can change the visible window. Re-clamp so the
+        // offset stays valid for the new viewport.
+        let starred = state.starred_models.clone();
+        picker.scroll_to_selection(&starred);
+    }
     Ok(())
 }
 

@@ -15,6 +15,10 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+fn ctrl(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::CONTROL)
+}
+
 fn seeded_state() -> TuiState {
     let mut state = TuiState::default();
     state.model = "seed-model".to_string();
@@ -239,8 +243,8 @@ fn slash_effort_with_an_unknown_level_pushes_an_error() {
 fn the_picker_appends_suggested_models_after_the_starred_and_dedupes() {
     let mut state = seeded_state();
     // The current is `seed-model`. Starred contains `starred-a`, and suggestions contain
-    // both `starred-a` and `new-suggested`. The dedupe should keep `starred-a` as starred,
-    // and only add `new-suggested` once.
+    // both `starred-a` and `new-suggested`. The catalog list keeps every unique id once;
+    // the display order duplicates `starred-a` at the top, then shows the full catalog.
     state.set_starred_models(vec!["starred-a".to_string()]);
     state.set_suggested_models(vec!["starred-a".to_string(), "new-suggested".to_string()]);
     state.open_model_picker();
@@ -256,10 +260,20 @@ fn the_picker_appends_suggested_models_after_the_starred_and_dedupes() {
             "starred-a".to_string(),
             "new-suggested".to_string(),
         ],
-        "current, then starred, then new suggestions, deduped: {ids:?}"
+        "catalog rows are unique and in provider order: {ids:?}"
     );
-    // A duplicated suggestion does not appear twice.
-    assert_eq!(picker.rows.len(), 3, "no duplicate rows");
+    let display = picker.display_rows(&state.starred_models);
+    let display_ids: Vec<String> = display.iter().map(|row| row.id.clone()).collect();
+    assert_eq!(
+        display_ids,
+        vec![
+            "seed-model".to_string(),
+            "starred-a".to_string(),
+            "starred-a".to_string(),
+            "new-suggested".to_string(),
+        ],
+        "display order: current, starred duplicate, then full catalog: {display_ids:?}"
+    );
     assert!(picker.rows[0].is_current, "row 0 is current");
     assert!(picker.rows[1].starred, "row 1 is starred");
     assert!(
@@ -282,7 +296,8 @@ fn the_picker_shows_the_current_model_first_and_then_the_starred() {
         Panel::ModelPicker(picker) => picker.clone(),
         other => panic!("picker not open: {other:?}"),
     };
-    let ids: Vec<String> = picker.rows.iter().map(|row| row.id.clone()).collect();
+    let display = picker.display_rows(&state.starred_models);
+    let ids: Vec<String> = display.iter().map(|row| row.id.clone()).collect();
     assert_eq!(
         ids,
         vec![
@@ -292,15 +307,12 @@ fn the_picker_shows_the_current_model_first_and_then_the_starred() {
         ],
         "current first, then starred, no duplicate: {ids:?}"
     );
-    assert!(picker.rows[0].is_current, "the first row is the current");
+    assert!(display[0].is_current, "the first row is the current");
     assert!(
-        picker.rows[0].starred,
+        display[0].starred,
         "the current is marked starred when it is in the file"
     );
-    assert!(
-        !picker.rows[1].is_current,
-        "the second row is not the current"
-    );
+    assert!(!display[1].is_current, "the second row is not the current");
 }
 
 #[test]
@@ -313,14 +325,16 @@ fn arrow_keys_move_the_picker_selection_and_never_wrap() {
     let last = match &state.panel {
         Panel::ModelPicker(picker) => {
             assert_eq!(picker.selected, 2, "at the last row");
-            picker.filtered_indices().len() - 1
+            picker.filtered_indices(&state.starred_models).len() - 1
         }
         other => panic!("picker not open: {other:?}"),
     };
     // One more press must not wrap.
     state.handle_key(key(KeyCode::Down));
     match &state.panel {
-        Panel::ModelPicker(picker) => assert_eq!(picker.selected, last, "no wrap at the end"),
+        Panel::ModelPicker(picker) => {
+            assert_eq!(picker.selected, last, "no wrap at the end")
+        }
         other => panic!("picker not open: {other:?}"),
     }
     // Move up past the top.
@@ -329,7 +343,9 @@ fn arrow_keys_move_the_picker_selection_and_never_wrap() {
     state.handle_key(key(KeyCode::Up));
     state.handle_key(key(KeyCode::Up));
     match &state.panel {
-        Panel::ModelPicker(picker) => assert_eq!(picker.selected, 0, "no wrap at the top"),
+        Panel::ModelPicker(picker) => {
+            assert_eq!(picker.selected, 0, "no wrap at the top")
+        }
         other => panic!("picker not open: {other:?}"),
     }
 }
@@ -375,8 +391,9 @@ fn tab_cycles_the_highlighted_rows_effort_but_does_not_apply_until_enter() {
             state.handle_key(key(KeyCode::Tab));
             match &state.panel {
                 Panel::ModelPicker(picker) => {
-                    let filtered = picker.filtered_indices();
-                    picker.rows[filtered[picker.selected]].effort
+                    let filtered = picker.filtered_indices(&state.starred_models);
+                    let display = picker.display_rows(&state.starred_models);
+                    display[filtered[picker.selected]].effort
                 }
                 _ => panic!("picker closed unexpectedly"),
             }
@@ -416,6 +433,8 @@ fn tab_cycles_the_highlighted_rows_effort_but_does_not_apply_until_enter() {
 #[test]
 fn shift_tab_toggles_the_star_and_returns_a_persistence_action() {
     let mut state = seeded_state();
+    // Put `starred-a` in the suggestion list so it stays in the picker after unstar.
+    state.set_suggested_models(vec!["starred-a".to_string()]);
     state.open_model_picker();
     // Un-star the currently-starred `starred-a` row: move down and press Shift+Tab.
     state.handle_key(key(KeyCode::Down));
@@ -440,6 +459,41 @@ fn shift_tab_toggles_the_star_and_returns_a_persistence_action() {
     );
     // The panel is still open.
     assert!(matches!(state.panel, Panel::ModelPicker(_)));
+}
+
+#[test]
+fn ctrl_s_stars_a_catalog_model_and_duplicates_it_to_the_top() {
+    let mut state = seeded_state();
+    state.set_starred_models(vec![]);
+    // `suggested-a` is in the catalog but not starred yet.
+    state.set_suggested_models(vec!["suggested-a".to_string()]);
+    state.open_model_picker();
+    state.handle_key(key(KeyCode::Down));
+    let action = state.handle_key(ctrl(KeyCode::Char('s')));
+    let list = match action {
+        KeyAction::PersistStarred(list) => list,
+        other => panic!("expected PersistStarred, got {other:?}"),
+    };
+    assert!(
+        list.iter().any(|id| id == "suggested-a"),
+        "ctrl+s stars the selected model: {list:?}"
+    );
+    // The model now appears at the top (starred duplicate) and in its catalog position.
+    let picker = match &state.panel {
+        Panel::ModelPicker(picker) => picker.clone(),
+        other => panic!("picker not open: {other:?}"),
+    };
+    let display = picker.display_rows(&state.starred_models);
+    let ids: Vec<String> = display.iter().map(|row| row.id.clone()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            "seed-model".to_string(),
+            "suggested-a".to_string(),
+            "suggested-a".to_string(),
+        ],
+        "starred catalog model is duplicated at the top and kept in place: {ids:?}"
+    );
 }
 
 #[test]
@@ -478,9 +532,9 @@ fn typing_filters_the_picker_by_fuzzy_subsequence() {
         other => panic!("picker not open: {other:?}"),
     };
     let filtered_ids: Vec<String> = picker
-        .filtered_indices()
+        .filtered_indices(&state.starred_models)
         .iter()
-        .map(|i| picker.rows[*i].id.clone())
+        .map(|i| picker.display_rows(&state.starred_models)[*i].id.clone())
         .collect();
     assert_eq!(
         filtered_ids,
@@ -522,7 +576,7 @@ fn enter_on_an_empty_filter_applies_the_query_verbatim() {
         state.handle_key(key(KeyCode::Char(ch)));
     }
     let filtered_len = match &state.panel {
-        Panel::ModelPicker(picker) => picker.filtered_indices().len(),
+        Panel::ModelPicker(picker) => picker.filtered_indices(&state.starred_models).len(),
         _ => panic!("picker not open"),
     };
     assert_eq!(filtered_len, 0, "the query matches no starred row");
