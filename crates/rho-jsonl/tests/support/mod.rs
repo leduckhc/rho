@@ -10,9 +10,9 @@ use async_trait::async_trait;
 use futures::stream;
 
 use rho_core::{
-    AllowAllPolicy, ApprovalPolicy, CancelToken, CompletionRequest, Context, HookChain, Provider,
-    ProviderError, ProviderStream, Role, Session, SessionConfig, StopReason, StreamEvent, Tool,
-    ToolContext, ToolError, ToolKind, ToolOutput, ToolRegistry,
+    AllowAllPolicy, ApprovalPolicy, CancelToken, CompletionRequest, Context, HookChain,
+    ModelCatalog, Provider, ProviderError, ProviderStream, Role, Session, SessionConfig,
+    StopReason, StreamEvent, Tool, ToolContext, ToolError, ToolKind, ToolOutput, ToolRegistry,
 };
 use rho_jsonl::{Asker, FactoryError, SessionFactory, SessionRequest};
 
@@ -46,6 +46,10 @@ impl ScriptedProvider {
 impl Provider for ScriptedProvider {
     fn id(&self) -> &str {
         "scripted"
+    }
+
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        None
     }
 
     async fn stream(

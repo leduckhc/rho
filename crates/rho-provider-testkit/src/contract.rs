@@ -122,6 +122,15 @@ pub async fn provider_contract_tool_call_end_has_parsed_arguments(harness: &dyn 
     );
 }
 
+/// `Provider::catalog()` must answer without panicking. A provider that cannot list
+/// returns `None`; a provider that can returns `Some`. Either answer is valid, but a
+/// panic is not. See `SPEC-choose-a-model-and-configure-a-run` section 3.
+pub fn provider_contract_catalog_answer(harness: &dyn ProviderHarness) {
+    // The call is synchronous, so no timeout is needed. The assertion is simply that
+    // the call returns and does not panic.
+    let _ = harness.provider().catalog();
+}
+
 /// Run every contract check against one provider. An outside author calls this.
 pub async fn run_all(harness: &dyn ProviderHarness) {
     provider_contract_emits_message_start_first(harness).await;
@@ -129,4 +138,5 @@ pub async fn run_all(harness: &dyn ProviderHarness) {
     provider_contract_yields_first_event_before_stream_end(harness).await;
     provider_contract_text_deltas_in_order(harness).await;
     provider_contract_tool_call_end_has_parsed_arguments(harness).await;
+    provider_contract_catalog_answer(harness);
 }

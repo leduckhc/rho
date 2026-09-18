@@ -16,9 +16,11 @@ use common::RecordingProvider;
 use futures::StreamExt;
 use rho_core::{
     AgentEvent, AgentEvents, CancelToken, CompletionRequest, ContentBlock, Context, HookChain,
-    ModelSelection, Provider, ProviderError, ProviderStream, ReasoningEffort, Session,
-    SessionConfig, StreamEvent, ToolRegistry,
+    ModelCatalog, ModelSelection, NewSession, Provider, ProviderError, ProviderStream,
+    ReasoningEffort, Record, Session, SessionConfig, SessionLog, SessionReader, SessionRecorder,
+    SessionStore, StreamEvent, ToolRegistry,
 };
+use std::path::Path;
 use tokio::sync::Notify;
 
 fn user_input(text: &str) -> Vec<ContentBlock> {
@@ -114,6 +116,10 @@ async fn set_selection_never_changes_the_running_turn() {
             "blocking"
         }
 
+        fn catalog(&self) -> Option<&dyn ModelCatalog> {
+            None
+        }
+
         async fn stream(
             &self,
             request: CompletionRequest,
@@ -193,4 +199,118 @@ async fn set_selection_never_changes_the_running_turn() {
     // Release the provider so the run finishes and the test does not hang.
     released.notify_one();
     let _ = collect(events).await;
+}
+
+/// A stable session id. Minting takes a time and a suffix, so no test sleeps.
+fn sid(suffix: u16) -> rho_core::SessionId {
+    rho_core::SessionId::mint(1_756_000_000_000, suffix)
+}
+
+/// Build a fresh session file and return the store, the writer, and the file path.
+fn temp_session() -> (
+    tempfile::TempDir,
+    rho_core::SessionWriter,
+    std::path::PathBuf,
+) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = SessionStore::new(dir.path());
+    let id = sid(1);
+    let writer = store
+        .create(NewSession {
+            id: &id,
+            cwd: Path::new("/work"),
+            approval: "read-only",
+            sandbox: "off",
+            provider: "testkit",
+            model: "test-model",
+            forked_from: None,
+        })
+        .expect("create session");
+    let path = writer.path().to_path_buf();
+    (dir, writer, path)
+}
+
+/// Read every record from a session file.
+fn read_records(path: &Path) -> Vec<Record> {
+    let read = SessionReader::read(path).expect("read session");
+    read.entries.into_iter().map(|entry| entry.record).collect()
+}
+
+/// A model change with an attached recorder writes a `ModelChange` record to the
+/// session file. Without this, a mid-session switch vanishes from the file.
+#[test]
+fn model_change_writes_a_model_change_record() {
+    let (_dir, writer, path) = temp_session();
+    let recorder = SessionRecorder::new(SessionLog::File(writer));
+    let session = session_over(Arc::new(RecordingProvider::new()), common::test_config())
+        .with_recorder(recorder);
+
+    session.set_selection(ModelSelection {
+        model: "switched-model".to_string(),
+        reasoning_effort: Some(ReasoningEffort::High),
+    });
+
+    let records = read_records(&path);
+    assert!(
+        records.iter().any(|r| matches!(
+            r,
+            Record::ModelChange { provider, model } if provider == "recording" && model == "switched-model"
+        )),
+        "set_selection wrote a ModelChange record: {records:?}"
+    );
+}
+
+/// Setting the same model id again does not write another ModelChange record. A
+/// repeated picker selection or slash command must not clutter the session file.
+#[test]
+fn unchanged_selection_does_not_write_a_model_change_record() {
+    let (_dir, writer, path) = temp_session();
+    let recorder = SessionRecorder::new(SessionLog::File(writer));
+    let session = session_over(Arc::new(RecordingProvider::new()), common::test_config())
+        .with_recorder(recorder);
+
+    session.set_selection(ModelSelection {
+        model: "test-model".to_string(),
+        reasoning_effort: Some(ReasoningEffort::High),
+    });
+
+    let records = read_records(&path);
+    let model_changes: Vec<_> = records
+        .iter()
+        .filter(|r| matches!(r, Record::ModelChange { .. }))
+        .collect();
+    assert_eq!(
+        model_changes.len(),
+        1,
+        "the session file keeps exactly one ModelChange record: the one written at create time"
+    );
+}
+
+/// A model change reaches the provider on the next request, not the current one.
+/// This is the same invariant `set_selection_takes_effect_on_the_next_request`
+/// proves, named here because `SPEC-choose-a-model-and-configure-a-run` lists it.
+#[tokio::test]
+async fn model_change_takes_effect_next_request() {
+    let provider = Arc::new(RecordingProvider::new());
+    let session = session_over(provider.clone(), common::test_config());
+
+    session.set_selection(ModelSelection {
+        model: "picked-model".to_string(),
+        reasoning_effort: Some(ReasoningEffort::High),
+    });
+
+    let events = session.prompt(user_input("hello"), CancelToken::new());
+    let _ = collect(events).await;
+
+    let seen = provider.seen.lock().expect("the lock holds");
+    assert_eq!(seen.len(), 1, "one request went out");
+    assert_eq!(
+        seen[0].model, "picked-model",
+        "the model on the wire is the new one"
+    );
+    assert_eq!(
+        seen[0].reasoning,
+        Some(ReasoningEffort::High),
+        "the effort on the wire is the new one"
+    );
 }

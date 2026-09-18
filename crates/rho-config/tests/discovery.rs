@@ -28,7 +28,7 @@ fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 }
 
 #[test]
-fn the_global_path_lives_under_dot_rho() {
+fn home_supplies_the_global_path() {
     // rho keeps every user-scoped file under one directory. So the config lives at
     // ~/.rho/config.toml, next to sessions and the MCP cache.
     let paths = ConfigPaths::discover(&env(&[("HOME", "/home/le")]), &PathBuf::from("/work"));
@@ -40,9 +40,9 @@ fn the_global_path_lives_under_dot_rho() {
 }
 
 #[test]
-fn xdg_config_home_reaches_the_legacy_slot() {
+fn home_wins_over_xdg_config_home() {
     // rho reads the XDG location only as a fallback for anyone who tracked the pre-launch
-    // branch. The new path wins when both exist.
+    // branch. The ~/.rho path wins when both exist.
     let paths = ConfigPaths::discover(
         &env(&[("XDG_CONFIG_HOME", "/xdg"), ("HOME", "/home/le")]),
         &PathBuf::from("/work"),
@@ -50,7 +50,7 @@ fn xdg_config_home_reaches_the_legacy_slot() {
     assert_eq!(
         paths.global,
         Some(PathBuf::from("/home/le/.rho/config.toml")),
-        "the new path is the primary"
+        "the ~/.rho path is the primary global path"
     );
     assert_eq!(
         paths.global_legacy,

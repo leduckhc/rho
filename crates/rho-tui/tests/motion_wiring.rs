@@ -7,7 +7,7 @@
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use rho_core::AgentEvent;
+use rho_core::{AgentEvent, ModelCatalog};
 use rho_tui::{ActivityState, App, MotionInputs, TuiState, motion_enabled, render};
 
 #[test]
@@ -107,6 +107,10 @@ struct SilentProvider;
 impl rho_core::Provider for SilentProvider {
     fn id(&self) -> &str {
         "silent"
+    }
+
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        None
     }
 
     async fn stream(

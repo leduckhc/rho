@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use rho_core::{
-    CancelToken, CompletionRequest, ContentBlock, Message, Provider, ProviderError, ProviderStream,
-    Role, StopReason, StreamEvent, Usage,
+    CancelToken, CompletionRequest, ContentBlock, Message, ModelCatalog, Provider, ProviderError,
+    ProviderStream, Role, StopReason, StreamEvent, Usage,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -156,6 +156,10 @@ impl AzureProvider {
 impl Provider for AzureProvider {
     fn id(&self) -> &str {
         "azure"
+    }
+
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        None
     }
 
     async fn stream(
@@ -370,6 +374,9 @@ struct AzureUsage {
     /// report zero for both. See decision D-measured-cost-and-cache.
     #[serde(default)]
     input_tokens_details: Option<AzureInputTokenDetails>,
+    /// Reasoning token breakout, when the service reports it.
+    #[serde(default)]
+    output_tokens_details: Option<AzureOutputTokenDetails>,
 }
 
 /// The cache breakdown inside `usage.input_tokens_details`.
@@ -379,6 +386,13 @@ struct AzureInputTokenDetails {
     cached_tokens: u64,
     #[serde(default)]
     cache_write_tokens: u64,
+}
+
+/// The reasoning breakout inside `usage.output_tokens_details`.
+#[derive(Clone, Debug, Default, Deserialize)]
+struct AzureOutputTokenDetails {
+    #[serde(default)]
+    reasoning_tokens: u64,
 }
 
 /// The error shape of a mid-stream event.
@@ -500,6 +514,10 @@ impl ResponsesState {
                             output_tokens: usage.output_tokens,
                             cache_read_tokens: details.cached_tokens,
                             cache_write_tokens: details.cache_write_tokens,
+                            reasoning_tokens: usage
+                                .output_tokens_details
+                                .as_ref()
+                                .map(|d| d.reasoning_tokens),
                             // Azure does not report a charge, so the field stays empty
                             // rather than guessing from a price table.
                             cost_usd: None,

@@ -3,7 +3,7 @@
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use rho_core::{AgentEvent, StreamEvent};
+use rho_core::{AgentEvent, ModelDescriptor, ReasoningEffort, StreamEvent};
 use rho_tui::{TuiState, render};
 use unicode_width::UnicodeWidthStr;
 
@@ -262,6 +262,74 @@ fn the_model_picker_footer_hits_a_space_between_status_and_hint() {
 }
 
 #[test]
+fn listing_failure_shows_one_error_line() {
+    // A listing failure must render as exactly one error line in the picker panel,
+    // and the current model must still draw. The panel budget keeps the error visible.
+    let mut state = TuiState::default();
+    state.model = "seed".to_string();
+    state.provider = "openrouter".to_string();
+    state.reasoning_effort = Some(ReasoningEffort::Medium);
+    state.set_starred_models(vec!["starred-a".to_string()]);
+    state.open_model_picker();
+    state.set_picker_error("provider timed out");
+    let lines = render_to_lines(&state, 60, 12);
+    let error_lines: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.trim().starts_with('⚠'))
+        .collect();
+    assert_eq!(
+        error_lines.len(),
+        1,
+        "a listing failure draws exactly one error line: {error_lines:?}"
+    );
+    assert!(
+        error_lines[0].contains("provider timed out"),
+        "the error line names the failure: {}",
+        error_lines[0]
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("seed")),
+        "the current model still draws after a listing failure"
+    );
+}
+
+#[test]
+fn stale_picker_rows_render_with_a_stale_tag() {
+    // A stale cached row must show a `(stale)` tag, and the current model must not.
+    let mut state = TuiState::default();
+    state.model = "seed".to_string();
+    state.provider = "openrouter".to_string();
+    state.reasoning_effort = Some(ReasoningEffort::Medium);
+    state.set_starred_models(vec!["starred-a".to_string()]);
+    state.open_model_picker();
+    state.seed_picker_with_cached_models(&[ModelDescriptor {
+        id: "cached-a".to_string(),
+        display_name: None,
+    }]);
+    let lines = render_to_lines(&state, 60, 12);
+    let stale_lines: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.contains("(stale)"))
+        .collect();
+    assert_eq!(
+        stale_lines.len(),
+        1,
+        "exactly one row draws the stale tag: {stale_lines:?}"
+    );
+    assert!(
+        stale_lines[0].contains("cached-a"),
+        "the stale row names the cached id: {}",
+        stale_lines[0]
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("seed") && line.contains("(stale)")),
+        "the current model is not marked stale"
+    );
+}
+
+#[test]
 fn the_footer_stops_saying_canceling_when_the_run_dies_without_an_end_event() {
     let mut state = TuiState::default();
     state.apply(&AgentEvent::TurnStart, 0);
@@ -269,7 +337,7 @@ fn the_footer_stops_saying_canceling_when_the_run_dies_without_an_end_event() {
         crossterm::event::KeyCode::Char('c'),
         crossterm::event::KeyModifiers::CONTROL,
     ));
-    state.end_run(true);
+    state.end_run(true, 100);
     let frame = render_to_string(&state, 100, 12);
     assert!(
         !frame.contains("canceling"),

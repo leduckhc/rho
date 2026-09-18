@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use futures::stream;
 use rho_core::{
     AgentRegistry, AllowAllPolicy, CancelToken, CompletionRequest, ContentBlock, HookChain,
-    Provider, ProviderError, ProviderStream, Role, SessionConfig, StopReason, StreamEvent,
-    SubagentLimits, Tool, ToolContext, ToolRegistry,
+    ModelCatalog, Provider, ProviderError, ProviderStream, Role, SessionConfig, StopReason,
+    StreamEvent, SubagentLimits, Tool, ToolContext, ToolRegistry,
 };
 use rho_skills::{AgentDefinition, SkillOrigin};
 use rho_tools::{ChildToolFactory, SpawnAgentTool, SpawnAgentsTool, SpawnEnv};
@@ -36,6 +36,10 @@ impl Provider for ScriptedProvider {
     fn id(&self) -> &str {
         "scripted"
     }
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        None
+    }
+
     async fn stream(
         &self,
         _request: CompletionRequest,
@@ -56,6 +60,10 @@ impl Provider for CyclingProvider {
     fn id(&self) -> &str {
         "cycling"
     }
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        None
+    }
+
     async fn stream(
         &self,
         _request: CompletionRequest,
@@ -101,6 +109,10 @@ impl Provider for HangingProvider {
     fn id(&self) -> &str {
         "hanging"
     }
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        None
+    }
+
     async fn stream(
         &self,
         _request: CompletionRequest,
@@ -1754,6 +1766,10 @@ impl Provider for FirstHangsProvider {
     fn id(&self) -> &str {
         "first-hangs"
     }
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        None
+    }
+
     async fn stream(
         &self,
         _request: CompletionRequest,

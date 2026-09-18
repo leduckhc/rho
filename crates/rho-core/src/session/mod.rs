@@ -2570,6 +2570,16 @@ impl SessionRecorder {
     ///
     /// An empty or blank title is refused, so a row never shows a blank name. A title costs no
     /// model call. See `D-a-session-title-costs-nothing`.
+    pub fn record_model_change(&mut self, provider: &str, model: &str) -> Option<RecordId> {
+        self.log.record(
+            Record::ModelChange {
+                provider: provider.to_string(),
+                model: model.to_string(),
+            },
+            None,
+        )
+    }
+
     pub fn record_name(&mut self, title: &str) -> Result<Option<RecordId>, SessionError> {
         let title = title.trim();
         if title.is_empty() {

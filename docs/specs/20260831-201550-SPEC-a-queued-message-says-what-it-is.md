@@ -1,6 +1,9 @@
 # SPEC-a-queued-message-says-what-it-is — the TUI states what steering does
 
-Status: draft. No code yet. This spec wires the steering surface into the TUI.
+Status: delivered. The TUI steers its own turn: a mid-turn Enter returns
+`KeyAction::Steer`, `on_steer_result` pushes a waiting row, and `MessageDelivered` flips
+it. The footer counts waiting messages. Owning crate: `rho-tui`. Tests:
+`crates/rho-tui/tests/steering.rs`.
 Owning crate: `rho-tui`.
 Features: F-tui-steering-is-visible (this spec), and F-message-steering (the core delivery).
 

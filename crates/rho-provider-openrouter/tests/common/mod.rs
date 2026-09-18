@@ -167,6 +167,12 @@ pub struct OpenRouterHarness;
 
 #[async_trait]
 impl ProviderHarness for OpenRouterHarness {
+    fn provider(&self) -> std::sync::Arc<dyn Provider> {
+        std::sync::Arc::new(OpenRouterProvider::new(OpenRouterConfig::new(Secret::new(
+            "test-key",
+        ))))
+    }
+
     async fn run(&self, script: Script) -> HarnessRun {
         let provider_stream;
         let guard: Box<dyn std::any::Any + Send>;

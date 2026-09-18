@@ -20,7 +20,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::bindings::{bindings, filter_slash_commands};
 use crate::concise::RowFold;
-use crate::duration::{DURATION_SLOT_COLUMNS, duration_slot, format_duration};
+use crate::duration::{
+    DURATION_SLOT_COLUMNS, duration_slot, format_duration, live_duration_is_amber,
+};
 use crate::markdown::{MarkdownKind, has_inline_markup, scan_inline, scan_markdown};
 use crate::motion::{MotionCell, MotionInputs, motion_cell, motion_enabled, sweep_weight};
 use crate::sanitize::{fit_to_width, sanitize_block, sanitize_line};
@@ -301,9 +303,15 @@ pub fn render(state: &TuiState, frame: &mut Frame<'_>) {
         y += 1;
     }
     if layout.footer {
-        let (footer, word_at, hint_at) = footer_line(state, width);
+        let (footer, word_at, hint_at, amber_span) = footer_line(state, width);
         put(frame, y, width, &one((footer.clone(), text_style())));
         restyle(frame, y, hint_at, width, style_for(Role::Muted));
+        // A live turn past one minute paints its duration amber. After the run ends the
+        // duration keeps the normal role, whatever the value, so a slow finished turn
+        // reads calm. See `SPEC-the-turn-clock-and-the-working-state` "The amber cue".
+        if let Some((start, end)) = amber_span {
+            restyle(frame, y, start, end, style_for(Role::Warn));
+        }
         apply_sweep(state, frame, y, word_at);
     }
 }
@@ -497,24 +505,29 @@ fn push_row(
     measure: usize,
 ) {
     match row {
-        Row::User { text } => {
+        Row::User { text, delivered } => {
             // A submitted prompt sits on a band, so the eye finds where each turn began. Both
             // Claude Code and pi mark it the same way. The row is padded to the full width, so the
             // band reaches the frame edge instead of stopping at the last word. See
             // `D-a-submitted-prompt-sits-on-a-band`.
             let band = style_for(Role::UserBand);
+            let warn = style_for(Role::Warn);
             let wrapped = wrap_block(&sanitize_block(text), measure.saturating_sub(2));
             for (line_index, line) in wrapped.iter().enumerate() {
-                let body = if line_index == 0 {
-                    format!("{GLYPH_USER} {line}")
+                // A waiting row carries a `waiting` tag in `warn`, so a steered message the
+                // model has not received reads differently from one already delivered. The
+                // tag rides the first line, after the text. See
+                // `SPEC-a-queued-message-says-what-it-is` section 6.2.
+                if line_index == 0 {
+                    let mut segs: StyledLine = vec![(format!("{GLYPH_USER} "), band)];
+                    segs.push((line.clone(), band));
+                    if !delivered {
+                        segs.push(("  · waiting".to_string(), warn));
+                    }
+                    out.push(segs);
                 } else {
-                    format!("  {line}")
-                };
-                // Deliberately not padded here. `put` fills the tail of a row with the row's own
-                // style, so the band reaches the frame edge through one mechanism instead of two.
-                // Padding here as well would leave that fill untested, and untested code is where
-                // this project's defects have lived.
-                out.push(one((body, band)));
+                    out.push(one((format!("  {line}"), band)));
+                }
             }
         }
         Row::Assistant { text } => {
@@ -993,12 +1006,19 @@ fn panel_demand(state: &TuiState) -> (usize, usize) {
             let rows = pages.get(guide.page).map_or(0, |page| page.rows.len() + 1);
             (rows, 0)
         }
-        // One row per filtered picker row, plus one query row. A query with no match
-        // still draws its prompt, so the user sees what they typed. Yields on a short
-        // screen: the picker is a preference and not a safety row. See
-        // `D-the-model-picker-is-a-panel` and
+        // One row per filtered picker row, plus one query row, plus at most one status
+        // row for loading or error. A query with no match still draws its prompt, so
+        // the user sees what they typed. Yields on a short screen: the picker is a
+        // preference and not a safety row. See `D-the-model-picker-is-a-panel` and
         // `D-model-picker-allows-fuzzy-search-and-typed-fallback`.
-        Panel::ModelPicker(picker) => (picker.filtered_indices().len() + 1, 0),
+        Panel::ModelPicker(picker) => {
+            let status_rows = if picker.loading || picker.error.is_some() {
+                1
+            } else {
+                0
+            };
+            (picker.filtered_indices().len() + 1 + status_rows, 0)
+        }
     }
 }
 
@@ -1139,6 +1159,7 @@ fn slash_panel(list: &SlashList, width: usize) -> Vec<StyledLine> {
 fn model_picker_panel(picker: &crate::state::ModelPicker, width: usize) -> Vec<StyledLine> {
     let mut lines = Vec::new();
     let muted = style_for(Role::Muted);
+    let warn = style_for(Role::Warn);
     let query_display = if picker.query.is_empty() {
         "type to filter · empty shows the current and starred".to_string()
     } else {
@@ -1146,6 +1167,12 @@ fn model_picker_panel(picker: &crate::state::ModelPicker, width: usize) -> Vec<S
     };
     let prompt = format!("> {query_display}");
     lines.push(one((pad(&prompt, width), muted)));
+    if picker.loading {
+        lines.push(one((pad("  loading…", width), muted)));
+    } else if let Some(error) = &picker.error {
+        let body = format!("  ⚠ {error}");
+        lines.push(one((pad(&body, width), warn)));
+    }
     let filtered = picker.filtered_indices();
     for (position, row_index) in filtered.iter().enumerate() {
         let row = &picker.rows[*row_index];
@@ -1155,7 +1182,8 @@ fn model_picker_panel(picker: &crate::state::ModelPicker, width: usize) -> Vec<S
             None => String::new(),
         };
         let tag = if row.is_current { " (current)" } else { "" };
-        let body = format!("  {star} {}{effort_suffix}{tag}", row.id);
+        let stale_tag = if row.stale { " (stale)" } else { "" };
+        let body = format!("  {star} {}{effort_suffix}{tag}{stale_tag}", row.id);
         let style = if position == picker.selected {
             text_style().add_modifier(Modifier::REVERSED)
         } else {
@@ -1268,6 +1296,16 @@ fn composer_lines(state: &TuiState, width: usize) -> Vec<StyledLine> {
         };
         lines.push(one((pad(&row, width), style)));
     }
+    // A steer refusal shows at the bottom of the composer in `warn`, so the reader sees
+    // why the message stayed without it vanishing. It rides the draft window, which is
+    // anchored to the newest row, so it stays visible. See `SPEC-a-queued-message-says-what-it-is`
+    // section 7.
+    if let Some(notice) = &state.steer_notice {
+        lines.push(one((
+            pad(&format!("{GLYPH_USER} {notice}"), width),
+            style_for(Role::Warn),
+        )));
+    }
     lines.push(one((rule_line(width), muted)));
     lines
 }
@@ -1306,12 +1344,18 @@ pub fn composer_text_width(width: u16) -> usize {
 
 // ---- The footer. ----------------------------------------------------------
 
-/// The footer content row, the column where the working word begins, and the column where
-/// the key hints begin. The word column is `None` when no word animates. The hint column
-/// lets the caller paint the hints muted and the activity word as text.
-fn footer_line(state: &TuiState, width: usize) -> (String, Option<usize>, usize) {
+/// The footer content row, the column where the working word begins, the column where
+/// the key hints begin, and the duration cell span to paint amber when a live turn runs
+/// past one minute. The word column is `None` when no word animates. The hint column
+/// lets the caller paint the hints muted and the activity word as text. The duration
+/// span is `None` unless a turn is live and past the amber threshold.
+fn footer_line(
+    state: &TuiState,
+    width: usize,
+) -> (String, Option<usize>, usize, Option<(usize, usize)>) {
     let running =
         state.activity == ActivityState::Running || matches!(state.panel, Panel::Approval(_));
+    let mut amber_span: Option<(usize, usize)> = None;
     let (left, word_col) = if running {
         let word = if matches!(state.panel, Panel::Approval(_)) {
             "waiting"
@@ -1325,10 +1369,34 @@ fn footer_line(state: &TuiState, width: usize) -> (String, Option<usize>, usize)
         let dur = format_duration(state.turn_millis).unwrap_or_default();
         // The word sits after the activity mark and one space.
         let col = EDGE_MARGIN + GLYPH_ACTIVITY.width() + 1;
-        (
-            format!("{GLYPH_ACTIVITY} {word} {GLYPH_SEPARATOR} {dur}"),
-            Some(col),
-        )
+        // The duration follows the activity mark, the word, and the separator, each with
+        // one space. The amber cue applies only while a turn is actually live (not an
+        // approval panel) and past one minute. See `SPEC-the-turn-clock-and-the-working-state`
+        // "The amber cue".
+        let dur_start = EDGE_MARGIN
+            + GLYPH_ACTIVITY.width()
+            + 1
+            + word.width()
+            + 1
+            + GLYPH_SEPARATOR.width()
+            + 1;
+        if state.activity == ActivityState::Running
+            && live_duration_is_amber(state.turn_millis.unwrap_or(0))
+        {
+            amber_span = Some((dur_start, dur_start + dur.width()));
+        }
+        // The footer counts waiting steered messages. The tail is absent when none wait,
+        // so the footer reads `◈ working · {dur}`. See `SPEC-a-queued-message-says-what-it-is`
+        // section 6.4 and `SPEC-the-turn-clock-and-the-working-state` section 3.
+        let waiting = state.waiting_count();
+        let left = if waiting > 0 {
+            format!(
+                "{GLYPH_ACTIVITY} {word} {GLYPH_SEPARATOR} {dur} {GLYPH_SEPARATOR} {waiting} waiting"
+            )
+        } else {
+            format!("{GLYPH_ACTIVITY} {word} {GLYPH_SEPARATOR} {dur}")
+        };
+        (left, Some(col))
     } else if state.last_error {
         let dur = format_duration(state.turn_millis).unwrap_or_default();
         (
@@ -1356,7 +1424,7 @@ fn footer_line(state: &TuiState, width: usize) -> (String, Option<usize>, usize)
     let line = format!("  {left}{}{right}  ", " ".repeat(gap));
     // Where the hints start, so the caller can paint them muted.
     let hint_at = EDGE_MARGIN + left.width() + gap;
-    (pad(&line, width), word_col, hint_at)
+    (pad(&line, width), word_col, hint_at, amber_span)
 }
 
 /// Repaint the style of the cells from `start` to `end` on row `y`, keeping the symbols.
@@ -1403,6 +1471,9 @@ fn footer_hints(state: &TuiState, width: usize) -> Cow<'static, str> {
             Cow::Borrowed("↑ ↓ move · enter pick · tab effort · shift-tab star · esc close")
         }
         Panel::None => {
+            if let Some(hint) = state.composer_hint() {
+                return Cow::Borrowed(hint);
+            }
             if state.activity == ActivityState::Running {
                 Cow::Borrowed("ctrl-c cancel · / commands · ? help")
             } else {

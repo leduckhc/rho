@@ -42,6 +42,7 @@ fn a_submitted_prompt_draws_a_band_across_every_column() {
     let rows = drawn(
         vec![Row::User {
             text: "run the tests".to_string(),
+            delivered: true,
         }],
         60,
         14,
@@ -90,7 +91,14 @@ fn a_wrapped_prompt_bands_every_one_of_its_rows() {
     // A long prompt takes several rows, and a band that covered only the first would look like a
     // rendering fault rather than one message.
     let long = "please run the whole test suite and then explain in detail what each failure means and why it happened".to_string();
-    let rows = drawn(vec![Row::User { text: long }], 50, 16);
+    let rows = drawn(
+        vec![Row::User {
+            text: long,
+            delivered: true,
+        }],
+        50,
+        16,
+    );
     let banded: Vec<&(String, Vec<ratatui::style::Color>)> = rows
         .iter()
         .filter(|(_, bg)| bg[0] != ratatui::style::Color::Reset)
@@ -118,6 +126,7 @@ fn the_band_does_not_bleed_into_the_row_above_or_below() {
             },
             Row::User {
                 text: "middle".to_string(),
+                delivered: true,
             },
             Row::Assistant {
                 text: "after".to_string(),
@@ -149,6 +158,7 @@ fn a_submitted_prompt_is_bold_in_every_colour_mode() {
     let mut state = TuiState::default();
     state.rows.push(Row::User {
         text: "run the tests".to_string(),
+        delivered: true,
     });
     let backend = TestBackend::new(60, 14);
     let mut terminal = Terminal::new(backend).expect("terminal");

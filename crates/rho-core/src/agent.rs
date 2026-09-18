@@ -321,6 +321,9 @@ impl ModelSelection {
 
 pub struct Session {
     inner: Arc<SessionInner>,
+    /// An optional session recorder. When present, `set_selection` writes a
+    /// `ModelChange` record so a mid-session model switch is visible in the file.
+    recorder: std::sync::Mutex<Option<crate::SessionRecorder>>,
 }
 
 struct SessionInner {
@@ -369,6 +372,16 @@ impl Session {
                 selection,
                 queue: config_queue,
             }),
+            recorder: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Attach a session recorder. The recorder writes a `ModelChange` record on every
+    /// `set_selection` call, so a mid-session switch is visible in the session file.
+    pub fn with_recorder(self, recorder: crate::SessionRecorder) -> Self {
+        Self {
+            inner: self.inner,
+            recorder: std::sync::Mutex::new(Some(recorder)),
         }
     }
 
@@ -388,13 +401,23 @@ impl Session {
     ///
     /// The running turn is unaffected: `Driver::build_request` reads the mutex once at
     /// the start of a turn. The write is synchronous, and the lock is uncontended.
-    /// See `D-model-selection-is-mutable-behind-a-mutex`.
+    /// If a session recorder is attached, this also writes a `ModelChange` record so a
+    /// mid-session switch is visible in the session file. See `D-model-selection-is-mutable-behind-a-mutex`.
     pub fn set_selection(&self, selection: ModelSelection) {
-        *self
+        let mut guard = self
             .inner
             .selection
             .lock()
-            .expect("the selection lock is never poisoned") = selection;
+            .expect("the selection lock is never poisoned");
+        let changed = guard.model != selection.model;
+        *guard = selection.clone();
+        drop(guard);
+        if changed
+            && let Ok(mut recorder) = self.recorder.lock()
+            && let Some(recorder) = recorder.as_mut()
+        {
+            recorder.record_model_change(self.inner.provider.id(), &selection.model);
+        }
     }
 
     /// Build a session with a test configuration. The config confines paths to
@@ -430,8 +453,13 @@ impl Session {
         // shared value. A session is built once, before it runs.
         let inner = Arc::try_unwrap(self.inner)
             .unwrap_or_else(|_| panic!("with_queue must run before the session is shared"));
+        let recorder = self
+            .recorder
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         Self {
             inner: Arc::new(SessionInner { queue, ..inner }),
+            recorder: std::sync::Mutex::new(recorder),
         }
     }
 

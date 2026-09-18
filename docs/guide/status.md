@@ -29,14 +29,14 @@ This page describes rho as of 2026-08-26.
 | List, read, name, fork, and delete a session | [sessions](sessions.md) |
 | A lock, so two rho processes never write one session | [sessions](sessions.md) |
 | Skills loaded from `SKILL.md` files | [skills](skills.md) |
-| `/help`, `/quit`, and `/guide` slash commands | [terminal interface](terminal.md) |
+| `/help`, `/quit`, `/guide`, `/model`, and `/effort` slash commands | [terminal interface](terminal.md) |
 | A local model host, through `--base-url` | [providers](providers.md) |
 | MCP tools, cached after the first handshake | [MCP servers](mcp.md) |
-| The working animation, and `--no-motion` to stop it | [terminal interface](terminal.md) |
+| The working animation with a live turn clock, and `--no-motion` to stop the sweep | [terminal interface](terminal.md) |
 | `--no-agents`, separate from `--no-skills` | [commands and flags](cli.md) |
 | The two minute tour, three pages, keys generated from the binding table | [terminal interface](terminal.md) |
 | Slash-command list (`/` opens it, typing filters it) | [terminal interface](terminal.md) |
-| 1592 tests passing in the workspace | — |
+| 2170 tests passing in the workspace | — |
 
 ## Partly built
 
@@ -45,7 +45,7 @@ This page describes rho as of 2026-08-26.
 | `approval = "ask"` parses in the config. | rho refuses it with an error message. Use `--read-only` to block writes, or omit the flag to allow all. |
 | `rho run` records a session, and `--continue` resumes one. `session-file` and `ephemeral` both reach the run. | The terminal records nothing, and `/sessions` opens no picker. Use `rho run` when you want a session, and `rho sessions list` as the picker. See [sessions](sessions.md). |
 | The `[subagents]` table sets four limits: `max-depth`, `max-children-per-parent`, `max-live-total`, and `child-timeout-secs`. A project file may only lower one. | Six limits have a flag and no config key: `--max-queued-per-parent`, `--max-queued-total`, `--queue-wait-secs`, `--max-agent-steer-bytes`, `--agent-grace-turns`, and `--max-agent-tool-calls`. Pass those as flags. No `RHO_*` variable sets a subagent limit. |
-| A subagent can be steered while it runs, with `steer_agent`. | You cannot steer your own turn. The terminal interface wires no queue for your session. A message you type mid-run never reaches the running turn, and Enter starts a new turn instead. |
+| A subagent can be steered while it runs, with `steer_agent`. You can also steer your own turn. A message typed while a turn runs shows at once as a waiting row. It turns delivered at the turn boundary. The footer counts waiting messages. Enter during a run steers; Enter while idle sends. |
 | A background task reports progress, and rho summarises it. | The terminal interface never draws the summary. The task row ignores the field, so a long build shows no percentage. |
 | The approval panel is drawn and its keys are unwired. | Nothing opens it in a real run. This is why `approval = "ask"` has nowhere to go, even in the terminal build. |
 | The terminal interface holds code for an image attachment. | No image reaches the provider. A pasted image is dropped at the send step, in silence. |
@@ -56,7 +56,7 @@ This page describes rho as of 2026-08-26.
 
 | If you try it today |
 |---|
-| `/model` and `/sessions` — each answers `✗ error · <command> is not built yet.` The list marks both, so you see it before you press Enter. |
+| `/sessions` answers `✗ error · /sessions is not built yet.` The list marks it, so you see it before you press Enter. `/model` is built: it opens a picker. |
 | Ctrl+O is shown in the help screen. It is labelled as not built and does nothing. |
 | A `todo` tool — the model keeps no task list, so a long job has no checklist you can read. |
 | An `ask_user` tool — the model cannot ask you a question mid-turn. It guesses instead, or it stops. |

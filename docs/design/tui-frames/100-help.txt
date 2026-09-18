@@ -1,6 +1,6 @@
 ```
 ρ rho  ~/Work/Vibe/rho · main · sonnet-4.5 · openrouter                                             
-  enter          send the draft                                                                     
+  enter          send the draft · steer a running turn                                              
   shift+enter    insert a newline, where the terminal reports the key                               
   ctrl-j         insert a newline, in every terminal                                                
   alt+enter      insert a newline, in every terminal                                                

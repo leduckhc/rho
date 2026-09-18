@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use rho_core::ModelCatalog;
 use rho_tui::{App, Row, TuiState, render};
 
 // ---- The row itself. -----------------------------------------------------------
@@ -270,6 +271,10 @@ struct SilentProvider;
 impl rho_core::Provider for SilentProvider {
     fn id(&self) -> &str {
         "silent"
+    }
+
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        None
     }
 
     async fn stream(

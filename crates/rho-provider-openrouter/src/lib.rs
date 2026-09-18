@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use rho_core::{
-    CancelToken, CompletionRequest, ContentBlock, Message, Provider, ProviderError, ProviderStream,
-    Role, StopReason, StreamEvent, Usage,
+    CancelToken, CompletionRequest, ContentBlock, MAX_MODELS, Message, ModelCatalog,
+    ModelDescriptor, Provider, ProviderError, ProviderStream, Role, StopReason, StreamEvent, Usage,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -75,6 +75,12 @@ fn build_client(base_url: &str) -> reqwest::Client {
 /// not. Appending OpenRouter's path to a local host gives a 404, and a live probe caught
 /// exactly that. See `D-a-provider-base-url-is-a-config-key`.
 const OPENAI_CHAT_PATH: &str = "/v1/chat/completions";
+/// The models endpoint on an OpenRouter base URL.
+///
+/// A plain OpenAI-compatible host is unlikely to serve this path, so a non-OpenRouter
+/// config still returns `Some(self)` but the call may fail. The caller treats a failure as
+/// a listing error and keeps the session alive. See `SPEC-choose-a-model-and-configure-a-run`.
+const MODELS_PATH: &str = "/api/v1/models";
 
 // `Secret` and `RetryPolicy` live in `rho-core`. See decision D-secret-in-core.
 //
@@ -123,7 +129,14 @@ impl OpenRouterConfig {
     /// Override the base URL. Tests use this to target a mock server.
     /// The full chat endpoint this config sends to.
     pub fn chat_url(&self) -> String {
-        format!("{}{}", self.base_url, self.chat_path)
+        let base = self.base_url.trim_end_matches('/');
+        format!("{}{}", base, self.chat_path)
+    }
+
+    /// The full models endpoint this config sends to.
+    pub fn models_url(&self) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        format!("{}{}", base, MODELS_PATH)
     }
 
     /// Point at an OpenAI-compatible host, such as Ollama, vLLM, or LM Studio.
@@ -182,6 +195,14 @@ impl OpenRouterProvider {
 impl Provider for OpenRouterProvider {
     fn id(&self) -> &str {
         "openrouter"
+    }
+
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        Some(self)
+    }
+
+    fn catalog_fingerprint(&self) -> String {
+        format!("openrouter:{}", self.config.base_url)
     }
 
     async fn stream(
@@ -293,13 +314,32 @@ impl OpenRouterProvider {
         }
     }
 
-    /// Send one request. Map a non-200 status to a provider error.
+    /// Send one POST request. Map a non-200 status to a provider error.
     async fn send_once(&self, url: &str, body: &Value) -> Result<reqwest::Response, ProviderError> {
-        let response = self
+        self.send_request(reqwest::Method::POST, url, Some(body))
+            .await
+    }
+
+    /// Send one GET request. Map a non-200 status to a provider error.
+    async fn send_get_once(&self, url: &str) -> Result<reqwest::Response, ProviderError> {
+        self.send_request(reqwest::Method::GET, url, None).await
+    }
+
+    /// Send one request. Map a non-200 status to a provider error.
+    async fn send_request(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        body: Option<&Value>,
+    ) -> Result<reqwest::Response, ProviderError> {
+        let mut request = self
             .client
-            .post(url)
-            .bearer_auth(self.config.api_key.expose())
-            .json(body)
+            .request(method, url)
+            .bearer_auth(self.config.api_key.expose());
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request
             .send()
             .await
             .map_err(|error| ProviderError::Transport(error.to_string()))?;
@@ -313,6 +353,62 @@ impl OpenRouterProvider {
         // through `ProviderError::Client`. Not reading it is stronger than scrubbing it, because
         // the bytes never enter the process. See `D-a-client-error-carries-no-peer-body`.
         Err(status_to_error(status.as_u16(), retry_after_ms))
+    }
+}
+
+/// One entry in the OpenRouter `/api/v1/models` response.
+#[derive(Clone, Debug, Deserialize)]
+struct OpenRouterModel {
+    id: String,
+    name: Option<String>,
+}
+
+/// The top-level response from the OpenRouter models endpoint.
+#[derive(Clone, Debug, Deserialize)]
+struct OpenRouterModelsResponse {
+    data: Vec<OpenRouterModel>,
+}
+
+#[async_trait]
+impl ModelCatalog for OpenRouterProvider {
+    async fn list_models(
+        &self,
+        cancel: CancelToken,
+    ) -> Result<Vec<ModelDescriptor>, ProviderError> {
+        let url = self.config.models_url();
+        let response = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ProviderError::Canceled),
+            result = self.send_get_once(&url) => result?,
+        };
+        let payload = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ProviderError::Canceled),
+            result = response.json::<OpenRouterModelsResponse>() => result.map_err(|error| {
+                if error.is_decode() {
+                    ProviderError::Decode(format!(
+                        "the OpenRouter models response did not parse: {error}"
+                    ))
+                } else {
+                    ProviderError::Transport(error.to_string())
+                }
+            })?,
+        };
+        if payload.data.len() > MAX_MODELS {
+            return Err(ProviderError::Decode(format!(
+                "the provider returned {} models, and rho keeps at most {}",
+                payload.data.len(),
+                MAX_MODELS
+            )));
+        }
+        Ok(payload
+            .data
+            .into_iter()
+            .map(|model| ModelDescriptor {
+                id: model.id,
+                display_name: model.name,
+            })
+            .collect())
     }
 }
 
@@ -551,6 +647,7 @@ impl SseState {
                 output_tokens: usage.completion_tokens,
                 cache_read_tokens: details.cached_tokens,
                 cache_write_tokens: details.cache_write_tokens,
+                reasoning_tokens: None,
                 cost_usd: usage.cost,
             }));
         }

@@ -31,7 +31,7 @@ All four hints work. `/guide` opens the two minute tour, described below.
 
 | Key | What it does |
 |-----|-------------|
-| Enter | Send the draft |
+| Enter | Send the draft, or steer a running turn |
 | Ctrl+D | Quit when the draft is empty |
 | Ctrl+C | Cancel the running turn |
 | Ctrl+C (twice, while idle) | Quit |
@@ -110,12 +110,13 @@ Type `/` to open the command list. Tab completes. Enter runs the selected comman
 The list marks a command that does not work, so you see it before you press Enter:
 
 ```
- ❯ /model      pick the model for this session · not built yet
+ ❯ /model      open the model picker · `/model <id>` sets one directly
+   /effort     show the reasoning effort · `/effort <level>` sets it
    /sessions   list, resume, or branch a session · not built yet
    /guide      the two minute tour
 ```
 
-> **Not built yet.** `/model` and `/sessions` appear in the list and run nothing. Each prints a row that reads, for example: `/model is not built yet. See F-slash-commands in docs/features.md.`
+> **Not built yet.** `/sessions` appears in the list and runs nothing. It prints a row that reads: `/sessions is not built yet. See F-slash-commands in docs/features.md.`
 
 ## The two minute tour
 
@@ -168,7 +169,7 @@ The footer shows the current state.
 
 | What you see | When |
 |-------------|------|
-| `◈ working · <duration>` | A turn is running. A sweep moves over the word, and `--no-motion` stops it |
+| `◈ working · <duration>` | A turn is running. The duration grows live, and turns amber past one minute. A sweep moves over the word, and `--no-motion` stops the sweep but not the clock. If you typed a message mid-turn, the footer also reads `N waiting`. |
 | `◈ canceling · <duration>` | Cancellation is in progress |
 | `◈ waiting · <duration>` | rho is waiting on an approval panel |
 | `ready` | Idle |

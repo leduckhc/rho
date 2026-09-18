@@ -35,3 +35,9 @@ async fn provider_contract_tool_call_end_has_parsed_arguments() {
 async fn provider_contract_run_all() {
     run_all(&AzureHarness).await;
 }
+
+/// `Provider::catalog()` must answer without panicking. Azure returns `None`.
+#[tokio::test]
+async fn run_all_checks_catalog_answer() {
+    rho_provider_testkit::provider_contract_catalog_answer(&AzureHarness);
+}

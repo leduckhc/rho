@@ -295,6 +295,7 @@ fn frame_100_idle_renders_at_100_columns() {
         &mut state,
         Row::User {
             text: "add a duration to every tool row, and keep the text beside it still".into(),
+            delivered: true,
         },
         None,
         RowFold::Collapsed,
@@ -365,6 +366,7 @@ fn frame_100_streaming_renders_at_100_columns() {
         &mut state,
         Row::User {
             text: "now bind the session clock to the header slot".into(),
+            delivered: true,
         },
         None,
         RowFold::Collapsed,
@@ -392,6 +394,7 @@ fn frame_100_tool_run_renders_at_100_columns() {
         &mut state,
         Row::User {
             text: "run the workspace tests and fix what breaks".into(),
+            delivered: true,
         },
         None,
         RowFold::Collapsed,
@@ -453,6 +456,7 @@ fn frame_100_approval_renders_at_100_columns() {
         &mut state,
         Row::User {
             text: "clean the build tree and rebuild the release binary".into(),
+            delivered: true,
         },
         None,
         RowFold::Collapsed,
@@ -479,6 +483,7 @@ fn frame_100_error_renders_at_100_columns() {
         &mut state,
         Row::User {
             text: "send the report to the tracker".into(),
+            delivered: true,
         },
         None,
         RowFold::Collapsed,
@@ -533,6 +538,7 @@ fn frame_100_slash_list_renders_at_100_columns() {
         &mut state,
         Row::User {
             text: "add a duration to every tool row, and keep the text beside it still".into(),
+            delivered: true,
         },
         None,
         RowFold::Collapsed,
@@ -558,6 +564,7 @@ fn frame_100_help_renders_at_100_columns() {
         &mut state,
         Row::User {
             text: "add a duration to every tool row, and keep the text beside it still".into(),
+            delivered: true,
         },
         None,
         RowFold::Collapsed,
@@ -587,6 +594,7 @@ fn frame_80_streaming_renders_at_80_columns() {
         &mut state,
         Row::User {
             text: "now bind the session clock to the header slot".into(),
+            delivered: true,
         },
         None,
         RowFold::Collapsed,
@@ -615,6 +623,7 @@ fn frame_40_streaming_renders_at_40_columns() {
         &mut state,
         Row::User {
             text: "now bind the session clock to the header slot".into(),
+            delivered: true,
         },
         None,
         RowFold::Collapsed,

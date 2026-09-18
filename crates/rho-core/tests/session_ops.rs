@@ -459,6 +459,7 @@ fn a_usage_record_round_trips() {
         output_tokens: 40,
         cache_read_tokens: 10,
         cache_write_tokens: 5,
+        reasoning_tokens: None,
         cost_usd: Some(0.0123),
     };
     let entry = rho_core::Entry {

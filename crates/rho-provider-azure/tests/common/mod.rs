@@ -146,6 +146,14 @@ pub struct AzureHarness;
 
 #[async_trait]
 impl ProviderHarness for AzureHarness {
+    fn provider(&self) -> std::sync::Arc<dyn Provider> {
+        std::sync::Arc::new(AzureProvider::new(AzureConfig::new(
+            "https://example.openai.azure.com",
+            "gpt-4o",
+            AzureAuth::ApiKey(Secret::new("test-key")),
+        )))
+    }
+
     async fn run(&self, script: Script) -> HarnessRun {
         if let Script::Gated = script {
             let head = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n"

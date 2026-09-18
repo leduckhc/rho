@@ -32,6 +32,9 @@ pub enum ProviderError {
     /// The response body could not be decoded. Permanent.
     #[error("stream decode error: {0}")]
     Decode(String),
+    /// The provider does not support the requested operation. Permanent.
+    #[error("unsupported: {0}")]
+    Unsupported(String),
     /// Credential resolution or signing failed. Permanent.
     #[error("authentication failed: {0}")]
     Auth(String),

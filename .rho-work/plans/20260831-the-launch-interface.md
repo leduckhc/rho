@@ -7,6 +7,22 @@ Owner: controller. Written 20260831. Specs: the six files stamped `20260831-2015
 This plan holds the order of work, who owns which file, and the gates. It does not repeat a
 contract. Each contract lives in its spec.
 
+## Status (20260902)
+
+| # | status | evidence |
+| --- | --- | --- |
+| 1 | **delivered** | `on_tick` in `state.rs`, a `TICK_PERIOD_MILLIS` interval in `app.rs`, `end_run(now_millis)`, the amber footer cue. Tests: `crates/rho-tui/tests/turn_clock.rs` (12). Spec `SPEC-the-turn-clock-and-the-working-state` is `delivered`. |
+| 2 | **delivered** | `KeyAction::Steer`, `on_steer_result`, `Row::User { delivered }`, the `MessageDelivered` fold, the footer `N waiting` count, the composer hint. `app.rs` routes a mid-turn Enter to `Session::steer`, never `Session::prompt`. Tests: `crates/rho-tui/tests/steering.rs` (20). Spec `SPEC-a-queued-message-says-what-it-is` is `delivered`. The lost-prompt defect is closed. |
+| 3 | delivered earlier | Reasoning text ships; the token count is parked (`F-reasoning-token-count`, `considered`). |
+| 4 | delivered earlier | `/model` picker, fuzzy filter, starred, effort cycle. |
+| 5, 6, 7 | not started | Still a two-level `RowFold`; no `RowDetail`/`BodyLine`/diff. |
+| 8, 9 | not started | `scroll.rs` exists; no `Selection`/`TextPos`/OSC 52. |
+
+Both defects the plan opened are closed: the working state animates on a real tick clock,
+and a mid-turn Enter steers instead of overwriting the run. `docs/guide/status.md` and
+`docs/features.md` are amended to match the code. The live pty drive against Bedrock remains
+open for both, as Phase 3 requires; the pure reducer and render tests land first.
+
 ## What the nine features became
 
 | # | user's words | spec | size |

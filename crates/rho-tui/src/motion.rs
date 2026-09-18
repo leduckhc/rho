@@ -8,6 +8,14 @@
 /// The sweep period, in ticks. Each tick is 100 milliseconds, so the period is 2 s.
 pub const SWEEP_PERIOD_TICKS: u64 = 20;
 
+/// The tick period, in milliseconds. One tick is 100 milliseconds.
+///
+/// The sweep period is `SWEEP_PERIOD_TICKS` ticks, which is 20. So one sweep lasts
+/// `SWEEP_PERIOD_TICKS * TICK_PERIOD_MILLIS` milliseconds, which is 2000, or 2 seconds.
+/// The event loop fires one tick per this period while a turn runs, and never while idle.
+/// See `D-the-loop-owns-the-tick-clock`.
+pub const TICK_PERIOD_MILLIS: u64 = 100;
+
 /// The band half width, in columns. The raised cosine reaches zero at this distance,
 /// so the band footprint spans at most eleven columns: five each side, plus the peak.
 const BAND_HALF_WIDTH: f32 = 5.0;

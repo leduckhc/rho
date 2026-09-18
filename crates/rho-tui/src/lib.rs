@@ -57,7 +57,7 @@ pub use concise::{
 };
 pub use guide::{Guide, GuidePage, MAX_GUIDE_PAGE_ROWS, guide_footer_hint, guide_pages};
 pub use motion::{
-    MotionCell, MotionInputs, SWEEP_PERIOD_TICKS, motion_cell, motion_enabled, sweep_frame,
-    sweep_weight,
+    MotionCell, MotionInputs, SWEEP_PERIOD_TICKS, TICK_PERIOD_MILLIS, motion_cell, motion_enabled,
+    sweep_frame, sweep_weight,
 };
 pub use theme::{Ansi16, Role, RoleStyle, role_16, role_256, role_bg_256, role_none};

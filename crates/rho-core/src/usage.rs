@@ -11,6 +11,12 @@ pub struct Usage {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
+    /// Reasoning tokens the provider reported for this turn, when it reports them.
+    ///
+    /// Not every provider breaks out reasoning tokens. A missing value stays `None`, so a
+    /// caller never mistakes "not reported" for "zero reasoning".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
     /// The cost of the call in dollars, when the provider reports it.
     ///
     /// **Measured, never estimated.** A harness that multiplies tokens by a price table
@@ -49,6 +55,12 @@ impl Usage {
         self.output_tokens += other.output_tokens;
         self.cache_read_tokens += other.cache_read_tokens;
         self.cache_write_tokens += other.cache_write_tokens;
+        self.reasoning_tokens = match (self.reasoning_tokens, other.reasoning_tokens) {
+            (Some(a), Some(b)) => Some(a + b),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
         self.cost_usd = match (self.cost_usd, other.cost_usd) {
             (Some(a), Some(b)) => Some(a + b),
             (Some(a), None) => Some(a),

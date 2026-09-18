@@ -221,9 +221,11 @@ Named, with the assertion each one proves.
 
 ### Discovery, in `rho-config`
 
-- `xdg_config_home_wins_over_home` — `global` is under `XDG_CONFIG_HOME`.
+- `home_wins_over_xdg_config_home` — when `XDG_CONFIG_HOME` is also set, the
+  primary `global` path stays under `HOME/.rho`, and only the legacy fallback
+  moves to `XDG_CONFIG_HOME/rho/config.toml`.
 - `home_supplies_the_global_path` — with no XDG variable, `global` is
-  `$HOME/.config/rho/config.toml`.
+  `$HOME/.rho/config.toml`.
 - `no_home_yields_no_global_path` — `global` is `None`, and discovery does not fail.
 - `an_empty_home_value_yields_no_global_path` — an exported-but-empty variable counts as
   unset, so discovery never names `/rho/config.toml` at the filesystem root. Added during

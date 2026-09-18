@@ -3,7 +3,7 @@
 //! sequences, the banner content, the mouse default, and the viewport origin. See
 //! `SPEC-tui-alternate-screen` sections 2, 6b, and 8.
 
-use rho_core::{AgentEvent, ToolKind, ToolOutput};
+use rho_core::{AgentEvent, ModelCatalog, ToolKind, ToolOutput};
 use rho_tui::{App, Row, TuiState, banner_line, render, restore_sequences, setup_sequences};
 
 // ---- Section 2: the setup and restore sequences. -------------------------------
@@ -141,6 +141,7 @@ fn the_screen_draws_at_the_viewport_origin() {
     state.model = "sonnet-4.5".to_string();
     state.rows.push(Row::User {
         text: "a prompt".to_string(),
+        delivered: true,
     });
 
     let backend = TestBackend::new(100, 20);
@@ -227,6 +228,10 @@ struct SilentProvider;
 impl rho_core::Provider for SilentProvider {
     fn id(&self) -> &str {
         "silent"
+    }
+
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        None
     }
 
     async fn stream(

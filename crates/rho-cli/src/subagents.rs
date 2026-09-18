@@ -246,6 +246,7 @@ fn available_notice(definitions: &HashMap<String, AgentDefinition>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rho_core::ModelCatalog;
     use rho_skills::AgentConfig;
     use std::path::Path;
 
@@ -257,6 +258,10 @@ mod tests {
     impl rho_core::Provider for NeverProvider {
         fn id(&self) -> &str {
             "never"
+        }
+
+        fn catalog(&self) -> Option<&dyn ModelCatalog> {
+            None
         }
 
         async fn stream(
@@ -627,6 +632,10 @@ mod tests {
         fn id(&self) -> &str {
             "stub"
         }
+        fn catalog(&self) -> Option<&dyn ModelCatalog> {
+            None
+        }
+
         async fn stream(
             &self,
             _request: rho_core::CompletionRequest,

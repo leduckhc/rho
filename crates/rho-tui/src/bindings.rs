@@ -22,7 +22,7 @@ pub fn bindings() -> &'static [Binding] {
     const TABLE: &[Binding] = &[
         Binding {
             keys: "enter",
-            summary: "send the draft",
+            summary: "send the draft · steer a running turn",
             built: true,
         },
         Binding {
@@ -193,6 +193,11 @@ pub fn slash_commands() -> &'static [SlashCommand] {
         SlashCommand {
             name: "/effort",
             summary: "show the reasoning effort · `/effort <level>` sets it",
+            built: true,
+        },
+        SlashCommand {
+            name: "/speed",
+            summary: "`fast` turns reasoning off · `normal` restores the start effort",
             built: true,
         },
         SlashCommand {

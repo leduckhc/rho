@@ -214,6 +214,7 @@ async fn provider_bedrock_reports_usage_with_cache_tokens() {
             cache_write_tokens: 4,
             // Bedrock reports no charge on the stream. rho leaves it empty rather than
             // estimating from a price table. See decision D-measured-cost-and-cache.
+            reasoning_tokens: None,
             cost_usd: None,
         }
     );

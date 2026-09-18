@@ -132,6 +132,7 @@ fn some_usage() -> Usage {
         output_tokens: 4_200,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        reasoning_tokens: None,
         cost_usd: Some(0.08),
     }
 }

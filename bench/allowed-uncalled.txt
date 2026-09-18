@@ -7,6 +7,7 @@
 # See D-dead-surface-is-a-defect-class and D-the-dead-surface-allowlist-names-its-lane.
 
 # Landed ahead of its wiring lane. Each names the spec that consumes it.
+crates/rho-core/src/agent.rs::with_recorder  SPEC-choose-a-model-and-configure-a-run section 8: a mid-session model change writes a ModelChange record when a recorder is attached. The interactive TUI path does not open a recording today, so only tests and future frontends reach this seam. See D-session-carries-an-optional-recorder.
 crates/rho-core/src/session/mod.rs::newest_open  SPEC-session-store-wiring: the crash offer. --continue takes newest_resumable, per D-continue-takes-the-newest-session-closed-or-not, and F-session-crash-continue stays partial until rho offers a crashed session unasked.
 crates/rho-core/src/session/mod.rs::record_cancel  SPEC-session-store-wiring: it completes a half-written tool pairing on an interrupt, and no frontend has an interrupt path. rho installs no signal handler, so a Ctrl-C kills the process and the file correctly looks like a crash. F-session-cancel-without-close says the pairing repair is library-only.
 crates/rho-core/src/subagent/tree.rs::spawn_child  SPEC-subagent-slots-handles-grace keeps it as the immediate queue-bypass extension point. The spec says no tool calls it, and admit_child is the queueing form the tools use.

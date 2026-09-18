@@ -11,13 +11,17 @@
 
 use std::io::{self, Stdout};
 use std::process::Command;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{Event, EventStream, KeyEventKind, MouseButton, MouseEventKind};
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use rho_core::{AgentEvent, AgentEvents, CancelToken, ContentBlock, ModelSelection, Session};
+use rho_core::{
+    AgentEvent, AgentEvents, CancelToken, ContentBlock, ModelCatalog, ModelDescriptor,
+    ModelSelection, Session,
+};
 
 use crate::editor::{editor_argv, editor_command};
 use crate::render::{STARTUP_MIN_ROWS, composer_text_width, render, transcript_metrics};
@@ -59,6 +63,15 @@ pub fn restore_sequences(mouse: bool) -> String {
     crate::screen::restore_sequences(mouse)
 }
 
+/// The result of a catalog load that the event loop applies to the picker.
+#[derive(Clone, Debug)]
+pub enum CatalogEvent {
+    /// The provider returned a list of models.
+    Models(Vec<ModelDescriptor>),
+    /// The provider returned an error. The string is one line for the picker.
+    Error(String),
+}
+
 /// The interactive TUI app. It owns the session and the current run state.
 pub struct App {
     state: TuiState,
@@ -72,6 +85,13 @@ pub struct App {
     /// drop the `TaskEnd` of a build that finished while the user was typing. See
     /// `SPEC-the-task-event-bridge` and `D-a-task-event-outlives-its-tool-call`.
     task_events: Option<rho_core::SessionEvents>,
+    /// A model catalog the picker can query. `None` when the provider cannot list, or
+    /// when the frontend was not given one.
+    catalog: Option<Arc<dyn ModelCatalog>>,
+    /// The in-flight catalog load, if any. The receiver lives in the event loop select.
+    catalog_events: Option<tokio::sync::mpsc::Receiver<CatalogEvent>>,
+    /// The cancel token for the in-flight catalog load. Closing the picker cancels it.
+    catalog_cancel: Option<CancelToken>,
     /// Whether the app captures the mouse. On by default, because in the alternate screen
     /// the wheel is the only way to scroll. See `SPEC-tui-alternate-screen` section 8.
     mouse: bool,
@@ -96,6 +116,9 @@ impl App {
             cancel: None,
             events: None,
             task_events: None,
+            catalog: None,
+            catalog_events: None,
+            catalog_cancel: None,
             mouse: true,
             started: Instant::now(),
         }
@@ -169,10 +192,20 @@ impl App {
         self
     }
 
+    /// Give the app a model catalog so the `/model` picker can list real models.
+    /// Without this the picker shows only the current model, starred models, and
+    /// the hard-coded suggestions. See `SPEC-choose-a-model-and-configure-a-run`.
+    pub fn with_catalog(mut self, catalog: Arc<dyn ModelCatalog>) -> Self {
+        self.catalog = Some(catalog);
+        self
+    }
+
     /// Set the initial reasoning effort, mirroring `Session::selection`. Without this,
-    /// the header would draw a stale value while the wire uses the mutex.
+    /// the header would draw a stale value while the wire uses the mutex. This also seeds
+    /// `start_effort`, which `/speed normal` restores.
     pub fn with_reasoning_effort(mut self, effort: Option<rho_core::ReasoningEffort>) -> Self {
         self.state.reasoning_effort = effort;
+        self.state.start_effort = effort;
         self
     }
 
@@ -244,14 +277,26 @@ impl App {
     ) -> Result<(), TuiError> {
         let mut input = EventStream::new();
 
+        // The tick source for the working-state sweep and the live turn clock. The loop
+        // fires one tick per `crate::motion::TICK_PERIOD_MILLIS` while a run is active,
+        // and the guard on the tick arm skips it while idle, so an idle screen never
+        // repaints on a timer. `Skip` stops a missed idle tick from bursting on the next
+        // run. See `D-the-loop-owns-the-tick-clock`.
+        let mut ticker =
+            tokio::time::interval(Duration::from_millis(crate::motion::TICK_PERIOD_MILLIS));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         let App {
             state,
             session,
             cancel,
             events,
             task_events,
+            catalog,
+            catalog_events,
+            catalog_cancel,
+            mouse: _,
             started,
-            ..
         } = self;
 
         draw_frame(terminal, state)?;
@@ -271,6 +316,20 @@ impl App {
                                     );
                                     *cancel = Some(token);
                                     *events = Some(stream);
+                                    // The first live tick lands one full period after the
+                                    // turn begins, so the clock grows from zero on a steady
+                                    // cadence instead of a partial first interval.
+                                    ticker.reset();
+                                }
+                                // Steer the draft into the running turn. The reducer keeps
+                                // the draft until the result lands, so a refusal keeps the
+                                // message. This never calls `Session::prompt`, so a
+                                // mid-turn Enter can no longer overwrite the live run. See
+                                // `SPEC-a-queued-message-says-what-it-is` amendment 1.
+                                KeyAction::Steer(text) => {
+                                    let result =
+                                        session.steer(vec![ContentBlock::Text { text: text.clone() }]);
+                                    state.on_steer_result(text, result);
                                 }
                                 KeyAction::Cancel => {
                                     if let Some(token) = cancel.as_ref() {
@@ -299,6 +358,41 @@ impl App {
                                 KeyAction::PersistStarred(list) => {
                                     persist_starred(state, &list);
                                 }
+                                // The picker opened. If a catalog is available, seed the
+                                // picker with any cached models (marked stale) and start a
+                                // lazy load. The current model is already drawn; the load
+                                // appends rows when it finishes. See
+                                // `SPEC-choose-a-model-and-configure-a-run` section 7.
+                                KeyAction::OpenModelPicker => {
+                                    if let Some(catalog) = catalog.as_ref() {
+                                        if let Some(models) = catalog.peek_cached_models() {
+                                            state.seed_picker_with_cached_models(&models);
+                                        }
+                                        let (tx, rx) = tokio::sync::mpsc::channel(1);
+                                        let load_cancel = CancelToken::new();
+                                        let catalog = Arc::clone(catalog);
+                                        let load_token = load_cancel.clone();
+                                        tokio::spawn(async move {
+                                            let result = catalog.list_models(load_token).await;
+                                            let event = match result {
+                                                Ok(models) => CatalogEvent::Models(models),
+                                                Err(error) => CatalogEvent::Error(format!("{error}")),
+                                            };
+                                            let _ = tx.send(event).await;
+                                        });
+                                        *catalog_events = Some(rx);
+                                        *catalog_cancel = Some(load_cancel);
+                                        state.set_picker_loading(true);
+                                    }
+                                }
+                            }
+                            // A key that closed the picker (Esc, Enter, or a slash command
+                            // that applied a model) must cancel any in-flight catalog load.
+                            if !state.is_model_picker_open() {
+                                if let Some(token) = catalog_cancel.take() {
+                                    token.cancel();
+                                }
+                                *catalog_events = None;
                             }
                             draw_frame(terminal, state)?;
                         }
@@ -344,6 +438,13 @@ impl App {
                         None => break,
                     }
                 }
+                // Drive the working-state sweep and the live turn clock. The guard skips
+                // this arm while no run is live, so an idle screen never repaints on a
+                // timer. See `SPEC-the-turn-clock-and-the-working-state` section 5.
+                _ = ticker.tick(), if events.is_some() => {
+                    state.on_tick(elapsed_millis(started));
+                    draw(terminal, state)?;
+                }
                 maybe_event = next_agent_event(events), if events.is_some() => {
                     match maybe_event {
                         Some(Ok(event)) => {
@@ -366,7 +467,7 @@ impl App {
                             // The driver returns on a failed turn with no `AgentEnd`, so the
                             // frontend ends the run itself. Without this the state stays
                             // `Running` and Ctrl-C can never quit again.
-                            state.end_run(true);
+                            state.end_run(true, elapsed_millis(started));
                             *events = None;
                             *cancel = None;
                             update_metrics(terminal, state)?;
@@ -374,7 +475,7 @@ impl App {
                             draw(terminal, state)?;
                         }
                         None => {
-                            state.end_run(false);
+                            state.end_run(false, elapsed_millis(started));
                             *events = None;
                             *cancel = None;
                             update_metrics(terminal, state)?;
@@ -399,6 +500,36 @@ impl App {
                         // The registry is gone, so no later task event can arrive. Stop
                         // polling this arm, and leave every drawn row as it is.
                         None => *task_events = None,
+                    }
+                }
+                // Catalog load results. The picker shows the current model immediately,
+                // then appends the provider's list when it arrives. A failure draws one
+                // line and keeps the current model. See
+                // `SPEC-choose-a-model-and-configure-a-run` section 7.
+                maybe_catalog = recv_catalog_event(catalog_events), if catalog_events.is_some() => {
+                    *catalog_cancel = None;
+                    match maybe_catalog {
+                        Some(CatalogEvent::Models(models)) => {
+                            state.append_catalog_models(&models);
+                            update_metrics(terminal, state)?;
+                            draw(terminal, state)?;
+                        }
+                        Some(CatalogEvent::Error(message)) => {
+                            state.set_picker_error(message);
+                            update_metrics(terminal, state)?;
+                            draw(terminal, state)?;
+                        }
+                        None => {
+                            // The sender dropped without sending a result, most likely
+                            // because the catalog-load task panicked. Tell the user so the
+                            // picker does not sit empty with no explanation.
+                            state.set_picker_error(
+                                "the catalog load ended unexpectedly".to_string(),
+                            );
+                            *catalog_events = None;
+                            update_metrics(terminal, state)?;
+                            draw(terminal, state)?;
+                        }
                     }
                 }
             }
@@ -542,6 +673,17 @@ async fn next_agent_event(
 async fn next_task_event(events: &mut Option<rho_core::SessionEvents>) -> Option<AgentEvent> {
     match events {
         Some(stream) => stream.next().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Await the next catalog event, or wait forever when no load is in flight.
+/// Mirrors `next_agent_event` and `next_task_event`.
+async fn recv_catalog_event(
+    events: &mut Option<tokio::sync::mpsc::Receiver<CatalogEvent>>,
+) -> Option<CatalogEvent> {
+    match events {
+        Some(rx) => rx.recv().await,
         None => std::future::pending().await,
     }
 }

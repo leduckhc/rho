@@ -280,6 +280,7 @@ fn a_user_row_is_drawn_verbatim() {
     let mut state = TuiState::default();
     state.rows.push(Row::User {
         text: "# not a heading, just my text".to_string(),
+        delivered: true,
     });
     let backend = TestBackend::new(60, 24);
     let mut terminal = Terminal::new(backend).expect("terminal");

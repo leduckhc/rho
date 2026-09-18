@@ -18,8 +18,9 @@ mod script;
 mod staged_server;
 
 pub use contract::{
-    provider_contract_emits_done_last, provider_contract_emits_message_start_first,
-    provider_contract_text_deltas_in_order, provider_contract_tool_call_end_has_parsed_arguments,
+    provider_contract_catalog_answer, provider_contract_emits_done_last,
+    provider_contract_emits_message_start_first, provider_contract_text_deltas_in_order,
+    provider_contract_tool_call_end_has_parsed_arguments,
     provider_contract_yields_first_event_before_stream_end, run_all,
 };
 pub use harness::{HarnessRun, ProviderHarness};

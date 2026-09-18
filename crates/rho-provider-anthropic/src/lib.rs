@@ -12,7 +12,9 @@
 pub mod sse;
 
 use async_trait::async_trait;
-use rho_core::{CancelToken, CompletionRequest, Provider, ProviderError, ProviderStream, Secret};
+use rho_core::{
+    CancelToken, CompletionRequest, ModelCatalog, Provider, ProviderError, ProviderStream, Secret,
+};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -223,6 +225,10 @@ impl AnthropicProvider {
 impl Provider for AnthropicProvider {
     fn id(&self) -> &str {
         "anthropic"
+    }
+
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        None
     }
 
     async fn stream(

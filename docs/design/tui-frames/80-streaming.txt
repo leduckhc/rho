@@ -22,5 +22,5 @@ timer. The renderer stays a pure function of the
 ────────────────────────────────────────────────────────────────────────────────
 ❯ also pin the carry case from the ladder█                                      
 ────────────────────────────────────────────────────────────────────────────────
-  ◈ working · 12s                          ctrl-c cancel · / commands · ? help  
+  ◈ working · 12s        enter steers the message to the agent · ctrl-c cancel  
 ```

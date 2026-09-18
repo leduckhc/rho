@@ -50,12 +50,21 @@ fn provider_error_rate_limited_is_retryable() {
 // --- Usage: cache hit ratio and cost -------------------------------------
 
 #[test]
+fn reasoning_tokens_defaults_to_none() {
+    // Not every provider breaks out reasoning tokens. A default Usage must keep the
+    // field absent, so a caller never mistakes "not reported" for "zero reasoning".
+    let usage = rho_core::Usage::default();
+    assert_eq!(usage.reasoning_tokens, None);
+}
+
+#[test]
 fn cache_hit_ratio_reports_the_share_served_from_cache() {
     let usage = rho_core::Usage {
         input_tokens: 250,
         output_tokens: 10,
         cache_read_tokens: 750,
         cache_write_tokens: 0,
+        reasoning_tokens: None,
         cost_usd: None,
     };
     // 750 of 1000 input tokens came from the cache.
@@ -86,6 +95,7 @@ fn usage_add_sums_tokens_and_cost() {
         output_tokens: 1,
         cache_read_tokens: 2,
         cache_write_tokens: 3,
+        reasoning_tokens: None,
         cost_usd: Some(0.001),
     };
     total.add(&rho_core::Usage {
@@ -93,10 +103,12 @@ fn usage_add_sums_tokens_and_cost() {
         output_tokens: 2,
         cache_read_tokens: 4,
         cache_write_tokens: 6,
+        reasoning_tokens: Some(7),
         cost_usd: Some(0.002),
     });
     assert_eq!(total.input_tokens, 30);
     assert_eq!(total.cache_read_tokens, 6);
+    assert_eq!(total.reasoning_tokens, Some(7));
     assert_eq!(total.cost_usd, Some(0.003));
 }
 

@@ -27,8 +27,8 @@ use async_trait::async_trait;
 use common::{ScriptedProvider, text_turn};
 use futures::StreamExt;
 use rho_core::{
-    AgentEvent, CancelToken, CompletionRequest, ContentBlock, Context, HookChain, Provider,
-    ProviderError, ProviderStream, Role, Session, StreamEvent, ToolRegistry,
+    AgentEvent, CancelToken, CompletionRequest, ContentBlock, Context, HookChain, ModelCatalog,
+    Provider, ProviderError, ProviderStream, Role, Session, StreamEvent, ToolRegistry,
 };
 
 /// A provider whose `stream` call fails, like a 400 or a transport reset.
@@ -40,6 +40,10 @@ struct FailingProvider;
 impl Provider for FailingProvider {
     fn id(&self) -> &str {
         "failing"
+    }
+
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        None
     }
 
     async fn stream(

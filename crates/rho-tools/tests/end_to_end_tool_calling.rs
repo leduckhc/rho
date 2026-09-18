@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream;
 use rho_core::{
-    AgentEvent, CancelToken, CompletionRequest, ContentBlock, Context, HookChain, Provider,
-    ProviderError, ProviderStream, Role, Session, SessionConfig, StopReason, StreamEvent,
+    AgentEvent, CancelToken, CompletionRequest, ContentBlock, Context, HookChain, ModelCatalog,
+    Provider, ProviderError, ProviderStream, Role, Session, SessionConfig, StopReason, StreamEvent,
 };
 use rho_tools::builtin_registry;
 
@@ -29,6 +29,10 @@ struct ToolCallingProvider {
 impl Provider for ToolCallingProvider {
     fn id(&self) -> &str {
         "tool-calling-fake"
+    }
+
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        None
     }
 
     async fn stream(

@@ -6,7 +6,7 @@
 //! and `starred::save`.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use rho_core::{ModelSelection, ReasoningEffort};
+use rho_core::{ModelDescriptor, ModelSelection, ReasoningEffort};
 use rho_tui::{
     KeyAction, Panel, TuiState, filter_slash_commands, fuzzy_match, next_effort_in_cycle,
 };
@@ -56,7 +56,11 @@ fn slash_effort_command_appears_in_the_list_with_its_argument() {
 fn slash_model_with_no_arg_opens_the_picker() {
     let mut state = seeded_state();
     let action = type_command(&mut state, "/model");
-    assert_eq!(action, KeyAction::None, "no ApplySelection on a bare open");
+    assert_eq!(
+        action,
+        KeyAction::OpenModelPicker,
+        "a bare `/model` tells the event loop to open the picker and start a catalog load"
+    );
     match &state.panel {
         Panel::ModelPicker(picker) => {
             assert!(
@@ -131,6 +135,84 @@ fn slash_effort_with_a_level_arg_applies_and_notices() {
             reasoning_effort: Some(ReasoningEffort::High),
         }),
         "the level reaches the app loop as an ApplySelection"
+    );
+}
+
+#[test]
+fn slash_speed_fast_sets_effort_off() {
+    let mut state = seeded_state();
+    let action = type_command(&mut state, "/speed fast");
+    assert_eq!(
+        action,
+        KeyAction::ApplySelection(ModelSelection {
+            model: "seed-model".to_string(),
+            reasoning_effort: Some(ReasoningEffort::Off),
+        }),
+        "/speed fast sets effort off"
+    );
+    let notices: Vec<String> = state
+        .live_rows()
+        .iter()
+        .filter_map(|row| match row {
+            rho_tui::Row::Notice { message } => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        notices.iter().any(|m| m.contains("speed: fast")),
+        "a notice confirms the speed change: {notices:?}"
+    );
+}
+
+#[test]
+fn slash_speed_normal_restores_start_effort() {
+    let mut state = seeded_state();
+    // The seeded state starts at Medium; mirror that into start_effort, which the app
+    // sets at startup.
+    state.start_effort = Some(ReasoningEffort::Medium);
+    // The first command changes the effort; the second one must restore the start value.
+    type_command(&mut state, "/speed fast");
+    let action = type_command(&mut state, "/speed normal");
+    assert_eq!(
+        action,
+        KeyAction::ApplySelection(ModelSelection {
+            model: "seed-model".to_string(),
+            reasoning_effort: Some(ReasoningEffort::Medium),
+        }),
+        "/speed normal restores the start effort"
+    );
+    let notices: Vec<String> = state
+        .live_rows()
+        .iter()
+        .filter_map(|row| match row {
+            rho_tui::Row::Notice { message } => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        notices.iter().any(|m| m.contains("speed: normal")),
+        "a notice confirms the speed change: {notices:?}"
+    );
+}
+
+#[test]
+fn slash_speed_with_an_unknown_arg_pushes_an_error() {
+    let mut state = seeded_state();
+    let action = type_command(&mut state, "/speed slow");
+    assert_eq!(action, KeyAction::None);
+    let errors: Vec<String> = state
+        .live_rows()
+        .iter()
+        .filter_map(|row| match row {
+            rho_tui::Row::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        errors
+            .iter()
+            .any(|m| m.contains("/speed fast") && m.contains("/speed normal")),
+        "the error names the valid args: {errors:?}"
     );
 }
 
@@ -514,6 +596,150 @@ fn the_picker_plans_a_row_per_starred_plus_the_current_line() {
         picker.rows.len() + 1
     };
     assert_eq!(plan_rows, 4);
+}
+
+/// The picker opens with the current model already shown. The user never sees an
+/// empty picker on first open, even on a slow network. The event loop sets the
+/// loading flag when it handles `KeyAction::OpenModelPicker`; this test covers the
+/// reducer side. See `SPEC-choose-a-model-and-configure-a-run` section 7.
+#[test]
+fn picker_shows_current_model_before_list_returns() {
+    let mut state = seeded_state();
+    let action = state.open_model_picker();
+    assert_eq!(action, KeyAction::OpenModelPicker);
+    match &state.panel {
+        Panel::ModelPicker(picker) => {
+            assert_eq!(picker.error, None);
+            assert_eq!(
+                picker
+                    .rows
+                    .first()
+                    .map(|row| (row.id.clone(), row.is_current)),
+                Some(("seed-model".to_string(), true)),
+                "the current model is visible before any network call returns"
+            );
+        }
+        other => panic!("picker not open: {other:?}"),
+    }
+}
+
+/// A stale catalog seeds the picker with rows marked stale. A fresh listing that
+/// confirms the same id clears the stale flag. See
+/// `SPEC-choose-a-model-and-configure-a-run` section 7.
+#[test]
+fn stale_cache_is_marked_stale() {
+    let mut state = seeded_state();
+    state.open_model_picker();
+    state.seed_picker_with_cached_models(&[
+        ModelDescriptor {
+            id: "cached-a".to_string(),
+            display_name: None,
+        },
+        ModelDescriptor {
+            id: "cached-b".to_string(),
+            display_name: None,
+        },
+    ]);
+    match &state.panel {
+        Panel::ModelPicker(picker) => {
+            let stale_ids: Vec<String> = picker
+                .rows
+                .iter()
+                .filter(|row| row.stale)
+                .map(|row| row.id.clone())
+                .collect();
+            assert_eq!(
+                stale_ids,
+                vec!["cached-a".to_string(), "cached-b".to_string()],
+                "cached rows are marked stale: {stale_ids:?}"
+            );
+            assert!(!picker.rows[0].stale, "the current model is not stale");
+        }
+        other => panic!("picker not open: {other:?}"),
+    }
+
+    // A fresh listing that returns one of the cached ids clears its stale flag.
+    state.append_catalog_models(&[ModelDescriptor {
+        id: "cached-a".to_string(),
+        display_name: None,
+    }]);
+    match &state.panel {
+        Panel::ModelPicker(picker) => {
+            let still_stale: Vec<String> = picker
+                .rows
+                .iter()
+                .filter(|row| row.stale)
+                .map(|row| row.id.clone())
+                .collect();
+            assert_eq!(
+                still_stale,
+                vec!["cached-b".to_string()],
+                "a confirmed id is no longer stale: {still_stale:?}"
+            );
+        }
+        other => panic!("picker not open: {other:?}"),
+    }
+}
+
+/// A catalog listing failure never removes the current model. It clears the loading
+/// flag and leaves exactly one error line. See
+/// `SPEC-choose-a-model-and-configure-a-run` section 7.
+#[test]
+fn listing_failure_keeps_the_current_model() {
+    let mut state = seeded_state();
+    state.open_model_picker();
+    state.set_picker_error("provider timed out");
+    match &state.panel {
+        Panel::ModelPicker(picker) => {
+            assert!(!picker.loading, "loading stops on failure");
+            assert_eq!(picker.error.as_deref(), Some("provider timed out"));
+            assert_eq!(
+                picker
+                    .rows
+                    .first()
+                    .map(|row| (row.id.clone(), row.is_current)),
+                Some(("seed-model".to_string(), true)),
+                "the current model is still the first row"
+            );
+        }
+        other => panic!("picker not open: {other:?}"),
+    }
+}
+
+/// When the returned catalog omits an id the user wants, typing it and pressing Enter
+/// still applies it. The list is advisory, not authoritative. See
+/// `SPEC-choose-a-model-and-configure-a-run` section 7.
+#[test]
+fn typed_id_absent_from_list_is_accepted() {
+    let mut state = seeded_state();
+    state.open_model_picker();
+    // Seed the picker with a catalog that does not include the user's desired id.
+    state.append_catalog_models(&[
+        ModelDescriptor {
+            id: "other-model".to_string(),
+            display_name: None,
+        },
+        ModelDescriptor {
+            id: "another-model".to_string(),
+            display_name: None,
+        },
+    ]);
+    for ch in "unlisted-model".chars() {
+        state.handle_key(key(KeyCode::Char(ch)));
+    }
+    let action = state.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        action,
+        KeyAction::ApplySelection(ModelSelection {
+            model: "unlisted-model".to_string(),
+            reasoning_effort: Some(ReasoningEffort::Medium),
+        }),
+        "a typed id that never appeared in the catalog is applied verbatim"
+    );
+    assert!(
+        !matches!(state.panel, Panel::ModelPicker(_)),
+        "the picker closes after the typed id is applied"
+    );
 }
 
 /// The picker draws a screen row per row it planned, and a mouse click is not routed

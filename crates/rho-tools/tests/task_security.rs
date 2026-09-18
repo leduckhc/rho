@@ -14,8 +14,8 @@ use futures::StreamExt;
 use futures::stream;
 use rho_core::{
     ApprovalDecision, ApprovalPolicy, CancelToken, CompletionRequest, ContentBlock, Context,
-    HookChain, Provider, ProviderError, ProviderStream, ReadOnlyPolicy, Role, Session,
-    SessionConfig, StopReason, StreamEvent, TaskLimits, TaskRegistry, Tool, ToolKind,
+    HookChain, ModelCatalog, Provider, ProviderError, ProviderStream, ReadOnlyPolicy, Role,
+    Session, SessionConfig, StopReason, StreamEvent, TaskLimits, TaskRegistry, Tool, ToolKind,
 };
 use rho_tools::{BashTool, TaskCancelTool, TaskTool, builtin_registry_with_tasks};
 
@@ -75,6 +75,10 @@ impl Provider for BackgroundBashProvider {
     fn id(&self) -> &str {
         "background-bash-fake"
     }
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        None
+    }
+
     async fn stream(
         &self,
         _request: CompletionRequest,

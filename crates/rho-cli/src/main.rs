@@ -5,6 +5,8 @@
 //! variable. A secret never reaches a log, because the `Secret` type masks
 //! itself by construction. See `SPEC-core-runtime` section 12a.
 
+#[cfg(feature = "tui")]
+mod catalog_cache;
 mod cli;
 mod extensions;
 #[cfg(feature = "jsonl")]

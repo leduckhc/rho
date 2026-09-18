@@ -1476,6 +1476,7 @@ fn a_row_of_a_recorded_run_reports_its_usage() {
                 output_tokens: 340,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                reasoning_tokens: None,
                 cost_usd: Some(0.08),
             },
         )));

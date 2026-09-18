@@ -226,6 +226,7 @@ Each rule has a name and a test in the next section.
 - `typed_id_absent_from_list_is_accepted` proves a typed id runs even when the list omits it.
 - `model_change_writes_a_model_change_record` proves the switch appends `ModelChange`.
 - `model_change_takes_effect_next_request` proves the current turn finishes on the old model.
+- `unchanged_selection_does_not_write_a_model_change_record` proves a repeated switch with the same id does not clutter the file.
 - `model_switch_drops_reasoning_bound_to_old_model` proves the drop reaches `dropped_replays`.
 - `reasoning_effort_change_reaches_next_request` proves the next `CompletionRequest.reasoning`.
 - `display_change_redraws_kept_reasoning` proves a switch to `full` shows earlier reasoning.

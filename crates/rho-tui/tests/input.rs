@@ -355,7 +355,7 @@ fn a_run_that_ends_with_no_stop_event_returns_to_idle() {
     state.handle_key(ctrl_c());
     assert!(state.canceling, "a cancel while running sets the flag");
 
-    state.end_run(true);
+    state.end_run(true, 100);
     assert_eq!(state.activity, ActivityState::Idle);
     assert!(!state.canceling, "the flag must not outlive the run");
     assert!(state.last_error, "a failed run is a failed run");
@@ -366,7 +366,7 @@ fn ctrl_c_can_still_quit_after_a_run_that_never_ended() {
     let mut state = TuiState::default();
     state.apply(&rho_core::AgentEvent::TurnStart, 0);
     state.handle_key(ctrl_c());
-    state.end_run(true);
+    state.end_run(true, 100);
 
     // The two-press gate must work again, because the run is over.
     assert_eq!(state.handle_key(ctrl_c()), KeyAction::None);
@@ -378,7 +378,7 @@ fn a_cancel_that_closes_the_stream_reads_as_canceled() {
     let mut state = TuiState::default();
     state.apply(&rho_core::AgentEvent::TurnStart, 0);
     state.handle_key(ctrl_c());
-    state.end_run(false);
+    state.end_run(false, 100);
     assert_eq!(state.activity, ActivityState::Idle);
     assert!(!state.last_error, "a cancel is not an error");
 }

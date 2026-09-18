@@ -8,8 +8,9 @@
 
 use crate::script::Script;
 use async_trait::async_trait;
-use rho_core::ProviderStream;
+use rho_core::{Provider, ProviderStream};
 use std::any::Any;
+use std::sync::Arc;
 
 /// One scripted run: the event stream, plus a guard that keeps the fake
 /// transport alive while the stream is read.
@@ -27,6 +28,11 @@ pub struct HarnessRun {
 /// then run against any implementation.
 #[async_trait]
 pub trait ProviderHarness: Send + Sync {
+    /// Return a provider instance for state checks that do not need a run.
+    ///
+    /// `Provider::catalog()` is synchronous, so this method is synchronous too.
+    fn provider(&self) -> Arc<dyn Provider>;
+
     /// Build the event stream for `script`, with no network call.
     async fn run(&self, script: Script) -> HarnessRun;
 }

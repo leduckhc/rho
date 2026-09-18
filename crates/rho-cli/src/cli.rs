@@ -553,7 +553,7 @@ pub(crate) async fn build_session(
 
     let context = Context::new(Some(prompt), tools.specs());
     Ok((
-        Session::with_config(config, provider, tools, hooks, context),
+        Session::with_config(config, Arc::clone(&provider), tools, hooks, context),
         tasks,
         SessionExtras {
             notices: wiring_notices
@@ -565,6 +565,10 @@ pub(crate) async fn build_session(
             // Holding the guard keeps the directory alive for the session, and removes it when
             // the session ends. See D-stored-result-inherits-session-trust.
             results_dir: results_dir.map(|(_, guard)| guard),
+            // Keep the provider alive for lazy model-catalog listings in the TUI.
+            // See `SPEC-choose-a-model-and-configure-a-run` section 7.
+            #[cfg(feature = "tui")]
+            provider: Arc::clone(&provider),
             agents: subagents.registry,
             agent_definitions: subagents.loaded,
             mcp_pool: extensions.mcp_pool,
@@ -577,6 +581,12 @@ pub(crate) struct SessionExtras {
     /// The result store directory. Dropping it removes the stored results.
     #[allow(dead_code)]
     results_dir: Option<tempfile::TempDir>,
+    /// The provider that drives the session. The TUI keeps it alive for the model
+    /// catalogue cache, so a lazy `/model` listing can reach the provider after the
+    /// session starts. See `SPEC-choose-a-model-and-configure-a-run` section 7.
+    #[cfg(feature = "tui")]
+    #[allow(dead_code)]
+    pub(crate) provider: Arc<dyn rho_core::Provider>,
     /// Lines to print once, before the session starts.
     pub(crate) notices: Vec<String>,
     /// The subagent registry. Holding it keeps the process-wide live cap in force for as
@@ -1397,6 +1407,15 @@ async fn run_interactive(cli: &Cli) -> i32 {
     // entry is matched by its protocol. See
     // `D-the-picker-seeds-from-a-per-provider-suggestion-list`.
     let suggestions = provider_suggestions_for(&loaded, &provider_name);
+    // Wrap the provider in a disk cache for lazy `/model` listings. A provider that cannot
+    // list (Azure) gets no catalog, so the picker shows only the current model and any
+    // starred or suggested ids. See `SPEC-choose-a-model-and-configure-a-run` section 7.
+    let catalog = extras.provider.catalog().map(|_| {
+        Arc::new(crate::catalog_cache::CatalogCache::new(
+            Arc::clone(&extras.provider),
+            &home_dir().join(".rho"),
+        )) as Arc<dyn rho_core::ModelCatalog>
+    });
     let mut app = rho_tui::App::new(session, model)
         .with_mouse(mouse)
         // The renderer read `state.animate` and nothing ever assigned it, so the sweep
@@ -1412,6 +1431,9 @@ async fn run_interactive(cli: &Cli) -> i32 {
         .with_task_events(tasks.session_events())
         .with_context(cwd, branch, provider_name)
         .with_notices(notices);
+    if let Some(catalog) = catalog {
+        app = app.with_catalog(catalog);
+    }
     let code = match app.run().await {
         Ok(()) => 0,
         Err(error) => fail(anyhow::anyhow!(error)),

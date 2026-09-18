@@ -41,7 +41,10 @@ pub use context::Context;
 pub use error::{Error, ProviderError};
 pub use event::StreamEvent;
 pub use hook::{Hook, HookChain, HookOutcome, ToolCallView};
-pub use provider::{CompletionRequest, Provider, ProviderStream, ToolSpec};
+pub use provider::{
+    CompletionRequest, LIST_TIMEOUT, MAX_MODELS, ModelCatalog, ModelDescriptor, Provider,
+    ProviderStream, ToolSpec,
+};
 pub use queue::{
     BLOCK_OVERHEAD_BYTES, JSON_NODE_MIN_BYTES, MAX_COUNTED_JSON_DEPTH, MAX_STEER_MESSAGE_BYTES,
     MessageQueue, QueueError, STEER_QUEUE_CAPACITY, message_bytes,

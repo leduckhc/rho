@@ -9,12 +9,12 @@
                                                                                                     
                                                                                                     
                                                                                                     
-                                                                                                    
 ❯ add a duration to every tool row, and keep the text beside it still                               
                                                                                                     
 Done. Every tool row now carries a duration, and 214 tests pass.                                    
  ❯ /model      open the model picker · `/model <id>` sets one directly                              
    /effort     show the reasoning effort · `/effort <level>` sets it                                
+   /speed      `fast` turns reasoning off · `normal` restores the start effort                      
    /sessions   list, resume, or branch a session · not built yet                                    
    /guide      the two minute tour                                                                  
    /help       every key and every command                                                          

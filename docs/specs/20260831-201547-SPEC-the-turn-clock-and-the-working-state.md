@@ -1,6 +1,8 @@
 # SPEC-the-turn-clock-and-the-working-state — The turn clock and the working state
 
-Status: draft for the working-state lane.
+Status: delivered. The tick clock is wired into the event loop, the reducer settles the
+live turn duration, and the footer renders it with an amber cue past one minute. Owning
+crate: `rho-tui`. Tests: `crates/rho-tui/tests/turn_clock.rs`.
 
 Owner crate: `rho-tui`. Related crate: `rho-cli`, which passes `--no-motion`.
 

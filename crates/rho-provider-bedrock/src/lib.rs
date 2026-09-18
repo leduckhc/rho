@@ -15,8 +15,8 @@ use aws_sdk_bedrockruntime::error::ProvideErrorMetadata;
 use aws_smithy_types::Document;
 use aws_smithy_types::Number;
 use rho_core::{
-    CancelToken, CompletionRequest, Message, Provider, ProviderError, ProviderStream, Role,
-    StopReason, StreamEvent, Usage,
+    CancelToken, CompletionRequest, MAX_MODELS, Message, ModelCatalog, ModelDescriptor, Provider,
+    ProviderError, ProviderStream, Role, StopReason, StreamEvent, Usage,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -277,6 +277,7 @@ pub fn map_converse_event(
             cache_write_tokens: metadata.usage.cache_write_input_tokens,
             // Bedrock reports no charge on the stream, so the field stays empty rather
             // than guessing from a price table. See decision D-measured-cost-and-cache.
+            reasoning_tokens: None,
             cost_usd: None,
         }));
     }
@@ -404,6 +405,14 @@ impl Provider for BedrockProvider {
         "bedrock"
     }
 
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        Some(self)
+    }
+
+    fn catalog_fingerprint(&self) -> String {
+        format!("bedrock:{}", self.config.region)
+    }
+
     async fn stream(
         &self,
         request: CompletionRequest,
@@ -477,6 +486,48 @@ fn map_sdk_error(code: Option<&str>, message: String) -> ProviderError {
         // failure surfaces here. Report it as auth so the user checks the
         // credential chain, unless it reads like a plain network fault.
         None => ProviderError::Transport(message),
+    }
+}
+
+#[async_trait]
+impl ModelCatalog for BedrockProvider {
+    async fn list_models(
+        &self,
+        cancel: CancelToken,
+    ) -> Result<Vec<ModelDescriptor>, ProviderError> {
+        use aws_config::BehaviorVersion;
+        use aws_sdk_bedrock::Client;
+        use aws_sdk_bedrock::config::Region;
+
+        let sdk_config = aws_config::defaults(BehaviorVersion::latest())
+            .region(Region::new(self.config.region.clone()))
+            .load()
+            .await;
+        let client = Client::new(&sdk_config);
+
+        let output = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ProviderError::Canceled),
+            result = client.list_foundation_models().send() => result.map_err(|error| {
+                map_sdk_error(error.code(), error.to_string())
+            })?,
+        };
+
+        let summaries = output.model_summaries();
+        if summaries.len() > MAX_MODELS {
+            return Err(ProviderError::Decode(format!(
+                "the provider returned {} models, and rho keeps at most {}",
+                summaries.len(),
+                MAX_MODELS
+            )));
+        }
+        Ok(summaries
+            .iter()
+            .map(|summary| ModelDescriptor {
+                id: summary.model_id().to_string(),
+                display_name: summary.model_name().map(str::to_string),
+            })
+            .collect())
     }
 }
 
@@ -2057,6 +2108,34 @@ mod drop_report_tests {
                 "{name}: a refused payload leaves nothing to send"
             );
         }
+    }
+
+    /// Switching models drops reasoning that belongs to the previous model. The drop is
+    /// reported in `dropped_replays`, so the contract is data and not a log line. See
+    /// `SPEC-choose-a-model-and-configure-a-run` section 8.
+    #[test]
+    fn model_switch_drops_reasoning_bound_to_old_model() {
+        let messages = assistant(ContentBlock::ReasoningReplay {
+            text: "plan".to_string(),
+            state: state(
+                "bedrock",
+                "old-model",
+                serde_json::json!({"signature": "s"}),
+            ),
+        });
+        let built = build_messages_for_model(&messages, "new-model");
+        assert_eq!(
+            built.dropped_replays,
+            vec![DroppedReplay {
+                message_index: 0,
+                reason: ReplayDropReason::AnotherOwner,
+            }],
+            "a model switch drops reasoning owned by the old model"
+        );
+        assert!(
+            built.messages.is_empty(),
+            "the dropped reasoning must not travel as a message"
+        );
     }
 
     /// A caller must be able to say **which** turn lost its reasoning.

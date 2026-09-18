@@ -14,8 +14,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 use futures::stream;
 use rho_core::{
-    CancelToken, CompletionRequest, ContentBlock, Hook, HookOutcome, Provider, ProviderError,
-    ProviderStream, StreamEvent, Tool, ToolCallView, ToolContext, ToolError, ToolKind, ToolOutput,
+    CancelToken, CompletionRequest, ContentBlock, Hook, HookOutcome, ModelCatalog, Provider,
+    ProviderError, ProviderStream, StreamEvent, Tool, ToolCallView, ToolContext, ToolError,
+    ToolKind, ToolOutput,
 };
 use tokio::sync::Notify;
 
@@ -74,6 +75,10 @@ impl Drop for DropGuard {
 impl Provider for ScriptedProvider {
     fn id(&self) -> &str {
         "scripted"
+    }
+
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        None
     }
 
     async fn stream(
@@ -675,6 +680,10 @@ impl Default for RecordingProvider {
 impl Provider for RecordingProvider {
     fn id(&self) -> &str {
         "recording"
+    }
+
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        None
     }
 
     async fn stream(

@@ -25,6 +25,16 @@ async fn drain(mut stream: rho_core::ProviderStream) -> Vec<StreamEvent> {
 }
 
 #[test]
+fn catalog_reports_none_for_azure() {
+    let provider = AzureProvider::new(AzureConfig::new(
+        "https://test.openai.azure.com",
+        "deployment-1",
+        AzureAuth::ApiKey(Secret::new("key")),
+    ));
+    assert!(provider.catalog().is_none());
+}
+
+#[test]
 fn provider_azure_entra_audience_is_pinned() {
     // The trailing slash is required. A missing slash is a known real-world bug
     // source. Azure rejects a token minted for the wrong audience. This test
@@ -314,6 +324,7 @@ async fn provider_azure_reports_cache_tokens() {
     assert_eq!(usage.input_tokens, 1200);
     assert_eq!(usage.cache_read_tokens, 900, "cached_tokens must be read");
     assert_eq!(usage.cache_write_tokens, 300);
+    assert_eq!(usage.reasoning_tokens, Some(0));
     // Azure reports no charge, so the field stays absent rather than reading as free.
     assert_eq!(usage.cost_usd, None);
 }

@@ -291,6 +291,7 @@ fn a_row_reports_the_cumulative_usage() {
         output_tokens: 340,
         cache_read_tokens: 10,
         cache_write_tokens: 5,
+        reasoning_tokens: None,
         cost_usd: Some(0.0821),
     };
     {

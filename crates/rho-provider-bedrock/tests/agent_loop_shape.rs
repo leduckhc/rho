@@ -24,9 +24,10 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream;
 use rho_core::{
-    AllowAllPolicy, CancelToken, CompletionRequest, ContentBlock, Context, HookChain, Provider,
-    ProviderError, ProviderState, ProviderStream, ReasoningOwner, Role, Session, SessionConfig,
-    StopReason, StreamEvent, Tool, ToolContext, ToolError, ToolKind, ToolOutput, ToolRegistry,
+    AllowAllPolicy, CancelToken, CompletionRequest, ContentBlock, Context, HookChain, ModelCatalog,
+    Provider, ProviderError, ProviderState, ProviderStream, ReasoningOwner, Role, Session,
+    SessionConfig, StopReason, StreamEvent, Tool, ToolContext, ToolError, ToolKind, ToolOutput,
+    ToolRegistry,
 };
 
 const MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
@@ -69,6 +70,10 @@ impl Provider for RecordingProvider {
     fn id(&self) -> &str {
         // The owner rule compares this against the payload's owner, so it must be the real id.
         "bedrock"
+    }
+
+    fn catalog(&self) -> Option<&dyn ModelCatalog> {
+        None
     }
 
     async fn stream(

@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use rho_core::{CancelToken, ProviderStream};
-use rho_provider_bedrock::{ConverseStreamEvent, events_to_stream};
+use rho_provider_bedrock::{BedrockConfig, BedrockProvider, ConverseStreamEvent, events_to_stream};
 use rho_provider_testkit::{HarnessRun, ProviderHarness, Script};
 
 /// Load a fixture file into the recorded-event mirror.
@@ -33,6 +33,10 @@ pub struct BedrockHarness;
 
 #[async_trait]
 impl ProviderHarness for BedrockHarness {
+    fn provider(&self) -> std::sync::Arc<dyn rho_core::Provider> {
+        std::sync::Arc::new(BedrockProvider::new(BedrockConfig::new("us-east-1")))
+    }
+
     async fn run(&self, script: Script) -> HarnessRun {
         // The text fixture answers "Hello" and reports usage. The tool fixture
         // splits the tool input across several deltas.

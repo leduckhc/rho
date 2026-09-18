@@ -6,8 +6,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rho_core::{
-    AgentEvent, AgentStopReason, ModelSelection, ReasoningDisplay, ReasoningEffort, StreamEvent,
-    TaskId, TaskProgress, TaskState, ThinkingPiece, ThinkingSplitter, ToolKind,
+    AgentEvent, AgentStopReason, ModelSelection, QueueError, ReasoningDisplay, ReasoningEffort,
+    StreamEvent, TaskId, TaskProgress, TaskState, ThinkingPiece, ThinkingSplitter, ToolKind,
 };
 
 use crate::concise::RowFold;
@@ -17,8 +17,11 @@ use crate::scroll::{PAGE_ROWS_MARGIN, Scroll};
 /// One rendered transcript row.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Row {
-    /// A finished or streaming user message.
-    User { text: String },
+    /// A finished or streaming user message. `delivered` is false while the message
+    /// waits to steer the agent, and true once the model has received it. A message the
+    /// user sends while no turn runs is delivered at once, so it starts true. See
+    /// `SPEC-a-queued-message-says-what-it-is`.
+    User { text: String, delivered: bool },
     /// A finished or streaming assistant answer.
     Assistant { text: String },
     /// A thinking block. Collapsed to one line by default.
@@ -130,6 +133,10 @@ pub struct ModelPicker {
     pub selected: usize,
     /// The fuzzy query. Empty means no filter, so every row of `rows` is shown.
     pub query: String,
+    /// True while a catalog load is in flight. The renderer draws one loading row.
+    pub loading: bool,
+    /// The error from a failed catalog load, if any. It draws as one line.
+    pub error: Option<String>,
 }
 
 impl ModelPicker {
@@ -182,6 +189,9 @@ pub struct PickerRow {
     pub starred: bool,
     /// The preview effort. `None` keeps the session's current effort. Cycled by `e`.
     pub effort: Option<ReasoningEffort>,
+    /// True when this row came from a stale cache entry and has not been confirmed by a
+    /// fresh listing yet.
+    pub stale: bool,
 }
 
 /// The approval prompt content. The command is verbatim, so the user sees exactly
@@ -264,6 +274,9 @@ pub struct TuiState {
     /// Read by the `/effort` slash command and by the picker header. Set by
     /// `set_current_selection` when the frontend applies a new selection.
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// The reasoning effort the session started with. `/speed normal` restores it.
+    /// Set once by the app at startup, and never changed by a model or effort switch.
+    pub start_effort: Option<ReasoningEffort>,
     /// The starred model ids, in file order. Loaded once at startup, and after every
     /// picker toggle. See `D-starred-models-live-in-their-own-file`.
     pub starred_models: Vec<String>,
@@ -319,6 +332,10 @@ pub struct TuiState {
     /// True after a Ctrl-C cancel while a turn runs, until the turn ends. It drives the
     /// footer word, so a cancel the model has not answered yet still shows on screen.
     pub canceling: bool,
+    /// The last steer refusal text, or `None`. It shows near the composer, in `warn`, so
+    /// a refused message names its limit without vanishing. See
+    /// `SPEC-a-queued-message-says-what-it-is` section 7.
+    pub steer_notice: Option<String>,
     /// The finished span of each row, parallel to `rows`. `None` for a row with no
     /// duration, or a row the index does not reach.
     pub row_durations: Vec<Option<i64>>,
@@ -350,6 +367,11 @@ pub enum KeyAction {
     None,
     /// Submit the given prompt text to the session.
     Submit(String),
+    /// Steer the given text into the running turn. The Enter handler returns this
+    /// instead of `Submit` while a turn runs. The app calls `Session::steer`, then folds
+    /// the result with `on_steer_result`. The draft is not cleared until the result lands,
+    /// so a refusal keeps the message. See `SPEC-a-queued-message-says-what-it-is`.
+    Steer(String),
     /// Cancel the running turn.
     Cancel,
     /// Exit the app.
@@ -363,6 +385,9 @@ pub enum KeyAction {
     /// Persist this starred list to `~/.rho/starred-models.toml`. The event loop
     /// writes the file. See `D-starred-models-live-in-their-own-file`.
     PersistStarred(Vec<String>),
+    /// Open the model picker and start a catalog load. The event loop owns the
+    /// `ModelCatalog`, so the state cannot start the load itself.
+    OpenModelPicker,
 }
 
 impl TuiState {
@@ -377,6 +402,10 @@ impl TuiState {
                 self.activity = ActivityState::Running;
                 self.canceling = false;
                 self.turn_started = Some(now_millis);
+                // The live clock starts at zero. Without this the footer shows the last
+                // turn's duration until the first tick fires, which reads as a frozen,
+                // wrong clock. See `SPEC-the-turn-clock-and-the-working-state` section 3.
+                self.turn_millis = Some(0);
             }
             AgentEvent::Stream(stream) => self.apply_stream(stream, now_millis),
             AgentEvent::ToolStart { id, name, kind } => {
@@ -398,11 +427,13 @@ impl TuiState {
             AgentEvent::TaskProgressed { id, progress } => self.on_task_progress(id, progress),
             AgentEvent::TaskEnd { id, state, .. } => self.on_task_end(id, state),
             AgentEvent::AgentEnd { stop_reason } => self.on_agent_end(*stop_reason, now_millis),
-            // Steering. The band shows nothing for either one: a queued message is the
-            // composer's business, and a delivery is visible as the next user row. They
-            // are matched by name rather than swept up by a wildcard, so the next event
-            // this enum gains stops the build here and gets a decision.
-            AgentEvent::MessageQueued { .. } | AgentEvent::MessageDelivered { .. } => {}
+            // Steering. A queued message is the composer's business: `on_steer_result`
+            // already pushed the waiting row when `steer` returned. A delivery flips the
+            // oldest waiting rows to delivered, in arrival order. They are matched by
+            // name rather than swept up by a wildcard, so the next event this enum gains
+            // stops the build here and gets a decision.
+            AgentEvent::MessageQueued { .. } => {}
+            AgentEvent::MessageDelivered { count } => self.mark_delivered(*count),
         }
     }
 
@@ -915,7 +946,13 @@ impl TuiState {
     /// stay aligned. It records the text in the history, and it drops a repeat.
     pub fn submit_input(&mut self) -> String {
         let text = self.draft.take();
-        self.push_row(Row::User { text: text.clone() }, None);
+        self.push_row(
+            Row::User {
+                text: text.clone(),
+                delivered: true,
+            },
+            None,
+        );
         self.push_history(&text);
         self.reset_history_nav();
         text
@@ -1052,6 +1089,13 @@ impl TuiState {
             KeyCode::Enter => {
                 if self.draft.is_empty() {
                     KeyAction::None
+                } else if self.activity == ActivityState::Running && self.panel == Panel::None {
+                    // A turn is live. Enter steers the draft into the running turn, and
+                    // the draft stays until the steer result lands, so a refusal keeps the
+                    // message. This never calls `Session::prompt` a second time, so a
+                    // mid-turn Enter can no longer overwrite the live run. See
+                    // `SPEC-a-queued-message-says-what-it-is` amendment 1.
+                    KeyAction::Steer(self.draft.model_text())
                 } else {
                     KeyAction::Submit(self.submit_input())
                 }
@@ -1371,7 +1415,7 @@ impl TuiState {
     /// A duplicate id later in the list is dropped, so the current stays at row zero and
     /// a starred id keeps its `starred` flag when it also appears in the suggestion list.
     /// See `D-the-picker-seeds-from-a-per-provider-suggestion-list`.
-    pub fn open_model_picker(&mut self) {
+    pub fn open_model_picker(&mut self) -> KeyAction {
         let mut rows: Vec<PickerRow> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         rows.push(PickerRow {
@@ -1379,6 +1423,7 @@ impl TuiState {
             is_current: true,
             starred: self.starred_models.iter().any(|id| id == &self.model),
             effort: self.reasoning_effort,
+            stale: false,
         });
         seen.insert(self.model.clone());
         for id in &self.starred_models {
@@ -1392,6 +1437,7 @@ impl TuiState {
                 // A starred row carries no effort. Enter with this row keeps the current
                 // effort, unless the user pressed Tab to preview one first.
                 effort: None,
+                stale: false,
             });
         }
         for id in &self.suggested_models {
@@ -1403,13 +1449,91 @@ impl TuiState {
                 is_current: false,
                 starred: false,
                 effort: None,
+                stale: false,
             });
         }
         self.panel = Panel::ModelPicker(ModelPicker {
             rows,
             selected: 0,
             query: String::new(),
+            loading: false,
+            error: None,
         });
+        KeyAction::OpenModelPicker
+    }
+
+    /// True when the panel is the model picker.
+    pub fn is_model_picker_open(&self) -> bool {
+        matches!(self.panel, Panel::ModelPicker(_))
+    }
+
+    /// Set or clear the loading flag on an open model picker.
+    pub fn set_picker_loading(&mut self, loading: bool) {
+        let Panel::ModelPicker(picker) = &mut self.panel else {
+            return;
+        };
+        picker.loading = loading;
+    }
+
+    /// Append catalog models to an open picker, dropping ids that already appear.
+    /// A model that was previously shown as stale is now confirmed fresh, so its stale
+    /// flag clears.
+    pub fn append_catalog_models(&mut self, models: &[rho_core::ModelDescriptor]) {
+        let Panel::ModelPicker(picker) = &mut self.panel else {
+            return;
+        };
+        picker.loading = false;
+        picker.error = None;
+        let mut seen: std::collections::HashSet<String> =
+            picker.rows.iter().map(|r| r.id.clone()).collect();
+        for model in models {
+            if seen.contains(&model.id) {
+                // A fresh listing confirms this id, so clear any stale marker.
+                if let Some(row) = picker.rows.iter_mut().find(|r| r.id == model.id) {
+                    row.stale = false;
+                }
+                continue;
+            }
+            seen.insert(model.id.clone());
+            picker.rows.push(PickerRow {
+                id: model.id.clone(),
+                is_current: false,
+                starred: false,
+                effort: None,
+                stale: false,
+            });
+        }
+    }
+
+    /// Seed an open picker with cached models while a fresh list loads. Rows from the
+    /// cache are marked stale until `append_catalog_models` confirms them.
+    pub fn seed_picker_with_cached_models(&mut self, models: &[rho_core::ModelDescriptor]) {
+        let Panel::ModelPicker(picker) = &mut self.panel else {
+            return;
+        };
+        let mut seen: std::collections::HashSet<String> =
+            picker.rows.iter().map(|r| r.id.clone()).collect();
+        for model in models {
+            if !seen.insert(model.id.clone()) {
+                continue;
+            }
+            picker.rows.push(PickerRow {
+                id: model.id.clone(),
+                is_current: false,
+                starred: false,
+                effort: None,
+                stale: true,
+            });
+        }
+    }
+
+    /// Set a single-line error on an open picker and clear the loading flag.
+    pub fn set_picker_error(&mut self, message: impl Into<String>) {
+        let Panel::ModelPicker(picker) = &mut self.panel else {
+            return;
+        };
+        picker.loading = false;
+        picker.error = Some(message.into());
     }
 
     /// Route a key while the model picker is open. See
@@ -1556,8 +1680,7 @@ impl TuiState {
                 let arg = crate::slash_argument(&list.query, "/model").to_string();
                 if arg.is_empty() {
                     // No argument opens the picker. See `D-the-model-picker-is-a-panel`.
-                    self.open_model_picker();
-                    KeyAction::None
+                    self.open_model_picker()
                 } else {
                     // A typed id is the confirmation, and the effort stays. See
                     // `D-model-arg-bypasses-the-picker`.
@@ -1604,6 +1727,35 @@ impl TuiState {
                     }
                 }
             }
+            "/speed" => {
+                let arg = crate::slash_argument(&list.query, "/speed");
+                match arg {
+                    "fast" => {
+                        self.push_notice("speed: fast".to_string());
+                        KeyAction::ApplySelection(ModelSelection {
+                            model: self.model.clone(),
+                            reasoning_effort: Some(ReasoningEffort::Off),
+                        })
+                    }
+                    "normal" => {
+                        let effort = self.start_effort;
+                        let name = effort
+                            .map(|e| e.as_str().to_string())
+                            .unwrap_or_else(|| "unset".to_string());
+                        self.push_notice(format!("speed: normal (effort: {name})"));
+                        KeyAction::ApplySelection(ModelSelection {
+                            model: self.model.clone(),
+                            reasoning_effort: effort,
+                        })
+                    }
+                    other => {
+                        self.push_error(format!(
+                            "`/speed {other}` is not valid. Use `/speed fast` or `/speed normal`."
+                        ));
+                        KeyAction::None
+                    }
+                }
+            }
             other => {
                 self.push_error(format!(
                     "{other} is not built yet. See F-slash-commands in docs/features.md."
@@ -1613,22 +1765,116 @@ impl TuiState {
         }
     }
 
+    /// Advance one tick, at `now_millis` on the caller's clock.
+    ///
+    /// Pure. No IO. No clock read. The event loop calls this once per
+    /// `crate::motion::TICK_PERIOD_MILLIS` while a run is active, and never while idle.
+    /// It advances `tick`, which drives the motion sweep. While a turn runs it also
+    /// refreshes `turn_millis` from the turn start, so the footer clock grows live.
+    /// While no turn runs it leaves `turn_millis` alone, as a fail-safe against a stray
+    /// call. See `D-the-loop-owns-the-tick-clock`.
+    pub fn on_tick(&mut self, now_millis: i64) {
+        self.tick = self.tick.wrapping_add(1);
+        if self.activity == ActivityState::Running
+            && let Some(start) = self.turn_started
+        {
+            self.turn_millis = Some(now_millis - start);
+        }
+    }
+
     /// End the run when the event stream stops with no `AgentEnd`.
     ///
     /// `rho_core::Driver::run` returns on `TurnOutcome::Failed` and on `Closed` without
     /// emitting a stop event. The frontend must not stay `Running` after that, because a
     /// stuck `Running` sends the next Ctrl-C to a cancel on a token that is gone, and the
-    /// user then cannot quit with Ctrl-C at all. Pass `failed` for a stream error.
-    pub fn end_run(&mut self, failed: bool) {
+    /// user then cannot quit with Ctrl-C at all. Pass `failed` for a stream error. Pass
+    /// `now_millis` from the same clock the reducer folds with, so a failed or closed run
+    /// freezes its final duration. See `D-a-failed-turn-freezes-the-clock`.
+    pub fn end_run(&mut self, failed: bool, now_millis: i64) {
         let was_canceling = self.canceling;
         self.activity = ActivityState::Idle;
         self.canceling = false;
+        if let Some(start) = self.turn_started {
+            self.turn_millis = Some(now_millis - start);
+        }
         if failed {
             self.last_error = true;
             self.status = "the run ended with an error".to_string();
         } else if was_canceling {
             self.last_stop = Some(AgentStopReason::Canceled);
             self.status = "canceled".to_string();
+        }
+    }
+
+    /// Fold the result of a steer attempt into the state.
+    ///
+    /// On success, clear the draft and push a waiting user row. On refusal, keep the
+    /// draft and set the steer notice, so a refused message never vanishes and names its
+    /// limit. See `SPEC-a-queued-message-says-what-it-is` sections 5.3 and 7.
+    pub fn on_steer_result(&mut self, text: String, result: Result<usize, QueueError>) {
+        match result {
+            Ok(_position) => {
+                self.draft.take();
+                self.push_row(
+                    Row::User {
+                        text,
+                        delivered: false,
+                    },
+                    None,
+                );
+                self.steer_notice = None;
+            }
+            Err(error) => {
+                self.steer_notice = Some(error.to_string());
+            }
+        }
+    }
+
+    /// Flip the oldest `count` waiting user rows to delivered, in arrival order. A row
+    /// sent while idle is already delivered, so it is never touched. See section 5.3.
+    fn mark_delivered(&mut self, count: usize) {
+        let mut left = count;
+        for row in &mut self.rows {
+            if left == 0 {
+                break;
+            }
+            if let Row::User { delivered, .. } = row
+                && !*delivered
+            {
+                *delivered = true;
+                left -= 1;
+            }
+        }
+    }
+
+    /// The number of waiting user rows, for the footer. A waiting row is a steered
+    /// message the model has not received.
+    pub fn waiting_count(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row,
+                    Row::User {
+                        delivered: false,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    /// The composer hint while a turn runs and the draft is not empty, or `None`. The
+    /// hint uses the word "steer", so the reader knows enter routes the message into the
+    /// running turn instead of starting a new one. See section 6.1.
+    pub fn composer_hint(&self) -> Option<&'static str> {
+        if self.activity == ActivityState::Running
+            && self.panel == Panel::None
+            && !self.draft.is_empty()
+        {
+            Some("enter steers the message to the agent · ctrl-c cancel")
+        } else {
+            None
         }
     }
 
