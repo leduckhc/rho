@@ -22,7 +22,9 @@ mod state;
 mod styled;
 mod theme;
 
-pub use app::{App, TuiError, edit_draft, restore_sequences, setup_sequences};
+pub use app::{
+    App, TuiError, TurnRecord, edit_draft, record_turn, restore_sequences, setup_sequences,
+};
 pub use duration::{DURATION_SLOT_COLUMNS, duration_slot, format_duration, live_duration_is_amber};
 pub use editor::{editor_argv, editor_command};
 pub use markdown::{

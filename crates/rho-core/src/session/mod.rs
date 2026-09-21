@@ -2321,7 +2321,14 @@ fn redact_block(block: &ContentBlock) -> ContentBlock {
             content: content.iter().map(redact_block).collect(),
             is_error: *is_error,
         },
-        other => other.clone(),
+        // Named arms, because a wildcard let a new block bypass redaction in silence. A plain
+        // text block holds no credential-shaped JSON key, and an image holds no key either, so
+        // each is cloned. The next block type must state its redaction here, and the compiler
+        // now forces it. See `D-plugin-does-not-classify-itself`.
+        ContentBlock::Text { text } => ContentBlock::Text { text: text.clone() },
+        ContentBlock::Image { source } => ContentBlock::Image {
+            source: source.clone(),
+        },
     }
 }
 

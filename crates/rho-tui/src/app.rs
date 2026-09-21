@@ -20,7 +20,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use rho_core::{
     AgentEvent, AgentEvents, CancelToken, ContentBlock, ModelCatalog, ModelDescriptor,
-    ModelSelection, Session,
+    ModelSelection, Session, SessionRecorder,
 };
 
 use crate::editor::{editor_argv, editor_command};
@@ -100,6 +100,11 @@ pub struct App {
     /// The session start, which is the clock the reducer folds with. The reducer reads no
     /// clock itself, so time arrives as data. See `D-the-reducer-owns-the-row-metadata`.
     started: Instant,
+    /// The recorder that folds the session file, or `None` when the app records nothing.
+    ///
+    /// The app owns the one recorder for the life of the run. Every record goes through
+    /// `record_turn`. See `D-the-interactive-recorder-lives-on-the-app`.
+    recorder: Option<SessionRecorder>,
 }
 
 impl App {
@@ -123,7 +128,19 @@ impl App {
             catalog_cancel: None,
             mouse: true,
             started: Instant::now(),
+            recorder: None,
         }
+    }
+
+    /// Give the app the recorder that folds the session file.
+    ///
+    /// The app owns the recorder for the life of the run. It folds the prompt, every event,
+    /// each model change, the cancel, and the close through `record_turn`. Without this call
+    /// the app records nothing, exactly as before. See
+    /// `D-the-interactive-recorder-lives-on-the-app`.
+    pub fn with_recorder(mut self, recorder: SessionRecorder) -> Self {
+        self.recorder = Some(recorder);
+        self
     }
 
     /// Read background task events for the whole life of the interface.
@@ -266,6 +283,10 @@ impl App {
         let signals = crate::screen::spawn_signal_restore(self.mouse);
         let mut terminal = build_terminal()?;
         let result = self.event_loop(&mut terminal, &mut guard).await;
+        // Record the close once, after the loop returns, on the success path and the error
+        // path alike. A cancel never reaches here, so the session stays open on a cancel. See
+        // section 4 and `D-cancel-keeps-the-session-open`.
+        record_turn(&mut self.recorder, &mut self.state, TurnRecord::Close);
         signals.abort();
         // Always restore the terminal, even after an error.
         let restore = restore_terminal(&mut terminal, &mut guard);
@@ -299,6 +320,7 @@ impl App {
             catalog_cancel,
             mouse: _,
             started,
+            recorder,
         } = self;
 
         draw_frame(terminal, state)?;
@@ -308,7 +330,14 @@ impl App {
                 maybe_key = input.next() => {
                     match maybe_key {
                         Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                            match state.handle_key(key) {
+                            let action = state.handle_key(key);
+                            // Record a prompt for a key that starts a turn, and nothing for a
+                            // steer. `submit_prompt` is the one decision, so a steer can never
+                            // record a prompt. See section 2.
+                            if let Some(input) = submit_prompt(&action) {
+                                record_turn(recorder, state, TurnRecord::Prompt(&input));
+                            }
+                            match action {
                                 KeyAction::None => {}
                                 KeyAction::Submit(text) => {
                                     let token = CancelToken::new();
@@ -337,6 +366,11 @@ impl App {
                                     if let Some(token) = cancel.as_ref() {
                                         token.cancel();
                                     }
+                                    // The cancel arm never records a close. It flushes the
+                                    // turn, completes any open tool pairing, and writes one
+                                    // stop, so the session stays open. See section 3 and
+                                    // `D-cancel-keeps-the-session-open`.
+                                    record_turn(recorder, state, TurnRecord::Cancel);
                                 }
                                 KeyAction::Exit => {
                                     break;
@@ -352,7 +386,18 @@ impl App {
                                 // keeps its old selection; the next turn uses the new
                                 // one. See `D-model-selection-is-mutable-behind-a-mutex`.
                                 KeyAction::ApplySelection(selection) => {
-                                    apply_selection(session, state, selection);
+                                    // Record the change only when the model id changed. The
+                                    // provider is the running provider, fixed for the run
+                                    // today. Read the previous model before the apply. See
+                                    // section 1 and ruling 3.
+                                    let previous_model = state.model.clone();
+                                    let provider = state.provider.clone();
+                                    apply_selection(session, state, selection.clone());
+                                    if let Some(step) =
+                                        selection_record(&previous_model, &selection, &provider)
+                                    {
+                                        record_turn(recorder, state, step);
+                                    }
                                 }
                                 // A picker star toggle. Persist to the file the state
                                 // now agrees with, so an app crash cannot lose a star.
@@ -456,6 +501,10 @@ impl App {
                     match maybe_event {
                         Some(Ok(event)) => {
                             let ended = matches!(event, AgentEvent::AgentEnd { .. });
+                            // Fold each event into the recorder before the state applies it,
+                            // so a panic in the reducer cannot lose a record already held. See
+                            // section 1.
+                            record_turn(recorder, state, TurnRecord::Event(&event));
                             state.apply(&event, elapsed_millis(started));
                             if ended {
                                 *events = None;
@@ -517,11 +566,20 @@ impl App {
                     *catalog_cancel = None;
                     match maybe_catalog {
                         Some(CatalogEvent::Models(models)) => {
+                            // The load is over, so stop polling the receiver. The loading
+                            // task sends one event and drops the sender, so a later poll
+                            // returns `None`. Without this line that `None` reached the arm
+                            // below, and every successful listing drew
+                            // `the catalog load ended unexpectedly` over a good list. A live
+                            // drive found it; no test reaches a `select!` arm.
+                            *catalog_events = None;
                             state.append_catalog_models(&models);
                             update_metrics(terminal, state)?;
                             draw(terminal, state)?;
                         }
                         Some(CatalogEvent::Error(message)) => {
+                            // The load is over here too, for the same reason.
+                            *catalog_events = None;
                             state.set_picker_error(message);
                             update_metrics(terminal, state)?;
                             draw(terminal, state)?;
@@ -548,6 +606,106 @@ impl App {
 /// The milliseconds since the session started. The one clock read in this crate.
 fn elapsed_millis(started: &Instant) -> i64 {
     i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
+}
+
+/// One transition of the event loop that the session file must reflect.
+///
+/// The loop passes one of these to `record_turn`. The loop never calls the recorder itself,
+/// so the whole recording lifecycle lives in one function a test drives. See
+/// `D-the-interactive-recorder-lives-on-the-app`.
+pub enum TurnRecord<'a> {
+    /// A turn began. The submit arm carries the submitted input.
+    Prompt(&'a [ContentBlock]),
+    /// One agent event arrived. The agent-event arm folds it.
+    Event(&'a AgentEvent),
+    /// The model changed. `provider` is the session's running provider, fixed for the run
+    /// today, so it comes from the session and not from the selection.
+    Selection { provider: &'a str, model: &'a str },
+    /// The turn was cancelled. The cancel arm carries this. It flushes the partial turn,
+    /// completes any open tool pairing, and writes one stop. The session stays open. See
+    /// `D-cancel-keeps-the-session-open`.
+    Cancel,
+    /// The run ended on its own. `App::run` calls this after the loop returns. A cancel never
+    /// reaches here. See `D-cancel-keeps-the-session-open`.
+    Close,
+}
+
+/// Fold one loop transition into the session file. This is the recording seam.
+///
+/// A `None` recorder records nothing. A write failure degrades the log to ephemeral inside
+/// `rho-core`, and the run continues. The alternate screen hides a tracing warning, so a
+/// fresh degrade pushes one transcript notice here. See `D-write-failure-degrades`.
+pub fn record_turn(
+    recorder: &mut Option<SessionRecorder>,
+    state: &mut TuiState,
+    step: TurnRecord<'_>,
+) {
+    let Some(recorder) = recorder.as_mut() else {
+        return;
+    };
+    let was_live = !recorder.is_ephemeral();
+    // Read whether this is a close before the match moves `step`.
+    let is_close = matches!(&step, TurnRecord::Close);
+    match step {
+        TurnRecord::Prompt(input) => {
+            recorder.record_prompt(input);
+        }
+        TurnRecord::Event(event) => {
+            recorder.observe(event);
+        }
+        TurnRecord::Selection { provider, model } => {
+            recorder.record_model_change(provider, model);
+        }
+        TurnRecord::Cancel => {
+            recorder.record_cancel();
+        }
+        TurnRecord::Close => {
+            if let Err(error) = recorder.close() {
+                // The screen is closing here, so stderr is visible again. See section 4.
+                tracing::warn!(%error, "the session file could not state its close");
+            }
+        }
+    }
+    // A record that just degraded the log to ephemeral is a silent drop unless the user is
+    // told. The alternate screen hides tracing, so the notice rides the transcript. Close is
+    // exempt, because it does not degrade the log and the screen is already closing.
+    if was_live && !is_close && recorder.is_ephemeral() {
+        state.push_error(
+            "the session file could not be written. rho keeps running, and this session is \
+             now ephemeral."
+                .to_string(),
+        );
+    }
+}
+
+/// The prompt a key submits, or `None` for a key that starts no turn.
+///
+/// Only `Submit` starts a turn and records a prompt. `Steer` joins the running turn, so it
+/// returns `None`. This is the one place that decides a prompt record, so a test drives it.
+fn submit_prompt(action: &KeyAction) -> Option<Vec<ContentBlock>> {
+    match action {
+        KeyAction::Submit(text) => Some(vec![ContentBlock::Text { text: text.clone() }]),
+        _ => None,
+    }
+}
+
+/// The record an applied selection produces, or `None` when nothing changed.
+///
+/// It records only when the model id changed. An effort-only change reselects the same model,
+/// so it writes no `ModelChange`, exactly like the headless guard. `provider` is the running
+/// provider, fixed for the run today.
+fn selection_record<'a>(
+    previous_model: &str,
+    current: &'a ModelSelection,
+    provider: &'a str,
+) -> Option<TurnRecord<'a>> {
+    if current.model == previous_model {
+        return None;
+    }
+    Some(TurnRecord::Selection {
+        provider,
+        model: &current.model,
+    })
 }
 
 /// Apply a new model selection to the session, and mirror it into the TUI state so the
@@ -735,4 +893,127 @@ fn restore_terminal(terminal: &mut Term, guard: &mut ScreenGuard) -> Result<(), 
         .show_cursor()
         .map_err(|error| TuiError::Io(error.to_string()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the private seam helpers and the recorder builder.
+    //!
+    //! The event loop owns the terminal, so a cargo test cannot drive it. These tests drive
+    //! the pure decisions the loop forwards, and the builder that attaches the recorder. The
+    //! five loop-arm calls are driven by the pty drive in `docs/verification/`. See
+    //! `SPEC-the-interactive-session-records-itself` section 11 and section 14.
+
+    use std::sync::Arc;
+
+    use rho_core::{
+        ContentBlock, ModelSelection, ReasoningEffort, Session, SessionLog, SessionRecorder,
+    };
+
+    use super::{App, TurnRecord, selection_record, submit_prompt};
+    use crate::state::KeyAction;
+
+    /// A provider that yields no event. It lets a test build a `Session` with no network.
+    struct SilentProvider;
+
+    #[async_trait::async_trait]
+    impl rho_core::Provider for SilentProvider {
+        fn id(&self) -> &str {
+            "silent"
+        }
+
+        fn catalog(&self) -> Option<&dyn rho_core::ModelCatalog> {
+            None
+        }
+
+        async fn stream(
+            &self,
+            _request: rho_core::CompletionRequest,
+            _cancel: rho_core::CancelToken,
+        ) -> Result<rho_core::ProviderStream, rho_core::ProviderError> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    /// Build a session with a silent provider, for a wiring test with no network.
+    fn test_session() -> Session {
+        let dir = tempfile::tempdir().expect("a temp session root");
+        let provider: Arc<dyn rho_core::Provider> = Arc::new(SilentProvider);
+        let tools = Arc::new(rho_core::ToolRegistry::new());
+        let hooks = Arc::new(rho_core::HookChain::default());
+        let config = rho_core::SessionConfig::new(
+            "sonnet-4.5",
+            dir.path().to_path_buf(),
+            Arc::new(rho_core::AllowAllPolicy),
+        );
+        let context = rho_core::Context::new(None, tools.specs());
+        Session::with_config(config, provider, tools, hooks, context)
+    }
+
+    /// A steer starts no turn, so `submit_prompt` records no prompt for it. A submit starts a
+    /// turn, so it returns the input. A future edit that folds a steer into a prompt fails
+    /// this test. See section 2.
+    #[test]
+    fn a_steered_message_records_no_prompt() {
+        assert!(
+            submit_prompt(&KeyAction::Steer("hi".to_string())).is_none(),
+            "a steer starts no turn, so it records no prompt"
+        );
+        let input = submit_prompt(&KeyAction::Submit("hello".to_string()))
+            .expect("a submit starts a turn, so it records a prompt");
+        assert_eq!(
+            input,
+            vec![ContentBlock::Text {
+                text: "hello".to_string()
+            }],
+            "the submit records the submitted text"
+        );
+    }
+
+    /// An effort-only change reselects the same model, so `selection_record` returns `None`
+    /// and no `ModelChange` reaches the file. See ruling 3.
+    #[test]
+    fn an_effort_only_change_records_no_model_change() {
+        let current = ModelSelection {
+            model: "sonnet-4.5".to_string(),
+            reasoning_effort: Some(ReasoningEffort::High),
+        };
+        assert!(
+            selection_record("sonnet-4.5", &current, "anthropic").is_none(),
+            "an effort-only change writes no ModelChange"
+        );
+    }
+
+    /// A new model id yields a `Selection` step whose model is the new id and whose provider
+    /// is the running provider. See ruling 3 and ruling 4.
+    #[test]
+    fn a_model_change_yields_a_selection_record() {
+        let current = ModelSelection {
+            model: "opus-4.1".to_string(),
+            reasoning_effort: Some(ReasoningEffort::Low),
+        };
+        match selection_record("sonnet-4.5", &current, "anthropic") {
+            Some(TurnRecord::Selection { provider, model }) => {
+                assert_eq!(model, "opus-4.1", "the record names the new model");
+                assert_eq!(
+                    provider, "anthropic",
+                    "the record names the running provider"
+                );
+            }
+            _ => panic!("a new model id must yield a Selection record"),
+        }
+    }
+
+    /// `App::with_recorder` sets the private `recorder` field, and `App::new` leaves it
+    /// `None`. The field is private and the loop needs a terminal, so this is a unit test.
+    #[test]
+    fn with_recorder_sets_the_recorder_field() {
+        let app = App::new(test_session(), "sonnet-4.5");
+        assert!(app.recorder.is_none(), "App::new leaves the recorder None");
+        let app = app.with_recorder(SessionRecorder::new(SessionLog::Off));
+        assert!(
+            app.recorder.is_some(),
+            "with_recorder sets the recorder field to Some"
+        );
+    }
 }

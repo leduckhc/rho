@@ -168,6 +168,21 @@ impl Recording {
         self.recorder.observe(event);
     }
 
+    /// Take the recorder, and leave an inert one behind.
+    ///
+    /// The app folds the session file, so the recorder moves to the app. The lock, the id,
+    /// and the path stay here, so the file stays locked and named for the run. The inert
+    /// recorder left behind writes nothing, so a later `close` on this value is safe. The
+    /// caller must keep the `Recording` bound for the life of the run. See
+    /// `SPEC-the-interactive-session-records-itself` section 12.
+    ///
+    /// The interactive TUI is the only caller, so this is `tui`-gated. A minimal build has no
+    /// interactive path, so a build without the feature would leave it dead.
+    #[cfg(feature = "tui")]
+    pub fn take_recorder(&mut self) -> SessionRecorder {
+        std::mem::replace(&mut self.recorder, SessionRecorder::new(SessionLog::Off))
+    }
+
     /// An ephemeral recording. It writes nothing.
     fn ephemeral(notices: Vec<String>) -> Self {
         Self {
@@ -481,5 +496,81 @@ fn target(
             }
             .into()),
         },
+    }
+}
+
+#[cfg(all(test, feature = "tui"))]
+mod take_recorder_tests {
+    //! Tests for the recorder handoff, `Recording::take_recorder`.
+    //!
+    //! The interactive path opens a `Recording`, gives the recorder to the app, and keeps the
+    //! lock. So the file stays locked for the whole run. See
+    //! `SPEC-the-interactive-session-records-itself` sections 11 and 12.
+
+    use super::*;
+
+    /// A request for a fresh named file, so a second open of the same path reaches the lock.
+    fn named_request<'a>(root: &'a Path, home: &'a Path, file: &'a Path) -> RecordingRequest<'a> {
+        RecordingRequest {
+            project_root: root,
+            home,
+            session_file: Some(file),
+            ephemeral: false,
+            selector: SessionSelector::New,
+            allow_widen: false,
+            approval: "allow-all",
+            sandbox: "off",
+            provider: "anthropic",
+            model: "sonnet-4.5",
+            now_millis: 1_756_000_000_000,
+        }
+    }
+
+    /// `take_recorder` returns the live recorder, and the value it leaves behind is off. The id
+    /// and the path stay set, so the file stays named.
+    #[test]
+    fn take_recorder_leaves_an_inert_recorder() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let root = home.path();
+        let file = root.join("session.jsonl");
+        let mut recording = open(named_request(root, root, &file)).expect("the first run opens");
+        assert!(recording.id.is_some(), "a named run has an id");
+        assert!(recording.path.is_some(), "a named run has a path");
+
+        let taken = recording.take_recorder();
+        assert!(
+            !taken.is_ephemeral(),
+            "take_recorder hands back the live recorder"
+        );
+        assert!(
+            recording.recorder.is_ephemeral(),
+            "the recorder left behind is inert"
+        );
+        assert!(recording.id.is_some(), "the id stays set after the handoff");
+        assert!(
+            recording.path.is_some(),
+            "the path stays named after the handoff"
+        );
+    }
+
+    /// The `Recording` still holds its lock after `take_recorder`, so a second open of the same
+    /// file returns `SessionError::Busy`.
+    #[test]
+    fn take_recorder_keeps_the_lock() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let root = home.path();
+        let file = root.join("session.jsonl");
+        let mut recording = open(named_request(root, root, &file)).expect("the first run opens");
+        let _taken = recording.take_recorder();
+
+        let error = open(named_request(root, root, &file))
+            .map(|_| ())
+            .expect_err("a locked file must refuse a second open");
+        match error.downcast_ref::<SessionError>() {
+            Some(SessionError::Busy { .. }) => {}
+            other => panic!("expected SessionError::Busy, got {other:?}"),
+        }
+        // The lock lives as long as the Recording, so keep it bound until here.
+        drop(recording);
     }
 }

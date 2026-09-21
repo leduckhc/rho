@@ -1368,13 +1368,45 @@ async fn run_interactive(cli: &Cli) -> i32 {
         tui_motion: loaded.tui_motion,
         stdout_is_terminal: std::io::IsTerminal::is_terminal(&std::io::stdout()),
     });
+    // Open the session file before the provider runs, exactly as the headless path does. The
+    // TUI has no --continue flag, so the selector is New. A `session-file` config key still
+    // reopens a named file inside `open_recording`. See
+    // `SPEC-the-interactive-session-records-itself` section 0 and section 6.
+    let request = RunRequest {
+        prompt: String::new(),
+        selector: SessionSelector::New,
+        ephemeral: loaded.ephemeral,
+        allow_widen: false,
+    };
+    let mut recording =
+        match open_recording(&loaded, &config, &provider_name, &request, &home_dir()) {
+            Ok(recording) => recording,
+            Err(error) => return fail(error),
+        };
+    // The notices ride the transcript, never stderr. The id and the path ride it too, so the
+    // user can resume this file. The alternate screen would hide a stderr line. See section 5.
+    notices.extend(recording.notices.iter().cloned());
+    if let (Some(id), Some(path)) = (&recording.id, &recording.path) {
+        notices.push(format!("session {} at {}", id.as_str(), path.display()));
+    }
+
     // Hold `tasks` and `_extras` for the whole run. Dropping the task registry kills
     // every background task, and dropping the MCP pool stops every server, so an early
-    // drop would end work the model is still waiting on.
+    // drop would end work the model is still waiting on. `build_session` takes `config` by
+    // value, so the recording opens first.
     let (session, tasks, extras) = match build_session(cli, &loaded, config).await {
         Ok(triple) => triple,
         Err(error) => return fail(error),
     };
+
+    // Replay the rebuilt conversation into the context before the app starts. The TUI does
+    // not repaint the old rows. See
+    // `D-a-resume-into-the-tui-replays-but-does-not-repaint`.
+    if !recording.messages.is_empty() {
+        session
+            .replay(std::mem::take(&mut recording.messages))
+            .await;
+    }
     // The notices go to the interface, not to stderr. rho used to print them here and then
     // open the alternate screen over them, so the user never read one. One of them says a
     // project skill stays unloaded until the user trusts it, which is a security notice.
@@ -1431,6 +1463,11 @@ async fn run_interactive(cli: &Cli) -> i32 {
         .with_task_events(tasks.session_events())
         .with_context(cwd, branch, provider_name)
         .with_notices(notices);
+    // Move the recorder to the app, and keep `recording` bound. `take_recorder` leaves the
+    // lock, the id, and the path inside `recording`, so the file stays locked for the run.
+    // See `SPEC-the-interactive-session-records-itself` section 12.
+    let recorder = recording.take_recorder();
+    app = app.with_recorder(recorder);
     if let Some(catalog) = catalog {
         app = app.with_catalog(catalog);
     }
@@ -1442,6 +1479,9 @@ async fn run_interactive(cli: &Cli) -> i32 {
     // lost to a fast exit. The interface has closed the alternate screen by now, so a cache
     // notice on stderr is visible again. See A1 and `D-a-notice-reaches-the-transcript`.
     drain_mcp(&extras).await;
+    // Drop the recording after the run, so the lock outlives `app.run()`. A one-line
+    // `open_recording(...).take_recorder()` would drop the lock at once. See section 12.
+    drop(recording);
     code
 }
 

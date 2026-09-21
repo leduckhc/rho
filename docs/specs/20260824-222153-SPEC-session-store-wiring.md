@@ -1567,7 +1567,7 @@ report.
   provider and drive `run_headless` in process. A break that wraps the call in `if false` still
   passes the suite. `docs/verification/session-store-wiring.md` drives it against live Bedrock
   instead, and that is the only guard.
-- **The terminal.** `rho-tui` records nothing and `/sessions` opens no picker.
+- **The terminal.** `rho-tui` now records every session; see `SPEC-the-interactive-session-records-itself`. `/sessions` still opens no picker.
 - **A `flock` failure from a real filesystem.** `classify_lock_failure` is pure and every code is
   tested, and no test makes a real network filesystem refuse a lock.
 - **The precondition of `Session::replay`.** Nothing stops a caller replaying after a prompt. The
