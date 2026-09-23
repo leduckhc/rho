@@ -392,11 +392,19 @@ impl App {
                                     // section 1 and ruling 3.
                                     let previous_model = state.model.clone();
                                     let provider = state.provider.clone();
-                                    apply_selection(session, state, selection.clone());
-                                    if let Some(step) =
-                                        selection_record(&previous_model, &selection, &provider)
-                                    {
-                                        record_turn(recorder, state, step);
+                                    match apply_selection(session, state, selection.clone()) {
+                                        Ok(()) => {
+                                            if let Some(step) = selection_record(
+                                                &previous_model,
+                                                &selection,
+                                                &provider,
+                                            ) {
+                                                record_turn(recorder, state, step);
+                                            }
+                                        }
+                                        Err(error) => {
+                                            state.push_error(error.to_string());
+                                        }
                                     }
                                 }
                                 // A picker star toggle. Persist to the file the state
@@ -585,12 +593,14 @@ impl App {
                             draw(terminal, state)?;
                         }
                         None => {
-                            // The sender dropped without sending a result, most likely
-                            // because the catalog-load task panicked. Tell the user so the
-                            // picker does not sit empty with no explanation.
-                            state.set_picker_error(
-                                "the catalog load ended unexpectedly".to_string(),
+                            // The sender dropped with no payload. This can happen on a
+                            // cancelled or aborted load. Clear the loading row and keep
+                            // the picker rows already on screen, so a user never sees a
+                            // false error over a valid list.
+                            tracing::warn!(
+                                "the model-catalog channel closed without a result"
                             );
+                            state.set_picker_loading(false);
                             *catalog_events = None;
                             update_metrics(terminal, state)?;
                             draw(terminal, state)?;
@@ -711,9 +721,14 @@ fn selection_record<'a>(
 /// Apply a new model selection to the session, and mirror it into the TUI state so the
 /// header and the picker agree with the mutex. See
 /// `D-model-selection-is-mutable-behind-a-mutex`.
-fn apply_selection(session: &Session, state: &mut TuiState, selection: ModelSelection) {
-    session.set_selection(selection.clone());
+fn apply_selection(
+    session: &Session,
+    state: &mut TuiState,
+    selection: ModelSelection,
+) -> Result<(), rho_core::ProviderBuildError> {
+    session.apply_selection(selection.clone())?;
     state.set_current_selection(&selection);
+    Ok(())
 }
 
 /// Persist the starred list to `~/.rho/starred-models.toml`. A write failure pushes one
@@ -977,6 +992,7 @@ mod tests {
         let current = ModelSelection {
             model: "sonnet-4.5".to_string(),
             reasoning_effort: Some(ReasoningEffort::High),
+            provider: None,
         };
         assert!(
             selection_record("sonnet-4.5", &current, "anthropic").is_none(),
@@ -991,6 +1007,7 @@ mod tests {
         let current = ModelSelection {
             model: "opus-4.1".to_string(),
             reasoning_effort: Some(ReasoningEffort::Low),
+            provider: None,
         };
         match selection_record("sonnet-4.5", &current, "anthropic") {
             Some(TurnRecord::Selection { provider, model }) => {

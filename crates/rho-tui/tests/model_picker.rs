@@ -90,6 +90,7 @@ fn slash_model_with_an_id_arg_applies_and_closes() {
         KeyAction::ApplySelection(ModelSelection {
             model: "picked-model".to_string(),
             reasoning_effort: Some(ReasoningEffort::Medium),
+            provider: None,
         }),
         "a typed id applies with the current effort"
     );
@@ -138,6 +139,7 @@ fn slash_effort_with_a_level_arg_applies_and_notices() {
         KeyAction::ApplySelection(ModelSelection {
             model: "seed-model".to_string(),
             reasoning_effort: Some(ReasoningEffort::High),
+            provider: None,
         }),
         "the level reaches the app loop as an ApplySelection"
     );
@@ -152,6 +154,7 @@ fn slash_speed_fast_sets_effort_off() {
         KeyAction::ApplySelection(ModelSelection {
             model: "seed-model".to_string(),
             reasoning_effort: Some(ReasoningEffort::Off),
+            provider: None,
         }),
         "/speed fast sets effort off"
     );
@@ -183,6 +186,7 @@ fn slash_speed_normal_restores_start_effort() {
         KeyAction::ApplySelection(ModelSelection {
             model: "seed-model".to_string(),
             reasoning_effort: Some(ReasoningEffort::Medium),
+            provider: None,
         }),
         "/speed normal restores the start effort"
     );
@@ -363,6 +367,7 @@ fn enter_applies_the_highlighted_row_and_closes() {
         KeyAction::ApplySelection(ModelSelection {
             model: "starred-a".to_string(),
             reasoning_effort: Some(ReasoningEffort::Medium),
+            provider: None,
         }),
         "enter carries the highlighted id and the current effort"
     );
@@ -587,6 +592,7 @@ fn enter_on_an_empty_filter_applies_the_query_verbatim() {
         KeyAction::ApplySelection(ModelSelection {
             model: "vendor/unknown-model".to_string(),
             reasoning_effort: Some(ReasoningEffort::Medium),
+            provider: None,
         }),
         "enter with no match applies the query verbatim"
     );
@@ -788,6 +794,7 @@ fn typed_id_absent_from_list_is_accepted() {
         KeyAction::ApplySelection(ModelSelection {
             model: "unlisted-model".to_string(),
             reasoning_effort: Some(ReasoningEffort::Medium),
+            provider: None,
         }),
         "a typed id that never appeared in the catalog is applied verbatim"
     );

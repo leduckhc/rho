@@ -29,7 +29,8 @@ mod transcript;
 mod usage;
 
 pub use agent::{
-    AgentConfig, AgentEvent, AgentEvents, AgentStopReason, ModelSelection, Session, SessionConfig,
+    AgentConfig, AgentEvent, AgentEvents, AgentStopReason, ModelSelection, ProviderBuildError,
+    ProviderFactory, Session, SessionConfig,
 };
 pub use agent_task::{
     Acceptance, AgentTask, ArtifactChecker, ArtifactSpec, CheckOutcome, CheckResult, ChildClaims,

@@ -611,7 +611,7 @@ pub enum KeyAction {
     /// Edit this text in the editor, then replace the draft with the result.
     EditDraft(String),
     /// Apply this model selection to the session. The event loop calls
-    /// `Session::set_selection`. See `SPEC-model-selection-in-tui` and
+    /// `Session::apply_selection`. See `SPEC-model-selection-in-tui` and
     /// `D-model-selection-is-mutable-behind-a-mutex`.
     ApplySelection(ModelSelection),
     /// Persist this starred list to `~/.rho/starred-models.toml`. The event loop
@@ -1641,7 +1641,7 @@ impl TuiState {
     }
 
     /// Sync the current selection into the state. The frontend calls it after every
-    /// `Session::set_selection`, so the header and the picker header agree with the
+    /// `Session::apply_selection`, so the header and the picker header agree with the
     /// mutex. See `SPEC-model-selection-in-tui` section 2.
     pub fn set_current_selection(&mut self, selection: &ModelSelection) {
         self.model = selection.model.clone();
@@ -1923,6 +1923,7 @@ impl TuiState {
                     return KeyAction::ApplySelection(ModelSelection {
                         model: query,
                         reasoning_effort: self.reasoning_effort,
+                        provider: None,
                     });
                 }
                 let selected = picker.selected.min(filtered.len() - 1);
@@ -1931,6 +1932,7 @@ impl TuiState {
                 KeyAction::ApplySelection(ModelSelection {
                     model: row.id.clone(),
                     reasoning_effort: row.effort.or(self.reasoning_effort),
+                    provider: None,
                 })
             }
             KeyCode::Tab => {
@@ -2058,6 +2060,7 @@ impl TuiState {
                     let selection = ModelSelection {
                         model: arg.clone(),
                         reasoning_effort: self.reasoning_effort,
+                        provider: None,
                     };
                     self.push_notice(format!("model set to {arg}"));
                     KeyAction::ApplySelection(selection)
@@ -2080,6 +2083,7 @@ impl TuiState {
                     KeyAction::ApplySelection(ModelSelection {
                         model: self.model.clone(),
                         reasoning_effort: None,
+                        provider: None,
                     })
                 } else {
                     use std::str::FromStr;
@@ -2089,6 +2093,7 @@ impl TuiState {
                             KeyAction::ApplySelection(ModelSelection {
                                 model: self.model.clone(),
                                 reasoning_effort: Some(effort),
+                                provider: None,
                             })
                         }
                         Err(message) => {
@@ -2106,6 +2111,7 @@ impl TuiState {
                         KeyAction::ApplySelection(ModelSelection {
                             model: self.model.clone(),
                             reasoning_effort: Some(ReasoningEffort::Off),
+                            provider: None,
                         })
                     }
                     "normal" => {
@@ -2117,6 +2123,7 @@ impl TuiState {
                         KeyAction::ApplySelection(ModelSelection {
                             model: self.model.clone(),
                             reasoning_effort: effort,
+                            provider: None,
                         })
                     }
                     other => {

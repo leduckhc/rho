@@ -295,44 +295,99 @@ impl SessionConfig {
     }
 }
 
-/// The mutable slice of the session config.
+/// The mutable slice of the session: the model, the effort, and the provider.
 ///
-/// A `ModelSelection` is what `Session::selection` reads and `set_selection` writes. The
-/// running turn is not affected: `Driver::build_request` reads the pair at the start of
-/// every turn, so the change takes effect at the next turn. See
-/// `D-model-selection-is-mutable-behind-a-mutex`.
+/// `Session::selection` reads it and `Session::apply_selection` writes it. The running
+/// turn is not affected. `run_turn` reads the running unit at the start of every turn, so
+/// a change takes effect at the next turn. See
+/// `D-the-provider-is-mutable-behind-a-mutex`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelSelection {
     /// The provider-specific model id, exactly as `--model` accepts it.
     pub model: String,
     /// How hard the model should think. `None` means the provider's own default.
     pub reasoning_effort: Option<crate::ReasoningEffort>,
+    /// The provider to run the model on. `None` keeps the session's current provider, so a
+    /// model-only or effort-only change never builds a provider. `Some(name)` names a
+    /// switch. `Session::selection` always returns `Some(<running name>)`. See
+    /// `D-the-provider-is-mutable-behind-a-mutex`.
+    pub provider: Option<String>,
 }
 
 impl ModelSelection {
-    /// Build a selection from a model id and an optional effort.
+    /// A model and effort change on the current provider. `provider` is `None`.
     pub fn new(model: impl Into<String>, reasoning_effort: Option<crate::ReasoningEffort>) -> Self {
         Self {
             model: model.into(),
             reasoning_effort,
+            provider: None,
+        }
+    }
+
+    /// A switch to `provider`, then this model and effort. `provider` is `Some(name)`.
+    pub fn switch(
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        reasoning_effort: Option<crate::ReasoningEffort>,
+    ) -> Self {
+        Self {
+            model: model.into(),
+            reasoning_effort,
+            provider: Some(provider.into()),
         }
     }
 }
 
+/// Builds a provider by name for a mid-session switch.
+///
+/// `rho-core` owns this trait and the `Session` holds it as a trait object, so the core
+/// never gains an HTTP or a credential dependency. `rho-cli` owns the one implementation,
+/// which wraps `build_provider` with the merged config and the environment. The call is
+/// synchronous and does no network I/O. See `D-the-core-takes-a-provider-factory`.
+pub trait ProviderFactory: Send + Sync {
+    /// Build the provider named `name`, or say why it cannot build. A failure leaves the
+    /// session on its current provider. See
+    /// `D-a-provider-switch-that-cannot-build-is-refused`.
+    fn build(&self, name: &str) -> Result<Arc<dyn Provider>, ProviderBuildError>;
+}
+
+/// Why a provider switch could not build a provider. It holds one line and no secret. The
+/// frontend shows it, and the session keeps its current provider.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("cannot switch provider: {0}")]
+pub struct ProviderBuildError(pub String);
+
+/// The running provider, its config name, the model, and the effort, as one unit.
+///
+/// `run_turn` reads it once per turn, and `apply_selection` swaps it as a whole. So the
+/// request and the provider that streams it always agree. See
+/// `D-the-provider-is-mutable-behind-a-mutex`.
+struct RunningState {
+    provider: Arc<dyn Provider>,
+    /// The config provider name, such as `openrouter` or `xdent-claude`. It is not
+    /// `Provider::id`, which is only the protocol, so a named entry keeps its own id.
+    provider_name: String,
+    model: String,
+    reasoning_effort: Option<crate::ReasoningEffort>,
+}
+
 pub struct Session {
     inner: Arc<SessionInner>,
+    /// Builds a provider for a switch. It sits on `Session`, outside the `Arc`, because
+    /// only `apply_selection` reads it and the driver never does. `None` refuses every
+    /// switch. See `D-the-core-takes-a-provider-factory`.
+    provider_factory: Option<Arc<dyn ProviderFactory>>,
 }
 
 struct SessionInner {
-    provider: Arc<dyn Provider>,
     tools: Arc<ToolRegistry>,
     hooks: Arc<HookChain>,
     context: tokio::sync::Mutex<Context>,
     config: SessionConfig,
-    /// The mutable slice of the config: the model id and the reasoning effort. Read at
-    /// the start of every turn by `Driver::build_request`, and swapped by
-    /// `Session::set_selection`. See `D-model-selection-is-mutable-behind-a-mutex`.
-    selection: std::sync::Mutex<ModelSelection>,
+    /// One mutex for the whole running unit. It replaces the old `provider` and
+    /// `selection` fields, so a turn reads the provider and the model together. See
+    /// `D-the-provider-is-mutable-behind-a-mutex`.
+    running: std::sync::Mutex<RunningState>,
     /// Messages that arrived while a turn ran. The driver drains it at a turn
     /// boundary. See `SPEC-steering`.
     queue: crate::MessageQueue,
@@ -352,54 +407,147 @@ impl Session {
         // `SessionConfig::with_queue`, so a caller that set a queue there had every
         // steering message silently dropped. A review found it.
         let config_queue = config.queue.clone();
-        // Prime the mutable slice from the config. From here the mutex is the one source
-        // of truth for the running model and effort, and `SessionConfig::model` records
-        // only the initial value.
-        let selection = std::sync::Mutex::new(ModelSelection {
+        // Prime the running unit from the config. From here the mutex is the one source of
+        // truth for the running provider, model, and effort. `SessionConfig::model` records
+        // only the initial value. `provider_name` seeds from `Provider::id`, which is right
+        // for a built-in and overridden for a named entry by `with_provider_name`.
+        let provider_name = provider.id().to_string();
+        let running = std::sync::Mutex::new(RunningState {
+            provider,
+            provider_name,
             model: config.model.clone(),
             reasoning_effort: config.reasoning_effort,
         });
         Self {
             inner: Arc::new(SessionInner {
-                provider,
                 tools,
                 hooks,
                 context: tokio::sync::Mutex::new(context),
                 config,
-                selection,
+                running,
                 queue: config_queue,
             }),
+            provider_factory: None,
         }
     }
 
-    /// Read the current model and effort. Cheap; the lock is uncontended.
+    /// Inject the provider factory a switch needs. Without it, a switch is refused.
     ///
-    /// The value is a snapshot. A later `set_selection` never mutates the returned value.
-    /// See `D-model-selection-is-mutable-behind-a-mutex`.
-    pub fn selection(&self) -> ModelSelection {
-        self.inner
-            .selection
-            .lock()
-            .expect("the selection lock is never poisoned")
-            .clone()
+    /// This sets a `Session` field with struct-update syntax, the same shape as
+    /// `with_recorder`. See `D-the-core-takes-a-provider-factory`.
+    pub fn with_provider_factory(self, factory: Arc<dyn ProviderFactory>) -> Self {
+        Self {
+            provider_factory: Some(factory),
+            ..self
+        }
     }
 
-    /// Replace the current model and effort. Takes effect at the next turn boundary.
+    /// Override the running provider name, from the resolved config name.
     ///
-    /// The running turn is unaffected: `Driver::build_request` reads the mutex once at
-    /// the start of a turn. The write is synchronous, and the lock is uncontended. See
-    /// `D-model-selection-is-mutable-behind-a-mutex`.
+    /// `with_config` seeds the name from `Provider::id`, which is right for a built-in and
+    /// wrong for a named entry. `rho-cli` calls this with the real config name. It rebuilds
+    /// `SessionInner` by `Arc::try_unwrap`, so it must run before the session is shared,
+    /// exactly like `with_queue`.
+    pub fn with_provider_name(self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        let inner = Arc::try_unwrap(self.inner)
+            .unwrap_or_else(|_| panic!("with_provider_name must run before the session is shared"));
+        // Destructure `SessionInner` fully, then rebuild it field by field. A partial move
+        // of `running` out of `inner` followed by `..inner` is a use of a moved value.
+        let SessionInner {
+            tools,
+            hooks,
+            context,
+            config,
+            running,
+            queue,
+        } = inner;
+        let mut running = running
+            .into_inner()
+            .expect("the running lock is never poisoned");
+        running.provider_name = name;
+        Self {
+            inner: Arc::new(SessionInner {
+                tools,
+                hooks,
+                context,
+                config,
+                running: std::sync::Mutex::new(running),
+                queue,
+            }),
+            provider_factory: self.provider_factory,
+        }
+    }
+
+    /// Read the current model, effort, and provider. Cheap; the lock is uncontended.
     ///
-    /// It records no `ModelChange`. The interactive TUI records a change through its own seam,
-    /// after a successful apply, so the session holds no second recorder. See
-    /// `D-the-interactive-recorder-lives-on-the-app`.
-    pub fn set_selection(&self, selection: ModelSelection) {
-        let mut guard = self
+    /// `provider` is always `Some`, and it names the running provider. The value is a
+    /// snapshot. A later `apply_selection` never mutates the returned value. See
+    /// `D-the-provider-is-mutable-behind-a-mutex`.
+    pub fn selection(&self) -> ModelSelection {
+        let running = self
             .inner
-            .selection
+            .running
             .lock()
-            .expect("the selection lock is never poisoned");
-        *guard = selection;
+            .expect("the running lock is never poisoned");
+        ModelSelection {
+            model: running.model.clone(),
+            reasoning_effort: running.reasoning_effort,
+            provider: Some(running.provider_name.clone()),
+        }
+    }
+
+    /// Apply a selection. Build and swap the provider first when the selection names a
+    /// different one. Then commit the model and the effort. Takes effect at the next turn.
+    ///
+    /// On a build failure this changes nothing and returns the error. On success it commits
+    /// the provider, its name, the model, and the effort under one lock. It records no
+    /// `ModelChange` itself. The frontend records a model or provider change through the
+    /// `record_turn` seam, after a successful apply, so the session holds no recorder. See
+    /// `D-a-provider-switch-that-cannot-build-is-refused` and
+    /// `SPEC-the-interactive-session-records-itself`.
+    pub fn apply_selection(&self, selection: ModelSelection) -> Result<(), ProviderBuildError> {
+        // Decide whether this is a switch, under the running lock, so the read is
+        // consistent.
+        let switch_to = {
+            let running = self
+                .inner
+                .running
+                .lock()
+                .expect("the running lock is never poisoned");
+            match &selection.provider {
+                Some(name) if *name != running.provider_name => Some(name.clone()),
+                _ => None,
+            }
+        };
+
+        // Build before any commit. On failure, change nothing.
+        let built = match &switch_to {
+            Some(name) => {
+                let factory = self.provider_factory.as_ref().ok_or_else(|| {
+                    ProviderBuildError("no provider factory is configured".to_string())
+                })?;
+                Some((name.clone(), factory.build(name)?))
+            }
+            None => None,
+        };
+
+        // Commit under one lock: swap the provider, its name, the model, and the effort
+        // together. So a concurrent turn read never sees a half-applied switch.
+        {
+            let mut running = self
+                .inner
+                .running
+                .lock()
+                .expect("the running lock is never poisoned");
+            if let Some((name, provider)) = built {
+                running.provider = provider;
+                running.provider_name = name;
+            }
+            running.model = selection.model;
+            running.reasoning_effort = selection.reasoning_effort;
+        }
+        Ok(())
     }
 
     /// Build a session with a test configuration. The config confines paths to
@@ -437,6 +585,7 @@ impl Session {
             .unwrap_or_else(|_| panic!("with_queue must run before the session is shared"));
         Self {
             inner: Arc::new(SessionInner { queue, ..inner }),
+            provider_factory: self.provider_factory,
         }
     }
 
@@ -709,13 +858,23 @@ impl Driver {
             return TurnOutcome::Closed;
         }
 
-        let request = self.build_request().await;
-        let mut stream = match self
-            .inner
-            .provider
-            .stream(request, self.cancel.clone())
-            .await
-        {
+        // Read the provider, model, and effort together, once, under one lock. A
+        // concurrent `apply_selection` swaps all of them at once, so this snapshot is
+        // never half-new. See `D-the-provider-is-mutable-behind-a-mutex`.
+        let (provider, model, reasoning_effort) = {
+            let running = self
+                .inner
+                .running
+                .lock()
+                .expect("the running lock is never poisoned");
+            (
+                running.provider.clone(),
+                running.model.clone(),
+                running.reasoning_effort,
+            )
+        };
+        let request = self.build_request(model, reasoning_effort).await;
+        let mut stream = match provider.stream(request, self.cancel.clone()).await {
             Ok(stream) => stream,
             Err(error) => {
                 let _ = self.tx.send(Err(Error::from(error))).await;
@@ -1086,26 +1245,24 @@ impl Driver {
 
     /// Build the next request from the current context. The system prompt and
     /// the tool list form the stable prefix. The messages grow by appending.
-    async fn build_request(&self) -> CompletionRequest {
+    ///
+    /// The model and the effort are read by `run_turn` under the running lock, once per
+    /// turn, and passed in here. So the request and the provider that streams it come from
+    /// one snapshot. See `D-the-provider-is-mutable-behind-a-mutex`.
+    async fn build_request(
+        &self,
+        model: String,
+        reasoning_effort: Option<crate::ReasoningEffort>,
+    ) -> CompletionRequest {
         let context = self.inner.context.lock().await;
-        // Read the model and the effort from the mutex. This is the one source of truth
-        // for the running turn, so a `Session::set_selection` between turns is picked up
-        // here and a running turn is left alone. See
-        // `D-model-selection-is-mutable-behind-a-mutex`.
-        let selection = self
-            .inner
-            .selection
-            .lock()
-            .expect("the selection lock is never poisoned")
-            .clone();
         CompletionRequest {
-            model: selection.model,
+            model,
             system: context.system().map(str::to_string),
             messages: context.messages().to_vec(),
             tools: self.inner.tools.specs(),
             max_tokens: None,
             temperature: None,
-            reasoning: selection.reasoning_effort,
+            reasoning: reasoning_effort,
         }
     }
 
