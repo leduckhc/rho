@@ -1741,7 +1741,7 @@ impl TuiState {
             (id, index)
         });
 
-        let old_rows: Vec<PickerRow> = picker.rows.drain(..).collect();
+        let old_rows = std::mem::take(&mut picker.rows);
         let mut old_by_id: std::collections::HashMap<String, PickerRow> = old_rows
             .iter()
             .map(|row| (row.id.clone(), row.clone()))
